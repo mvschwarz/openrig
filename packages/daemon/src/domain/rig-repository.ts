@@ -30,6 +30,7 @@ import type {
   SnapshotData,
   SessionSourceSpec,
   NodeLaunchRecipe,
+  SeatSliceMode,
   StartupBlock,
   StartupFile,
 } from "./types.js";
@@ -156,6 +157,7 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
   if (typeof spec.version !== "string" || typeof spec.name !== "string" || !Array.isArray(spec.pods)) return false;
   if (spec.cultureFile !== undefined && typeof spec.cultureFile !== "string") return false;
   if (spec.nonInterruptive !== undefined && typeof spec.nonInterruptive !== "boolean") return false;
+  if (spec.seatSlice !== undefined && spec.seatSlice !== "rig") return false;
   if (spec.permissionPolicy !== undefined && typeof spec.permissionPolicy !== "string") return false;
   if (spec.env !== undefined && !isStringRecord(spec.env)) return false;
   if (spec.managedBlocks !== undefined) {
@@ -454,6 +456,31 @@ export class RigRepository {
     const row = this.db.prepare("SELECT non_interruptive FROM rigs WHERE id = ?")
       .get(rigId) as { non_interruptive: number } | undefined;
     return row?.non_interruptive === 1;
+  }
+
+  /** #80: persist the rig's seat grouping (spec `seat_slice`), or null for none. A grouping is never silently dropped:
+   *  without the column it needs a migration. */
+  setRigSeatSlice(rigId: string, mode: SeatSliceMode | null): void {
+    if (!this.hasRigColumn("seat_slice")) {
+      if (mode !== null) throw new Error("Cannot persist seat_slice: database migration is required");
+      return;
+    }
+    this.db.prepare("UPDATE rigs SET seat_slice = ?, updated_at = ? WHERE id = ?").run(mode, new Date().toISOString(), rigId);
+  }
+
+  getRigSeatSlice(rigId: string): SeatSliceMode | null {
+    if (!this.hasRigColumn("seat_slice")) return null;
+    const row = this.db.prepare("SELECT seat_slice FROM rigs WHERE id = ?").get(rigId) as { seat_slice: string | null } | undefined;
+    return row?.seat_slice === "rig" ? "rig" : null;
+  }
+
+  /** #80: the name of the rig whose slice a seat's new scopes go beneath, read at each launch; undefined when the seat's
+   *  rig doesn't group its seats (or the seat is unknown). */
+  getNodeSeatSliceRig(nodeId: string): string | undefined {
+    if (!this.hasRigColumn("seat_slice")) return undefined;
+    const row = this.db.prepare("SELECT r.name AS name, r.seat_slice AS seat_slice FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
+      .get(nodeId) as { name: string; seat_slice: string | null } | undefined;
+    return row?.seat_slice === "rig" ? row.name : undefined;
   }
 
   /** Persist the rig-level `env:` block from the spec, or null to clear. */

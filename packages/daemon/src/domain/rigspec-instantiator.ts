@@ -732,6 +732,8 @@ export class PodRigInstantiator {
         }
         // The rig's culture and startup layers, for seats added later (both rig-create sites; an expansion keeps them).
         if (!opts?.targetRigId) this.persistRigStartupLayers(materializedRigId, rigSpec, rigRoot);
+        // #80: the rig's seat grouping, read at each seat launch (both pod-aware rig-create sites; an expansion keeps it).
+        if (!opts?.targetRigId && rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(materializedRigId, rigSpec.seatSlice);
 
         // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
         // this is ONE of TWO rig-persist sites (materializeValidatedSpec + instantiate); missing
@@ -1579,6 +1581,8 @@ export class PodRigInstantiator {
       createdRigId = rig.id;
       const nonInterruptive = opts?.nonInterruptive ?? rigSpec.nonInterruptive;
       if (nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, nonInterruptive);
+      // #80: the rig's seat grouping, read at each seat launch (both pod-aware rig-create sites).
+      if (rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(rigId, rigSpec.seatSlice);
       // PL-007: persist typed workspace block (when declared) on the rig
       // record. Whoami / node-inventory read it via getRigWorkspace().
       if (rigSpec.workspace) {
