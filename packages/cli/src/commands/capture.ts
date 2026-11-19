@@ -194,9 +194,12 @@ Supported notes:
     window-size override, so Herdr, tmux attach and other clients size it again. The
     seat redraws twice, and anyone watching it sees the resize briefly. A window that's already big
     enough is read as it is, and so is one whose size is pinned (window-size manual, as while the
-    web terminal has opted into fixed geometry), one whose sizing can't be read, and one with several panes. With --rig
-    or --pod, small seats are read at that size for up to 8 seconds in all, and the rest as they
-    are. A stderr note says which; --json has it as readable.
+    web terminal has opted into fixed geometry; when the window's own manual setting remains and no
+    OpenRig reader holds it, the note names the command that drops it, to run on the daemon's host),
+    one whose sizing can't be read, and one with several panes. A pin an OpenRig reader left without
+    giving it back is taken over, and given back after the read. With --rig or --pod, small seats
+    are read at that size for up to 8 seconds in all, and the rest as they are. A stderr note says
+    which; --json has it as readable.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace

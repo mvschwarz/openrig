@@ -1,7 +1,7 @@
 // The stuck sweep reads its undelivered candidates as ids, in yielding windows on a file database, and derives each row
 // by id between its own yields. The rows it finds, their order and their delivery outcomes are findUndelivered's; a
 // request keeps moving during a long candidate read; and a row that changes while the read yields is judged as it is now.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,10 +17,10 @@ import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 const FOUNDER = { entityId: "human-founder", class: "human", displayName: "F", address: "human-founder@external",
   connectorBindings: [{ connector: "slack", ref: "U0F", primary: true }], prefs: {} } as unknown as HumanFragment;
 
-/** Counts the event loop's turns while something runs; `onTick` runs at each turn. */
-function ticker(onTick?: (tick: number) => void) {
+/** Counts the event loop's turns while something runs. */
+function ticker() {
   let ticks = 0; let done = false;
-  const spin = () => { if (done) return; ticks++; onTick?.(ticks); setImmediate(spin); };
+  const spin = () => { if (done) return; ticks++; setImmediate(spin); };
   setImmediate(spin);
   return { now: () => ticks, stop: () => { done = true; } };
 }
@@ -82,9 +82,12 @@ describe.each(["file", "memory"] as const)("the stuck sweep's undelivered candid
     const add = insertFailed(db);
     db.transaction(() => { for (let i = 0; i < 2_000; i++) add(`qitem-many-${String(i).padStart(4, "0")}`); })();
     const clock = ticker();
-    const ids = await repo.undeliveredCandidateIds();
-    const ticks = clock.now();
-    clock.stop();
+    let ids: string[] = [];
+    let ticks = 0;
+    try {
+      ids = await repo.undeliveredCandidateIds();
+      ticks = clock.now();
+    } finally { clock.stop(); }
     expect(ids).toHaveLength(2_000);
     expect(new Set(ids).size).toBe(2_000);
     // The read takes 2,000 rowids in windows of 256 and yields between them on a WAL file; in memory it stays one read.
@@ -96,10 +99,23 @@ describe.each(["file", "memory"] as const)("the stuck sweep's undelivered candid
     const add = insertFailed(db);
     db.transaction(() => { for (let i = 0; i < 600; i++) add(`qitem-row-${String(i).padStart(4, "0")}`); })();
     const target = "qitem-row-0599";
-    // At the read's first yield (a file database) or before the pass (memory), the row's owner closes it.
-    const clock = ticker(() => db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'no-follow-on' WHERE qitem_id = ?").run(target));
+    const close = () => db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'no-follow-on' WHERE qitem_id = ?").run(target);
+    // The row's owner closes it once, at a point the test controls: on a file database at the candidate read's first
+    // yield between windows (600 rows are three windows of 256); in memory, where the read doesn't yield, right after it.
+    // Either way the read's snapshot still lists the row as pending, and the sweep hasn't derived any row yet.
+    const read = repo.undeliveredCandidateIds.bind(repo);
+    let closedAt: "read-yield" | "after-read" | undefined;
+    let listed: boolean | undefined;
+    vi.spyOn(repo, "undeliveredCandidateIds").mockImplementation(async (opts) => {
+      const atYield = setImmediate(() => { closedAt ??= "read-yield"; close(); });
+      const ids = await read(opts);
+      if (!closedAt) { clearImmediate(atYield); closedAt = "after-read"; close(); }
+      listed = ids.includes(target);
+      return ids;
+    });
     const result = await runStuckSweep({ db, queueRepo: repo, log: () => {}, resolveOrchestrator: () => "orch@r" });
-    clock.stop();
+    expect(closedAt).toBe(kind === "file" ? "read-yield" : "after-read");
+    expect(listed).toBe(true);
     const found = new Set(result.findings.filter((f) => f.kind === "undelivered-wake").map((f) => f.qitemId));
     expect(found.has(target)).toBe(false);
     expect(found.size).toBe(599);

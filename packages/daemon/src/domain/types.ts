@@ -418,6 +418,9 @@ export type RigEvent =
   | { type: "classifier.dead"; leaseId: string; classifierSession: string; lastHeartbeat: string; detectedAt: string }
   | { type: "classifier.reclaimed"; leaseId: string; previousClassifierSession: string; reclaimedBySession: string; reason: string; reclaimedAt: string }
   | { type: "view.changed"; viewName: string; cause: string }
+  // settings.changed: an HTTP caller set or reset a setting that defines what this daemon may reach.
+  // Stored, so a person asking later why the file surface changed has something to find.
+  | { type: "settings.changed"; key: string; action: "set" | "reset" }
   // PL-004 Phase C: daemon-native Watchdog supervision tree events.
   // Three policies in scope (periodic-reminder, artifact-pool-ready,
   // edge-artifact-required); workflow-keepalive deferred to Phase D.

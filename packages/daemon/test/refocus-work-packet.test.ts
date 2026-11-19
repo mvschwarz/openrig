@@ -75,7 +75,7 @@ exit 1
     OPENRIG_REFOCUS_NOTES_MAX_AGE_DAYS: undefined,
     RIG_CALL_LOG: calls,
   };
-  const trace = (args: string[], evidence?: unknown, extra: NodeJS.ProcessEnv = {}) => spawnSync("python3", [TRACE, ...args], {
+  const trace = (args: string[], evidence?: unknown, extra: NodeJS.ProcessEnv = {}) => spawnSync(process.env.OPENRIG_TEST_PYTHON || "python3", [TRACE, ...args], {
     encoding: "utf8", env: { ...env, ...extra }, input: evidence === undefined ? "" : JSON.stringify(evidence),
   });
   return { root, workspace, missions, topology, seat, slice, bin, env, trace,
@@ -241,6 +241,45 @@ describe("frontmatterIntent — folded and literal intents", () => {
 });
 
 describe("trace-to-root --packet — the work packet as text", () => {
+  it("keeps the age cue for old progress without a current-state section", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "PROGRESS.md"), "---\nupdated: 2020-01-02\n---\n# Progress\n\n## Notes\n\nOld work\n", "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("OLD NOTES");
+    expect(result.stdout).not.toContain("CURRENT STATE —");
+  });
+
+  it.each([
+    '"progress_rail": readme-only\n"current_state_updated": "2020-01-02T03:04:05.000Z"',
+    '{progress_rail: readme-only, current_state_updated: "2020-01-02T03:04:05.000Z"}',
+  ])("parses quoted and flow YAML metadata: %s", (frontmatter) => {
+    const w = world();
+    writeFileSync(join(w.slice, "SPEC.md"), `---\n${frontmatter}\n---\n# Slice\n\n## Current state ##\n\nReady\n`, "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout, result.stdout).toContain("PROGRESS · SPEC.md");
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Ready");
+  });
+
+  it("reports the current-state timestamp instead of the file modification time", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "PROGRESS.md"), '---\ncurrent_state_updated: "2020-01-02T03:04:05.000Z"\n---\n# Progress\n\n## Current state\n\nWaiting\n', "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Waiting");
+  });
+  it("includes a readme-only rail in the work packet", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "SPEC.md"), '---\nintent: Work\nprogress_rail: readme-only\ncurrent_state_updated: "2020-01-02T03:04:05.000Z"\n---\n# Slice\n\n## Current state\n\nReady\n', "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("PROGRESS · SPEC.md");
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Ready");
+  });
   it("traces the logical parent intent, not just filesystem ancestors", () => {
     const w = world();
     writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
