@@ -44,7 +44,7 @@ function isBridge(row: ProcessRow): boolean {
     && encoded === Buffer.from(loader(file), "utf16le").toString("base64");
 }
 
-function isScopedBootstrap(row: ProcessRow): boolean {
+export function isWindowsScopedBootstrap(row: ProcessRow): boolean {
   if (!executable(row, "powershell")) return false;
   const words = parseWindowsCommandLine(row.command);
   if (words.length !== 5 || words[1] !== "-NoLogo" || words[2] !== "-NoProfile" || words[3] !== "-EncodedCommand") return false;
@@ -70,7 +70,7 @@ export function windowsScopedShellPid(rows: ProcessRow[], panePid: number): numb
   if(new Set(rows.map(row=>row.pid)).size!==rows.length)return null;
   const pane=rows.find(row=>row.pid===panePid);
   if(!pane)return null;
-  return isScopedBootstrap(pane) ? scopedShellChild(rows,pane)?.pid ?? null : panePid;
+  return isWindowsScopedBootstrap(pane) ? scopedShellChild(rows,pane)?.pid ?? null : panePid;
 }
 
 /** A direct PowerShell parent, or one managed loader under a supported shell. */
@@ -82,7 +82,7 @@ export function windowsManagedRunnerParent(rows: ProcessRow[], panePid: number):
 function managedRunnerParent(rows: ProcessRow[], panePid: number, posixForks: number): number | null {
   const pane = rows.find(row => row.pid === panePid);
   if (!pane) return null;
-  if (isScopedBootstrap(pane)) {
+  if (isWindowsScopedBootstrap(pane)) {
     const shell = scopedShellChild(rows,pane);
     if(!shell)return null;
     if (executable(shell, "powershell") || executable(shell, "pwsh")) return shell.pid;

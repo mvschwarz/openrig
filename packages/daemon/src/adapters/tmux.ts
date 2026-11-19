@@ -19,6 +19,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isWindowsPrivateEnvironmentName, psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
 import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
+import { readWindowsSeatJobForPane } from "../domain/windows-seat-job-readback.js";
 import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
 import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../domain/windows-cmd-bridge.js";
 import { windowsScopedLaunch } from "./windows-scoped-launch.js";
@@ -506,6 +507,7 @@ export interface SeatProcessLimitsReport {
    *  was about to go over the limit (memory.events `max`), and how many processes in the scope an OOM killer killed
    *  (memory.events `oom_kill`, any OOM killer: not proof that this limit ended the seat). */
   memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number;
+  memoryAccounting?: "job_commit";
   /** The seat's scope unit, when the process is in one. */
   scope?: string;
   /** Which process the status read: the seat's own pane, or its session's active pane when no pane is recorded. */
@@ -778,6 +780,7 @@ export class TmuxAdapter {
 
   /** Reads /proc and /sys for the limit's readback, and a launch's scope marker; replaceable in tests. */
   procRead: (path: string) => Promise<string> = (path) => fsReadFile(path, "utf8");
+  readWindowsSeatJobForPane: typeof readWindowsSeatJobForPane = readWindowsSeatJobForPane;
 
   /** An executable's absolute path from the daemon's PATH (absolute entries only), or null; replaceable in tests. */
   resolveExecutable: (name: string) => string | null = (name) => {
@@ -952,9 +955,13 @@ export class TmuxAdapter {
     const fixed = this.seatScopeStaticProblem(policy, seatEnv.OPENRIG_NODE_ID, seatEnv.OPENRIG_SESSION_NAME);
     if (fixed) {
       if (process.platform === "win32" && fixed.kind === "unsupported") {
-        return positive(limits.tasksMax !== undefined
-          ? { kind: "unsupported", limit: "tasks_max", reason: "Windows Job active-process limits do not enforce the requested process-and-thread task count" }
-          : { kind: "unsupported", limit: "memory_max", reason: "Windows seat Job commit-memory enforcement and persistent readback are not available; Job commit charge is not Linux cgroup memory accounting" });
+        if (limits.tasksMax !== undefined) return positive({ kind: "unsupported", limit: "tasks_max",
+          reason: "Windows Job active-process limits do not enforce the requested process-and-thread task count" });
+        if (policy instanceof Error) return fail({ kind: "unverified", reason: `the launch environment can't be read: ${policy.message}` });
+        if (!policy) return fail({ kind: "setup", reason: "this daemon gives seats no launch environment" });
+        if (policy.inheritTmuxEnvironment) return fail({ kind: "setup", reason: INHERIT_TMUX_ENVIRONMENT_REASON });
+        // Actual Job creation and readback are fenced at the launch boundary.
+        return { ok: true, prefix: [] };
       }
       return positive(fixed);
     }
@@ -1085,7 +1092,8 @@ export class TmuxAdapter {
     if (!marker) return "unreadable";
     try {
       const text = await this.procRead(marker);
-      return text === "" ? "ran" : text === SCOPE_MARKER_PENDING ? "pending" : "unreadable";
+      return (process.platform === "win32" ? /^started\|[1-9]\d*$/.test(text) : text === "") ? "ran"
+        : text === SCOPE_MARKER_PENDING ? "pending" : "unreadable";
     } catch {
       return "unreadable";
     }
@@ -1098,19 +1106,35 @@ export class TmuxAdapter {
    *  but its process wasn't seen in the scope in time; `unknown` when the time ran out with the pane alive (its wrapper
    *  can still enter the scope and start the command after the last look) or the pane or the marker can't be read.
    *  The marker is removed at the end. */
-  private async seatScopeStart(pane: string, marker: string | undefined):
+  private async seatScopeStart(pane: string, marker: string | undefined, requested?: SeatProcessLimits):
     Promise<"started" | "failed_before_command" | "ran_and_ended" | "ran_unconfirmed" | "unknown"> {
     let sawRan = false;
+    const deadline = Date.now() + SEAT_SCOPE_START_CHECKS * SEAT_SCOPE_START_CHECK_MS;
     try {
       for (let i = 0; i < SEAT_SCOPE_START_CHECKS; i++) {
+        if (Date.now() >= deadline) break;
         let dead: boolean;
         try { dead = await this.isPaneDead(pane); } catch { return sawRan ? "ran_unconfirmed" : "unknown"; }
         const mark = await this.scopeMarkerState(marker);
         if (mark === "ran") sawRan = true;
-        if (dead) return mark === "ran" ? "ran_and_ended" : mark === "pending" ? "failed_before_command" : sawRan ? "ran_unconfirmed" : "unknown";
+        // A Windows guardian can die after creating a suspended child but
+        // before publishing its receipt. Never replay that uncertain start.
+        if (dead) return mark === "ran" ? "ran_and_ended" : process.platform === "win32" ? "unknown"
+          : mark === "pending" ? "failed_before_command" : sawRan ? "ran_unconfirmed" : "unknown";
         if (mark === "ran") {
           try {
             const pid = await this.getPanePid(pane);
+            if (process.platform === "win32") {
+              if (pid !== null && marker) {
+                const receipt = /^started\|([1-9]\d*)$/.exec(await this.procRead(marker));
+                if (receipt) {
+                  const read = await this.readWindowsSeatJobForPane(pid, { targetPid: Number(receipt[1]) });
+                  if (read.activeProcesses > 0 && read.memoryMax === requested?.memoryMax && await this.getPanePid(pane) === pid) return "started";
+                }
+              }
+              await this.scopeStartSleep(SEAT_SCOPE_START_CHECK_MS);
+              continue;
+            }
             const path = pid === null ? null : cgroupV2Path(await this.procRead(`/proc/${pid}/cgroup`));
             if (path && /\/openrig-seat-[^/]+\.scope$/.test(path)) return "started";
           } catch { /* not readable at this moment: look again */ }
@@ -1179,10 +1203,22 @@ export class TmuxAdapter {
     const fixed = this.seatScopeStaticProblem(policy, nodeId);
     // A guest seat's pane holds only a local viewer: its readback says nothing of the agent's processes.
     if (nodeId && this.seatInEnvironmentGuest?.(nodeId)) return { ...base, state: "not_applied", reason: fixed!.reason };
-    // A Windows process might have an externally imposed Job. Until the seat
-    // backend can read that Job, neither its presence nor its absence is known.
-    if (process.platform === "win32") return { ...base, state: "unknown",
-      reason: "Windows seat Job membership and limits cannot currently be read back; no applied limit is claimed" };
+    if (process.platform === "win32") {
+      if (requested.tasksMax !== undefined) return { ...base, state: "unsupported",
+        reason: "Windows Job active-process limits do not enforce the requested process-and-thread task count" };
+      try {
+        const pid = await this.getPanePid(paneTarget);
+        if (pid === null) throw new Error("the seat pane process is unavailable");
+        const read = await this.readWindowsSeatJobForPane(pid);
+        if (await this.getPanePid(paneTarget) !== pid) throw new Error("the seat pane changed during readback");
+        if (read.activeProcesses === 0) throw new Error("the seat Job has no active processes");
+        if (read.memoryMax !== requested.memoryMax) return { ...base, state: "not_applied", memoryAccounting: "job_commit",
+          memoryMax: String(read.memoryMax), reason: "the Job commit limit differs from the requested memory limit" };
+        return { ...base, state: "applied", memoryAccounting: "job_commit", memoryMax: String(read.memoryMax) };
+      } catch {
+        return { ...base, state: "unknown", reason: "Windows seat Job, guardian or target membership could not be verified; no applied limit is claimed" };
+      }
+    }
     // The last positive answer counts only for a request that asks a limit it was about: a failed memory probe says
     // nothing of a tasks-only seat (nor a pids answer of a memory-only one); no cgroup v2 is about every limit.
     const recent = this.seatScopeLastPositive && Date.now() - this.seatScopeLastPositive.at < SEAT_SCOPE_RETRY_MS
@@ -1282,8 +1318,20 @@ export class TmuxAdapter {
       if (process.platform === "win32") {
         const file = this.fileOps.tmpName();
         const key = `OPENRIG_LAUNCH_RECOVERY_${randomUUID().replace(/-/g, "")}`;
-        const launch = windowsScopedLaunch(shell, command ?? "", selected, file, false, key);
-        await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
+        const marker = limited ? await this.scopeMarker() : undefined;
+        let launch: ReturnType<typeof windowsScopedLaunch>;
+        try {
+          // A limited launch is one-shot: replaying the old loader would reuse
+          // an already-consumed receipt without an OpenRig recovery decision.
+          launch = windowsScopedLaunch(shell, command ?? "", selected, file, false, marker ? undefined : key,
+            marker ? { memoryMax: (lookup as { limits: SeatProcessLimits }).limits.memoryMax!, marker } : undefined);
+          await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
+        } catch (error) {
+          if (marker) await this.fileOps.unlink(marker).catch(() => {});
+          throw error;
+        }
+        if (marker && notices) { notices.capped = true; notices.marker = marker;
+          notices.requested = { ...(lookup as { limits: SeatProcessLimits }).limits }; }
         const recoveryEnv = Object.fromEntries(Object.entries(selected).filter((entry): entry is [string,string] => entry[1] !== undefined));
         if (launch.recovery) recoveryEnv[launch.recovery.key] = launch.recovery.value;
         staged?.(file, recoveryEnv);
@@ -1328,7 +1376,7 @@ export class TmuxAdapter {
    *  command runs as the pane's default shell would run it, inside a new seat scope, with the bus and runtime directory
    *  the pane would get from tmux. Recovery only: where the scope can't be made, the respawn goes on without it. */
   private async keptScopeCommand(nodeId: string, pane: string, command: string | undefined, warnings: string[],
-    notices: ScopeNotices): Promise<string[] | null> {
+    notices: ScopeNotices, staged?: (file: string) => void): Promise<string[] | null> {
     const lookup = this.seatLimitsLookup(nodeId);
     if (!lookup) return null;
     const notApplied = (problem: SeatProcessLimitsProblem): null => {
@@ -1347,6 +1395,18 @@ export class TmuxAdapter {
       if (!command) throw new Error("a kept scope needs the respawn's command");
       const shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
+      if (process.platform === "win32") {
+        const marker = await this.scopeMarker(), file = this.fileOps.tmpName();
+        try {
+          const launch = windowsScopedLaunch(shell, command, {}, file, true, undefined, { memoryMax: requested.memoryMax!, marker });
+          await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
+          staged?.(file); notices.capped = true; notices.marker = marker; notices.requested = requested;
+          return ["--", ...launch.argv];
+        } catch (error) {
+          await this.fileOps.unlink(marker).catch(() => {});
+          throw error;
+        }
+      }
       const restore = restoreEnvArgv({
         DBUS_SESSION_BUS_ADDRESS: await this.paneStartEnv(pane, "DBUS_SESSION_BUS_ADDRESS"),
         XDG_RUNTIME_DIR: await this.paneStartEnv(pane, "XDG_RUNTIME_DIR"),
@@ -1386,7 +1446,7 @@ export class TmuxAdapter {
   private async scopeStartOutcome(pane: string | null, mode: ProcessLimitsMode | undefined, notices: ScopeNotices,
     warnings: string[]): Promise<{ refuse: SeatProcessLimitsProblem } | { retryUncapped: SeatProcessLimitsProblem } | null> {
     // No pane to watch: whether its command started can't be told.
-    const start = pane ? await this.seatScopeStart(pane, notices.marker) : "unknown";
+    const start = pane ? await this.seatScopeStart(pane, notices.marker, notices.requested) : "unknown";
     if (!pane && notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
     if (start === "started") return null;
     const requested = notices.requested ? { requested: { ...notices.requested } } : {};
@@ -3115,7 +3175,7 @@ export class TmuxAdapter {
     const notices: ScopeNotices = opts?.failedStart ? { failedStart: opts.failedStart } : {};
     try {
       scopedCommand = opts?.keepLimitOf && !opts.env
-        ? await this.keptScopeCommand(opts.keepLimitOf, exact, command, warnings, notices)
+        ? await this.keptScopeCommand(opts.keepLimitOf, exact, command, warnings, notices, file => { bootstrap = file; })
         : await this.scopedLaunchCommand(launchEnv, command, warnings, opts?.processLimitsMode, notices, (file, recoveryEnv) => { bootstrap = file; Object.assign(launchEnv,recoveryEnv); });
     } catch (error) { if (error instanceof SeatProcessLimitsNotApplied) return processLimitsNotAppliedResult(error); throw error; }
     for (const [k,v] of Object.entries(launchEnv)) argv.push("-e",`${k}=${v}`);

@@ -66,8 +66,16 @@ public static class OpenRigProbeJob {
   [StructLayout(LayoutKind.Sequential)] struct EXTENDED_LIMITS {
     public BASIC_LIMITS basic; public IO_COUNTERS io; public UIntPtr processMemory,jobMemory,peakProcess,peakJob;
   }
+  [StructLayout(LayoutKind.Sequential)] struct BASIC_ACCOUNTING {
+    public long userTime,kernelTime,periodUserTime,periodKernelTime;
+    public uint pageFaults,totalProcesses,activeProcesses,terminatedProcesses;
+  }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr security,string name);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr OpenJobObjectW(uint access,bool inherit,string name);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job,int info,ref EXTENDED_LIMITS data,int size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job,int info,out EXTENDED_LIMITS data,int size,IntPtr returned);
+  [DllImport("kernel32.dll", SetLastError=true, EntryPoint="QueryInformationJobObject")] static extern bool QueryAccounting(IntPtr job,int info,out BASIC_ACCOUNTING data,int size,IntPtr returned);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process,IntPtr job,out bool result);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,int flags,ref IntPtr size);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list,uint flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr returned);
   [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
@@ -76,9 +84,89 @@ public static class OpenRigProbeJob {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CreatePipe(out IntPtr read,out IntPtr write,ref SECURITY_ATTRIBUTES security,uint size);
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr handle);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr handle,uint code);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   static void Check(bool ok) { if(!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  public static IntPtr CreateSeatJob(string name,ulong memory) {
+    IntPtr job=CreateJobObjectW(IntPtr.Zero,name); Check(job!=IntPtr.Zero);
+    int creationError=Marshal.GetLastWin32Error();
+    try {
+      if(creationError==183)throw new InvalidOperationException("Seat Job name is already in use");
+      var limits=new EXTENDED_LIMITS(); limits.basic.flags=0x200; limits.jobMemory=(UIntPtr)memory;
+      Check(SetInformationJobObject(job,9,ref limits,Marshal.SizeOf(typeof(EXTENDED_LIMITS)))); return job;
+    } catch { CloseHandle(job); throw; }
+  }
+  // The JOB_LIST attribute assigns the root atomically during creation.
+  // On any failure before resume it is terminated, never retried implicitly.
+  public static int RunSeatJob(IntPtr job,string file,string args,string cwd,string environment,string marker) {
+    IntPtr list=IntPtr.Zero, handlesValue=IntPtr.Zero, jobValue=IntPtr.Zero, env=IntPtr.Zero; bool initialized=false, resumed=false;
+    PROCESS_INFORMATION process=new PROCESS_INFORMATION();
+    try {
+      IntPtr size=IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero,2,0,ref size);
+      list=Marshal.AllocHGlobal(size); Check(InitializeProcThreadAttributeList(list,2,0,ref size)); initialized=true;
+      jobValue=Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(jobValue,job);
+      Check(UpdateProcThreadAttribute(list,0,new IntPtr(0x2000D),jobValue,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
+      var handles=new IntPtr[] {GetStdHandle(-10),GetStdHandle(-11),GetStdHandle(-12)};
+      var unique=new System.Collections.Generic.List<IntPtr>();
+      foreach(var h in handles) { Check(h!=IntPtr.Zero && h!=new IntPtr(-1)); Check(SetHandleInformation(h,1,1)); if(!unique.Contains(h))unique.Add(h); }
+      handlesValue=Marshal.AllocHGlobal(IntPtr.Size*unique.Count);
+      for(int i=0;i<unique.Count;i++)Marshal.WriteIntPtr(handlesValue,i*IntPtr.Size,unique[i]);
+      Check(UpdateProcThreadAttribute(list,0,new IntPtr(0x20002),handlesValue,new IntPtr(IntPtr.Size*unique.Count),IntPtr.Zero,IntPtr.Zero));
+      var startup=new STARTUPINFOEX(); startup.startup.cb=Marshal.SizeOf(typeof(STARTUPINFOEX)); startup.attributes=list;
+      startup.startup.flags=0x100; startup.startup.input=handles[0]; startup.startup.output=handles[1]; startup.startup.error=handles[2];
+      var command=new StringBuilder(Quote(file)); if(!String.IsNullOrEmpty(args))command.Append(' ').Append(args);
+      env=Marshal.StringToHGlobalUni(environment);
+      Check(CreateProcessW(file,command,IntPtr.Zero,IntPtr.Zero,true,0x00080404,env,cwd,ref startup,out process));
+      bool member; Check(IsProcessInJob(process.process,job,out member));
+      if(!member)throw new InvalidOperationException("Created process is not in its seat Job");
+      WriteExistingMarker(marker,"assigned|"+process.pid);
+      if(ResumeThread(process.thread)==0xffffffff)throw new Win32Exception(Marshal.GetLastWin32Error()); resumed=true;
+      // A missing post-resume receipt is uncertainty, never a reason to replay
+      // the command or to drop the guardian's handle while it can still run.
+      try { WriteExistingMarker(marker,"started|"+process.pid); } catch { }
+      if(WaitForSingleObject(process.process,0xffffffff)!=0)throw new Win32Exception(Marshal.GetLastWin32Error());
+      uint code; Check(GetExitCodeProcess(process.process,out code));
+      while(SeatJobActive(job)>0)System.Threading.Thread.Sleep(250);
+      return unchecked((int)code);
+    } finally {
+      if(process.process!=IntPtr.Zero && !resumed)TerminateProcess(process.process,1);
+      if(process.thread!=IntPtr.Zero)CloseHandle(process.thread);
+      if(process.process!=IntPtr.Zero)CloseHandle(process.process);
+      if(initialized)DeleteProcThreadAttributeList(list);
+      if(list!=IntPtr.Zero)Marshal.FreeHGlobal(list);
+      if(handlesValue!=IntPtr.Zero)Marshal.FreeHGlobal(handlesValue);
+      if(jobValue!=IntPtr.Zero)Marshal.FreeHGlobal(jobValue);
+      if(env!=IntPtr.Zero)Marshal.FreeHGlobal(env);
+    }
+  }
+  public static uint SeatJobActive(IntPtr job) {
+    BASIC_ACCOUNTING a; Check(QueryAccounting(job,1,out a,Marshal.SizeOf(typeof(BASIC_ACCOUNTING)),IntPtr.Zero)); return a.activeProcesses;
+  }
+  public static void CloseSeatJob(IntPtr job) { if(job!=IntPtr.Zero)CloseHandle(job); }
+  public static ulong ReadSeatJobLimit(string name,IntPtr process) {
+    IntPtr job=OpenJobObjectW(4,false,name); Check(job!=IntPtr.Zero);
+    try {
+      bool inside; Check(IsProcessInJob(process,job,out inside)); if(!inside)throw new InvalidOperationException("Process is not in the selected seat Job");
+      EXTENDED_LIMITS limits; Check(QueryInformationJobObject(job,9,out limits,Marshal.SizeOf(typeof(EXTENDED_LIMITS)),IntPtr.Zero));
+      if((limits.basic.flags&0x200)==0)throw new InvalidOperationException("Seat Job has no commit-memory limit");
+      return limits.jobMemory.ToUInt64();
+    } finally { CloseHandle(job); }
+  }
+  public static string ReadSeatJobState(string name) {
+    IntPtr job=OpenJobObjectW(4,false,name); Check(job!=IntPtr.Zero);
+    try {
+      EXTENDED_LIMITS limits; Check(QueryInformationJobObject(job,9,out limits,Marshal.SizeOf(typeof(EXTENDED_LIMITS)),IntPtr.Zero));
+      if((limits.basic.flags&0x200)==0)throw new InvalidOperationException("Seat Job has no commit-memory limit");
+      return limits.jobMemory.ToUInt64().ToString()+"|"+SeatJobActive(job).ToString();
+    } finally { CloseHandle(job); }
+  }
+  static void WriteExistingMarker(string file,string value) {
+    using(var stream=new FileStream(file,FileMode.Open,FileAccess.Write,FileShare.Read)) {
+      stream.SetLength(0); var bytes=Encoding.UTF8.GetBytes(value); stream.Write(bytes,0,bytes.Length); stream.Flush();
+    }
+  }
   static string Quote(string value) {
     var result=new StringBuilder("\""); int slashes=0;
     foreach(char c in value) {
@@ -171,6 +259,17 @@ try {
   exit [OpenRigProbeJob]::Run($launch.file, $launch.argv0, [string[]]$launch.args, $launch.cwd, $environment, [bool]$launch.verbatim, [bool]$launch.preserveClosedStdio)
 } catch { [Console]::Error.WriteLine('OpenRig native probe job: ' + $_.Exception.Message); exit 125 }
 `;
+
+/** The same native Job interop used by finite probes, without the probe entrypoint. */
+export function windowsJobInteropScript(): string {
+  const end = HELPER.indexOf("\ntry {\n  $encoded");
+  if (end < 0) throw new Error("Native Job interop boundary is unavailable");
+  return HELPER.slice(0, end);
+}
+
+/** Both the guardian and readback derive their name from the same prefix and
+ * live guardian PID plus its Windows process creation time. */
+export const WINDOWS_SEAT_JOB_PREFIX = "Local\\OpenRigSeat-";
 
 /** Finite Windows 10+ background CLI commands only. Never use this for persistent seats. */
 export type WindowsJobExitPolicy = "terminate-descendants" | "preserve-closed-stdio";

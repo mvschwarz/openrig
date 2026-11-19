@@ -8,11 +8,34 @@ import { randomUUID } from "node:crypto";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { windowsScopedLaunch } from "../src/adapters/windows-scoped-launch.js";
 import { powershellQuote } from "../src/adapters/windows-launch.js";
+import { readWindowsProcessesStrict } from "../src/domain/windows-process-table.js";
+import { isWindowsScopedBootstrap } from "../src/domain/windows-cmd-bridge.js";
 
 const nativeShells = [join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
   ...(process.env.OPENRIG_TEST_PWSH ? [process.env.OPENRIG_TEST_PWSH] : [])];
 
 describe.skipIf(process.platform !== "win32")("native scoped shell bootstrap", () => {
+  it("enforces a seat Job commit limit before the selected shell runs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-seat-job-"));
+    try {
+      const file = join(dir, "launch.ps1"), marker = join(dir, "marker"), output = join(dir, "result.txt"), target = join(dir, "target.ps1");
+      writeFileSync(marker, "pending");
+      const targetScript = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class SeatCommitTest { [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr VirtualAlloc(IntPtr p,UIntPtr size,uint type,uint protect); [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess(); [DllImport("kernel32.dll",SetLastError=true)] public static extern bool IsProcessInJob(IntPtr p,IntPtr j,out bool result); }'; ` +
+        `$p=[SeatCommitTest]::VirtualAlloc([IntPtr]::Zero,[UIntPtr]::new(536870912),0x3000,4); ` +
+        `$inside=$false; [void][SeatCommitTest]::IsProcessInJob([Diagnostics.Process]::GetCurrentProcess().Handle,[IntPtr]::Zero,[ref]$inside); ` +
+        `[IO.File]::WriteAllText(${powershellQuote(output)},([string]($p -eq [IntPtr]::Zero)+'|'+$inside+'|'+$PID))`;
+      writeFileSync(target, targetScript);
+      const command = `& ${powershellQuote(target)}`;
+      const launch = windowsScopedLaunch(`"${nativeShells[0]}" -NoProfile`, command, { SystemRoot: process.env.SystemRoot, TEMP: dir, TMP: dir }, file, false, undefined,
+        { memoryMax: 268435456, marker });
+      writeFileSync(file, launch.content);
+      const result = spawnSync(launch.argv[0]!, launch.argv.slice(1), { cwd: dir, env: process.env, encoding: "utf8", windowsHide: true, timeout: 15000 });
+      expect(result.status, result.stderr).toBe(0);
+      const marked = readFileSync(marker, "utf8");
+      expect(marked).toMatch(/^started\|\d+$/);
+      expect(readFileSync(output, "utf8")).toBe("True|True|" + marked.split("|")[1]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 20000);
   it("recovers without its consumed file using current allowed session values and hides recovery metadata", () => {
     const dir=mkdtempSync(join(tmpdir(),"openrig-recover-"));
     try {
@@ -167,3 +190,73 @@ it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX).each(
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }, 30000);
+
+it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX)("enforces and reads a Job through an isolated psmux seat", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openrig-seat-job-psmux-")), registry = join(dir, "registry"); mkdirSync(registry);
+  const namespace = `seat-job-${randomUUID()}`, output = join(dir, "target.txt"), target = join(dir, "target.ps1"), release = join(dir, "release");
+  const shell = nativeShells[0]!;
+  const env = { SHELL: shell, SystemRoot: process.env.SystemRoot, WINDIR: process.env.SystemRoot, PATH: dirname(shell) + ";" + process.env.SystemRoot + "\\System32", HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir, PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: "NUL" };
+  writeFileSync(target, `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class PsmuxCommitTest {[DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr VirtualAlloc(IntPtr p,UIntPtr n,uint t,uint f);}'; ` +
+    `$p=[PsmuxCommitTest]::VirtualAlloc([IntPtr]::Zero,[UIntPtr]::new(536870912),0x3000,4); [IO.File]::WriteAllText(${powershellQuote(output)},[string]($p -eq [IntPtr]::Zero)); ` +
+    `$until=[DateTime]::UtcNow.AddSeconds(45); while(-not [IO.File]::Exists(${powershellQuote(release)}) -and [DateTime]::UtcNow -lt $until) { Start-Sleep -Milliseconds 100 }`);
+  const invoke = async (argv: string[]) => (await promisify(execFile)(process.env.OPENRIG_TEST_PSMUX!, ["-L", namespace, ...argv.slice(1)], { env, cwd: dir, timeout: 10000, windowsHide: true })).stdout;
+  const adapter = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
+  adapter.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { ...env } });
+  adapter.seatProcessLimits = id => id === "synthetic-seat" ? { memoryMax: 268435456 } : undefined;
+  try {
+    expect(await adapter.startServer()).toEqual({ ok: true });
+    await invoke(["tmux", "set-option", "-g", "remain-on-exit", "on"]);
+    const command = `& ${powershellQuote(target)}`;
+    await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile -EncodedCommand ${Buffer.from(command, "utf16le").toString("base64")}`]);
+    const created = await adapter.createSession("seat", dir, { OPENRIG_NODE_ID: "synthetic-seat" });
+    expect(created).toMatchObject({ ok: true });
+    await expect.poll(() => existsSync(output), { timeout: 12000 }).toBe(true);
+    expect(readFileSync(output, "utf8")).toBe("True");
+    const pane = (await adapter.listPanes("seat"))[0]!;
+    expect(await adapter.readSeatProcessLimits(pane.id, { memoryMax: 268435456 }, "synthetic-seat"))
+      .toMatchObject({ state: "applied", memoryAccounting: "job_commit", memoryMax: "268435456" });
+    const observer = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
+    observer.launchEnvironment = adapter.launchEnvironment;
+    expect(await observer.readSeatProcessLimits(pane.id, { memoryMax: 268435456 }, "synthetic-seat"))
+      .toMatchObject({ state: "applied", memoryAccounting: "job_commit", memoryMax: "268435456" });
+    // The owned fixture alone is terminated; birth identity is rechecked before
+    // signalling, and the target exits separately through its release file.
+    const panePid = await adapter.getPanePid(pane.id), rows = await readWindowsProcessesStrict();
+    const underPane = (pid: number) => {
+      const seen = new Set<number>(); let current = rows.find(row => row.pid === pid);
+      while (current && !seen.has(current.pid)) { if (current.pid === panePid) return true; seen.add(current.pid); current = rows.find(row => row.pid === current!.ppid); }
+      return false;
+    };
+    const guardians = rows.filter(row => underPane(row.pid) && isWindowsScopedBootstrap(row));
+    expect(guardians).toHaveLength(1);
+    const guardian = guardians[0]!;
+    const targets = rows.filter(row => row.ppid === guardian.pid && row.executableName.toLowerCase() === "powershell.exe");
+    expect(targets).toHaveLength(1);
+    const targetPid = targets[0]!.pid;
+    const current = (await readWindowsProcessesStrict()).find(row => row.pid === guardian.pid);
+    expect(current?.startedAt).toBe(guardian.startedAt); expect(current?.command).toBe(guardian.command);
+    process.kill(guardian.pid);
+    await expect.poll(() => { try { process.kill(guardian.pid, 0); return true; } catch { return false; } }, { timeout: 5000 }).toBe(false);
+    expect(await observer.readSeatProcessLimits(pane.id, { memoryMax: 268435456 }, "synthetic-seat")).toMatchObject({ state: "unknown" });
+    writeFileSync(release, "done");
+    await expect.poll(() => { try { process.kill(targetPid, 0); return true; } catch { return false; } }, { timeout: 5000 }).toBe(false);
+    await expect.poll(() => adapter.isPaneDead(pane.id), { timeout: 10000 }).toBe(true);
+    expect(await observer.readSeatProcessLimits(pane.id, { memoryMax: 268435456 }, "synthetic-seat"))
+      .toMatchObject({ state: "unknown" });
+    unlinkSync(release); unlinkSync(output);
+    await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile`]);
+    const recovered = await adapter.respawnPane(pane.id, `& ${powershellQuote(target)}`,
+      { cwd: dir, env: { ...env, OPENRIG_NODE_ID: "synthetic-seat" }, processLimitsMode: "recovery" });
+    expect(recovered).toMatchObject({ ok: true });
+    await expect.poll(() => existsSync(output), { timeout: 12000 }).toBe(true);
+    expect(readFileSync(output, "utf8")).toBe("True");
+    expect(await observer.readSeatProcessLimits(pane.id, { memoryMax: 268435456 }, "synthetic-seat"))
+      .toMatchObject({ state: "applied", memoryAccounting: "job_commit", memoryMax: "268435456" });
+  } finally {
+    writeFileSync(release, "done");
+    const panes = await adapter.listPanes("seat").catch(() => []);
+    if (panes[0]) await expect.poll(() => adapter.isPaneDead(panes[0]!.id), { timeout: 10000 }).toBe(true).catch(() => {});
+    await invoke(["tmux", "kill-server"]).catch(() => {});
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}, 120000);

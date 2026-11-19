@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 import { parseWindowsCommandLine, windowsArguments } from "./windows-argv.js";
 import { powershellQuote as q } from "./windows-launch.js";
+import { WINDOWS_SEAT_JOB_PREFIX, windowsJobInteropScript } from "../domain/windows-job-process.js";
 
 function scopedLoader(file: string, recoveryKey?: string): string {
   const first = `$s=[IO.File]::ReadAllText(${q(file)}); Remove-Item -LiteralPath ${q(file)} -ErrorAction Stop;`;
@@ -20,8 +21,10 @@ export function readWindowsScopedLoader(source: string): {file:string; recoveryK
 }
 
 /** A private bootstrap replaces the inherited server environment before starting the user's shell. */
-export function windowsScopedLaunch(shell: string, command: string, selected: Readonly<Record<string, string | undefined>>, file: string, inheritEnvironment = false, recoveryKey?: string): { content: string; argv: string[]; recovery?: {key:string; value:string} } {
+export function windowsScopedLaunch(shell: string, command: string, selected: Readonly<Record<string, string | undefined>>, file: string, inheritEnvironment = false, recoveryKey?: string,
+  seatJob?: { memoryMax: number; marker: string }): { content: string; argv: string[]; recovery?: {key:string; value:string} } {
   if (recoveryKey !== undefined && !/^OPENRIG_LAUNCH_RECOVERY_[A-Fa-f0-9]{32}$/.test(recoveryKey)) throw new Error("Invalid native launch recovery key");
+  if (seatJob && (!Number.isSafeInteger(seatJob.memoryMax) || seatJob.memoryMax <= 0)) throw new Error("Invalid seat Job memory limit");
   const words = existsSync(shell) ? [shell] : parseWindowsCommandLine(shell);
   const executable = words.shift();
   if (!executable) throw new Error("Default shell unavailable");
@@ -45,7 +48,13 @@ export function windowsScopedLaunch(shell: string, command: string, selected: Re
   const inherited = (keys: string[]) => keys.map(key => `$v=[Environment]::GetEnvironmentVariable(${q(key)},'Process'); if ($null -ne $v) {$p.EnvironmentVariables[${q(key)}]=$v}\n`).join("");
   const suffix = inherited(paneKeys)
     + (recoveryKey ? `foreach($k in @($p.EnvironmentVariables.Keys)){if($k -match '^OPENRIG_LAUNCH_RECOVERY_[A-Fa-f0-9]{32}$'){$p.EnvironmentVariables.Remove($k)}}\n` : "")
-    + `$child=[Diagnostics.Process]::Start($p)\ntry {$child.WaitForExit(); exit $child.ExitCode} finally {$child.Dispose()}\n`;
+    + (seatJob
+      ? `${windowsJobInteropScript()}\n$guardianStart=[Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks\n` +
+        `$seatJob=[OpenRigProbeJob]::CreateSeatJob((${q(WINDOWS_SEAT_JOB_PREFIX)}+$PID+'-'+$guardianStart),${seatJob.memoryMax})\n` +
+        `$envBlock=(($p.EnvironmentVariables.GetEnumerator() | Sort-Object Name | ForEach-Object { $_.Key+'='+$_.Value }) -join [char]0)+[char]0+[char]0\n` +
+        `try { $code=[OpenRigProbeJob]::RunSeatJob($seatJob,$p.FileName,$p.Arguments,$p.WorkingDirectory,$envBlock,${q(seatJob.marker)}); exit $code ` +
+        `} finally { [OpenRigProbeJob]::CloseSeatJob($seatJob) }\n`
+      : `$child=[Diagnostics.Process]::Start($p)\ntry {$child.WaitForExit(); exit $child.ExitCode} finally {$child.Dispose()}\n`);
   const content = prefix + [...env.values()].map(([key, value]) => `$p.EnvironmentVariables[${q(key)}]=${q(value)}\n`).join("") + suffix;
   // Recovery stores shell/command and allowed variable NAMES, never the initial
   // environment values. Its session-environment entry disappears with the server.
