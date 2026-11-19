@@ -81,13 +81,21 @@ const INPUT_BOX_READ_DEADLINE_MS = 500;
 const STALE_BOUND_PANE = "The session does not have the expected bound pane";
 
 // Mid-work detection patterns (cheap heuristics)
+const WORKING_WORD_PATTERN = /Working/;
 const MID_WORK_PATTERNS = [
   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, // spinner chars
-  /Working/,
+  WORKING_WORD_PATTERN,
   /^[✶✢✳✻✽·]\s+\S.*(?:…|\.{3})\s+\([^)]*\bthinking\)$/m,
   /esc to interrupt/,
   COMPOSER_SELECTION_SCAN_PATTERN,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
+
+// Under an empty prompt, the word alone is a finished turn's prose ("Working tree is clean; ready for an
+// assignment.", #3544). There only a status-shaped row counts: "Working" after an optional marker, then a
+// paren, an ellipsis or the end of the line ("• Working (3s • esc to interrupt)", "✻ Working…", "⠋ Working").
+const LIVE_WORKING_ROW_PATTERN = /^(?:\S\s+)?Working(?:\s*\(|\s*…|\.{3}|\s*$)/;
+const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>
+  pattern === WORKING_WORD_PATTERN ? LIVE_WORKING_ROW_PATTERN : pattern);
 
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
 // Lines like '❯ Working on a task.' have text after the prompt char and
@@ -936,7 +944,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   const midWorkEvidence = findPatternEvidence(recentLines, [
-    ...MID_WORK_PATTERNS,
+    ...(idlePromptLine ? MID_WORK_PATTERNS_UNDER_IDLE_PROMPT : MID_WORK_PATTERNS),
     CLAUDE_LIVE_STATUS_PATTERN,
     ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
   ]);

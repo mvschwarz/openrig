@@ -201,6 +201,29 @@ describe("agent pane activity classifier", () => {
     }
   });
 
+  it("reads completed Working prose right above an empty prompt as idle (#3544)", () => {
+    const prose = "• Working tree is clean; ready for an assignment.";
+    for (const pane of [
+      [prose, "", ...CODEX_0158_FOOTER],
+      [prose, "", "› "],
+      ["• Working directory: /tmp/project", "", "› "],
+    ]) {
+      const result = classifyPaneActivity(pane.join("\n"));
+
+      expect(result.state, pane[0]).toBe("agent_idle");
+      expect(result.reason, pane[0]).toBe("idle_prompt");
+    }
+  });
+
+  it("still reads a live Working row right above an empty prompt as active", () => {
+    for (const status of ["⠋ Working", "Working…", "• Working", "Working...", "◦ Working (3s • esc to interrupt)"]) {
+      const result = classifyPaneActivity([status, "", "› "].join("\n"));
+
+      expect(result.state, status).toBe("agent_active");
+      expect(result.reason, status).toBe("mid_work_pattern");
+    }
+  });
+
   it("reads a far turn-status row with a reasoning-summary header as active", () => {
     const result = classifyPaneActivity([
       "• Exploring the test fixtures (2m 03s • esc to interrupt)",

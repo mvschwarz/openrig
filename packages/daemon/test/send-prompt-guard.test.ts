@@ -977,6 +977,23 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalled();
   });
 
+  it("--wait-for-idle sends to an idle Codex seat whose finished turn ended with 'Working tree is clean' right above the prompt (#3544)", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "UserPromptSubmit", 330_000, seat);
+    const idlePane = [
+      "• Working tree is clean; ready for an assignment.",
+      "",
+      CODEX_PLACEHOLDER_PANE,
+    ].join("\n");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => idlePane, sendText }), { now: () => fixedNow });
+    const r = await t.send(seat, "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(true);
+    expect(r.activity?.state).toBe("idle");
+    expect(sendText).toHaveBeenCalled();
+  });
+
   it("Claude Code is unchanged: a bare ❯ pane still sends past a send-stale running hook", async () => {
     const fixedNow = new Date("2026-06-27T12:00:00.000Z");
     agentActivityStore.recordHookEvent({
