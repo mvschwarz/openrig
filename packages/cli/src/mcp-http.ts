@@ -34,6 +34,9 @@ export type McpGrant = {
   roots: string[];
   workspace: boolean;
   owner: boolean;
+  /** #3512: the registered person this connection may answer the team's questions for (`--person <entity_id>`), their
+   *  address being <id>@external. Absent: no person tools, as before. */
+  person?: string;
   createdAt: string;
 };
 
@@ -51,7 +54,8 @@ function isGrant(entry: unknown): entry is McpGrant {
   const list = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === "string");
   const flag = (value: unknown) => typeof value === "boolean";
   return text(grant.name) && typeof grant.tokenSha256 === "string" && text(grant.seat)
-    && list(grant.rigs) && list(grant.roots) && flag(grant.workspace) && flag(grant.owner);
+    && list(grant.rigs) && list(grant.roots) && flag(grant.workspace) && flag(grant.owner)
+    && (grant.person === undefined || (typeof grant.person === "string" && PERSON_ENTITY_ID.test(grant.person)));
 }
 
 /** The configured grants, or null when there is no token file (auth not configured). A file that can't be read or parsed,
@@ -109,13 +113,18 @@ export function addGrant(file: string, grant: Omit<McpGrant, "tokenSha256" | "cr
   if (!grant.name.trim() || !grant.seat.trim()) {
     return Promise.reject(new Error("A grant needs a name and a seat: --seat <session>, the seat this caller acts as."));
   }
+  if (grant.person !== undefined && !PERSON_ENTITY_ID.test(grant.person)) {
+    return Promise.reject(new Error(`--person needs a registered person's entity id (as rig gateway human list shows it), not '${grant.person}'.`));
+  }
   return withGrantsLock(file, () => {
     const grants = readGrants(file) ?? [];
     if (grants.some((existing) => existing.name === grant.name)) {
       throw new Error(`'${grant.name}' already has a grant; revoke it first to issue a new token`);
     }
     const token = `orm_${randomBytes(32).toString("base64url")}`;
-    grants.push({ ...grant, seat: grant.seat.trim(), tokenSha256: sha256(token), createdAt: new Date().toISOString() });
+    const { person, ...scope } = grant;
+    grants.push({ ...scope, seat: grant.seat.trim(), ...(person !== undefined ? { person } : {}), tokenSha256: sha256(token),
+      createdAt: new Date().toISOString() });
     writeGrants(file, grants);
     return token;
   });
@@ -438,7 +447,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
     // A grant that names its person gets a client acting as them, which records only their answers to the team.
-    const person = caller.access?.external?.person;
+    const person = caller.access?.external ? caller.access.external.person : caller.access?.person;
     return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
       unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),
@@ -514,7 +523,8 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
           refuse(res, unauthenticated(token ? NOT_VALID_HERE : NO_BEARER));
           return;
         }
-        access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true };
+        access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true,
+          ...(grant.person !== undefined ? { person: grant.person } : {}) };
         seat = grant.seat;
         // A token-file grant has a name and nothing more: no grant id or version is invented for it.
         principal = { source: "file", id: grant.name };

@@ -1634,7 +1634,7 @@ rig specs rename <name-or-id> <new-name> [--json]
 ```bash
 rig mcp serve [--port <daemon-port>]        # stdio: a local app starts the server itself
 rig mcp serve --http [--bind <host:port>]   # Streamable HTTP at /mcp (default 127.0.0.1:7437)
-rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner]
+rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner] [--person <entity_id>]
 rig mcp token list [--json]
 rig mcp token revoke <name>
 ```

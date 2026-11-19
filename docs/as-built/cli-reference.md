@@ -461,7 +461,7 @@ do not establish connectivity to a live peer.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
-| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
+| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner`<br>`--person <entity_id>` |
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
