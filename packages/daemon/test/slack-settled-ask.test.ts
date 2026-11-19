@@ -208,6 +208,30 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(postCount).toBe(2);
   });
 
+  // C8: a chosen label reaches the settled status as the question card renders it, secrets redacted.
+  it("redacts a secret-shaped chosen label in the settled status, in its text and its block, and keeps an ordinary one", async () => {
+    const label = "Ship with xoxb-EXAMPLE-label";
+    const statusOf = (update: Record<string, unknown>) => {
+      const [status] = update.blocks as Array<{ block_id?: string; elements?: Array<{ text?: string }> }>;
+      expect(status?.block_id).toBe("or-settled");
+      return { text: String(update.text).split("\n")[0]!.split(" · ")[0], block: String(status?.elements?.[0]?.text).split(" · ")[0] };
+    };
+    const secret = await postAsk(undefined, label);
+    expect(repo.recordHumanAnswer({ qitemId: secret.qitemId, actorSession: human, questionId: "ship", optionId: "yes" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: secret.qitemId, actorSession: human, decision: `Ship now?: ${label}` })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(statusOf(updates[0]!)).toEqual({ text: "Answered: Ship with [redacted-secret]", block: "Answered: Ship with [redacted-secret]" });
+    expect(JSON.stringify(updates[0])).not.toContain("xoxb-EXAMPLE-label");
+
+    const ordinary = await postAsk();
+    expect(repo.recordHumanAnswer({ qitemId: ordinary.qitemId, actorSession: human, questionId: "ship", optionId: "hold" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: ordinary.qitemId, actorSession: human, decision: "Ship now?: Hold" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    expect(statusOf(updates[1]!)).toEqual({ text: "Answered: Hold", block: "Answered: Hold" });
+  });
+
   // C8 on a re-park: each park is its own question, and the item keeps one set of answers, so a card names only what its
   // own park recorded. The decision is asked of the person and parked on them by its asker; Slack resumes it.
   describe("a decision parked on the person again", () => {

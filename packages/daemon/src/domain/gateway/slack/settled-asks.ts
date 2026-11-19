@@ -63,11 +63,12 @@ function episodeChoices(questions: readonly HumanQuestion[], answers: HumanAnswe
     ? recorded.has(`human-answer-recorded: ${JSON.stringify({ questionId, optionId: answer })}`) : !answeredBefore)));
 }
 
-/** An answered card names what was chosen (C8); a typed reply's words stay in the thread, so the card says only that. */
+/** An answered card names what was chosen (C8); a typed reply's words stay in the thread, so the card says only that.
+ *  Each label is redacted as the question card's inert() redacts it; statusLine escapes the whole line. */
 function answeredLine(chosen: ReadonlyArray<string | null>): string {
   if (!chosen.length) return "Answered";
   return chosen.every((c) => c === null) ? "Answered with a typed reply"
-    : `Answered: ${chosen.map((c) => c ?? "a typed reply").join("; ")}`;
+    : `Answered: ${chosen.map((c) => c === null ? "a typed reply" : redactSecrets(c)).join("; ")}`;
 }
 
 function statusLine(t: QueueTransition, label?: string, chosen: ReadonlyArray<string | null> = []): string {
