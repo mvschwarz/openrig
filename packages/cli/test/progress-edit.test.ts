@@ -129,6 +129,27 @@ it("does not mistake a deeper subsection for the requested H2 section", () => {
 });
 
 
+describe("progress edits preserve HTML comments", () => {
+  const comment = "<!--\n## Rail\n- [ ] Ship it\n```md\n-->";
+
+  it("sets the visible row without treating a commented duplicate as ambiguous", () => {
+    const content = `# Progress\n${comment}\n## Rail\n- [ ] Ship it\n`;
+    expect(setProgressRow(content, { text: "Ship it", status: "done" }).content)
+      .toBe(`# Progress\n${comment}\n## Rail\n- [x] Ship it\n`);
+  });
+
+  it("adds under the visible heading and outside a trailing comment", () => {
+    const content = `# Progress\n${comment}\n## Rail\n<!--\n- [x] Ship it\n-->\n`;
+    expect(addProgressRow(content, { section: "Rail", text: "Ship it", status: "active" }).content)
+      .toBe(`# Progress\n${comment}\n## Rail\n- [ ] Ship it\n<!--\n- [x] Ship it\n-->\n`);
+  });
+
+  it("does not update a row inside an unclosed comment", () => {
+    expect(() => setProgressRow("# Progress\n<!--\n- [ ] Hidden\n", { text: "Hidden", status: "done" }))
+      .toThrow(/No progress row/);
+  });
+});
+
 describe("progress edits preserve fenced examples", () => {
   it.each(["```md", "~~~md", "````md", "   ```md"])("sets only the real row after %s", (opening) => {
     const marker = opening.trimStart().startsWith("~") ? "~" : "`";
