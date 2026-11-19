@@ -841,8 +841,11 @@ describe("the actual dsh runner native channel", () => {
       expect(frame).not.toHaveProperty("memberIds");
       expect(JSON.stringify(frame).length).toBeGreaterThan(6 * 1024 * 1024 + 64 * 1024);
     }
-    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "GROUP"), "native input acknowledged", 5000);
-    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "native input completion", 5000);
+    // These waits measure acceptance, not runner speed: 1 s per escaped MiB, at least waitFor's 10 s. On slow CI runners
+    // the 9-source case (about 18 MiB escaped) has run up to about 6 s, so a flat 5 s ack wait failed unrelated PRs.
+    const budget = Math.max(10_000, Math.ceil(JSON.stringify(frame).length / (1024 * 1024)) * 1_000);
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "GROUP"), "native input acknowledged", budget);
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "native input completion", budget);
     channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
     const prompts = requests(runner.log(), "session/prompt");
     expect(prompts).toHaveLength(1);
@@ -851,7 +854,7 @@ describe("the actual dsh runner native channel", () => {
     await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "WAKE:AFTER-GROUP"), "unhinted successor");
     expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
     expect(runner.log()[0]).toMatchObject({ start: { token: false } });
-  });
+  }, 60_000); // the 9-source frame's two 19 s waits, plus the hello and successor waits
 
   it.each([
     { status: 409, code: "runner_receipt_erased", later: true },

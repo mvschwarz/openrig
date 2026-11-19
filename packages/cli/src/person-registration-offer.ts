@@ -4,7 +4,7 @@
 /** The offer's lines. OpenRig registers no one by printing them; the agent asks, and registers only on a yes. */
 export const REGISTRATION_OFFER: readonly string[] = [
   "No person is registered yet, so OpenRig can't reach anyone with its questions to a person, such as a team seat's permission prompt or another machine asking to pair.",
-  "An agent the person is talking to can still bring them the team's questions. Registering gives OpenRig its own way to reach them: the TUI's Feed and Steering, and Slack if it's added.",
+  "An agent the person is talking to can still bring them the team's questions. Registering records them as the person for those questions: without a connector such as Slack, they reach them only in the TUI's Feed and Steering.",
   "If you're setting OpenRig up for someone, offer to register them now. Ask the name to use, and only on their yes run:",
   '  rig gateway human add <id> --display-name "<name>" --delivery-class B --default',
 ];

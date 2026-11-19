@@ -60,13 +60,16 @@ import { shellQuote } from "../adapters/shell-quote.js";
 const WORKFLOW_CONTEXT_SHORTCUT =
   "Context: this workflow packet is a shortcut, not the whole story; inspect additional project, mission, and receipt evidence before choosing an authored exit.";
 
-/** One occurrence-bound action, shared by packet bodies and authored wait wakes. */
+/** One occurrence-bound action, shared by packet bodies, authored wait wakes and the execution view.
+ * A step the lifecycle binding requires names the receipt its close needs. */
 export function renderWorkflowProjectCommand(input: {
   instanceId: string;
   packetId: string;
-  step?: Pick<WorkflowStepSpec, "acceptance">;
+  step?: Pick<WorkflowStepSpec, "acceptance"> & { id?: string };
+  binding?: Record<string, unknown> | null;
 }): string {
-  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>`;
+  const receiptRequired = input.step?.id !== undefined && requiredLifecycleSteps(input.binding ?? null).includes(input.step.id);
+  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>${receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
   const acceptance = input.step?.acceptance;
   if (!acceptance) return base;
   const verdict = acceptance.verdicts.length === 1
@@ -120,7 +123,7 @@ export function workflowWaitWakeMessage(input: {
     ...(input.step.objective ? [`Objective: ${input.step.objective}`] : []),
     ...workflowPlanningContext(input.spec.context_refs, input.instance.instanceId),
     ...(input.spec.context_refs ?? []).map((ref) => `Context reference: ${ref}`),
-    `Continuation: ${renderWorkflowProjectCommand({ ...input, instanceId: input.instance.instanceId })}`,
+    `Continuation: ${renderWorkflowProjectCommand({ ...input, instanceId: input.instance.instanceId, binding: input.instance.lifecycleBinding })}`,
     WORKFLOW_CONTEXT_SHORTCUT,
   ].join("\n");
 }
