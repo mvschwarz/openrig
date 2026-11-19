@@ -268,9 +268,10 @@ async function readQueueDerivedStates(): Promise<{ states: Map<string, QueueStat
         : derived === "unknown" ? "unreadable-counts"
         : null;
       const physicalPath = physicalSlicePath(row.slicePath);
-      if (physicalPath === null) {
-        return unreadable("Could not establish the physical identity of a slice path in the daemon list.");
-      }
+      // An entry whose path cannot resolve locally (for example, a cached row after a slice folder was moved or
+      // removed) cannot match any local slice; skip it so unaffected slices keep their states and a local slice at
+      // a moved path stays unknown under the existing "not in the daemon's list" warning.
+      if (physicalPath === null) continue;
       states.set(physicalPath, { state: derived ?? "unknown", cause });
     }
     return { states, warnings: [], listed: true };

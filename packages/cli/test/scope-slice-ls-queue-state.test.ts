@@ -340,6 +340,67 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     } finally { realpath.mockRestore(); }
   });
 
+  it("skips an unresolvable daemon list entry so other slices keep their states and the missing slice stays unknown with its warning", async () => {
+    const movedPath = path.join(ws.missionsRoot, "alpha", "slices", "04-moved");
+    const otherMissionSameName = path.join(ws.missionsRoot, "beta", "slices", "04-unlisted");
+    daemon.respond = () => ({
+      status: 200,
+      data: {
+        slices: [
+          { slicePath: ws.slicePath("01-stuck"), derivedState: "blocked" },
+          { slicePath: ws.slicePath("02-moving"), derivedState: "in-progress" },
+          { slicePath: ws.slicePath("03-closed"), derivedState: "idle" },
+          { slicePath: movedPath, derivedState: "blocked" },
+          { slicePath: otherMissionSameName, derivedState: "pending" },
+          { slicePath: ws.slicePath("05-older-daemon"), derivedState: "none" },
+        ],
+      },
+    });
+
+    const all = await ls("--with-queue");
+    expect(all.result.exitCode).toBe(0);
+    expect.soft(derivedByName(all.parsed!.slices), "unaffected slices keep their states and the missing slice is not attributed from unresolvable entries").toEqual({
+      "01-stuck": "blocked",
+      "02-moving": "in-progress",
+      "03-closed": "idle",
+      "04-unlisted": "unknown",
+      "05-older-daemon": "none",
+    });
+    expect.soft(all.parsed!.warnings).toHaveLength(1);
+    expect.soft(all.parsed!.warnings?.[0]).toContain("1 of 5 slices are not in the daemon's list");
+
+    const blocked = await ls("--derived", "blocked");
+    expect(blocked.result.exitCode).toBe(0);
+    expect.soft(blocked.parsed!.slices.map((row) => row.name)).toEqual(["01-stuck"]);
+    expect.soft(blocked.parsed!.warnings).toHaveLength(1);
+    expect.soft(blocked.parsed!.warnings?.[0]).toContain("1 of 5 slices are not in the daemon's list");
+
+    const pending = await ls("--derived", "pending");
+    expect(pending.result.exitCode).toBe(0);
+    expect.soft(pending.parsed!.slices).toEqual([]);
+
+    const unknownOnly = await ls("--derived", "unknown");
+    expect(unknownOnly.result.exitCode).toBe(0);
+    expect.soft(unknownOnly.parsed!.slices.map((row) => row.name)).toEqual(["04-unlisted"]);
+
+    // Skipping an unresolvable entry must not weaken validation of later malformed entries.
+    daemon.respond = () => ({
+      status: 200,
+      data: {
+        slices: [
+          { slicePath: movedPath, derivedState: "blocked" },
+          { slicePath: ws.slicePath("01-stuck"), derivedState: "blocked" },
+          null,
+        ],
+      },
+    });
+    const malformed = await ls("--with-queue");
+    expect(malformed.result.exitCode).toBe(0);
+    expect.soft(Object.values(derivedByName(malformed.parsed!.slices))).toEqual(Array(SLICES.length).fill("unknown"));
+    expect.soft(malformed.parsed!.warnings).toHaveLength(1);
+    expect.soft(malformed.parsed!.warnings?.[0]).toContain("a slice entry is malformed");
+  });
+
   it("matches the daemon's slice by physical path when it reports the path through a symlink", async () => {
     const alias = path.join(ws.workRoot, "alias");
     fs.symlinkSync(ws.missionsRoot, alias);
