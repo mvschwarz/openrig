@@ -161,18 +161,23 @@ export function storedPoolText(block: SeatPoolNodeBlock): string {
   return text;
 }
 
+/** Why a stored `nodes.pool` value can't be read at all: it isn't text. */
+export const STORED_POOL_NOT_TEXT = "pool: the stored value is not JSON text";
+/** Why a stored `nodes.pool` value can't be read at all: it isn't JSON. */
+export const STORED_POOL_NOT_JSON = "pool: the stored value is not valid JSON";
+
 /**
  * Reads `nodes.pool`. NULL is no pool. A block that can't be read comes back as stored, with why, and never throws:
  * it holds the pool rather than removing it.
  */
 export function parseStoredPoolBlock(stored: unknown): StoredSeatPool | undefined {
   if (stored === undefined || stored === null) return undefined;
-  if (typeof stored !== "string") return { raw: stored, error: "pool: the stored value is not JSON text" };
+  if (typeof stored !== "string") return { raw: stored, error: STORED_POOL_NOT_TEXT };
   let parsed: unknown;
   try {
     parsed = JSON.parse(stored);
   } catch {
-    return { raw: stored, error: "pool: the stored value is not valid JSON" };
+    return { raw: stored, error: STORED_POOL_NOT_JSON };
   }
   const read = parsePoolBlock(parsed);
   if (!read.ok) {
@@ -180,6 +185,21 @@ export function parseStoredPoolBlock(stored: unknown): StoredSeatPool | undefine
   }
   if (read.spec === null) return { raw: parsed, error: "pool: the stored block is empty" };
   return { spec: read.spec };
+}
+
+/**
+ * The advisories a launch from stored state reports for the block stored on a node, in the load's form:
+ * `<member> pool.<field>: <reason>; pool not used`, one per problem. A value that can't be read at all (not text,
+ * not JSON) and an empty block give one line with the read error. No block, or a usable one, gives none.
+ */
+export function storedPoolAdvisories(member: string, stored: StoredSeatPool | undefined): string[] {
+  if (stored === undefined || "spec" in stored) return [];
+  if (stored.error === STORED_POOL_NOT_TEXT || stored.error === STORED_POOL_NOT_JSON) {
+    return [`${member} ${stored.error}; pool not used`];
+  }
+  const read = parsePoolBlock(stored.raw);
+  if (!read.ok) return poolProblemAdvisories(member, read.problems);
+  return [`${member} ${stored.error}; pool not used`];
 }
 
 /** What a re-applied member writes to its node: a block, null to clear (`pool: {}`), or undefined to leave it. */
