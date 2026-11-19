@@ -24,6 +24,11 @@ export interface RelayedAnswer extends AnswerRecord {
   readonly answeredAt?: string;
 }
 
+export interface DirectAnswer extends AnswerRecord {
+  readonly kind: "direct-answer";
+  readonly eventId?: string;
+}
+
 export interface DirectCorrection extends AnswerRecord {
   readonly kind: "direct-correction";
   readonly qitemId: string;
@@ -33,6 +38,7 @@ export interface DirectCorrection extends AnswerRecord {
 export interface RelayJournal {
   readonly relays: readonly RelayedAnswer[];
   readonly corrections: readonly DirectCorrection[];
+  readonly directAnswers?: readonly DirectAnswer[];
   readonly returnId: string | null;
 }
 
@@ -50,10 +56,17 @@ export type RelayAnswerWrite = {
   readonly identityPrincipal?: string;
   readonly nudge?: boolean;
 } & ({ readonly relay: RelaySubmission } | {
-  readonly direct: { readonly questionId?: string; readonly optionId?: string; readonly text?: string; readonly primaryUser?: boolean; readonly eventId?: string };
+  readonly direct: {
+    readonly questionId?: string;
+    readonly optionId?: string;
+    readonly text?: string;
+    readonly primaryUser?: boolean;
+    readonly eventId?: string;
+    readonly attachments?: { readonly body: string; readonly tag: string };
+  };
 });
 
-export type ReturnedRelayAnswer = (RelayedAnswer & { readonly qitemId: string | null }) | DirectCorrection;
+export type ReturnedRelayAnswer = ((RelayedAnswer | DirectAnswer) & { readonly qitemId: string | null }) | DirectCorrection;
 
 export function renderRelayedAnswers(journal: RelayJournal, questions: readonly HumanQuestion[], direct: HumanAnswers): string {
   return [...journal.relays.filter(relay => !journal.corrections.some(answer => answer.questionId === relay.questionId)).map(relay => {

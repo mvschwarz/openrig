@@ -5,6 +5,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { eraseQueue } from "../src/domain/queue-erasure.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -18,7 +19,7 @@ const questions = ["first", "second"].map(id => ({ id, question: id,
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); vi.useRealTimers(); });
 
-async function fixture(structured = false) {
+async function fixture(structured = false, extraQuestion = false) {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-02-03T04:05:06Z"));
   const db = new Database(":memory:");
@@ -37,13 +38,15 @@ async function fixture(structured = false) {
   app.route("/api/queue", queueRoutes());
   app.route("/api/mission-control", missionControlRoutes());
   const ask = await repo.create({ sourceSession: asker, destinationSession: person, summary: "Synthetic ask", body: "What do you think?",
-    evidenceRef: "/fixture/evidence", humanIntent: "decision", ...(structured ? { humanQuestions: questions } : {}), nudge: false });
+    evidenceRef: "/fixture/evidence", humanIntent: "decision", ...(structured ? {
+      humanQuestions: extraQuestion ? [...questions, { ...questions[0], id: "third", question: "third" }] : questions,
+    } : {}), nudge: false });
   const post = (path: string, actor: string, body: object) => app.request(path, { method: "POST",
     headers: { "Content-Type": "application/json", "X-OpenRig-Session": actor }, body: JSON.stringify(body) });
   const relay = (fields: object = {}) => post(`/api/queue/${ask.qitemId}/relayed-answer`, relaySeat,
     { attributedTo: person, channel: "voice call", text: "  Not this week.\n", ...fields });
   const correct = (fields: object) => post("/api/mission-control/action", person, { actorSession: person, verb: "answer", qitemId: ask.qitemId, ...fields });
-  return { db, repo, ask, relay, correct, post, history: () => repo.answersForAsk(ask.qitemId) };
+  return { db, bus, repo, contract, ask, relay, correct, post, history: () => repo.answersForAsk(ask.qitemId) };
 }
 
 it("returns an ordinary relay from a different seat with the verbatim words and honest provenance", async () => {
@@ -96,4 +99,59 @@ it("returns an exact-question direct correction without replacing the relay or r
   expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer", humanAnswers: { second: "yes" } });
   const correction = f.history().at(-1);
   expect(f.repo.getById(correction?.qitemId ?? "")).toMatchObject({ sourceSession: person, destinationSession: asker, replyTo: f.ask.qitemId });
+});
+
+it("includes an attributed direct word-for-word answer in the mixed history", async () => {
+  const f = await fixture(true);
+  expect((await f.relay({ questionId: "first" })).status).toBe(200);
+  vi.setSystemTime(new Date("2026-02-03T04:05:07Z"));
+  expect((await f.correct({ questionId: "second", decision: "  My own words.\n" })).status).toBe(200);
+  expect(f.history()).toEqual([
+    expect.objectContaining({ kind: "relayed-answer", recordedBy: relaySeat }),
+    expect.objectContaining({ kind: "direct-answer", questionId: "second", by: person, text: "  My own words.\n", at: "2026-02-03T04:05:07.000Z" }),
+  ]);
+});
+
+it("replays the final direct answer without accepting a different closed submission", async () => {
+  const f = await fixture(true);
+  expect((await f.relay({ questionId: "first" })).status).toBe(200);
+  const input = { qitemId: f.ask.qitemId, actorSession: person, direct: { questionId: "second", optionId: "yes" } };
+  const first = f.repo.writeRelayedAnswer(input);
+  expect(f.repo.writeRelayedAnswer(input)).toEqual(first);
+  expect(() => f.repo.writeRelayedAnswer({ ...input, direct: { ...input.direct, optionId: "no" } })).toThrow();
+  expect(f.history()).toHaveLength(2);
+});
+
+it("no longer returns the journal or answer history after scrubbing the ask", async () => {
+  const f = await fixture();
+  expect((await f.relay()).status).toBe(200);
+  expect((await f.correct({ decision: "  My correction.\n" })).status).toBe(200);
+  expect(f.history()).toHaveLength(2);
+  const report = await eraseQueue(f.db, { scope: { kind: "ids", entries: [{ qitemId: f.ask.qitemId, action: "scrub" }] },
+    apply: true, nowIso: "2026-02-04T04:05:06.000Z" });
+  expect(report.qitems).toMatchObject([{ qitemId: f.ask.qitemId, action: "scrub" }]);
+  expect(f.repo.getById(f.ask.qitemId)).not.toHaveProperty("relayedAnswers");
+  expect(f.history()).toEqual([]);
+});
+
+it.each(["checkpoint", "audit"])("rolls back a relayed app answer when %s fails", async phase => {
+  const f = await fixture(true, true);
+  expect((await f.relay({ questionId: "first" })).status).toBe(200);
+  const before = f.repo.getById(f.ask.qitemId);
+  const seq = f.bus.maxSeq();
+  f.db.exec("CREATE TABLE fixture_receipt (id TEXT)");
+  if (phase === "audit") f.db.exec(`CREATE TRIGGER reject_audit BEFORE INSERT ON mission_control_actions
+    BEGIN SELECT RAISE(ABORT, 'audit failed'); END`);
+  const result = () => f.contract.act({ verb: "answer", qitemId: f.ask.qitemId, actorSession: person, questionId: "second", optionId: "yes",
+    appSubmission: { verify: () => {}, checkpoint: () => {
+      f.db.prepare("INSERT INTO fixture_receipt VALUES (?)").run(f.ask.qitemId);
+      if (phase === "checkpoint") throw new Error("checkpoint failed");
+    }, finalize: () => ({ fixture: true }) } });
+  await expect(result()).rejects.toThrow(`${phase} failed`);
+  expect(f.repo.getById(f.ask.qitemId)).toEqual(before);
+  expect(f.bus.maxSeq()).toBe(seq);
+  expect(f.db.prepare("SELECT * FROM fixture_receipt").all()).toEqual([]);
+  if (phase === "audit") f.db.exec("DROP TRIGGER reject_audit");
+  else return;
+  await expect(result()).resolves.toMatchObject({ answer: { outcome: "recorded", unanswered: ["third"] } });
 });

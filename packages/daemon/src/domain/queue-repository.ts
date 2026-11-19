@@ -5,7 +5,7 @@ import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js"
 import type Database from "better-sqlite3";
 import { cooperativeReadFile, readRowsCooperatively } from "./execution-candidate-reader.js";
 import { createHash } from "node:crypto";
-import type { EventBus } from "./event-bus.js";
+import type { EventBus, NotifyRegister } from "./event-bus.js";
 import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type HumanFragment, type LoadResult } from "./gateway/human-registry.js";
 import { DispatchBuffer } from "./gateway/dispatch-buffer.js";
 import { loadRelayProfiles, type LoadRelayProfilesResult } from "./gateway/relay-config.js";
@@ -2409,8 +2409,8 @@ export class QueueRepository {
     const ask = this.getById(askId);
     if (!this.hasReplyToColumn || !ask || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return [];
     if (ask.relayedAnswers) {
-      const { relays, corrections, returnId } = ask.relayedAnswers;
-      return [...relays.map(relay => ({ ...relay, qitemId: returnId })), ...corrections].sort((a, b) => a.at.localeCompare(b.at));
+      const { relays, corrections, directAnswers = [], returnId } = ask.relayedAnswers;
+      return [...[...relays, ...directAnswers].map(answer => ({ ...answer, qitemId: returnId })), ...corrections].sort((a, b) => a.at.localeCompare(b.at));
     }
     const candidates = (this.db.prepare(`SELECT qitem_id, source_session, ts_created,
         EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer') AS tagged
@@ -2452,7 +2452,10 @@ export class QueueRepository {
   }
 
   /** The history, linked return, close and wake intent commit together. */
-  writeRelayedAnswer(input: RelayAnswerWrite): RelayedAnswerReceipt {
+  writeRelayedAnswer(input: RelayAnswerWrite, envelope?: {
+    readonly register: NotifyRegister;
+    readonly afterCommit: (wake: () => void) => void;
+  }): RelayedAnswerReceipt {
     const events: PersistedEvent[] = [];
     const wakes: QueueCreateInput[] = [];
     const result = this.db.transaction(() => {
@@ -2511,25 +2514,32 @@ export class QueueRepository {
           || (!input.direct.primaryUser && !this.answersAsk(ask, input.actorSession))) refuse("Only a direct human answer can correct a relay.");
         const text = input.direct.text ?? question?.options.find(option => option.id === input.direct.optionId)?.label ?? "";
         if (!text.trim()) refuse("Supply the direct answer's words or option.");
-        const previous = journal.corrections.filter(answer => answer.questionId === questionId).at(-1);
-        const replay = input.direct.eventId ? journal.corrections.find(answer => answer.eventId === input.direct.eventId) : previous;
-        if (replay && replay.by === input.actorSession && replay.text === text && replay.optionId === input.direct.optionId) {
-          return receipt(replay.qitemId, true);
+        const { eventId, optionId, attachments } = input.direct;
+        const history = [...journal.corrections, ...(journal.directAnswers ?? [])];
+        const replay = eventId ? history.find(answer => answer.eventId === eventId)
+          : history.filter(answer => answer.questionId === questionId).at(-1);
+        if (replay && replay.questionId === questionId && replay.by === input.actorSession && replay.text === text && replay.optionId === optionId) {
+          return replay.kind === "direct-correction" ? receipt(replay.qitemId, true) : receipt();
         }
+        if (eventId && replay) refuse("This event was already recorded with a different answer.");
         if (ask.state !== "pending" && !(ask.state === "done" && ask.closureReason === "relayed-answer" && prior)) {
           refuse("This ask is not waiting for an answer or a correction to that question.");
         }
-        if (question) {
-          direct = { ...direct, [question.id]: input.direct.optionId ?? { kind: "typed-reply", text, placement: "explicit", unansweredCount: 0 } };
-        }
+        if (question) direct = { ...direct, [question.id]: optionId ?? { kind: "typed-reply", text, placement: "explicit", unansweredCount: 0 } };
+        const answer = { by: input.actorSession, at, text, questionId,
+          ...(optionId === undefined ? {} : { optionId }), ...(eventId ? { eventId } : {}) };
         if (prior) {
           correctionId = humanAnswerId(ask.qitemId, `relay-correction:${journal.corrections.length}`);
-          journal = { ...journal, corrections: [...journal.corrections, { kind: "direct-correction", qitemId: correctionId, by: input.actorSession,
-            at, text, questionId, ...(input.direct.optionId === undefined ? {} : { optionId: input.direct.optionId }),
-            ...(input.direct.eventId ? { eventId: input.direct.eventId } : {}) }] };
+          journal = { ...journal, corrections: [...journal.corrections, { kind: "direct-correction", qitemId: correctionId, ...answer }] };
           deliver(correctionId, `Direct correction to a RELAYED answer: ${ask.summary ?? ask.qitemId}`,
             `Direct correction from ${input.actorSession} to the RELAYED answer on ${ask.qitemId}${question ? `, question ${question.id}${input.direct.optionId ? `, option ${input.direct.optionId}` : ""}` : ""}. The relay stays in history. Do not repeat work already performed.\n\n${text}`, "human-answer-correction");
-        } else if (question && JSON.stringify(direct) === JSON.stringify(ask.humanAnswers)) return receipt();
+        } else {
+          journal = { ...journal, directAnswers: [...(journal.directAnswers ?? []), { kind: "direct-answer", ...answer }] };
+        }
+        if (eventId && attachments) {
+          deliver(humanAnswerId(ask.qitemId, `relay-attachments:${eventId}`), `Attachments to a direct answer on ${ask.qitemId}`,
+            attachments.body, attachments.tag);
+        }
       }
       const completed = ask.state === "pending" && unanswered().length === 0;
       if (completed) {
@@ -2546,12 +2556,20 @@ export class QueueRepository {
       }, completed).persistedEvents);
       return receipt(correctionId ?? journal.returnId, correctionId !== undefined);
     })();
-    for (const event of events) this.eventBus.notifySubscribers(event);
-    for (const wake of wakes) {
-      if (wake.nudge === false || !wake.qitemId) continue;
-      if (this.outbox) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${wake.qitemId}`);
-      else void this.maybeNudge(wake.qitemId, wake.destinationSession, wake.nudge, wake.sourceSession)
-        .catch(error => console.warn(`[queue] answer ${wake.qitemId} retained; wake failed`, error));
+    const deliverWakes = () => {
+      for (const wake of wakes) {
+        if (wake.nudge === false || !wake.qitemId) continue;
+        if (this.outbox) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${wake.qitemId}`);
+        else void this.maybeNudge(wake.qitemId, wake.destinationSession, wake.nudge, wake.sourceSession)
+          .catch(error => console.warn(`[queue] answer ${wake.qitemId} retained; wake failed`, error));
+      }
+    };
+    if (envelope) {
+      for (const event of events) envelope.register(event);
+      envelope.afterCommit(deliverWakes);
+    } else {
+      for (const event of events) this.eventBus.notifySubscribers(event);
+      deliverWakes();
     }
     return result;
   }
