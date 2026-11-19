@@ -5,8 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -81,7 +79,6 @@ describe("a runtime switch's own processes don't act as the seat; nothing else c
   afterEach(() => db.close());
 
   it.each([true, false])("fences relayed writes from the non-custodial runtime (committed=%s)", async committed => {
-    migrate(db, ALL_MIGRATIONS);
     record(committed);
     const ask = await queueRepo.create({ sourceSession: OTHER, destinationSession: "reader@external", body: "Question", nudge: false });
     const relay = (generation: string) => app.request(`/api/queue/${ask.qitemId}/relayed-answer`, { method: "POST", headers: asSeat(generation),
