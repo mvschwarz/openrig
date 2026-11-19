@@ -18,7 +18,7 @@ const planId = "0123456789abcdef".repeat(4);
 
 function demoView(): ComposedView {
   const composed = composeView("demo", SEATS.map(seat => ({ seat, label: seat, tmuxSession: `fixture-${seat}`, host: null, readOnly: false, alive: true })),
-    { resolveHost: () => null, localTmux: TMUX, localTmuxServer: SERVER });
+    { resolveHost: () => null, localTmux: TMUX, localTmuxServer: SERVER, localPlatform: "linux" });
   return { ...composed, planId };
 }
 
@@ -67,6 +67,7 @@ function herdr() {
   };
   const pid = (paneId: string) => 101 + SEATS.findIndex(seat => paneId.endsWith(`-${seat}`));
   const liveWorkspace = {
+    platform: "linux" as const,
     herdr: async (args: string[]) => {
       cli.push(args);
       const [noun, verb, , id] = args;

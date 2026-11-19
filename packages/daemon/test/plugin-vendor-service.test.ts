@@ -213,8 +213,8 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     await service(older).ensureVendored("openrig");
     expect(older._store[installedSkill]).toBe("# released 0.7.13");
     expect(older._store[installedManifest]).toBe(manifest("0.7.13"));
-    const backups = Object.entries(older._store).filter(([path]) => path.startsWith("/fixture/home/.openrig/backups/managed-refresh/"));
-    expect(backups.map(([path, text]) => [path.split("/").slice(-1)[0], text])).toEqual(expect.arrayContaining([["SKILL.md", "# installed 0.1.0"]]));
+    const backups = Object.entries(older._store).filter(([file]) => file.startsWith(path.resolve("/fixture/home/.openrig/backups/managed-refresh") + path.sep));
+    expect(backups.map(([file, text]) => [path.basename(file), text])).toEqual(expect.arrayContaining([["SKILL.md", "# installed 0.1.0"]]));
 
     const devSource = mockFs({ ...bundled("0.1.0", "# development source"), [installedManifest]: manifest("0.7.13"), [installedSkill]: "# released 0.7.13" });
     await service(devSource).ensureVendored("openrig");

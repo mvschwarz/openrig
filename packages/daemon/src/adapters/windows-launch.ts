@@ -67,6 +67,17 @@ export function renderWindowsLaunchArgv(argv: readonly string[], env: Readonly<R
     + `$openrigChild = [Diagnostics.Process]::Start($openrigStart)\ntry { $openrigChild.WaitForExit(); $global:LASTEXITCODE = $openrigChild.ExitCode } finally { $openrigChild.Dispose() }\n}`;
 }
 
+/** Add a native preparation step to our structured launch, after its environment
+ * selection and immediately before Process.Start. Never interpret a user's shell text. */
+export function prepareWindowsLaunch(command: string, preparation: string): string {
+  const start = "$openrigChild = [Diagnostics.Process]::Start($openrigStart)";
+  if (!command.startsWith("& {\n$global:LASTEXITCODE = 1\n$ErrorActionPreference = 'Stop'\n")
+    || command.indexOf(start) < 0 || command.indexOf(start) !== command.lastIndexOf(start)) {
+    throw new Error("Run-bound reporting requires a structured native launch");
+  }
+  return command.replace(start, preparation + "\n" + start);
+}
+
 /** Match managed env -i admission while retaining auth only by pane variable name. */
 export function renderWindowsManagedLaunch(executable: string, args: readonly string[], cwd: string,
   environment: Readonly<Record<string, string>>, inherited: readonly string[], beforeStart = "", nonemptyInherited: readonly string[] = []): string {

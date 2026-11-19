@@ -1,5 +1,5 @@
 import { windowsPowerShell } from "./windows-executables.js";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 
@@ -14,6 +14,20 @@ export interface WindowsProcessRow {
 }
 const exec = promisify(execFile);
 const CENSUS_TIMEOUT_MS = 5000;
+
+/** The same CIM creation stamp as the census, without requiring readable argv.
+ * Lifecycle reservations need one exact PID synchronously, never an empty-table fallback. */
+export function readWindowsProcessStartToken(pid: number): string | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
+    + `$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; `
+    + "if($p -and $p.CreationDate){[Console]::Write($p.CreationDate.ToUniversalTime().ToString('o'))}";
+  try {
+    const stamp = execFileSync(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script,"utf16le").toString("base64")],
+      { encoding: "utf8", windowsHide: true, timeout: CENSUS_TIMEOUT_MS, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return stamp && Number.isFinite(Date.parse(stamp)) ? `windows:${stamp}` : undefined;
+  } catch { return undefined; }
+}
 
 /** CIM supplies executable identity and creation time, never POSIX foreground groups. */
 export function parseWindowsProcesses(output: string): WindowsProcessRow[] {

@@ -13,7 +13,7 @@ export function windowsClaudePluginHooks(source: string): string {
       if (!object(group) || !Array.isArray(group.hooks)) throw Error("Claude hook group has no hooks array");
       for (const hook of group.hooks) {
         if (!object(hook) || hook.type !== "command" || typeof hook.command !== "string") throw Error("Unsupported Claude plugin hook");
-        const match = /^"\$\{OPENRIG_NODE:-node\}" "\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+)"((?: (?:--[a-z-]+|[a-z]+))*)$/.exec(hook.command);
+        const match = /^(?:exec )?"\$\{OPENRIG_NODE:-node\}" "\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+)"((?: (?:--[a-z-]+|[a-z]+))*)$/.exec(hook.command);
         if (!match || match[1]!.split("/").some(part => !part || part === "." || part === "..")) {
           throw Error("Unsupported Claude plugin hook command; native manifest was not produced");
         }

@@ -764,7 +764,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       let found: LiveWorkspaceSearch = { unconfirmed: [], stale: [] };
       try {
         found = await findLiveHerdrWorkspace({ id: composed.id, planId, pages: composed.pages, ...(composed.spaceLabel ? { spaceLabel: composed.spaceLabel } : {}) },
-          { herdr: args => deps.exec("/usr/bin/env", [...herdrArgs, ...args]), exec: (file, args) => deps.exec(file, args), serverArgs: tmuxServer });
+          { platform: deps.platform, herdr: args => deps.exec("/usr/bin/env", [...herdrArgs, ...args]), exec: (file, args) => deps.exec(file, args), serverArgs: tmuxServer });
       } catch (err) {
         windowNotes.push(`Could not check existing Herdr workspaces: ${(err as Error).message} Creating a fresh workspace; existing workspaces are kept.`);
       }

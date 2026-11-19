@@ -10,6 +10,7 @@ export { spawnWindowsJobProcess } from "./domain/windows-job-process.js";
 
 export { resolveWindowsCommand } from "./domain/windows-command.js";
 export { windowsPowerShell } from "./domain/windows-executables.js";
+export { readWindowsProcessStartToken } from "./domain/windows-process-table.js";
 
 export { localControlEndpoint } from "./domain/local-control-endpoint.js";
 export { herdrAppSocketPath, resolveHerdrAppHome } from "./domain/terminal/herdr-app-transport.js";
