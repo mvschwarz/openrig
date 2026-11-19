@@ -38,7 +38,6 @@ import { recordsNoWakeRoute } from "./gateway/destination-resolver.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
-import { randomBytes } from "node:crypto";
 import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
@@ -143,7 +142,6 @@ export function findingTitle(kind: StuckFindingKind, rowId: string, ageMinutes: 
 }
 
 /** #514: create-once unreachable notice prefix and separator, distinct from #2988 `=>` keys. */
-export const UNROUTABLE_NOTICE_QITEM_PREFIX = "qitem-unroutable-";
 export const UNROUTABLE_NOTICE_PREFIX = "stuck-sweep:unroutable-notice:";
 export const UNROUTABLE_NOTICE_SEPARATOR = "~>";
 
@@ -152,9 +150,47 @@ export function unroutableNoticeTag(source: string, destination: string): string
   return `${UNROUTABLE_NOTICE_PREFIX}${source}${UNROUTABLE_NOTICE_SEPARATOR}${destination}`;
 }
 
-/** Mint a sweep-specific queue ID for #514 notices so creation-time origin is explicit. */
-export function freshUnroutableNoticeId(): string {
-  return `${UNROUTABLE_NOTICE_QITEM_PREFIX}${randomBytes(8).toString("hex")}`;
+export interface UnroutableNoticeMatch {
+  qitemId: string;
+  state: string;
+  destinationSession: string;
+  tsUpdated: string;
+}
+
+const OPEN_UNROUTABLE_NOTICE_STATES = ["pending", "in-progress", "blocked"] as const;
+
+/** Look up the latest #514 unroutable-notice row for `(source, destination)` by
+ *  `STUCK_SWEEP_FINDING_TAG` plus `unroutableNoticeTag(source, destination)` alone.
+ *  Defaults to open rows (`pending`, `in-progress`, `blocked`); pass `states` to
+ *  inspect closed notices (for example `["done", "canceled"]`) or another state set. */
+export function findUnroutableNotice(
+  db: Database.Database,
+  source: string,
+  destination: string,
+  options?: { states?: readonly string[] },
+): UnroutableNoticeMatch | null {
+  const states = options?.states ?? OPEN_UNROUTABLE_NOTICE_STATES;
+  if (states.length === 0) return null;
+  const tag = unroutableNoticeTag(source, destination);
+  const placeholders = states.map(() => "?").join(", ");
+  const row = db.prepare(
+    // Unary + on state prevents SQLite from choosing idx_queue_items_state over the smaller partial idx_queue_items_recovery_tags.
+    `SELECT qitem_id, state, destination_session, ts_updated
+       FROM queue_items
+      WHERE +state IN (${placeholders})
+        AND (tags LIKE '%"stuck-sweep:%')
+        AND json_valid(tags)
+        AND EXISTS (SELECT 1 FROM json_each(tags) j WHERE typeof(j.value) = 'text' AND j.value = ?)
+        AND EXISTS (SELECT 1 FROM json_each(tags) j WHERE typeof(j.value) = 'text' AND j.value = ?)
+      ORDER BY +CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
+               ts_updated DESC, ts_created DESC, qitem_id DESC
+      LIMIT 1`,
+  ).get(...states, STUCK_SWEEP_FINDING_TAG, tag) as
+    | { qitem_id: string; state: string; destination_session: string; ts_updated: string }
+    | undefined;
+  return row
+    ? { qitemId: row.qitem_id, state: row.state, destinationSession: row.destination_session, tsUpdated: row.ts_updated }
+    : null;
 }
 
 function unroutableNoticeEvidenceRef(destination: string): string {
@@ -182,43 +218,18 @@ function parseUnroutableNoticeTags(rawTags: string | null): { source: string; de
   } catch {
     return null;
   }
-  if (!Array.isArray(parsed) || !parsed.every((t): t is string => typeof t === "string")) return null;
-  if (!parsed.includes(STUCK_SWEEP_FINDING_TAG)) return null;
-  const noticeTags = parsed.filter((t) => t.startsWith(UNROUTABLE_NOTICE_PREFIX));
+  if (!Array.isArray(parsed)) return null;
+  const strings = parsed.filter((t): t is string => typeof t === "string");
+  if (!strings.includes(STUCK_SWEEP_FINDING_TAG)) return null;
+  const noticeTags = strings.filter((t) => t.startsWith(UNROUTABLE_NOTICE_PREFIX));
   if (noticeTags.length !== 1) return null;
   const key = noticeTags[0]!.slice(UNROUTABLE_NOTICE_PREFIX.length);
   const sepAt = key.indexOf(UNROUTABLE_NOTICE_SEPARATOR);
   if (sepAt <= 0) return null;
   const source = key.slice(0, sepAt);
   const dest = key.slice(sepAt + UNROUTABLE_NOTICE_SEPARATOR.length);
-  if (!source || !dest || source === dest) return null;
+  if (!source || !dest) return null;
   return { source, dest };
-}
-
-function matchesUnroutableNoticeBody(body: string, source: string, destination: string): boolean {
-  const lines = body.split("\n");
-  if (lines.length !== 5) return false;
-  if (lines[0] !== "STUCK SWEEP FINDING (unroutable-notice)") return false;
-  if (lines[1] !== `destination: ${destination}`) return false;
-  if (lines[2] !== `source: ${source}`) return false;
-  if (lines[4] !== `list: ${unroutableNoticeEvidenceRef(destination)}`) return false;
-  const suffix = ` from ${source} to ${destination}`;
-  if (!lines[3]!.endsWith(suffix)) return false;
-  const countPart = lines[3]!.slice(0, lines[3]!.length - suffix.length);
-  const match = /^count: ([1-9]\d*) unclaimed (row|rows)$/.exec(countPart);
-  if (!match) return false;
-  return (Number(match[1]) === 1 ? "row" : "rows") === match[2];
-}
-
-function hasAddedUnroutableTagsNote(note: string | null): boolean {
-  if (!note || !note.startsWith("tags added: ")) return false;
-  try {
-    const added = JSON.parse(note.slice("tags added: ".length));
-    return !Array.isArray(added)
-      || added.some((tag) => typeof tag !== "string" || tag === STUCK_SWEEP_FINDING_TAG || tag.startsWith(UNROUTABLE_NOTICE_PREFIX));
-  } catch {
-    return true;
-  }
 }
 
 /** A standing notice's title: whose work, and how many items nobody has picked up. */
@@ -921,7 +932,19 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
     /** #2988: each seat's one declared delegation parent (parentNow, below), dropped with agentSeats. */
     const parentsNow = new Map<string, string | null>();
-    const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); agentSeats.clear(); parentsNow.clear(); };
+    /** Hosted polling-member status (pollsForWork, below), dropped on every yield or awaited write. */
+    const pollingMembers = new Map<string, boolean>();
+    /** Configured operator recovery seats (routeAroundMissing, below), dropped on every yield or awaited write. */
+    let recoverySeats: Array<string | null> | undefined;
+    const othersMayHaveRun = (): void => {
+      othersRan++;
+      recoveries.invalidate();
+      successors?.invalidate();
+      agentSeats.clear();
+      parentsNow.clear();
+      pollingMembers.clear();
+      recoverySeats = undefined;
+    };
     // A successor index whose build took at least half of a stretch that yielded by elapsed time is not rebuilt for
     // the rest of the pass: the yield drops it, the next stretch would pay the build again and end the same way after a
     // few rows, so the rows would pay about one build each instead of one per STUCK_SWEEP_YIELD_EVERY_ROWS. Those rows
@@ -1078,8 +1101,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const isHumanNotice = (row: QueueItem): boolean => row.deliveryOutcome === "never-posted" || row.deliveryOutcome === "transport-failed";
     // A hosted member with no wake trigger picks up its work by reading the queue: nothing can push work to it, by design.
     // Its rows' unroutable wakes aren't failed deliveries, so they get no finding each; work it leaves unclaimed past the
-    // unclaimed age is listed in the member's one standing notice instead. Read once per member per pass.
-    const pollingMembers = new Map<string, boolean>();
+    // unclaimed age is listed in the member's one standing notice instead. Refreshed after every yield or awaited write.
     const pollsForWork = (session: string): boolean => {
       let polls = pollingMembers.get(session);
       if (polls === undefined) {
@@ -1470,7 +1492,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       return nodeId === null ? null : nodeExecutorStoppedReason(deps.db, nodeId);
     };
     const sessionMissing = deps.sessionConfirmedMissing ?? ((session: string) => stoppedReason(session) !== null);
-    let recoverySeats: Array<string | null> | undefined;
     const routeAroundMissing = (c: Candidate): void => {
       if (!sessionMissing(c.route)) return;
       const stoppedDescription = stoppedReason(c.route) === "pane_exited"
@@ -2112,104 +2133,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (filed && parent) await foldInto(filed, seat, parent, current.map((c) => c.row.qitemId));
     }
 
-    // #514: create-once notices for unreachable unclaimed obligations deduplicated by (source, destination) while open.
-    const hasTransitionProvenanceCol = deps.db.prepare(
-      "SELECT 1 FROM pragma_table_info('queue_transitions') WHERE name = 'identity_provenance'",
-    ).get() !== undefined;
-    const hasArchiveTransitions = deps.db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'queue_transitions_archive'",
-    ).get() !== undefined;
-    const archiveProvenanceCol = hasArchiveTransitions && deps.db.prepare(
-      "SELECT 1 FROM pragma_table_info('queue_transitions_archive') WHERE name = 'identity_provenance'",
-    ).get() !== undefined;
-    // Fail closed when creation provenance evidence is unavailable or #514 marker tags were added after creation.
-    const createdOriginFilter = hasTransitionProvenanceCol
-      ? `AND (
-          EXISTS (
-            SELECT 1 FROM queue_transitions t
-             WHERE t.qitem_id = q.qitem_id AND t.transition_note = 'created' AND t.actor_session = q.source_session AND t.identity_provenance IS NULL
-          )${archiveProvenanceCol ? `
-          OR EXISTS (
-            SELECT 1 FROM queue_transitions_archive t
-             WHERE t.qitem_id = q.qitem_id AND t.transition_note = 'created' AND t.actor_session = q.source_session AND t.identity_provenance IS NULL
-          )` : ""}
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM queue_transitions t
-           WHERE t.qitem_id = q.qitem_id AND t.transition_note = 'created' AND (t.identity_provenance IS NOT NULL OR t.actor_session <> q.source_session)
-        )${hasArchiveTransitions ? `
-        AND NOT EXISTS (
-          SELECT 1 FROM queue_transitions_archive t
-           WHERE t.qitem_id = q.qitem_id AND t.transition_note = 'created'${archiveProvenanceCol ? " AND (t.identity_provenance IS NOT NULL OR t.actor_session <> q.source_session)" : ""}
-        )` : ""}
-        AND NOT EXISTS (
-          SELECT 1 FROM queue_transitions ta
-           WHERE ta.qitem_id = q.qitem_id AND ta.transition_note LIKE 'tags added:%'
-             AND (ta.transition_note LIKE '%stuck-sweep-finding%' OR ta.transition_note LIKE '%stuck-sweep:unroutable-notice:%')
-        )${hasArchiveTransitions ? `
-        AND NOT EXISTS (
-          SELECT 1 FROM queue_transitions_archive ta
-           WHERE ta.qitem_id = q.qitem_id AND ta.transition_note LIKE 'tags added:%'
-             AND (ta.transition_note LIKE '%stuck-sweep-finding%' OR ta.transition_note LIKE '%stuck-sweep:unroutable-notice:%')
-        )` : ""}`
-      : "AND 1 = 0";
-    const escapeLike = (s: string): string => s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-    const unroutableOriginFilter =
-      `AND q.handed_off_from IS NULL
-       AND q.qitem_id LIKE 'qitem-unroutable-%'
-       AND q.source_session <> '' AND q.destination_session <> q.source_session
-       AND q.evidence_ref = ('rig queue list --destination ' || q.source_session || ' --state pending')
-       AND q.body LIKE 'STUCK SWEEP FINDING (unroutable-notice)%'
-       AND json_valid(q.tags)
-       AND (q.tags LIKE '%"stuck-sweep:%') AND q.tags LIKE ? ESCAPE '\\' AND q.tags LIKE ? ESCAPE '\\'
-       AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
-       ${createdOriginFilter}`;
-    type UnroutableNoticeCandidateRow = {
-      qitem_id: string;
-      state: string;
-      source_session: string;
-      destination_session: string;
-      handed_off_from: string | null;
-      body: string;
-      evidence_ref: string | null;
-      tags: string | null;
-      ts_updated?: string;
-      close_sig?: string | null;
-      archive_close_sig?: string | null;
-    };
-    const hasVerifiedCreatedTransitions = (qitemId: string, expectedCreator: string): boolean => {
-      if (!hasTransitionProvenanceCol) return false;
-      type TransitionCheckRow = { transition_note: string | null; actor_session: string; identity_provenance: string | null };
-      const liveRows = deps.db.prepare(
-        "SELECT transition_note, actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ?",
-      ).all(qitemId) as TransitionCheckRow[];
-      const archiveRows = hasArchiveTransitions
-        ? (deps.db.prepare(
-            `SELECT transition_note, actor_session, ${archiveProvenanceCol ? "identity_provenance" : "'missing_provenance_col' AS identity_provenance"}
-               FROM queue_transitions_archive WHERE qitem_id = ?`,
-          ).all(qitemId) as TransitionCheckRow[])
-        : [];
-      const transitions = [...liveRows, ...archiveRows];
-      const created = transitions.filter((t) => t.transition_note === "created");
-      if (created.length === 0) return false;
-      if (created.some((t) => t.identity_provenance !== null || t.actor_session !== expectedCreator)) return false;
-      return !transitions.some((t) => hasAddedUnroutableTagsNote(t.transition_note));
-    };
-    const verifyUnroutableOrigin = (
-      row: UnroutableNoticeCandidateRow,
-      expectedPair?: { source: string; dest: string },
-    ): { source: string; dest: string } | null => {
-      if (!hasTransitionProvenanceCol) return null;
-      if (!row.qitem_id.startsWith(UNROUTABLE_NOTICE_QITEM_PREFIX)) return null;
-      if (row.handed_off_from !== null || !row.source_session || row.destination_session === row.source_session) return null;
-      const pair = parseUnroutableNoticeTags(row.tags);
-      if (!pair || pair.dest !== row.source_session) return null;
-      if (expectedPair && (pair.source !== expectedPair.source || pair.dest !== expectedPair.dest)) return null;
-      if (row.evidence_ref !== unroutableNoticeEvidenceRef(pair.dest)) return null;
-      if (!matchesUnroutableNoticeBody(row.body, pair.source, pair.dest)) return null;
-      if (!hasVerifiedCreatedTransitions(row.qitem_id, row.source_session)) return null;
-      return pair;
-    };
+    // #514: create-once notices for unreachable unclaimed obligations, identified by STUCK_SWEEP_FINDING_TAG plus
+    // unroutableNoticeTag(source, destination) alone (matching unclaimed-backlog notices).
     const reachableNoticeTarget = (seat: string | null | undefined, destination: string): seat is string => {
       if (!seat || seat === destination || isMachinerySession(seat) || sessionMissing(seat)
         || classOf(seat) === "unroutable" || isBoundTerminalSeat(deps.db, seat)
@@ -2225,71 +2150,65 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const unreachableNoticeTarget = (destination: string, source: string | null): string | null =>
       [source, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)()]
         .find((seat) => reachableNoticeTarget(seat, destination)) ?? null;
-    const findOpenUnroutableRoot = (source: string, destination: string): { qitem_id: string } | undefined => {
-      if (!hasTransitionProvenanceCol) return undefined;
-      const tag = unroutableNoticeTag(source, destination);
-      const candidates = deps.db.prepare(
-        `SELECT q.qitem_id, q.state, q.source_session, q.destination_session, q.handed_off_from, q.body, q.evidence_ref, q.tags
-           FROM queue_items q
-          WHERE q.state IN ('pending', 'in-progress', 'blocked')
-            AND q.source_session = ?
-            ${unroutableOriginFilter}
-            AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
-          ORDER BY q.ts_updated DESC, q.ts_created DESC, q.qitem_id DESC`,
-      ).all(
-        destination,
-        `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`,
-        `%"${escapeLike(tag)}"%`,
-        STUCK_SWEEP_FINDING_TAG,
-        tag,
-      ) as UnroutableNoticeCandidateRow[];
-      const verified = candidates.find((row) => verifyUnroutableOrigin(row, { source, dest: destination }) !== null);
-      return verified ? { qitem_id: verified.qitem_id } : undefined;
+    const findLatestNonSweepClosedUnroutable = (
+      source: string,
+      destination: string,
+    ): { qitemId: string; tsUpdated: string } | null => {
+      const closed = findUnroutableNotice(deps.db, source, destination, { states: ["done", "canceled"] });
+      if (!closed) return null;
+      const latestClose = deps.db.prepare(
+        `SELECT actor_session, closure_reason FROM (
+           SELECT transition_id, state, actor_session, closure_reason,
+                  LAG(state) OVER (ORDER BY transition_id) AS previous_state
+             FROM (
+               SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions WHERE qitem_id = ?
+               UNION ALL
+               SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions_archive WHERE qitem_id = ?
+             )
+         ) WHERE state IN ('done', 'canceled')
+             AND (state IS NOT previous_state OR closure_reason IS NOT NULL)
+           ORDER BY transition_id DESC LIMIT 1`,
+      ).get(closed.qitemId, closed.qitemId) as { actor_session: string; closure_reason: string | null } | undefined;
+      return closed.state === "done"
+        && latestClose?.actor_session === "stuck-sweep@system"
+        && latestClose?.closure_reason === "no-follow-on"
+        ? null
+        : { qitemId: closed.qitemId, tsUpdated: closed.tsUpdated };
     };
-    const findLatestNonSweepClosedRoot = (source: string, destination: string): { qitem_id: string; ts_updated: string } | undefined => {
-      if (!hasTransitionProvenanceCol) return undefined;
-      const tag = unroutableNoticeTag(source, destination);
-      const candidates = deps.db.prepare(
-        `SELECT q.qitem_id, q.state, q.source_session, q.destination_session, q.handed_off_from, q.body, q.evidence_ref, q.tags, q.ts_updated,
-                (SELECT t.actor_session || ':' || COALESCE(t.closure_reason, '')
-                   FROM queue_transitions t WHERE t.qitem_id = q.qitem_id AND t.state IN ('done', 'canceled')
-                  ORDER BY t.transition_id DESC LIMIT 1) AS close_sig${
-          hasArchiveTransitions ? `,
-                (SELECT t.actor_session || ':' || COALESCE(t.closure_reason, '')
-                   FROM queue_transitions_archive t WHERE t.qitem_id = q.qitem_id AND t.state IN ('done', 'canceled')
-                  ORDER BY t.transition_id DESC LIMIT 1) AS archive_close_sig` : ""}
-           FROM queue_items q
-          WHERE q.state IN ('done', 'canceled')
-            AND q.source_session = ?
-            ${unroutableOriginFilter}
-            AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
-          ORDER BY q.ts_updated DESC, q.ts_created DESC, q.qitem_id DESC`,
-      ).all(
-        destination,
-        `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`,
-        `%"${escapeLike(tag)}"%`,
-        STUCK_SWEEP_FINDING_TAG,
-        tag,
-      ) as UnroutableNoticeCandidateRow[];
-      const closed = candidates.find((row) => verifyUnroutableOrigin(row, { source, dest: destination }) !== null);
-      if (!closed || !closed.ts_updated) return undefined;
-      const sig = closed.close_sig ?? closed.archive_close_sig ?? null;
-      return closed.state === "done" && sig === "stuck-sweep@system:no-follow-on"
-        ? undefined
-        : { qitem_id: closed.qitem_id, ts_updated: closed.ts_updated };
+    const recountQualifyingUnroutable = (rows: Candidate[]): Candidate[] => {
+      const current: Candidate[] = [];
+      for (const c of rows) {
+        routeNotes.delete(c.row.qitemId);
+        routed.delete(c.row.qitemId);
+        delegationParent.delete(c.row.qitemId);
+        const now_ = freshCandidate("unclaimed-obligation", c.row.qitemId);
+        if (!now_) continue;
+        routeAroundMissing(now_);
+        routeAroundNoWake(now_);
+        if (!recoveries.find(now_.row.qitemId) && !activeBacklogKeyOf(now_) && isUnreachableUnclaimed(now_)) {
+          current.push(now_);
+        }
+      }
+      return current;
     };
     class DuplicateOpenUnroutableNoticeError extends Error {
       constructor(readonly existingQitemId: string) { super(existingQitemId); }
     }
+    class UnroutableNoticeSkippedError extends Error {}
     const liveUnroutableTags = new Set<string>();
     for (const [groupKey, group] of unroutableGroups) {
       if (dueToYield()) await yieldLoop();
       if (deps.queueRepo.deliveryDrains.holds(group.destination)) continue;
       const liveRows: Candidate[] = [];
+      let refreshYielded = false;
       for (const c of group.rows) {
-        if (dueToYield()) await yieldLoop();
+        if (dueToYield()) {
+          await yieldLoop();
+          refreshYielded = true;
+        }
         routeNotes.delete(c.row.qitemId);
         routed.delete(c.row.qitemId);
+        delegationParent.delete(c.row.qitemId);
         const now_ = freshCandidate("unclaimed-obligation", c.row.qitemId);
         if (!now_) continue;
         routeAroundMissing(now_);
@@ -2300,45 +2219,65 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
       if (deps.queueRepo.deliveryDrains.holds(group.destination) || liveRows.length === 0) continue;
       const tag = unroutableNoticeTag(group.source, group.destination);
-      liveUnroutableTags.add(tag);
       const target = unreachableNoticeTarget(group.destination, group.source);
       if (!target) {
-        for (const c of liveRows) {
+        const surviving = refreshYielded ? recountQualifyingUnroutable(liveRows) : liveRows;
+        if (surviving.length === 0) continue;
+        liveUnroutableTags.add(tag);
+        for (const c of surviving) {
           log(`[stuck-sweep] unreported #514 unreachable row ${c.row.qitemId} at ${group.destination}: no reachable source, operator agent or operator seat`);
           findings.push({ kind: "unroutable-notice", qitemId: c.row.qitemId, findingQitemId: "", action: "unreported", destination: group.destination });
         }
         continue;
       }
-      const openRoot = findOpenUnroutableRoot(group.source, group.destination);
-      if (openRoot) {
-        findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openRoot.qitem_id, action: "refreshed" });
+      const openNotice = findUnroutableNotice(deps.db, group.source, group.destination);
+      if (openNotice) {
+        if (refreshYielded && recountQualifyingUnroutable(liveRows).length === 0) continue;
+        liveUnroutableTags.add(tag);
+        findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openNotice.qitemId, action: "refreshed" });
         continue;
       }
-      const dismissed = findLatestNonSweepClosedRoot(group.source, group.destination);
-      if (dismissed && !liveRows.some((c) => evidenceIsNewer(c.evidenceAt, dismissed.ts_updated))) continue;
+      const dismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
+      if (dismissed && !liveRows.some((c) => evidenceIsNewer(c.evidenceAt, dismissed.tsUpdated))) continue;
       const text = unroutableNoticeText(group.source, group.destination, liveRows.length);
+      const createInput = {
+        sourceSession: group.destination,
+        destinationSession: target,
+        body: text.body,
+        summary: text.summary,
+        evidenceRef: unroutableNoticeEvidenceRef(group.destination),
+        tags: [STUCK_SWEEP_FINDING_TAG, tag],
+        wakeTrigger: "openrig" as const,
+      };
       try {
-        const created = await deps.queueRepo.create({
-          qitemId: freshUnroutableNoticeId(),
-          sourceSession: group.destination,
-          destinationSession: target,
-          body: text.body,
-          summary: text.summary,
-          evidenceRef: unroutableNoticeEvidenceRef(group.destination),
-          tags: [STUCK_SWEEP_FINDING_TAG, tag],
-          wakeTrigger: "openrig" as const,
-        }, () => {
-          const existing = findOpenUnroutableRoot(group.source, group.destination);
-          if (existing) throw new DuplicateOpenUnroutableNoticeError(existing.qitem_id);
+        const created = await deps.queueRepo.create(createInput, () => {
+          if (deps.queueRepo.deliveryDrains.holds(group.destination)) throw new UnroutableNoticeSkippedError();
+          const existing = findUnroutableNotice(deps.db, group.source, group.destination);
+          if (existing) throw new DuplicateOpenUnroutableNoticeError(existing.qitemId);
+          othersMayHaveRun();
+          const recounted = recountQualifyingUnroutable(liveRows);
+          if (recounted.length === 0) throw new UnroutableNoticeSkippedError();
+          const latestDismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
+          if (latestDismissed && !recounted.some((c) => evidenceIsNewer(c.evidenceAt, latestDismissed.tsUpdated))) {
+            throw new UnroutableNoticeSkippedError();
+          }
+          if (recounted.length !== liveRows.length) {
+            const refreshedText = unroutableNoticeText(group.source, group.destination, recounted.length);
+            createInput.body = refreshedText.body;
+            createInput.summary = refreshedText.summary;
+          }
         });
         othersMayHaveRun();
+        liveUnroutableTags.add(tag);
         findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: created.qitemId, action: "created" });
       } catch (err) {
         othersMayHaveRun();
         if (err instanceof DuplicateOpenUnroutableNoticeError) {
+          liveUnroutableTags.add(tag);
           findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: err.existingQitemId, action: "refreshed" });
           continue;
         }
+        if (err instanceof UnroutableNoticeSkippedError) continue;
         const message = `unroutable-notice for ${groupKey} not created: ${err instanceof Error ? err.message : String(err)}`;
         log(`[stuck-sweep] ${message}`);
         failedCreates.push(message);
@@ -2351,6 +2290,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (recoveries.find(row.qitemId) || deliveryResolutionEvidence(deps, "unclaimed-obligation", row.qitemId, now)) return false;
       const savedNotes = new Map(routeNotes);
       const savedRouted = new Set(routed);
+      const savedParents = new Map(delegationParent);
       try {
         const route = resolveOrch(row.destinationSession, row) ?? row.destinationSession;
         const probe: Candidate = { kind: "unclaimed-obligation", row, route, ageMinutes: 0, evidenceAt: row.tsCreated, why: "" };
@@ -2362,31 +2302,26 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         for (const [k, v] of savedNotes) routeNotes.set(k, v);
         routed.clear();
         for (const k of savedRouted) routed.add(k);
+        delegationParent.clear();
+        for (const [k, v] of savedParents) delegationParent.set(k, v);
       }
     };
-    const openUnroutableNotices = hasTransitionProvenanceCol
-      ? (deps.db.prepare(
-          `SELECT q.qitem_id, q.state, q.source_session, q.destination_session, q.handed_off_from, q.body, q.evidence_ref, q.tags
-             FROM queue_items q
-            WHERE q.state IN ('pending', 'in-progress', 'blocked')
-              ${unroutableOriginFilter}
-              AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value LIKE ? ESCAPE '\\')`,
-        ).all(
-          `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`,
-          `%"${escapeLike(UNROUTABLE_NOTICE_PREFIX)}%`,
-          STUCK_SWEEP_FINDING_TAG,
-          `${escapeLike(UNROUTABLE_NOTICE_PREFIX)}%`,
-        ) as UnroutableNoticeCandidateRow[])
-      : [];
+    const openUnroutableNotices = deps.db.prepare(
+      `SELECT q.qitem_id, q.tags
+         FROM queue_items q
+        WHERE +q.state IN ('pending', 'in-progress', 'blocked')
+          AND (q.tags LIKE '%"stuck-sweep:%')
+          AND json_valid(q.tags)
+          AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE typeof(j.value) = 'text' AND j.value = ?)
+          AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE typeof(j.value) = 'text' AND substr(j.value, 1, length(?)) = ?)`,
+    ).all(STUCK_SWEEP_FINDING_TAG, UNROUTABLE_NOTICE_PREFIX, UNROUTABLE_NOTICE_PREFIX) as Array<{ qitem_id: string; tags: string | null }>;
     for (const notice of openUnroutableNotices) {
       if (dueToYield()) await yieldLoop();
-      const quickPair = parseUnroutableNoticeTags(notice.tags);
-      if (!quickPair) continue;
-      const noticeTag = unroutableNoticeTag(quickPair.source, quickPair.dest);
+      const pair = parseUnroutableNoticeTags(notice.tags);
+      if (!pair) continue;
+      const { source, dest } = pair;
+      const noticeTag = unroutableNoticeTag(source, dest);
       if (liveUnroutableTags.has(noticeTag)) continue;
-      const verifiedPair = verifyUnroutableOrigin(notice, quickPair);
-      if (!verifiedPair) continue;
-      const { source, dest } = verifiedPair;
       const key = `${source}${UNROUTABLE_NOTICE_SEPARATOR}${dest}`;
       const hasOrdinaryPending = (): boolean => deps.db.prepare(
         `SELECT 1 FROM queue_items
@@ -2420,11 +2355,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         if (hasLivePending) continue;
       }
       const liveNotice = deps.db.prepare(
-        `SELECT qitem_id, state, source_session, destination_session, handed_off_from, body, evidence_ref, tags
-           FROM queue_items WHERE qitem_id = ?`,
-      ).get(notice.qitem_id) as UnroutableNoticeCandidateRow | undefined;
+        "SELECT state, tags FROM queue_items WHERE qitem_id = ?",
+      ).get(notice.qitem_id) as { state: string; tags: string | null } | undefined;
       if (!liveNotice || !["pending", "in-progress", "blocked"].includes(liveNotice.state)) continue;
-      if (!verifyUnroutableOrigin(liveNotice, verifiedPair)) continue;
+      const livePair = parseUnroutableNoticeTags(liveNotice.tags);
+      if (!livePair || livePair.source !== source || livePair.dest !== dest) continue;
       if (deps.queueRepo.deliveryDrains.holds(dest) && hasOrdinaryPending()) continue;
       await deps.queueRepo.update({
         qitemId: notice.qitem_id,

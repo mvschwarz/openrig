@@ -13,15 +13,15 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import type { RosterMember } from "../src/domain/rosters.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { isTmuxBoundSession, wireTerminalReachability } from "../src/domain/terminal-server-seats.js";
+import { recoveryTag } from "../src/domain/queue-recovery.js";
+import * as stuckSweep from "../src/domain/queue-stuck-sweep.js";
 import {
   createStuckSweepStatus,
-  freshUnroutableNoticeId,
   runStuckSweep,
   STUCK_SWEEP_FINDING_TAG,
   STUCK_SWEEP_YIELD_EVERY_ROWS,
   unclaimedBacklogTag,
   UNROUTABLE_NOTICE_PREFIX,
-  UNROUTABLE_NOTICE_QITEM_PREFIX,
   unroutableNoticeTag,
 } from "../src/domain/queue-stuck-sweep.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -325,7 +325,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     humans = [];
   });
 
-  it("R4 / C3: deduplicates by (source, dest) across target changes, enforces provenance & ASCII case isolation, and enforces atomic verifyBeforeCreate dedup", async () => {
+  it("R4 / C3: deduplicates by (source, dest) across target changes, enforces ASCII case isolation, and enforces atomic verifyBeforeCreate dedup", async () => {
     const alphaUpper = seedSeat("ops", "coord.alpha", "Alpha@ops");
     seedSeat("ops", "coord.alpha_lower", "alpha@ops");
     seedSeat("ops", "coord.operator", "operator@ops");
@@ -336,51 +336,19 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     await createNoNudge("Alpha@ops", "parked@ops", "A2");
     await createNoNudge("alpha@ops", "parked@ops", "a1");
 
-    // P2-2: HTTP spoof matching full #514 notice shape (qitem-unroutable-* ID, body, evidenceRef, source=dest, tags):
-    // ONLY identity_provenance IS NULL rejects it.
-    const spoofRes = await appFor().request("/api/queue/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "parked@ops" },
-      body: JSON.stringify({
-        qitemId: freshUnroutableNoticeId(),
-        destinationSession: "Alpha@ops",
-        evidenceRef: "rig queue list --destination parked@ops --state pending",
-        body:
-          "STUCK SWEEP FINDING (unroutable-notice)\n" +
-          "destination: parked@ops\n" +
-          "source: Alpha@ops\n" +
-          "count: 1 unclaimed row from Alpha@ops to parked@ops\n" +
-          "list: rig queue list --destination parked@ops --state pending",
-        summary: "Unreachable destination parked@ops: 1 unclaimed row from Alpha@ops",
-        tags: [STUCK_SWEEP_FINDING_TAG, unroutableNoticeTag("Alpha@ops", "parked@ops")],
-        nudge: false,
-      }),
-    });
-    expect(spoofRes.status).toBe(201);
-    const httpSpoof = await spoofRes.json() as { qitemId: string };
-
-    // Direct queue.create spoof with wrong source_session must also fail shape check.
-    await queue.create({
-      sourceSession: "Alpha@ops",
-      destinationSession: "alpha@ops",
-      body: "wrong shape",
-      tags: [STUCK_SWEEP_FINDING_TAG, unroutableNoticeTag("alpha@ops", "parked@ops")],
-      nudge: false,
-    });
-
     await sweep();
-    const realNotices = unroutableNotices().filter((n) => n.sourceSession === "parked@ops" && n.qitemId !== httpSpoof.qitemId);
+    const realNotices = unroutableNotices().filter((n) => n.sourceSession === "parked@ops");
     expect(realNotices.filter((n) => n.destinationSession === "Alpha@ops")).toHaveLength(1);
     expect(realNotices.filter((n) => n.destinationSession === "alpha@ops")).toHaveLength(1);
 
     // P3-1: Second pass while open creates zero duplicates, even if Alpha@ops stops and notice target shifts to operator@ops.
     const countBefore = realNotices.length;
     await sweep();
-    expect(unroutableNotices().filter((n) => n.sourceSession === "parked@ops" && n.qitemId !== httpSpoof.qitemId)).toHaveLength(countBefore);
+    expect(unroutableNotices().filter((n) => n.sourceSession === "parked@ops")).toHaveLength(countBefore);
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(alphaUpper.nodeId);
     db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(alphaUpper.nodeId);
     await sweep({ resolveRecoveryAgentSeat: () => "operator@ops" });
-    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("Alpha@ops", "parked@ops")) && n.qitemId !== httpSpoof.qitemId)).toHaveLength(1);
+    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("Alpha@ops", "parked@ops")))).toHaveLength(1);
 
     // P3-2: Two sources differing only in ASCII case sharing operator@ops get distinct notices and isolated dismissals.
     await createNoNudge("CaseSrc@ops", "parked@ops", "Upper case fallback");
@@ -403,9 +371,8 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     const origCreate = queue.create.bind(queue);
     queue.create = (async (input, verifyBeforeCreate) => {
       if ((input.tags ?? []).includes(unroutableNoticeTag("alpha@ops", "parked2@ops"))) {
-        // Insert an open sweep-shaped root right before create's transaction checks verifyBeforeCreate.
+        // Insert an open tag-matched notice right before create's transaction checks verifyBeforeCreate.
         await origCreate({
-          qitemId: freshUnroutableNoticeId(),
           sourceSession: input.sourceSession,
           destinationSession: input.destinationSession,
           body: input.body,
@@ -446,7 +413,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(nudgesSent.filter((n) => n.destination === "senderA@ops")).toHaveLength(1);
   });
 
-  it("R6: creates notice once without rewriting count/body and never extends authority across handoff children", async () => {
+  it("R6: creates notice once without rewriting count/body and follows tag-identified handoff children", async () => {
     seedSeat("ops", "coord.lead", "lead@ops");
     seedSeat("ops", "coord.helper", "helper@ops");
     seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
@@ -467,7 +434,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(afterAdd.summary).toBe(initialSummary);
     expect(findingsTo("lead@ops").filter(isOpen)).toHaveLength(1);
 
-    // Handing off the open notice marks child foreign; sweep does not modify child and creates a fresh root notice for remaining work.
+    // Handing off copies STUCK_SWEEP_FINDING_TAG + unroutable-notice tag to child: sweep recognizes child without filing a duplicate and resolves it once work clears.
     const { created: child } = await queue.handoff({
       qitemId: notice!.qitemId,
       fromSession: "lead@ops",
@@ -476,14 +443,21 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
       nudge: false,
     });
     queue.update({ qitemId: r1.qitemId, actorSession: "lead@ops", state: "canceled" });
-    await sweep({ now });
+    const handedSweep = await sweep({ now });
 
+    expect(handedSweep.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: "lead@ops~>parked@ops",
+      findingQitemId: child.qitemId,
+      action: "refreshed",
+    });
     expect(queue.getByIdOrThrow(child.qitemId)).toMatchObject({ state: "pending", body: "Forwarded for review" });
-    const freshLead = findingsTo("lead@ops").filter(isOpen);
-    expect(freshLead).toHaveLength(1);
-    expect(freshLead[0]!.qitemId).not.toBe(notice!.qitemId);
-    expect(freshLead[0]!.body).toContain("1 unclaimed row from lead@ops to parked@ops");
-    expect(r2.state).toBe("pending");
+    expect(findingsTo("lead@ops").filter(isOpen)).toHaveLength(0);
+    expect(unroutableNotices().filter(isOpen)).toHaveLength(1);
+
+    queue.update({ qitemId: r2.qitemId, actorSession: "lead@ops", state: "canceled" });
+    await sweep({ now });
+    expect(queue.getByIdOrThrow(child.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
   });
 
   it("R7: stays open across raised age thresholds while work waits, and closes done on row resolution or destination recovery", async () => {
@@ -550,127 +524,114 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(n3Open[0]!.qitemId).not.toBe(n2!.qitemId);
   });
 
-  it("P1: closes only sweep-created notices with immutable creation-time origin and fails closed when provenance/origin is missing or tagged via addTags", async () => {
+  it("identifies notices by STUCK_SWEEP_FINDING_TAG plus unroutable-notice tag alone and exports findUnroutableNotice for #3541", async () => {
     seedSeat("ops", "coord.lead", "lead@ops");
-    const parked = seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
 
     const noticeTag = unroutableNoticeTag("lead@ops", "parked@ops");
-    const forgedBody =
-      "STUCK SWEEP FINDING (unroutable-notice)\n" +
-      "destination: parked@ops\n" +
-      "source: lead@ops\n" +
-      "count: 1 unclaimed row from lead@ops to parked@ops\n" +
-      "list: rig queue list --destination parked@ops --state pending";
+    expect(typeof stuckSweep.findUnroutableNotice).toBe("function");
 
-    // 1) Non-sweep internal item tagged post-creation via addTags must NEVER block real notice creation or be closed.
-    const internalItem = await queue.create({
-      sourceSession: "parked@ops",
+    // A row carrying only one of the two tags, or only a substring, does not match and is never closed.
+    const missingFindingTag = await queue.create({
+      sourceSession: "lead@ops",
       destinationSession: "lead@ops",
-      body: "Internal escalation log entry",
-      tags: ["ops-internal"],
+      body: "Missing STUCK_SWEEP_FINDING_TAG",
+      tags: [noticeTag],
       nudge: false,
     });
-    queue.addTags({ qitemId: internalItem.qitemId, actorSession: "lead@ops", tags: [STUCK_SWEEP_FINDING_TAG, noticeTag] });
-
-    // 2) Even an internal row created with sweep qitemId/body/evidenceRef WITHOUT tags, then tagged via addTags,
-    // must be rejected both as an open root and as a dismissed suppression root.
-    const postTaggedOpen = await queue.create({
-      qitemId: freshUnroutableNoticeId(),
-      sourceSession: "parked@ops",
+    const substringOnly = await queue.create({
+      sourceSession: "lead@ops",
       destinationSession: "lead@ops",
-      body: forgedBody,
-      evidenceRef: "rig queue list --destination parked@ops --state pending",
+      body: "Substring tag only",
+      tags: [STUCK_SWEEP_FINDING_TAG, `note:${noticeTag}`],
       nudge: false,
     });
-    queue.addTags({ qitemId: postTaggedOpen.qitemId, actorSession: "lead@ops", tags: [STUCK_SWEEP_FINDING_TAG, noticeTag] });
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops")).toBeNull();
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops", { states: [] })).toBeNull();
 
-    const postTaggedClosed = await queue.create({
-      qitemId: freshUnroutableNoticeId(),
-      sourceSession: "parked@ops",
-      destinationSession: "lead@ops",
-      body: forgedBody,
-      evidenceRef: "rig queue list --destination parked@ops --state pending",
-      nudge: false,
+    // 1) A notice created via HTTP with arbitrary body/qitemId and non-null identity_provenance IS identified by its tags alone.
+    const httpRes = await appFor().request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "lead@ops" },
+      body: JSON.stringify({
+        destinationSession: "lead@ops",
+        body: "Custom notice body without 5-line format",
+        tags: [STUCK_SWEEP_FINDING_TAG, noticeTag],
+        nudge: false,
+      }),
     });
-    queue.addTags({ qitemId: postTaggedClosed.qitemId, actorSession: "lead@ops", tags: [STUCK_SWEEP_FINDING_TAG, noticeTag] });
-    queue.update({ qitemId: postTaggedClosed.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "post-tagged close" });
-
-    // 3) Direct internal row created WITH #514 tags but non-sweep qitemId/body/evidenceRef must also be rejected.
-    const nonSweepDirect = await queue.create({
-      sourceSession: "parked@ops",
+    expect(httpRes.status).toBe(201);
+    const httpNotice = await httpRes.json() as { qitemId: string };
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops")).toMatchObject({
+      qitemId: httpNotice.qitemId,
+      state: "pending",
       destinationSession: "lead@ops",
-      body: "Non-sweep row created directly with #514 tags",
-      tags: [STUCK_SWEEP_FINDING_TAG, noticeTag],
-      nudge: false,
     });
+    // Exact ASCII case isolation holds in the exported lookup.
+    expect(stuckSweep.findUnroutableNotice(db, "Lead@ops", "parked@ops")).toBeNull();
 
-    const work = await createNoNudge("lead@ops", "parked@ops", "Real unreachable task", 90, new Date());
-    await sweep();
+    // Sweep refreshes the tag-identified HTTP notice instead of creating a duplicate, and closes it when work clears.
+    const work = await createNoNudge("lead@ops", "parked@ops", "Work waiting at parked@ops", 90, new Date());
+    const refreshRes = await sweep();
+    expect(refreshRes.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: "lead@ops~>parked@ops",
+      findingQitemId: httpNotice.qitemId,
+      action: "refreshed",
+    });
+    expect(unroutableNotices().filter(isOpen)).toHaveLength(1);
 
-    const realOpen = findingsTo("lead@ops").filter((n) => isOpen(n) && n.qitemId.startsWith(UNROUTABLE_NOTICE_QITEM_PREFIX)
-      && n.qitemId !== postTaggedOpen.qitemId);
-    expect(realOpen).toHaveLength(1);
-    const realNotice = realOpen[0]!;
-
-    // When all unreachable work clears, ONLY the sweep-created notice closes; forged/post-tagged rows stay untouched.
+    // Deleting the 'created' transition does not prevent tag-only lookup or resolution.
+    db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'created'").run(httpNotice.qitemId);
     queue.update({ qitemId: work.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved" });
     await sweep();
-    expect(queue.getByIdOrThrow(realNotice.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
-    expect(queue.getByIdOrThrow(internalItem.qitemId).state).toBe("pending");
-    expect(queue.getByIdOrThrow(postTaggedOpen.qitemId).state).toBe("pending");
-    expect(queue.getByIdOrThrow(nonSweepDirect.qitemId).state).toBe("pending");
+    expect(queue.getByIdOrThrow(httpNotice.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    expect(queue.getByIdOrThrow(missingFindingTag.qitemId).state).toBe("pending");
+    expect(queue.getByIdOrThrow(substringOnly.qitemId).state).toBe("pending");
 
-    // 4) Missing creation provenance ('created' transition deleted) fails closed: notice is NEVER closed on recovery.
-    await createNoNudge("lead@ops", "parked@ops", "Missing provenance task", 90, new Date());
-    await sweep();
-    const openBeforeDrop = findingsTo("lead@ops").filter((n) => isOpen(n) && n.qitemId.startsWith(UNROUTABLE_NOTICE_QITEM_PREFIX)
-      && n.qitemId !== postTaggedOpen.qitemId);
-    expect(openBeforeDrop).toHaveLength(1);
-    const realNotice2 = openBeforeDrop[0]!;
+    // Closed lookup finds the resolved notice, while open lookup returns null.
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops")).toBeNull();
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops", { states: ["done", "canceled"] })).toMatchObject({
+      qitemId: httpNotice.qitemId,
+      state: "done",
+    });
 
-    db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'created'").run(realNotice2.qitemId);
-    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-up-p1', ?, 'parked@ops', 'running', '2026-11-18T00:00:00Z')")
-      .run(parked.nodeId);
-    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-up-p1', ?, 'tmux', 'parked@ops', '%91')")
-      .run(parked.nodeId);
-    await sweep();
-    expect(queue.getByIdOrThrow(realNotice2.qitemId).state).toBe("pending");
+    // 2) A row tagged post-creation via addTags is also recognized as the notice (no duplicate filed, closes on clear).
+    const taggedLater = await queue.create({
+      sourceSession: "parked@ops",
+      destinationSession: "lead@ops",
+      body: "Tagged post-creation",
+      tags: ["ops-note"],
+      nudge: false,
+    });
+    queue.addTags({ qitemId: taggedLater.qitemId, actorSession: "lead@ops", tags: [STUCK_SWEEP_FINDING_TAG, noticeTag] });
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops")?.qitemId).toBe(taggedLater.qitemId);
 
-    // 4b) Re-restore provenance, then tamper 'created' transition during pendingRows yield before close:
-    // live pre-close check must still reject closing realNotice2.
-    db.prepare(
-      "INSERT INTO queue_transitions (qitem_id, state, actor_session, transition_note, ts) VALUES (?, 'pending', 'parked@ops', 'created', ?)",
-    ).run(realNotice2.qitemId, new Date().toISOString());
-    const freshTamperIds = new Set<string>();
-    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
-      const r = await createNoNudge("lead@ops", "parked@ops", `Tamper yield row ${i}`, 5, new Date());
-      freshTamperIds.add(r.qitemId);
-    }
-    const origGetByIdP1 = queue.getById.bind(queue);
-    let tamperQueued = false;
-    const spyP1 = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
-      if (!tamperQueued && freshTamperIds.has(id)) {
-        tamperQueued = true;
-        setImmediate(() => {
-          db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'created'").run(realNotice2.qitemId);
-        });
-      }
-      return origGetByIdP1(id, opts);
-    }) as typeof queue.getById);
+    const work2 = await createNoNudge("lead@ops", "parked@ops", "Second waiting row", 90, new Date());
+    const res2 = await sweep();
+    expect(res2.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: "lead@ops~>parked@ops",
+      findingQitemId: taggedLater.qitemId,
+      action: "refreshed",
+    });
+    queue.update({ qitemId: work2.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved" });
     await sweep();
-    spyP1.mockRestore();
-    expect(tamperQueued).toBe(true);
-    expect(queue.getByIdOrThrow(realNotice2.qitemId).state).toBe("pending");
+    expect(queue.getByIdOrThrow(taggedLater.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
 
-    // 5) Missing identity_provenance schema column fails closed: even a valid notice must NOT be closed or touched.
-    db.prepare(
-      "INSERT INTO queue_transitions (qitem_id, state, actor_session, transition_note, ts) VALUES (?, 'pending', 'parked@ops', 'created', ?)",
-    ).run(realNotice2.qitemId, new Date().toISOString());
-    db.exec("ALTER TABLE queue_transitions DROP COLUMN identity_provenance");
-    const updateSpy = vi.spyOn(queue, "update");
-    await sweep();
-    expect(updateSpy).not.toHaveBeenCalled();
-    expect(db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(realNotice2.qitemId)).toEqual({ state: "pending" });
+    // 3) Query plan for the actual SQL executed by findUnroutableNotice uses idx_queue_items_recovery_tags rather than scanning by state.
+    let lookupSql = "";
+    const origPrepare = db.prepare.bind(db);
+    const prepareSpy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      lookupSql = sql;
+      return origPrepare(sql);
+    }) as typeof db.prepare);
+    expect(stuckSweep.findUnroutableNotice(db, "lead@ops", "parked@ops")).toBeNull();
+    prepareSpy.mockRestore();
+    expect(lookupSql).not.toBe("");
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${lookupSql}`)
+      .all("pending", "in-progress", "blocked", STUCK_SWEEP_FINDING_TAG, noticeTag) as Array<{ detail: string }>;
+    expect(plan.some((p) => p.detail.includes("idx_queue_items_recovery_tags"))).toBe(true);
   });
 
   it("P2-A: seat losing binding during sweep yield before #2430 creation skips #2430 without waking the stopped seat", async () => {
@@ -987,5 +948,247 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     } finally {
       reach.stop();
     }
+  });
+
+  it("recounts qualifying rows inside the create transaction, stopping at zero and updating count after mid-yield cancellations", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+    seedSeat("ops", "work.parked2", "parked2@ops", { running: false, bound: false });
+    seedSeat("ops", "work.parked3", "parked3@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const batchSize = STUCK_SWEEP_YIELD_EVERY_ROWS + 10;
+
+    // 1) All rows canceled during a later yield in group.rows refresh (after early rows already entered liveRows) -> zero notices created.
+    const allCancelIds: string[] = [];
+    for (let i = 0; i < batchSize; i++) {
+      const r = await createNoNudge("lead@ops", "parked@ops", `All-cancel row ${i}`, 90, now);
+      allCancelIds.push(r.qitemId);
+    }
+    const allCancelSet = new Set(allCancelIds);
+    const origGetById = queue.getById.bind(queue);
+    let allCancelReads = 0;
+    let allCanceledDuringYield = false;
+    const spyAllCancel = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (allCancelSet.has(id)) {
+        allCancelReads++;
+        // Trigger on the second pass (group.rows refresh), once early rows are already in liveRows.
+        if (!allCanceledDuringYield && allCancelReads === batchSize + 5) {
+          setImmediate(() => {
+            allCanceledDuringYield = true;
+            for (const qid of allCancelIds) {
+              queue.update({ qitemId: qid, actorSession: "lead@ops", state: "canceled", transitionNote: "canceled during group yield" });
+            }
+          });
+        }
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    nudgesSent = [];
+    const resAllCancel = await sweep({ now });
+    spyAllCancel.mockRestore();
+
+    expect(allCanceledDuringYield).toBe(true);
+    expect(resAllCancel.outcome).toBe("clean");
+    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")))).toHaveLength(0);
+    expect(nudgesSent).toHaveLength(0);
+
+    // 2) Partial cancellation of already-counted rows (0..19) during yield -> notice count reflects the 40 surviving rows, not 60.
+    const partialCancelIds: string[] = [];
+    for (let i = 0; i < batchSize; i++) {
+      const r = await createNoNudge("lead@ops", "parked2@ops", `Partial-cancel row ${i}`, 90, now);
+      partialCancelIds.push(r.qitemId);
+    }
+    const partialSet = new Set(partialCancelIds);
+    let partialReads = 0;
+    let partialCanceledDuringYield = false;
+    const spyPartial = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (partialSet.has(id)) {
+        partialReads++;
+        if (!partialCanceledDuringYield && partialReads === batchSize + 5) {
+          setImmediate(() => {
+            partialCanceledDuringYield = true;
+            for (const qid of partialCancelIds.slice(0, 20)) {
+              queue.update({ qitemId: qid, actorSession: "lead@ops", state: "canceled", transitionNote: "early row canceled during yield" });
+            }
+          });
+        }
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resPartial = await sweep({ now });
+    spyPartial.mockRestore();
+
+    expect(partialCanceledDuringYield).toBe(true);
+    expect(resPartial.outcome).toBe("findings");
+    const [partialNotice] = unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked2@ops")));
+    expect(partialNotice).toBeDefined();
+    expect(partialNotice!.body).toContain(`${batchSize - 20} unclaimed rows from lead@ops to parked2@ops`);
+    expect(partialNotice!.summary).toContain(`${batchSize - 20} unclaimed rows`);
+
+    // 3) Last qualifying row canceled right before create's transaction callback runs -> verifyBeforeCreate recounts 0 and skips cleanly.
+    const raceRow = await createNoNudge("lead@ops", "parked3@ops", "Canceled right before create txn", 90, now);
+    const origCreate = queue.create.bind(queue);
+    let canceledBeforeTxn = false;
+    queue.create = (async (input, verifyBeforeCreate) => {
+      if (!canceledBeforeTxn && (input.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked3@ops"))) {
+        canceledBeforeTxn = true;
+        queue.update({ qitemId: raceRow.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "canceled before create txn" });
+      }
+      return origCreate(input, verifyBeforeCreate);
+    }) as typeof queue.create;
+
+    nudgesSent = [];
+    const resPreTxn = await sweep({ now });
+    queue.create = origCreate;
+
+    expect(canceledBeforeTxn).toBe(true);
+    expect(resPreTxn.outcome).not.toBe("failed");
+    expect(resPreTxn.error).toBeUndefined();
+    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked3@ops")))).toHaveLength(0);
+    expect(nudgesSent).toHaveLength(0);
+  });
+
+  it("refreshes hosted polling status after a yield so dropping a hosted member during close scan keeps the notice open", async () => {
+    hostedMembers = [{ seat: "helper@hub", kind: "agent", label: "Helper" } as unknown as RosterMember];
+    queue = makeRepo();
+    seedSeat("ops", "coord.lead", "lead@ops", { running: false, bound: false });
+    seedSeat("ops", "coord.watcher", "watcher@ops", { running: true, bound: true });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "helper@hub", "Initial no-nudge row", 90, now);
+    await sweep({ now, resolveRecoveryAgentSeat: () => "watcher@ops" });
+    const [notice] = findingsTo("watcher@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "helper@hub")));
+    expect(notice).toBeDefined();
+
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by polled batch" });
+
+    const polledIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "helper@hub", `Hosted polled row ${i}`, 5, now);
+      db.prepare("UPDATE queue_items SET last_nudge_result = 'awaiting-pickup: helper@hub is a hosted member' WHERE qitem_id = ?").run(r.qitemId);
+      polledIds.push(r.qitemId);
+    }
+
+    // Drop helper@hub from hostedMembers during the close-scan yield so remaining rows become unreachable non-polled work.
+    const origGetById = queue.getById.bind(queue);
+    const firstId = polledIds[0]!;
+    let sawFirstRow = false;
+    let droppedFromRoster = false;
+    const spy = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (id === firstId && !sawFirstRow) {
+        sawFirstRow = true;
+        setImmediate(() => {
+          hostedMembers = [];
+          droppedFromRoster = true;
+        });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resKeep = await sweep({ now });
+    spy.mockRestore();
+
+    expect(sawFirstRow).toBe(true);
+    expect(droppedFromRoster).toBe(true);
+    expect(resKeep.outcome).toBe("clean");
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+
+    // Restoring helper@hub to hostedMembers lets the next sweep close the notice cleanly.
+    hostedMembers = [{ seat: "helper@hub", kind: "agent", label: "Helper" } as unknown as RosterMember];
+    const resClose = await sweep({ now });
+    expect(resClose.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("keeps no-yield close scan synchronous through update and closes a yielding set of stably recovery-covered rows while honoring delivery holds", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    const parked = seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "parked@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice1] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(notice1).toBeDefined();
+
+    // 1) No-yield close scan stays inline with zero implicit await before queue.update.
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-sync', ?, 'parked@ops', 'running', '2026-11-18T00:00:00Z')")
+      .run(parked.nodeId);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-sync', ?, 'tmux', 'parked@ops', '%94')")
+      .run(parked.nodeId);
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by single fresh row" });
+    const shortRow = await createNoNudge("lead@ops", "parked@ops", "Short scan fresh row", 5, now);
+
+    const origGetById = queue.getById.bind(queue);
+    const origUpdate = queue.update.bind(queue);
+    let microtaskQueued = false;
+    let microtaskRan = false;
+    let closeObs: { microtaskRanAtUpdate: boolean; bindingsAtUpdate: number } | null = null;
+    const getSpy = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (id === shortRow.qitemId && !microtaskQueued) {
+        microtaskQueued = true;
+        Promise.resolve().then(() => {
+          microtaskRan = true;
+          db.prepare("DELETE FROM bindings WHERE node_id = ?").run(parked.nodeId);
+          db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(parked.nodeId);
+        });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+    const updSpy = vi.spyOn(queue, "update").mockImplementation(((input: Parameters<typeof queue.update>[0]) => {
+      if (input.qitemId === notice1!.qitemId) {
+        const bindingsAtUpdate = (db.prepare("SELECT COUNT(*) AS n FROM bindings WHERE node_id = ?").get(parked.nodeId) as { n: number }).n;
+        closeObs = { microtaskRanAtUpdate: microtaskRan, bindingsAtUpdate };
+      }
+      return origUpdate(input);
+    }) as typeof queue.update);
+
+    const resSync = await sweep({ now });
+    getSpy.mockRestore();
+    updSpy.mockRestore();
+
+    expect(resSync.outcome).toBe("findings");
+    expect(microtaskQueued).toBe(true);
+    expect(microtaskRan).toBe(true);
+    expect(closeObs).toEqual({ microtaskRanAtUpdate: false, bindingsAtUpdate: 1 });
+    expect(queue.getByIdOrThrow(notice1!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+
+    // 2) A yielding set of stably recovery-covered rows closes cleanly, while a genuine delivery hold keeps open.
+    const parked2 = seedSeat("ops", "work.parked2", "parked2@ops", { running: false, bound: false });
+    const seedRow = await createNoNudge("lead@ops", "parked2@ops", "Seed parked2 notice", 90, now);
+    await sweep({ now });
+    const [notice2] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked2@ops")));
+    expect(notice2).toBeDefined();
+    queue.update({ qitemId: seedRow.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by recovery-covered batch" });
+
+    const coveredIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "parked2@ops", `Recovery-covered row ${i}`, 5, now);
+      coveredIds.push(r.qitemId);
+      await queue.create({
+        sourceSession: "lead@ops",
+        destinationSession: "lead@ops",
+        body: `Open recovery for ${r.qitemId}`,
+        tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(r.qitemId)],
+        nudge: false,
+      });
+    }
+
+    let holdActive = true;
+    queue.deliveryDrains.attachTerminalHold(
+      (session) => holdActive && session === "parked2@ops",
+      () => holdActive,
+    );
+    const resHeld = await sweep({ now });
+    expect(resHeld.outcome).toBe("clean");
+    expect(queue.getByIdOrThrow(notice2!.qitemId).state).toBe("pending");
+
+    holdActive = false;
+    const resClosed = await sweep({ now });
+    expect(resClosed.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice2!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    expect(parked2.session).toBe("parked2@ops");
   });
 });
