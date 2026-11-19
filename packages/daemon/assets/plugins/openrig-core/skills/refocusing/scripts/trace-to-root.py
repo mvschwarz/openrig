@@ -300,7 +300,7 @@ def parsed_frontmatters(texts):
         if block is None:
             return None
         fields, seen = {}, set()
-        pattern = re.compile(r'''^(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)[ \t]*(?:\#.*)?$''')
+        pattern = re.compile(r'''^(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)(?:[ \t]+\#.*)?[ \t]*$''')
         lines = block.splitlines()
         for index, line in enumerate(lines):
             match = pattern.match(line)
