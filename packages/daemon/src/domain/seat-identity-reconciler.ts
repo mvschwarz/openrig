@@ -130,6 +130,7 @@ export class SeatIdentityReconciler {
   private readonly readRunnerCensus: () => Promise<RunnerProcessCensus>;
   private readonly backgroundEvidence = new BackgroundProcessEvidence();
   private readonly backgroundMatches = new Map<string, { generation: string; sessionId: string; processes: BackgroundProcess[] }>();
+  private backgroundWorkSnapshot: Array<{ nodeId: string; rigId: string; sessionName: string; state: "unknown"; reason: string; observedAt: string; processes: BackgroundProcess[] }> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
   private generation = 0;
@@ -168,6 +169,10 @@ export class SeatIdentityReconciler {
 
   /** A missing pane is not evidence that work it started has ended. These are unknowns, not a process inventory. */
   backgroundWorkUnknown(): Array<{ nodeId: string; rigId: string; sessionName: string; state: "unknown"; reason: string; observedAt: string; processes: BackgroundProcess[] }> {
+    return this.backgroundWorkSnapshot;
+  }
+
+  private computeBackgroundWorkUnknown(): typeof this.backgroundWorkSnapshot {
     const registry = new SessionRegistry(this.db);
     return this.runningSeats().flatMap((seat) => {
       const verdict = this.store.getForNode(seat.node_id);
@@ -207,8 +212,10 @@ export class SeatIdentityReconciler {
     // that could leave subprocesses alive. Normal polling cost is unchanged.
     if (this.reconciling) return;
     this.reconciling = true;
+    const generation = this.generation;
     try {
-      await this.reconcileSweep(this.generation);
+      await this.reconcileSweep(generation);
+      if (generation === this.generation) this.backgroundWorkSnapshot = this.computeBackgroundWorkUnknown();
     } finally {
       this.reconciling = false;
     }

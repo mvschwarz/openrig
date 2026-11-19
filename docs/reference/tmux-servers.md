@@ -188,7 +188,8 @@ list empty while work is still running. Explicitly stopped seats are not labeled
 as unexpected loss. OpenRig does not terminate these processes.
 Live-pane samples are taken only on identity-check passes that already inspect
 native processes; if no such pass occurs before the loss, attribution remains
-unknown. A later check of previously sampled identities shares the existing
+unknown. On a host with only token-bound Claude seats, these native-process
+samples are not taken, so the process list remains empty. A later check of previously sampled identities shares the existing
 process-table reader and does not create a new polling loop.
 
 ## When the server stops answering

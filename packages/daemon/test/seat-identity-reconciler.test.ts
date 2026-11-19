@@ -410,10 +410,17 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     await rec.reconcileAll();
     expect(rec.backgroundWorkUnknown()).toMatchObject([{ processes: [{ pid: 12 }] }]);
     registry.mintOccupantTenure("n1", "handover", "second");
+    // Health serves the last completed sweep until the new tenure is reconciled.
+    expect((await (await app.request("/healthz")).json() as { backgroundWork: unknown }).backgroundWork)
+      .toMatchObject([{ processes: [{ pid: 12 }] }]);
+    await rec.reconcileAll();
     expect(rec.backgroundWorkUnknown()).toEqual([]);
     db.prepare("UPDATE sessions SET status = 'stopped' WHERE node_id = 'n1'").run();
+    await rec.reconcileAll();
     expect(rec.backgroundWorkUnknown()).toEqual([]);
     db.close();
+    const afterClose = await (await app.request("/healthz")).json() as { backgroundWork: unknown };
+    expect(afterClose.backgroundWork).toEqual([]);
   });
 
   it("does not retain descendants when the pane root changes identity between snapshots", async () => {
