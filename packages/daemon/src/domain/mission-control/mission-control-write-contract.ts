@@ -44,7 +44,7 @@ import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
@@ -625,6 +625,26 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
     const before = snapshotQitem(ask);
+    if (ask.relayedAnswers) {
+      input.appSubmission?.verify();
+      let receipt;
+      try {
+        receipt = this.queueRepo.writeRelayedAnswer({ qitemId: ask.qitemId, actorSession: input.actorSession,
+          identityProvenance: input.identityProvenance ?? undefined, nudge: input.notify,
+          direct: { questionId: input.questionId, optionId: input.optionId, text: input.decision, primaryUser } });
+      } catch (err) {
+        if (err instanceof QueueRepositoryError && err.code === "relayed_answer_refused") {
+          throw new MissionControlWriteContractError("answer_not_recorded", err.message);
+        }
+        throw err;
+      }
+      input.appSubmission?.checkpoint(receipt.item);
+      return this.recordAnswer(input, before, input.decision ?? input.optionId ?? "", {
+        outcome: receipt.unanswered.length ? "recorded" : "answered",
+        unanswered: (ask.humanQuestions ?? []).filter(q => receipt.unanswered.includes(q.id)).map(q => q.question),
+        ...(receipt.corrected ? { message: `Direct correction returned to ${ask.sourceSession} as ${receipt.replyQitemId}. The relay remains in history.` } : {}),
+      }, receipt.replyQitemId);
+    }
     const questions = ask.humanQuestions ?? [];
     const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession, { primaryUser });
     if (existing && (ask.state === "pending" || ask.state === "done")) {
