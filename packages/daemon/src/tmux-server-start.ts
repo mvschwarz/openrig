@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { NO_SESSION_BUS } from "./domain/seat-runtime-dir.js";
 
 /** tmux 3.3a–3.6 inherits its creating client's limits. This runs in that child only:
@@ -20,12 +19,14 @@ openrig_tmux_nofile() {
 openrig_tmux_nofile 2>/dev/null || printf '%s\\n' '${TMUX_SERVER_LIMIT_WARNING}' >&2
 `;
 
-/** #3253: the session bus address a terminal server this daemon process starts gets in its own process: one that can't
- *  connect (the unknown `disabled:` transport, as NO_SESSION_BUS), carrying a value made once per daemon process. tmux
- *  copies it into the new server's global environment, and the start gives the panes the real value back there only
- *  while that environment still holds exactly this address: a server another process started, or whose global
- *  environment a person's tmux configuration set (NO_SESSION_BUS included), is left as it is. */
-export const TMUX_SERVER_SESSION_BUS = `${NO_SESSION_BUS}openrig-server=${randomUUID().replaceAll("-", "")}`;
+/** #3253: the session bus address a terminal server OpenRig starts gets in its own process: one that can't connect (the
+ *  unknown `disabled:` transport, as NO_SESSION_BUS), marked as OpenRig's own. tmux copies it into the new server's
+ *  global environment, and a start gives the panes the real value back there only while that environment still holds
+ *  exactly this address: a server another process started, or whose global environment a person's tmux configuration
+ *  set (NO_SESSION_BUS included), is left as it is. A fixed value, not one made per daemon process: the server outlives
+ *  the daemon (`tmux -D`, the user scope), and a daemon that starts again on the same server finds it and gives the bus
+ *  back. Only OpenRig's own starts put it on that server, so "only our own value" holds across a restart. */
+export const TMUX_SERVER_SESSION_BUS = `${NO_SESSION_BUS}openrig=tmux-server`;
 
 /** #3253: the line that gives only OpenRig's own terminal-server process a session bus it can't reach. A systemd-enabled
  *  tmux moves every new pane into a tmux-spawn-*.scope through that bus (3.4: the server, right after the fork; 3.6: the

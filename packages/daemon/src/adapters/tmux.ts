@@ -1550,9 +1550,10 @@ export class TmuxAdapter {
   private scopeSkipLogged = false;
   /** #3253: a server start in progress, so concurrent callers wait for it, the global environment's bus included. */
   private serverStarting?: Promise<TmuxResult>;
-  /** #3253: a server this adapter started may still hold the unusable bus in its global environment (the start ran
-   *  past its wait, or giving the bus back failed): the next startServer that finds it up gives it back first. */
-  private sessionBusRestorePending = false;
+  /** #3253: the server may still hold the unusable bus in its global environment (this adapter's start ran past its
+   *  wait or failed to give the bus back, or an earlier daemon process stopped before giving it back): the next
+   *  startServer that finds it up gives it back first. True at first on Linux, so a restarted daemon checks once. */
+  private sessionBusRestorePending = process.platform === "linux";
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -1656,8 +1657,8 @@ export class TmuxAdapter {
   /** #3253: the server this start made has no session bus in its own process (TMUX_SERVER_NO_SESSION_BUS), and tmux
    *  copied that value into its global environment, which panes inherit. This gives the global environment the daemon's
    *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
-   *  holds this daemon process's own unusable address (TMUX_SERVER_SESSION_BUS), which no other process or tmux
-   *  configuration sets: a server someone else started, or a value set since, is left as it is. The read and the write
+   *  holds OpenRig's own unusable address (TMUX_SERVER_SESSION_BUS), which no other process or tmux configuration sets:
+   *  a server someone else started, or a value set since, is left as it is. The read and the write
    *  are two commands: a server-side check (`if-shell -F '#{==:#{DBUS_SESSION_BUS_ADDRESS},…}'`) reads the target
    *  session's environment before the global one, so on a server that already has a session with its own address (a
    *  retry) it would compare that one and leave the global as it is. The value goes in argv,

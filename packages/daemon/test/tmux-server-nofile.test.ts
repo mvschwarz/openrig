@@ -112,8 +112,33 @@ describe.skipIf(process.platform === "win32")("tmux server start without a sessi
     expect(result.stdout).toBe(TMUX_SERVER_SESSION_BUS);
   });
 
-  it("is the unknown disabled: transport, with a value unique to this daemon process", () => {
-    expect(TMUX_SERVER_SESSION_BUS).toMatch(/^disabled:openrig-server=[0-9a-f]{32}$/);
+  it("is the unknown disabled: transport, marked as OpenRig's own, the same in every daemon process", () => {
+    expect(TMUX_SERVER_SESSION_BUS).toBe("disabled:openrig=tmux-server");
+  });
+
+  it.skipIf(!tmux || process.platform !== "linux")("a daemon that starts again gives the bus back to a server still holding OpenRig's address, and only to that", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "or-nobus-restart-"));
+    const socket = join(dir, "socket");
+    const query = (...args: string[]) => execFileSync("tmux", ["-S", socket, ...args], { encoding: "utf8", timeout: 5000 });
+    const global = () => query("show-environment", "-g").split("\n").find(v => /^-?DBUS_SESSION_BUS_ADDRESS(=|$)/.test(v));
+    const adapter = () => new TmuxAdapter(execTmuxCommand, undefined, execArgvCommand, ["-f", "/dev/null", "-S", socket]);
+    vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/openrig-3253-bus");
+    vi.stubEnv("MANAGERPID", undefined);
+    try {
+      expect(await adapter().startServer()).toEqual({ ok: true });
+      // The daemon stopped before it gave the bus back: the server, which outlives it, still holds OpenRig's address.
+      query("set-environment", "-g", "DBUS_SESSION_BUS_ADDRESS", TMUX_SERVER_SESSION_BUS);
+      expect(await adapter().startServer()).toEqual({ ok: true });
+      expect(global()).toBe("DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/openrig-3253-bus");
+      // A plain disabled: (a person's own) is left as it is by a daemon that starts again.
+      query("set-environment", "-g", "DBUS_SESSION_BUS_ADDRESS", "disabled:");
+      expect(await adapter().startServer()).toEqual({ ok: true });
+      expect(global()).toBe("DBUS_SESSION_BUS_ADDRESS=disabled:");
+    } finally {
+      vi.unstubAllEnvs();
+      try { query("kill-server"); } catch { /* Only this test's exact private socket. */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.skipIf(!tmux || process.platform !== "linux").each([

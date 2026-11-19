@@ -556,6 +556,31 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
     });
   });
 
+  // G1m
+  it("#3253: a daemon that starts again on a server still holding OpenRig's address gives the bus back once", async () => {
+    await userManagerEnv(false);
+    vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+    const host = new FakeHost("no-manager", path.join(dir, "tmux", "openrig-restart"));
+    await observe(host, async () => {
+      // The server outlived a daemon that stopped before giving the bus back.
+      host.serverUp = true;
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
+      const restarted = new TmuxAdapter(host.exec);
+      expect(await restarted.startServer()).toMatchObject({ ok: true });
+      expect(host.starts).toEqual([]);
+      expect(host.setEnvironment).toEqual([["set-environment", "-g", "DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus"]]);
+      // Checked once per daemon: the next start that finds the server up neither reads nor writes.
+      host.calls.length = 0;
+      expect(await restarted.startServer()).toMatchObject({ ok: true });
+      expect(host.calls.filter(call => /show-environment|set-environment/.test(call))).toEqual([]);
+      // A plain disabled: is not OpenRig's: another restarted daemon leaves it as it is.
+      host.setEnvironment.length = 0;
+      host.globalEnv = "DBUS_SESSION_BUS_ADDRESS=disabled:\n";
+      expect(await new TmuxAdapter(host.exec).startServer()).toMatchObject({ ok: true });
+      expect(host.setEnvironment).toEqual([]);
+    });
+  });
+
   // G1j
   it("#3253: without a user manager, a launch that finds no server tries the running server, then starts it as startServer does", async () => {
     vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");
