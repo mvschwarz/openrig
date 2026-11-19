@@ -2731,13 +2731,24 @@ describe("GET /api/slices observed queue counts", () => {
 
     it("keeps captured snapshot roots unchanged in sliceRoots during withResolvedRoots", () => {
       const alphaExtra = path.join(root, "alpha-snapshot-missions");
+      const alphaSlicePath = path.join(alphaExtra, "shipping", "slices", "01-release");
       write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.ALPHA", "active", "Mission"));
-      write(path.join(alphaExtra, "shipping", "slices", "01-release", "SPEC.md"), nodeBytes("SLICE.ALPHA", "active", "Slice"));
+      write(path.join(alphaSlicePath, "SPEC.md"), nodeBytes("SLICE.ALPHA", "active", "Slice"));
 
       const lateTarget = path.join(root, "late-target");
       fs.mkdirSync(path.join(lateTarget, "sub"), { recursive: true });
       write(path.join(lateTarget, "missions", "late-mission", "SPEC.md"), nodeBytes("M.LATE", "active", "Late Mission"));
       write(path.join(lateTarget, "missions", "late-mission", "slices", "02-late", "SPEC.md"), nodeBytes("SLICE.LATE", "active", "Late Slice"));
+      // Flat directory with no lexical sibling under root/beta/missions; walking an unresolved `..`
+      // spelling after late-link appears would publish it as a false flat slice under beta/missions.
+      write(path.join(lateTarget, "missions", "orphan-mission", "SPEC.md"), nodeBytes("SLICE.ORPHAN", "active", "Orphan"));
+      // Lexical sibling under root/beta/missions; path.join(unresolvedRoot, "late-mission") collapses
+      // here and would leak 09-beta-sibling if the missing `..` root were still walked mid-operation.
+      write(path.join(root, "beta", "missions", "late-mission", "SPEC.md"), nodeBytes("M.BETA.SIB", "active", "Beta Sibling"));
+      write(
+        path.join(root, "beta", "missions", "late-mission", "slices", "09-beta-sibling", "SPEC.md"),
+        nodeBytes("SLICE.BETA.SIB", "active", "Beta Sibling Slice"),
+      );
 
       const lateLink = path.join(root, "beta", "late-link");
       fs.mkdirSync(path.dirname(lateLink), { recursive: true });
@@ -2763,17 +2774,20 @@ describe("GET /api/slices observed queue counts", () => {
             const snapshotRoot = indexer.slicesRoot;
             expect(snapshotRoot).toBe(unresolvedRoot);
             expect(indexer.isReady()).toBe(true);
-            expect(indexer.list().map((s) => s.name)).toEqual(["01-release"]);
+            const beforeLink = indexer.list().map((s) => [s.name, s.missionId, s.slicePath]);
+            expect(beforeLink).toEqual([["01-release", "shipping", alphaSlicePath]]);
             expect(indexer.missionAuthoredStatuses()).toEqual({ shipping: { authoredStatus: "active" } });
 
-            // Create the symlink mid-operation; sliceRoots must use the snapshot roots as captured
-            // rather than re-resolving unresolvedRoot to lateTarget/missions mid-request.
+            // Create the symlink mid-operation; a `..` root that was missing at capture must stay
+            // excluded from walks for the rest of the operation rather than walking the unresolved
+            // `..` string and collapsing into lexical siblings or publishing a false flat slice.
             const callsBeforeLink = unresolvedRealpathCalls;
             fs.symlinkSync(path.join(lateTarget, "sub"), lateLink, "dir");
             indexer.invalidate();
             const midOp = indexer.list();
             expect(indexer.slicesRoot).toBe(snapshotRoot);
-            expect(midOp.find((s) => s.name === "02-late")).toBeUndefined();
+            expect(midOp.map((s) => [s.name, s.missionId, s.slicePath])).toEqual(beforeLink);
+            expect(indexer.missionAuthoredStatuses()).toEqual({ shipping: { authoredStatus: "active" } });
             expect(unresolvedRealpathCalls).toBe(callsBeforeLink);
           });
         });
@@ -2783,16 +2797,141 @@ describe("GET /api/slices observed queue counts", () => {
         indexer.withResolvedRoots(() => {
           expect(indexer.slicesRoot).toBe(path.join(lateTarget, "missions"));
           expect(unresolvedRealpathCalls).toBe(callsBeforeNextOp + 1);
-          indexer.invalidate();
           const nextOp = indexer.list();
-          expect(nextOp.find((s) => s.name === "02-late")?.slicePath).toBe(
-            path.join(lateTarget, "missions", "late-mission", "slices", "02-late"),
-          );
+          expect(nextOp.map((s) => [s.name, s.missionId, s.slicePath])).toEqual([
+            ["01-release", "shipping", alphaSlicePath],
+            ["02-late", "late-mission", path.join(lateTarget, "missions", "late-mission", "slices", "02-late")],
+            ["orphan-mission", null, path.join(lateTarget, "missions", "orphan-mission")],
+          ]);
         });
       } finally {
         spy.mockRestore();
       }
     });
+
+    it("excludes unreadable .. roots from walks and fails observed counts closed to unknown", () => {
+      const alphaExtra = path.join(root, "alpha-unreadable-missions");
+      const alphaSlicePath = path.join(alphaExtra, "shipping", "slices", "01-release");
+      write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.ALPHA", "active", "Mission"));
+      write(path.join(alphaSlicePath, "SPEC.md"), nodeBytes("SLICE.ALPHA", "active", "Slice"));
+      row("alpha-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-release"]);
+
+      const target = path.join(root, "unreadable-target");
+      fs.mkdirSync(path.join(target, "sub"), { recursive: true });
+      write(path.join(target, "missions", "late-mission", "SPEC.md"), nodeBytes("M.LATE", "active", "Late Mission"));
+      write(path.join(target, "missions", "late-mission", "slices", "02-late", "SPEC.md"), nodeBytes("SLICE.LATE", "active", "Late Slice"));
+      write(path.join(target, "missions", "orphan-mission", "SPEC.md"), nodeBytes("SLICE.ORPHAN", "active", "Orphan"));
+      write(
+        path.join(root, "beta", "missions", "late-mission", "slices", "09-beta-sibling", "SPEC.md"),
+        nodeBytes("SLICE.BETA.SIB", "active", "Beta Sibling Slice"),
+      );
+
+      const link = path.join(root, "beta", "unreadable-link");
+      fs.mkdirSync(path.dirname(link), { recursive: true });
+      fs.symlinkSync(path.join(target, "sub"), link, "dir");
+      const unreadableRoot = `${link}${path.sep}..${path.sep}missions`;
+
+      const indexer = new SliceIndexer({
+        db,
+        projectId: "alpha",
+        slicesRoot: alphaExtra,
+        additionalSliceRoots: [unreadableRoot],
+        dogfoodEvidenceRoot: null,
+      });
+
+      const origNative = fs.realpathSync.native;
+      let realpathFaultHits = 0;
+      const spy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+        if (String(p) === unreadableRoot) {
+          realpathFaultHits++;
+          throw Object.assign(new Error("injected unreadable .. root EACCES"), { code: "EACCES" });
+        }
+        return origNative(p, options as never);
+      }) as typeof fs.realpathSync.native);
+      vi.mocked(fs.readdirSync).mockClear();
+      try {
+        indexer.withResolvedRoots(() => {
+          const entries = indexer.list();
+          const counts = indexer.observedQueueCounts(entries);
+          expect(realpathFaultHits).toBeGreaterThan(0);
+          expect(counts.get(alphaSlicePath)).toBeNull();
+          expect(entries.map((s) => [s.name, s.missionId, s.slicePath])).toEqual([
+            ["01-release", "shipping", alphaSlicePath],
+          ]);
+          const readdirOnUnresolved = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === unreadableRoot);
+          expect(readdirOnUnresolved).toHaveLength(0);
+        });
+      } finally {
+        spy.mockRestore();
+      }
+
+      // Positive control: when the .. root resolves cleanly, observed counts recover and list the physical target.
+      indexer.withResolvedRoots(() => {
+        const entries = indexer.list();
+        const counts = indexer.observedQueueCounts(entries);
+        expect(entries.map((s) => [s.name, s.missionId, s.slicePath])).toEqual([
+          ["01-release", "shipping", alphaSlicePath],
+          ["02-late", "late-mission", path.join(target, "missions", "late-mission", "slices", "02-late")],
+          ["orphan-mission", null, path.join(target, "missions", "orphan-mission")],
+        ]);
+        expect(counts.get(alphaSlicePath)).toEqual({ ...ZERO, blocked: 1 });
+      });
+    });
+
+    it.each(["ENOENT", "EACCES"] as const)(
+      "does not drop an ambiguous duplicate candidate via a redundant second realpath in resolveProjectId (%s)",
+      async (code) => {
+        const alphaPrimary = path.join(root, "alpha", "missions");
+        addSlice("alpha", "shipping", "01-release", "active", "SLICE.ALPHA.PRIMARY");
+        addSlice("alpha", "shipping", "02-unique", "active", "SLICE.ALPHA.UNIQUE");
+
+        const alphaDuplicate = path.join(root, "alpha-duplicate-missions");
+        write(path.join(alphaDuplicate, "shipping", "SPEC.md"), nodeBytes("M.ALPHA.DUP", "active", "Duplicate Mission"));
+        const hiddenSlicePath = path.join(alphaDuplicate, "shipping", "slices", "01-release");
+        write(path.join(hiddenSlicePath, "SPEC.md"), nodeBytes("SLICE.ALPHA.DUP", "active", "Duplicate Slice"));
+        const hiddenSliceReal = fs.realpathSync.native(hiddenSlicePath);
+
+        row("dup-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-release"]);
+        row("unique-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:02-unique"]);
+
+        catalog([{ id: "alpha", root: "alpha" }]);
+        const { app } = route("alpha", true, alphaPrimary, [alphaDuplicate]);
+
+        const origNative = fs.realpathSync.native;
+        let hiddenRealpathCalls = 0;
+        let secondCallFailures = 0;
+        const spy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+          if (String(p) === hiddenSliceReal) {
+            hiddenRealpathCalls++;
+            if (hiddenRealpathCalls > 1) {
+              secondCallFailures++;
+              throw Object.assign(new Error(`injected second realpath ${code}`), { code });
+            }
+          }
+          return origNative(p, options as never);
+        }) as typeof fs.realpathSync.native);
+        try {
+          const entries = await list(app);
+          expect(entries.find((s) => s.name === "01-release")).toMatchObject({
+            queueCounts: ZERO,
+            derivedState: "none",
+          });
+          expect(entries.find((s) => s.name === "02-unique")).toMatchObject({
+            queueCounts: { ...ZERO, blocked: 1 },
+            derivedState: "blocked",
+          });
+          expect(hiddenRealpathCalls).toBe(1);
+          expect(secondCallFailures).toBe(0);
+
+          hiddenRealpathCalls = 0;
+          expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual(["02-unique"]);
+          expect(hiddenRealpathCalls).toBe(1);
+          expect(secondCallFailures).toBe(0);
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
 
     it("keeps unrelated slice counts readable and preserves ambiguity checks when a cached folder moves in a README-only mission", async () => {
       const missionRoot = path.join(root, "alpha", "missions", "shipping");

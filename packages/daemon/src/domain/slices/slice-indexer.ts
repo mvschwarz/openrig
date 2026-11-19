@@ -96,6 +96,11 @@ function canonicalPhysicalPath(absPath: string): string | null {
   return resolved.ok ? resolved.path : null;
 }
 
+type ConfiguredRootResolution = {
+  identity: string;
+  status: "ok" | "missing" | "unreadable";
+};
+
 /** The absolute identity of a configured root, used for the walk, the duplicate check and every
  *  published path. A relative spelling is made absolute from the working directory. The kernel
  *  applies a `..` component to the directory a symlink points at, but `path.resolve` removes it
@@ -104,16 +109,22 @@ function canonicalPhysicalPath(absPath: string): string | null {
  *  (`fs.realpathSync.native`; the JavaScript `fs.realpathSync` also resolves the path as text
  *  first, so it would repeat the error). A root without `..` is normalized as text only, which
  *  is exact for it and keeps a symlinked root under its configured name. If a root with `..`
- *  cannot be resolved (missing, unreadable) its absolute spelling is kept as written, so the
- *  filesystem still decides what a read of it does, as before. */
-function configuredRootIdentity(root: string): string {
-  if (root.length === 0) return root;
+ *  cannot be resolved, its absolute spelling is retained only as identity metadata while its
+ *  status marks it missing (`ENOENT`) or unreadable so walks never pass an unresolved `..`
+ *  string to `fs.readdirSync` and `path.join`. */
+function resolveConfiguredRoot(root: string): ConfiguredRootResolution {
+  if (root.length === 0) return { identity: root, status: "missing" };
   const absolute = path.isAbsolute(root) ? root : process.cwd() + path.sep + root;
-  if (!absolute.split(/[\\/]+/).includes("..")) return path.resolve(absolute);
+  if (!absolute.split(/[\\/]+/).includes("..")) {
+    return { identity: path.resolve(absolute), status: "ok" };
+  }
   try {
-    return fs.realpathSync.native(absolute);
-  } catch {
-    return absolute;
+    return { identity: fs.realpathSync.native(absolute), status: "ok" };
+  } catch (err) {
+    return {
+      identity: absolute,
+      status: (err as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable",
+    };
   }
 }
 
@@ -428,7 +439,7 @@ export class SliceIndexer {
   readonly missionId?: string;
   private readonly configuredSlicesRoot: string;
   private readonly configuredAdditionalSliceRoots: string[];
-  private resolvedRootsForOperation: string[] | null = null;
+  private resolvedRootsForOperation: ConfiguredRootResolution[] | null = null;
   readonly dogfoodEvidenceRoot: string | null;
   /** Workflows in Spec Library v0: exposed read-only so the slices
    *  route's `boundToWorkflow` lens filter can call
@@ -466,12 +477,12 @@ export class SliceIndexer {
 
   /** Current filesystem identity of the configured root, resolved at read time. */
   get slicesRoot(): string {
-    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots())[0] ?? "";
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots())[0]?.identity ?? "";
   }
 
   /** Current filesystem identities of the configured additional roots. */
   get additionalSliceRoots(): string[] {
-    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).slice(1);
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).slice(1).map((root) => root.identity);
   }
 
   /** Keep one configured-root snapshot across a synchronous compound read. */
@@ -949,7 +960,7 @@ export class SliceIndexer {
       locations.push(location);
     };
 
-    for (const root of this.sliceRoots(additionalRoots)) {
+    for (const root of this.sliceRoots(additionalRoots, onReadError)) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
@@ -1035,7 +1046,7 @@ export class SliceIndexer {
     const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
     const claims = new Map<string, Set<string>>();
     const seenRoots = new Set<string>();
-    for (const configuredRoot of this.sliceRoots(additionalRoots)) {
+    for (const configuredRoot of this.sliceRoots(additionalRoots, onReadError)) {
       let root: string;
       try {
         root = fs.realpathSync.native(configuredRoot);
@@ -1185,29 +1196,37 @@ export class SliceIndexer {
   }
 
   /** The distinct, absolute roots to scan, each by its filesystem identity (see
-   *  `configuredRootIdentity`). Every slice path the indexer produces is built from
+   *  `resolveConfiguredRoot`). Every slice path the indexer produces is built from
    *  these, so the walk, the duplicate check and the published paths name the same
    *  directory, and a client sees absolute paths whatever its working directory.
    *  Inside `withResolvedRoots`, the captured snapshot roots are used as they are
-   *  so one request does not re-resolve them mid-operation. */
-  private sliceRoots(additionalRoots: readonly string[] = []): string[] {
+   *  so one request does not re-resolve them mid-operation. A `..` root that was
+   *  missing at capture stays excluded for that operation, and an unreadable `..`
+   *  root reports a read error and stays excluded rather than passing an unresolved
+   *  `..` spelling to `fs.readdirSync` and `path.join`. */
+  private sliceRoots(additionalRoots: readonly string[] = [], onReadError?: () => void): string[] {
     const configuredRoots = this.resolvedRootsForOperation ?? this.resolveConfiguredRoots();
     const roots = [
       ...configuredRoots,
-      ...additionalRoots.map(configuredRootIdentity),
-    ].filter((root) => root.length > 0);
+      ...additionalRoots.map(resolveConfiguredRoot),
+    ];
     const seen = new Set<string>();
     const out: string[] = [];
     for (const root of roots) {
-      if (seen.has(root)) continue;
-      seen.add(root);
-      out.push(root);
+      if (root.status === "missing") continue;
+      if (root.status === "unreadable") {
+        onReadError?.();
+        continue;
+      }
+      if (root.identity.length === 0 || seen.has(root.identity)) continue;
+      seen.add(root.identity);
+      out.push(root.identity);
     }
     return out;
   }
 
-  private resolveConfiguredRoots(): string[] {
-    return [this.configuredSlicesRoot, ...this.configuredAdditionalSliceRoots].map(configuredRootIdentity);
+  private resolveConfiguredRoots(): ConfiguredRootResolution[] {
+    return [this.configuredSlicesRoot, ...this.configuredAdditionalSliceRoots].map(resolveConfiguredRoot);
   }
 
   private toListEntry(location: SliceLocation, served: Set<string> | null): SliceListEntry {

@@ -412,9 +412,10 @@ function resolveSliceProjectLookup(
   // The resolver is request-local. Reuse inference only for the same canonical
   // project/mission-root matches, keeping the two containment relations distinct.
   const inferredByContainment = new Map<string, { id: string; root: string }>();
-  const resolveProjectId = (slicePath: string): string | null => {
-    const actualSlicePath = tryRealpath(slicePath);
-    if (!actualSlicePath) return null;
+  // `observedQueueCounts` passes the canonical physical path already established
+  // by `canonicalizeCountPath`, so avoid a redundant second realpath whose failure
+  // would silently drop an ambiguous candidate.
+  const resolveProjectId = (actualSlicePath: string): string | null => {
     if (explicitProjectId && explicitRoots.some((root) => isInsideDir(root, actualSlicePath))) return explicitProjectId;
     const matching = projects.flatMap((project) => {
       const projectRootContains = project.root !== null && isInsideDir(project.root, actualSlicePath);
