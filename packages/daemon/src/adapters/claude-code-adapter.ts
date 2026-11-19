@@ -1,6 +1,6 @@
 import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
-import { operationalLaunchArgs } from "./kernel-authority.js";
+import { claudeSettingsTransportProblem, operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
@@ -475,6 +475,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
       const forkSessionId = this.sessionIdFactory();
       const launchArgs = permissionArgs(forkSessionId);
+      const settingsProblem = claudeSettingsTransportProblem(launchArgs);
+      if (settingsProblem) return { ok: false, error: settingsProblem };
       const permissionMode = permissionArg(launchArgs);
       const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
@@ -501,6 +503,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const permissionMode = permissionArg(launchArgs);
     const nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null);
+    const settingsProblem = claudeSettingsTransportProblem(managed || (opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable) ? nativeArgs : launchArgs);
+    if (settingsProblem) return { ok: false, error: settingsProblem };
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;

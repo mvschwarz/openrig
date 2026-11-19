@@ -55,6 +55,30 @@ function makeBinding(cwd = "/project"): NodeBinding {
   };
 }
 
+it.each(["fresh", "resume", "fork"] as const)("refuses oversized composed Claude settings before %s input", async kind => {
+  const tmux = mockTmux();
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+  const deny = Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`);
+  const result = await adapter.launchHarness({ ...makeBinding(), claudePermissions: { deny } }, {
+    name: "dev-builder@workshop", ...(kind === "resume" ? { resumeToken: "previous" } : {}),
+    ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent" } } : {}),
+  });
+  expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/--settings.*bytes/) });
+  expect(tmux.sendText).not.toHaveBeenCalled();
+  expect(tmux.sendKeys).not.toHaveBeenCalled();
+});
+
+it("checks the captured settings actually sent on a provider continuation", async () => {
+  const tmux = mockTmux();
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+  const result = await adapter.launchHarness({ ...makeBinding(), claudeExecutable: "/native/claude",
+    claudeLaunch: { args: [`--settings=${JSON.stringify({ custom: "x".repeat(131072) })}`], warnings: [] } },
+  { name: "dev-builder@workshop", resumeToken: "previous" });
+  expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/--settings.*bytes/) });
+  expect(tmux.sendText).not.toHaveBeenCalled();
+  expect(tmux.sendKeys).not.toHaveBeenCalled();
+});
+
 it("shares a poll's Claude idle-shell listings without collapsing each two-sample proof", async () => {
   let reads = 0;
   const startedAt = "Sat Jan  1 12:00:00 2000";

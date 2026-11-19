@@ -255,6 +255,11 @@ also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings
 arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
 not establish support by every Claude version.
 
+Launch and resume also check the final composed `--settings` argument against OpenRig's
+inline transport bound before sending input. An oversized argument is refused with its UTF-8
+byte count and the bound; reduce the inline rules/settings before retrying. Rules are never
+truncated or dropped to fit. This check does not expand or rewrite a captured settings filename.
+
 The initial spec records the rules on the stable seat. For an existing seat, put the
 complete replacement in a JSON file and use the existing audited permission command:
 

@@ -2,7 +2,7 @@ import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, ty
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
-import { operationalLaunchArgs } from "./kernel-authority.js";
+import { claudeSettingsTransportProblem, operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -156,6 +156,8 @@ export class ClaudeResumeAdapter {
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
     const nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null);
+    const settingsProblem = claudeSettingsTransportProblem(managed || (continuation?.args && executable) ? nativeArgs : launchArgs);
+    if (settingsProblem) return { ok: false, code: "resume_failed", message: settingsProblem };
     const cmd = managed ? managed.command(nativeArgs, claudeResumeLaunchEnv(resumeToken!))
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 

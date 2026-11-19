@@ -36,6 +36,28 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it("refuses oversized composed settings before restoring a Claude seat", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
+    args[14] = { deny: Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`) };
+    const result = await adapter.resume(...args);
+    expect(result).toMatchObject({ ok: false, message: expect.stringMatching(/--settings.*bytes/) });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("checks the captured settings actually sent by a provider restore", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
+    args[16] = "/native/claude";
+    args[19] = { args: ["--settings", JSON.stringify({ custom: "x".repeat(131072) })], warnings: [] };
+    const result = await adapter.resume(...args);
+    expect(result).toMatchObject({ ok: false, message: expect.stringMatching(/--settings.*bytes/) });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it("warning-only capture on a classic resume still dispatches the ordinary command", async () => {
     const tmux = mockTmux();
     const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
