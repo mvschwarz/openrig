@@ -166,6 +166,8 @@ it.each([
     "─".repeat(80), "  ? for shortcuts", ""].join("\n")],
   ["the menu quoted in history above a multiline draft", [...LIMIT_MENU.split("\n"), "✻ Worked for 2s", "", "─".repeat(80), "❯ please choose:",
     "  1. Stop and wait", "  2. Switch to usage credits", "─".repeat(80), "  ? for shortcuts", ""].join("\n")],
+  ["the menu quoted above the unframed input box (#808's layout)", [...LIMIT_MENU.split("\n"), "", "❯ ", "  ⏵⏵ auto mode on (shift+tab to cycle)", ""].join("\n")],
+  ["a dismissed menu followed by Claude's reply", [...LIMIT_MENU.split("\n"), "● Waiting for the limit to reset before continuing.", ""].join("\n")],
 ] as const)("control: after a fresh Stop, %s isn't read as a menu and delivers", async (_name, frame) => {
   const f = fixture(frame);
   await f.hook("Stop", null, 1_000);

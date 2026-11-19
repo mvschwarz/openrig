@@ -329,14 +329,17 @@ function findCurrentClaudeConfirmMenu(paneContent: string): string | null {
   return null;
 }
 
-/** Claude's cursor on a numbered option (`❯ N.`) in the screen's bottom block: up to 40 non-blank rows, ending at a rule
- *  or at one of Claude's output or timer rows (⏺, ✻), so a tall menu's cursor is found and older output isn't read. */
-function findClaudeMenuCursorInBottomBlock(paneContent: string): string | null {
+// The option labels of Claude Code's usage-limit menu (its rate-limit options dialog, read from the 2.1.282 bundle),
+// with or without the cursor and number.
+const CLAUDE_LIMIT_MENU_OPTION = /^(?:❯\s*)?(?:\d+\.\s+)?(?:Stop and wait for limit to reset|Switch to usage(?: credits)?\b|Add funds to continue with\b|Upgrade your plan\b|Ask your admin for more usage|Wait here, then continue automatically\b|Don.t continue automatically\b)/;
+/** A usage-limit menu option in the screen's bottom block: up to 40 non-blank rows, ending at one of Claude's output or
+ *  timer rows (⏺, ●, ✻), so a reply that came after a dismissed menu isn't read as the menu. */
+function findClaudeLimitMenuInBottomBlock(paneContent: string): string | null {
   const lines = paneContent.split("\n").map(line => line.trim()).filter(line => line.length > 0).slice(-40);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
-    if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
-    if (/^[▔─━═-]{3,}$/.test(line) || /^[⏺✻] /.test(line)) break;
+    if (CLAUDE_LIMIT_MENU_OPTION.test(line)) return truncateEvidence(line);
+    if (/^[⏺●✻] /.test(line)) break;
   }
   return null;
 }
@@ -909,15 +912,16 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
     : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
   const confirmMenu = options.runtime === undefined || options.runtime === "claude-code" ? findCurrentClaudeConfirmMenu(paneContent) : null;
-  // A current Claude menu replaces the input box. In the dialogue-only read, Claude's cursor on a numbered row in the
-  // bottom block, with no Claude input box drawn, is a current menu, whatever its footer, rows or height. Quoted history
-  // sits above an input box and a draft, multiline included, inside one (its input line, closing rule and footer), so
-  // neither counts.
-  const claudeInputBox = claudeComposer?.framed === true
+  // Claude's usage-limit menu replaces the input box, and some of its options spend money. In the dialogue-only read, its
+  // own option text in the bottom block with no Claude input box drawn refuses, whatever the menu's layout. Any input box
+  // counts (framed, unframed above the mode bar, or an input line, closing rule and footer, multiline drafts included), so
+  // a quoted menu above one, or a draft inside one, doesn't. A version whose labels differ is covered after a usage-limit
+  // hook by the full read below.
+  const claudeInputBox = claudeComposer !== null
     || (currentComposer !== null && currentComposer.markerLine !== null && currentComposer.closingRuleLine !== null);
-  const menuInPlaceOfInputBox = options.currentClaudeDialogueOnly && options.runtime === "claude-code" && !claudeInputBox
-    ? findClaudeMenuCursorInBottomBlock(paneContent) : null;
-  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ?? menuInPlaceOfInputBox ??
+  const limitMenu = options.currentClaudeDialogueOnly && options.runtime === "claude-code" && !claudeInputBox
+    ? findClaudeLimitMenuInBottomBlock(paneContent) : null;
+  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ?? limitMenu ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {
@@ -4684,12 +4688,16 @@ export class SessionTransport {
     const probe = input.readinessFromPaneOnly && input.runtime === "claude-code"
       ? (await this.readAtReadableSize(input.sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readPane)).value
       : await readPane();
-    // After a fresh usage-limit hook only a pane that positively reads an input box (idle, or a turn running) delivers.
-    // Anything else (an unreadable capture, or a menu drawn so its cursor row is outside the scan) refuses before any
-    // write, as the choice prompt it may be. This is the one deliberate stop here; every other path keeps failing open.
-    if (freshUsageLimit && probe.state !== "idle" && probe.state !== "running") {
-      return { ...probe, state: "needs_input", reason: "selection_prompt",
-        evidence: probe.evidence ?? "usage-limit hook; the pane didn't read as an input box" };
+    // After a fresh usage-limit hook the full read is a veto only. Unless the pane reads idle or a running turn (the
+    // heuristic for an input box), it refuses before any write as the choice prompt it may be: an unreadable capture,
+    // or a menu drawn outside the scan. This is the one deliberate stop here; every other path keeps failing open.
+    // Otherwise the fresh hook's own verdict stands, as it did before this read.
+    if (freshUsageLimit && hookActivity) {
+      if (probe.state !== "idle" && probe.state !== "running") {
+        return { ...probe, state: "needs_input", reason: "selection_prompt",
+          evidence: probe.evidence ?? "usage-limit hook; the pane didn't read as an input box" };
+      }
+      return hookActivity;
     }
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)

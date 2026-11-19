@@ -1303,27 +1303,11 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       occurredAt: new Date(fixedNow.getTime() - 10_000).toISOString(),
     });
     const { sendText } = spies();
-    const t = makeTransport(mockTmux({ capturePaneContent: async () => "Unrecognized terminal content", sendText }), { now: () => fixedNow });
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => SHIP_PROMPT, sendText }), { now: () => fixedNow });
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(true);
     expect(r.activity === undefined || r.activity?.evidenceSource === "runtime_hook").toBe(true);
     expect(sendText).toHaveBeenCalled();
-  });
-
-  // A current Claude menu (its cursor on a numbered option, no input box drawn) refuses even after a fresh idle hook:
-  // Enter or a digit there picks an option. This cell used SHIP_PROMPT above as the pane a fresh hook overrides.
-  it("a current Claude menu refuses after a fresh idle hook, before any write", async () => {
-    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
-    agentActivityStore.recordHookEvent({
-      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Stop",
-      occurredAt: new Date(fixedNow.getTime() - 10_000).toISOString(),
-    });
-    const { sendText, sendKeys } = spies();
-    const t = makeTransport(mockTmux({ capturePaneContent: async () => SHIP_PROMPT, sendText, sendKeys }), { now: () => fixedNow });
-    const r = await t.send("dev-impl@my-rig", "hi");
-    expect(r).toMatchObject({ ok: false, reason: "target_needs_input" });
-    expect(sendText).not.toHaveBeenCalled();
-    expect(sendKeys).not.toHaveBeenCalled();
   });
 
   // FR-1c: a permission question with no visible selector is still detected (Codex/Claude robustness).
