@@ -261,7 +261,7 @@ export class InboundRouter {
   }
 
   /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
-  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string; attachmentsChars?: number } {
+  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string; attachments?: string } {
     const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
@@ -296,7 +296,7 @@ export class InboundRouter {
     return {
       summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}${sender} via Slack: ${headline.slice(0, 90)}`,
       body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}${correlationQitemId ? `\nIn reply to: ${correlationQitemId}` : ""}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
-      ...(attachments ? { attachmentsChars: attachments.length } : {}),
+      ...(attachments ? { attachments } : {}),
     };
   }
 
@@ -318,7 +318,7 @@ export class InboundRouter {
   private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true): Promise<{
     landed: boolean;
     qitemId?: string;
-    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered";
+    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered" | "question-selection-required";
     correlationQitemId?: string;
     replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
@@ -370,7 +370,7 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body: incomingBody, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
+      const { summary, body: incomingBody, attachments } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
@@ -392,11 +392,38 @@ export class InboundRouter {
       // words for whoever it reached.
       const settles = route.correlationQitemId === undefined || this.deps.queue.routesToAsker?.(route.correlationQitemId, route.destination) !== false;
       const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined && settles;
-      if (answerable && route.correlationQitemId && correlated?.relayedAnswers?.returnId
-        && !correlated.humanQuestions?.length && ev.text?.trim() && this.deps.queue.answerRelayedAsk) {
+      if (answerable && route.correlationQitemId && correlated?.relayedAnswers && ev.text?.trim() && this.deps.queue.answerRelayedAsk) {
+        const journal = correlated.relayedAnswers;
+        const questions = correlated.humanQuestions ?? [];
+        const relayed = new Set(journal.relays.map(answer => answer.questionId));
+        const open = correlated.state === "pending"
+          ? unansweredQuestions(questions.filter(q => !relayed.has(q.id)), correlated.humanAnswers ?? {}) : [];
+        const candidates = correlated.state === "pending" ? open : questions.filter(q => relayed.has(q.id));
+        // A retry must use its original question, even if the first write completed the ask.
+        const replay = [...journal.corrections, ...(journal.directAnswers ?? [])].find(answer => answer.eventId === eventId);
+        const selection = /^question:([^\s]+)(?:\r?\n|$)/.exec(ev.text);
+        const named = selection?.[1];
+        const eligible = named && correlated.state === "pending" ? [...open, ...questions.filter(q => relayed.has(q.id))] : candidates;
+        const questionId = replay ? replay.questionId ?? undefined
+          : selection ? ev.text.slice(selection[0].length).trim() ? eligible.find(q => q.id === named)?.id : undefined
+          : candidates.length === 1 ? candidates[0]?.id : undefined;
+        if (questions.length && !questionId) {
+          // This message was refused, not queued for later inference against a different set of questions.
+          this.deps.seen.mark(eventId, "question-selection-required");
+          const ids = [...new Set(eligible.map(q => q.id))].map(id => `\`question:${id}\``).join(", ");
+          try {
+            await this.deps.acknowledgeAnswer?.({ channel: ev.channel, threadTs: ev.thread_ts ?? ts, text: ids
+              ? `Your reply wasn't recorded as an answer. Put the question on the first line (${ids}), then your answer on the next line, or use its buttons.`
+              : "Your reply wasn't recorded as an answer. No question is open for this reply." });
+          } catch (error) {
+            this.deps.log?.(`question selection notice failed qitem=${route.correlationQitemId}: ${String(error)}`);
+          }
+          return { landed: false, reason: "question-selection-required", correlationQitemId: route.correlationQitemId };
+        }
         try {
           const correction = this.deps.queue.answerRelayedAsk({ qitemId: route.correlationQitemId, actorSession: who.source,
-            identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId, direct: { text: ev.text, eventId } });
+            identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId, direct: { text: ev.text, eventId, questionId,
+              ...(attachments ? { attachments: { body: attachments, tag: `${SLACK_ATTACHMENTS_TAG_PREFIX}${attachments.length}` } } : {}) } });
           if (correction.replyQitemId && route.arrivalThread) {
             this.deps.recordArrivalThread?.({ qitemId: correction.replyQitemId, ...route.arrivalThread });
           }
@@ -444,7 +471,7 @@ export class InboundRouter {
           destination: route.destination,
           priority: "routine",
           tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? []),
-            ...(attachmentsChars ? [`${SLACK_ATTACHMENTS_TAG_PREFIX}${attachmentsChars}`] : [])],
+            ...(attachments ? [`${SLACK_ATTACHMENTS_TAG_PREFIX}${attachments.length}`] : [])],
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
@@ -528,7 +555,7 @@ export class InboundRouter {
       this.deps.deadLetter.append(ev, attempts + 1);
       this.deps.log?.(`dead-lettered ts=${ev.ts} (attempt ${attempts + 1})`);
     }
-    const disposition = r.landed ? "accepted" : r.reason === "unregistered" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive") ? "ignored" : "dead-lettered";
+    const disposition = r.landed ? "accepted" : r.reason === "unregistered" || r.reason === "question-selection-required" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive") ? "ignored" : "dead-lettered";
     return { landed: r.landed, qitemId: r.qitemId, disposition, reason: r.reason, correlationQitemId: r.correlationQitemId, replyResolution: r.replyResolution };
   }
 

@@ -50,6 +50,68 @@ describe("structured human questions (#193)", () => {
   });
   afterEach(() => { for (const stop of stops.splice(0)) stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
+  async function relayedSlack(extraQuestion = false) {
+    const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: extraQuestion
+      ? [...questions, { ...questions[1]!, id: "third", question: "Third?" }] : questions });
+    repo.writeRelayedAnswer({ qitemId, actorSession: request.sourceSession, nudge: false,
+      relay: { questionId: "db", attributedTo: human, channel: "voice", text: "Postgres." } });
+    const acknowledgeAnswer = vi.fn(async () => true);
+    const makeRouter = (seen: string) => new InboundRouter({
+      queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+      seen: new SeenStore(join(home, seen)), deadLetter: new DeadLetterStore(join(home, "events.jsonl")),
+      destination: request.sourceSession, resolveSender: () => ({ admitted: true, source: human, entityId: "human-founder" }),
+      resolveRoute: () => ({ destination: request.sourceSession, correlationQitemId: qitemId }), acknowledgeAnswer,
+      files: { transfer: async () => ({ stored: [{ localPath: "/fixture/report.pdf", name: "report.pdf", bytes: 7 }],
+        failed: [{ name: "missing.txt", error: "not available" }] }) },
+    });
+    const reply = (ts: string, text: string) => ({ type: "message", channel: "C-TEST", user: "UFOUNDER", thread_ts: "1.1", ts, text });
+    return { qitemId, makeRouter, acknowledgeAnswer, reply };
+  }
+
+  it("places a typed answer on the only uncovered question of a partial relay", async () => {
+    const f = await relayedSlack();
+    const text = "  Next week, please.\n";
+    await expect(f.makeRouter("seen").route(f.reply("2.1", text))).resolves.toMatchObject({ landed: true });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "done", humanAnswers: { ship: { text } } });
+  });
+
+  it("asks for an exact question instead of landing an ambiguous typed answer", async () => {
+    const f = await relayedSlack(true);
+    const router = f.makeRouter("seen");
+    await expect(router.route(f.reply("2.1", "Next week"))).resolves.toMatchObject({ disposition: "refused", reason: "question-selection-required" });
+    expect(f.acknowledgeAnswer).toHaveBeenCalledTimes(1);
+    expect(repo.list()).toHaveLength(1);
+    await expect(router.route(f.reply("2.15", "question:ship\n  "))).resolves.toMatchObject({ disposition: "refused" });
+    await expect(router.route(f.reply("2.2", "question:ship\nNext week"))).resolves.toMatchObject({ landed: true });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "pending", humanAnswers: { ship: { text: "question:ship\nNext week" } } });
+  });
+
+  it("records a typed correction after close and retains one linked attachment row across redelivery", async () => {
+    const f = await relayedSlack();
+    repo.writeRelayedAnswer({ qitemId: f.qitemId, actorSession: human, nudge: false, direct: { questionId: "ship", optionId: "yes" } });
+    const text = "  Actually, SQLite.\n";
+    const event = { ...f.reply("2.1", text), files: [{ name: "report.pdf" }, { name: "missing.txt" }] };
+    await expect(f.makeRouter("seen").route(event)).resolves.toMatchObject({ landed: true });
+    await expect(f.makeRouter("fresh-seen").route(event)).resolves.toMatchObject({ landed: true });
+    expect(repo.answersForAsk(f.qitemId).filter(answer => "kind" in answer && answer.kind === "direct-correction"))
+      .toEqual([expect.objectContaining({ questionId: "db", text, by: human })]);
+    expect(repo.list().filter(row => row.body.includes("/fixture/report.pdf"))).toEqual([
+      expect.objectContaining({ replyTo: f.qitemId, sourceSession: human, body: expect.stringContaining("FILE TRANSFER FAILED: missing.txt") }),
+    ]);
+  });
+
+  it("does not let redelivery of an older click replace a newer choice on an unrelayed question", async () => {
+    const f = await relayedSlack(true);
+    const click = (ts: string, option: string) => ({ type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "1.1" }, actions: [{ block_id: "or-q:ship", action_id: `or-opt:${option}`, action_ts: ts }] });
+    const older = click("2.1", "yes");
+    const router = f.makeRouter("seen");
+    await router.routeAction(older);
+    await router.routeAction(click("2.2", "no"));
+    await expect(f.makeRouter("fresh-seen").routeAction(older)).resolves.toMatchObject({ status: "accepted" });
+    expect(repo.getById(f.qitemId)?.humanAnswers).toEqual({ ship: "no" });
+  });
+
   describe("create", () => {
     it("records the questions on a decision item", async () => {
       const created = await repo.create({ ...request, humanIntent: "decision", humanQuestions: questions });
