@@ -20,8 +20,8 @@ building it yourself.
   prompt, unless they said so.
 - **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them, unless
   they told you outright to decide that kind of prompt (step 2).
-- **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so the
-  team's questions and its result come to this conversation's address. Set it before you promise to report back.
+- **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
+  the team's questions and its result come to this conversation's address. Set it before you promise to report back.
   This chat has no wake of its own: say you'll check when they ask, start each turn by listing your address's tasks
   and checking the seats, and offer a wake only where their app actually has one (Claude Desktop's scheduled tasks,
   for example).
