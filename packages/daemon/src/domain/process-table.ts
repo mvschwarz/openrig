@@ -15,6 +15,8 @@ export interface ProcessTableRow {
   pgid?: number;
   tpgid?: number;
   platform?: "win32";
+  /** An observed Windows PID/parent with unreadable runtime identity; not an omitted process. */
+  identityReadable?: false;
   executablePath?: string;
   executableName: string;
   /** lstart, in local time: the identity half of pid + start time. */

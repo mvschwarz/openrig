@@ -340,7 +340,7 @@ export class HerdrViewer {
       try {
         const status = body(await this.run(["status", "server", "--json"]));
         if ((this.platform !== "linux" && this.platform !== "darwin" && this.platform !== "win32") || status.protocol !== 22
-          || status.running !== true || (typeof status.socket !== "string" || !sameViewerCwd(status.socket, this.socketPath, this.platform))) return false;
+          || status.running !== true || (typeof status.socket !== "string" || !sameHerdrPath(status.socket, this.socketPath))) return false;
         const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
         const file = path.join(this.root, `${endpoint}.json`);
         const journal = JSON.parse(readFileSync(file, "utf8")) as Journal;

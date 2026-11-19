@@ -120,7 +120,17 @@ describe("Windows process ancestry without fabricated foreground groups", () => 
     expect(await verify(values)).toBeNull();
   });
   it("does not promote malformed or unavailable CIM rows", () => {
-    expect(parseWindowsProcesses(JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, Name: "codex.exe" }]))).toEqual([]);
+    expect(parseWindowsProcesses(JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, Name: "codex.exe" }]))).toEqual([
+      {platform:"win32",pid:1,ppid:0,executableName:"codex.exe",executablePath:"",command:"",startedAt:"",identityReadable:false},
+    ]);
+  });
+  it("retains a live inaccessible child and refuses a false unique runtime", async () => {
+    const values=rows();
+    const partial=parseWindowsProcesses(JSON.stringify([{ProcessId:999,ParentProcessId:100,Name:"unknown.exe",ExecutablePath:null,CommandLine:null,StartedAt:null}]));
+    expect(partial[0]).toMatchObject({pid:999,ppid:100,identityReadable:false});
+    expect(await verify([...values,...partial])).toBeNull();
+    expect((await verify(values))?.process.pid).toBe(101);
+    expect(()=>parseWindowsProcesses(JSON.stringify([{ProcessId:999,ParentProcessId:null}]))).toThrow("unreadable PID or parent");
   });
   it.skipIf(process.platform !== "win32")("observes this actual Windows Node process using CIM", async () => {
     const current = (await listNativeProcesses()).find(row => row.pid === process.pid);

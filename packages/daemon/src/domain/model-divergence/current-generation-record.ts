@@ -16,6 +16,8 @@ import { windowsManagedRunnerParent } from "../windows-cmd-bridge.js";
 
 export interface ProcessRow {
   platform?: "win32";
+  identityReadable?: false;
+  executableName?: string;
   executablePath?: string;
   pid: number;
   ppid: number;

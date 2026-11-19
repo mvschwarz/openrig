@@ -535,8 +535,9 @@ export async function defaultListProcessesStrict(): Promise<Array<ProcessRow & {
   // (r1's pid-reuse remedy): a reused pid changes it, so a consumer
   // holding last cycle's identity can invalidate without any extra spawn.
   const rows = await runAsyncSite("resume_metadata.list_processes", readProcessTable);
-  return rows.map(({ pid, ppid, startedAt, command, platform, executablePath }) => ({ pid, ppid, startedAt: startedAt!, command,
-    ...(platform === "win32" ? { platform, executablePath } : {}) }));
+  // Preserve the canonical census's native identity/unknown evidence. A field
+  // projection here must not turn an unreadable live child into a unique receiver.
+  return rows.map(row => ({ ...row }));
 }
 
 function findCodexDescendantPids(

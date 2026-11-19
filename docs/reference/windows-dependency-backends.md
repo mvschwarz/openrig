@@ -51,3 +51,23 @@ For a standalone copy of the Windows installer or polluter finder, include the
 sibling `npm-command.mjs` helper. The repository and shipped skill already carry
 it. Release packaging still uses the existing Git-for-Windows build-shell
 contract; that build-time dependency is separate from native runtime launch.
+# Upstream refresh: 2026-11-19
+
+The Windows candidate is rebased onto upstream `02c5a7b26a5b525015bdccc7cafa821038fb4e75`.
+New upstream consumers retain the same native dependency boundaries:
+
+| Capability | Canonical Windows implementation | Consumer rule |
+| --- | --- | --- |
+| Process census and PID creation identity | `domain/windows-process-table.ts` | Preserve an observed PID and parent when identity fields are unreadable; mark it explicitly. Missing identity is neither process absence nor a unique runtime. Lifecycle reservations read one PID's CIM creation stamp through this same backend. |
+| Run-bound Pi/community reporting | `domain/runner-grant-launch.ts` with `adapters/windows-launch.ts` | Prepare the existing structured `ProcessStartInfo` launch after environment selection. Transfer the grant through the selected private psmux session environment and the child environment, never token argv or `/bin/sh`. |
+| Herdr live attachment reuse | `domain/terminal/herdr-live-workspace.ts` | CLI and daemon share the proof, including native per-session psmux client inventories and the existing tile-attach decoder. The CLI's compatibility export delegates to it. |
+| Herdr follow-close endpoint identity | `domain/terminal/herdr-viewer.ts` | Compare endpoints with `sameHerdrPath`; compare real private directories with `sameViewerCwd`. Named pipes are not directories. |
+| Native plugin projection | `domain/windows-claude-plugin-hooks.ts` | Accept the finite shipped Node command grammar with or without the upstream `exec` prefix; preserve binary plugin bytes outside the two hook manifests. Fork projection revision `0.1.35` advances older installed projections honestly. |
+
+The upstream `process_limits` contract is Linux/systemd-specific. A Windows Job
+active-process count does not count threads as `TasksMax` does, and Job commit
+charge is not cgroup `MemoryMax` accounting. This refresh must not silently
+accept either guarantee without enforcement and readback. Native seat-limit work
+is separate from the already implemented finite helper Job ownership; neither a
+successful build nor the latter's tests establish seat-limit parity.
+

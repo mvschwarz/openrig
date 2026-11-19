@@ -16,6 +16,7 @@ import { windowsScopedShellPid } from "./windows-cmd-bridge.js";
 
 export interface NativeProcessRow {
   platform?: "win32";
+  identityReadable?: false;
   pid: number;
   ppid: number;
   command: string;
@@ -716,6 +717,16 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
   const root = byPid.get(panePid);
   if (root?.platform === "win32") {
     if (byPid.size !== rows.length || !root.startedAt) return [];
+    // A partially readable process in this pane's tree may be another receiver.
+    // Keep its observed PID/parent, and refuse uniqueness rather than drop it.
+    for (const candidate of rows.filter(row => row.identityReadable === false)) {
+      const seen = new Set<number>();
+      let current: NativeProcessRow | undefined = candidate;
+      while (current && !seen.has(current.pid)) {
+        if (current.pid === panePid) return [];
+        seen.add(current.pid); current = byPid.get(current.ppid);
+      }
+    }
     // A unique native child rooted in this pane is the Windows occupancy proof.
     // Creation ordering rejects a recycled parent PID; no foreground PGID is invented.
     const matches: NativeProcessObservation[] = [];

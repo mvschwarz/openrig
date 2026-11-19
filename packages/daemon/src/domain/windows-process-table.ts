@@ -11,6 +11,9 @@ export interface WindowsProcessRow {
   executablePath: string;
   command: string;
   startedAt: string;
+  /** PID/parent are observed, but identity fields are unreadable. Empty fields
+   * carry no identity evidence; keep the live PID in absence/lineage checks. */
+  identityReadable?: false;
 }
 const exec = promisify(execFile);
 const CENSUS_TIMEOUT_MS = 5000;
@@ -35,13 +38,21 @@ export function parseWindowsProcesses(output: string): WindowsProcessRow[] {
   if (!Array.isArray(rows)) throw new Error("Windows process census was not an array");
   return rows.flatMap((value): WindowsProcessRow[] => {
     const row = value as Record<string, unknown>;
+    if (row?.ProcessId === 0) return []; // The system idle pseudo-process is never a launch PID.
     if (!row || !Number.isSafeInteger(row.ProcessId) || Number(row.ProcessId) <= 0
-      || !Number.isSafeInteger(row.ParentProcessId) || Number(row.ParentProcessId) < 0
-      || typeof row.Name !== "string" || typeof row.ExecutablePath !== "string"
-      || typeof row.CommandLine !== "string" || typeof row.StartedAt !== "string"
-      || !Number.isFinite(Date.parse(row.StartedAt))) return [];
+      || !Number.isSafeInteger(row.ParentProcessId) || Number(row.ParentProcessId) < 0) {
+      throw new Error("Windows process census has an unreadable PID or parent; absence is unproven");
+    }
+    const identityReadable = typeof row.Name === "string" && row.Name.length > 0
+      && typeof row.ExecutablePath === "string" && row.ExecutablePath.length > 0
+      && typeof row.CommandLine === "string" && row.CommandLine.length > 0 && typeof row.StartedAt === "string"
+      && Number.isFinite(Date.parse(row.StartedAt));
     return [{ platform: "win32", pid: Number(row.ProcessId), ppid: Number(row.ParentProcessId),
-      executableName: row.Name, executablePath: row.ExecutablePath, command: row.CommandLine, startedAt: row.StartedAt }];
+      executableName: typeof row.Name === "string" ? row.Name : "",
+      executablePath: typeof row.ExecutablePath === "string" ? row.ExecutablePath : "",
+      command: typeof row.CommandLine === "string" ? row.CommandLine : "",
+      startedAt: typeof row.StartedAt === "string" ? row.StartedAt : "",
+      ...(!identityReadable ? { identityReadable: false as const } : {}) }];
   });
 }
 
