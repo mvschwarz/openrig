@@ -128,6 +128,7 @@ export class SeatIdentityReconciler {
   private readonly listProcesses: NativeProcessLister;
   private readonly readPiRunnerState?: SeatIdentityReconcilerDeps["readPiRunnerState"];
   private readonly readRunnerCensus: () => Promise<RunnerProcessCensus>;
+  private readonly canSampleBackground: boolean;
   private readonly backgroundEvidence = new BackgroundProcessEvidence();
   private readonly backgroundMatches = new Map<string, { generation: string; sessionId: string; processes: BackgroundProcess[] }>();
   private backgroundWorkSnapshot: Array<{ nodeId: string; rigId: string; sessionName: string; state: "unknown"; reason: string; observedAt: string; processes: BackgroundProcess[] }> = [];
@@ -142,6 +143,7 @@ export class SeatIdentityReconciler {
     this.store = new SeatIdentityStore(deps.db);
     this.listProcesses = deps.listProcesses ?? listNativeProcesses;
     this.readPiRunnerState = deps.readPiRunnerState;
+    this.canSampleBackground = !deps.listProcesses || !!deps.readProcessTableCensus;
     // Unlike the native best-effort recognizer, absence proof must not turn a census failure into an empty table.
     this.readRunnerCensus = deps.readProcessTableCensus ?? (deps.listProcesses
       ? async () => ({ rows: await deps.listProcesses!(), permissionHiddenPids: [] }) : readProcessTableCensus);
@@ -352,7 +354,7 @@ export class SeatIdentityReconciler {
     const firstPanes = panes;
     // Only sample live work when this pass already needs the two native process observations.
     // Otherwise keep reporting unknown instead of introducing a new periodic process census.
-    const trackBackground = nativeSeats.length > 0 && seats.some(seat => occupantGenerations.get(seat.node_id) && seat.tmux_pane);
+    const trackBackground = this.canSampleBackground && nativeSeats.length > 0 && seats.some(seat => occupantGenerations.get(seat.node_id) && seat.tmux_pane);
     // Share each strict census with the existing native proof's concurrent process read.
     const firstCensusAt = this.now().getTime();
     const firstCensusPromise = trackBackground ? this.readRunnerCensus().catch(() => null) : null;
