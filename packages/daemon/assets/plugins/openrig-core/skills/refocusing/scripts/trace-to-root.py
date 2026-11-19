@@ -301,7 +301,8 @@ def parsed_frontmatters(texts):
             return None
         fields, seen = {}, set()
         pattern = re.compile(r'''^(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)[ \t]*(?:\#.*)?$''')
-        for line in block.splitlines():
+        lines = block.splitlines()
+        for index, line in enumerate(lines):
             match = pattern.match(line)
             if not match:
                 continue
@@ -309,6 +310,11 @@ def parsed_frontmatters(texts):
             if key in seen:
                 return None
             seen.add(key)
+            following = next((line for line in lines[index + 1:]
+                              if line.strip() and not line.lstrip().startswith("#")), "")
+            if following and following[0] in " \t":
+                # A continued scalar is not an unambiguous single-line value.
+                continue
             value = match.group("value").strip()
             if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
                 value = value[1:-1]
@@ -352,7 +358,7 @@ process.stdout.write(JSON.stringify(blocks.map(block => {
 })));'''
         try:
             result = subprocess.run(["node", "-e", program, str(Path(__file__).resolve()), shutil.which("rig") or ""],
-                                    input=json.dumps(blocks), capture_output=True, text=True, timeout=1, check=True)
+                                    input=json.dumps(blocks), capture_output=True, encoding="utf-8", timeout=1, check=True)
             values = json.loads(result.stdout)
             return values if isinstance(values, list) and len(values) == len(blocks) else [None] * len(blocks)
         except (OSError, subprocess.SubprocessError, ValueError):
