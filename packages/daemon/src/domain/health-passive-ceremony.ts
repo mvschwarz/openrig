@@ -45,13 +45,13 @@ const WAKE_NOTE_PREFIXES = ["park wake ", "parked-owner "] as const;
 /**
  * The transitions seats decided, in transition order. An owner's note-only blocked -> blocked
  * acknowledgement is not one of them when it directly follows a wake note on that row and repeats
- * the blocker (closure target) and note of the owner's last blocked transition: nothing changed,
+ * the actor, blocker (closure target) and note of the owner's last park: nothing changed,
  * so nothing was decided. A state change, a new blocker or continuation, or an acknowledgement
  * with no earlier owner park in the window still counts.
  */
 function coordinationTransitions<T extends { qitemId: string; state: string; actorSession: string; transitionNote: string | null; closureTarget: string | null }>(window: T[]): T[] {
   const counted: T[] = [];
-  const lastPark = new Map<string, { note: string; target: string | null }>();
+  const lastPark = new Map<string, { note: string; target: string | null; actor: string }>();
   const previous = new Map<string, T>();
   for (const t of window) {
     const prev = previous.get(t.qitemId);
@@ -60,10 +60,10 @@ function coordinationTransitions<T extends { qitemId: string; state: string; act
     const park = lastPark.get(t.qitemId);
     if (t.state !== "blocked" || !t.transitionNote?.startsWith(CONTINUATION_MARKER)) lastPark.delete(t.qitemId);
     else {
-      const acknowledgesWake = park !== undefined && park.note === t.transitionNote && park.target === t.closureTarget
+      const acknowledgesWake = park !== undefined && park.actor === t.actorSession && park.note === t.transitionNote && park.target === t.closureTarget
         && prev?.state === "blocked" && prev.transitionNote !== null
         && WAKE_NOTE_PREFIXES.some((prefix) => prev.transitionNote!.startsWith(prefix));
-      lastPark.set(t.qitemId, { note: t.transitionNote, target: t.closureTarget });
+      lastPark.set(t.qitemId, { note: t.transitionNote, target: t.closureTarget, actor: t.actorSession });
       if (acknowledgesWake) continue;
     }
     counted.push(t);

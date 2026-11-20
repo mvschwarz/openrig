@@ -79,3 +79,8 @@ it("an acknowledgement after a state change still counts", async () => {
 it("a note-only acknowledgement with no wake before it still counts", async () => {
   expect(await counted(18, [park(), park(), park(), park()])).toHaveLength(22);
 });
+
+it("a different seat repeating the same continuation after a wake still counts", async () => {
+  const peer: Step = { ...park(), actor: "peer@rig" };
+  expect(await counted(18, [park(), wake, peer])).toHaveLength(20);
+});
