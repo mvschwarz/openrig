@@ -10,7 +10,7 @@ const APPROVAL = [/Do you want to proceed\?/, /Would you like to run the followi
 const PICKER = [/Select model/i, /Select Model and Effort/];
 
 /** The dialog's own rows: from its title line to the bottom of the screen, where both programs draw it. */
-function dialogRegion(screen, pattern) {
+export function dialogRegion(screen, pattern) {
   const rows = (screen ?? "").split("\n");
   const start = rows.findIndex((row) => pattern.test(row));
   return start < 0 ? null : rows.slice(start).join("\n").trimEnd();
@@ -22,7 +22,7 @@ export function isRefusal(json) {
 }
 
 /** An ordinary send while a dialog is up: refused before any input, nothing typed, the dialog unchanged, no turn. */
-async function sendIntoDialog(ctx, label, dialogPattern) {
+export async function sendIntoDialog(ctx, label, dialogPattern) {
   const { verdict } = ctx;
   await ctx.settle({ timeoutMs: 15_000 });
   const before = dialogRegion((await ctx.observe()).screen, dialogPattern);
@@ -46,7 +46,7 @@ async function sendIntoDialog(ctx, label, dialogPattern) {
 }
 
 /** After the dialog is gone: an explicit resend delivers once (the pending item reconciled, not replayed). */
-async function resendOnce(ctx, marker) {
+export async function resendOnce(ctx, marker) {
   const body = `Delivery check ${ctx.mark("resend")}: the explicit resend of ${marker} after the dialog closed.`;
   const sent = await ctx.send(body);
   ctx.verdict.check("the explicit resend was accepted", sent.exit === 0 && sent.json?.ok === true, { exit: sent.exit, json: sent.json });

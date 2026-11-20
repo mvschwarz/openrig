@@ -43,7 +43,7 @@ const nextId = (prefix) => `${prefix}_standin_${(++ids).toString().padStart(6, "
 
 async function answer({ res, body, rule, marker, stream, sleep }) {
   const model = typeof body?.model === "string" ? body.model : "stand-in";
-  const usage = { input_tokens: 10, output_tokens: 1 };
+  const usage = { input_tokens: 10, output_tokens: 1, ...(rule.usage ?? {}) };
   const text = rule.say !== undefined ? fillMarker(rule.say, marker) : null;
   const toolId = rule.tool ? nextId("toolu") : null;
   const messageId = nextId("msg");
@@ -51,7 +51,7 @@ async function answer({ res, body, rule, marker, stream, sleep }) {
   if (!stream) {
     const content = rule.tool ? [{ type: "tool_use", id: toolId, name: rule.tool.name, input: rule.tool.input ?? {} }] : [{ type: "text", text: text ?? "" }];
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: messageId, type: "message", role: "assistant", model,
-      content, stop_reason: rule.tool ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5 } }));
+      content, stop_reason: rule.tool ? "tool_use" : "end_turn", stop_sequence: null, usage: { ...usage, output_tokens: 5 } }));
     return;
   }
 
@@ -100,7 +100,14 @@ export function messagesDescribe(body) {
   return { thread, tools: Array.isArray(body?.tools) ? body.tools.length : 0, structuredOutput: format?.type === "json_schema" };
 }
 
-export const messagesProtocol = { path: "/v1/messages", turnOf: messagesTurnOf, userTurns: messagesUserTurns, describe: messagesDescribe, answer, other };
+/** The text of every user item in the request, in order: what a `within: "history"` rule is matched against. */
+export function messagesHistoryText(body) {
+  const blocks = (m) => typeof m.content === "string" ? [m.content] : (Array.isArray(m.content) ? m.content : []).flatMap((b) => b?.type === "text" ? [b.text]
+    : b?.type === "tool_result" ? (typeof b.content === "string" ? [b.content] : (Array.isArray(b.content) ? b.content : []).filter((c) => c?.type === "text").map((c) => c.text)) : []);
+  return (Array.isArray(body?.messages) ? body.messages : []).filter((m) => m?.role === "user").flatMap(blocks).join("\n");
+}
+
+export const messagesProtocol = { path: "/v1/messages", turnOf: messagesTurnOf, userTurns: messagesUserTurns, historyText: messagesHistoryText, describe: messagesDescribe, answer, other };
 
 /** Start the Claude Code stand-in; see core.mjs for the options and the script format. */
 export function startMessagesStandIn(options) {
