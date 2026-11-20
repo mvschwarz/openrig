@@ -268,6 +268,9 @@ const QUIET_SKIP_REASONS = new Set<string>([
   // scan writes no history (the loud, audited signals are the SENT wake,
   // episode-ended, and all-parked-owners-deferred).
   "no-parked-owner",
+  // #3315 — every parked owner sits on a tmux server the daemon cannot reach. The loss is recorded once
+  // (tmux.server_gone); a history row per scan for as long as it lasts is the volume the issue measured.
+  "terminal-server-unreachable",
   // OPR.0.4.3.16 rev1-r1 fixback (advisor ruling 2026-07-03): seat_needs_input
   // and activity_stale_unknown are the COMMON recurring states for this
   // policy's own target scenario — a gate qitem pending on a seat that has

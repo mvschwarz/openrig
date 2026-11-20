@@ -594,13 +594,17 @@ describe("round 3: every rendered field checked, failures kept to their host, a 
     expect(all.filter((r) => !isUsageRow(r))).toEqual([]);
     const seat = (seatSession: string, runtime: string) => ({ seatSession, rigName: "r", runtime, lifecycleState: "running" });
     const seats = configuredSeatAccounts({
-      seats: [seat("q@r", "codex"), seat("d@r", "codex"), seat("a@r", "claude-code"), seat("b@r", "claude-code"), seat("x@r", "pi"), seat("q@r", "codex")],
+      seats: [seat("q@r", "codex"), seat("d@r", "codex"), seat("a@r", "claude-code"), seat("b@r", "claude-code"), seat("x@r", "pi"), seat("q@r", "codex"),
+        // A Claude seat's own token or API key, and a seat moved to its own home by an account switch.
+        { ...seat("t@r", "claude-code"), claudeToken: { label: "team-a" } }, { ...seat("k@r", "claude-code"), claudeToken: { label: "ci", kind: "api-key" as const } },
+        { ...seat("h@r", "codex"), runtimeHome: { home: "/homes/h", source: "account-switch" as const } }],
       auth: { profiles: ["work-a"], seats: [{ seat: "q@r", rig: "r", runtime: "codex", cwd: "/w", authProfile: "work-a", updatedTs: "2026-10-12T10:00:00Z" },
         { seat: "d@r", rig: "r", runtime: "claude-code", cwd: "/w", authProfile: "gone", updatedTs: "2026-10-12T10:00:00Z" }] } as never,
       usage: after, claudeSamples: h.samples, codexHome: "/h/.codex", claudeConfigDir: undefined, home: "/h",
     });
-    expect(seats.length).toBe(6);
-    expect(new Set(seats.map((s) => s.configured.source))).toEqual(new Set(["registry", "default_login", "unknown"]));
+    expect(seats.length).toBe(9);
+    expect(new Set(seats.map((s) => s.configured.source))).toEqual(new Set(["registry", "default_login", "unknown", "claude_token"]));
+    expect(seats.find((s) => s.seatSession === "h@r")!.configured).toMatchObject({ homeFrom: "account-switch" });
     expect(seats.filter((s) => !isSeat(s))).toEqual([]);
   });
 

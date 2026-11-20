@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join as pathJoin, isAbsolute as pathIsAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
+import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
@@ -172,6 +173,13 @@ export type SessionProbe =
 /** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
 export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
   return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
+}
+
+/** The first line of tmux's own diagnostic for a lost server, for a log line or a status field. */
+function serverDiagnostic(error: unknown): string {
+  const reported = tmuxReportedError(error);
+  const message = reported instanceof Error ? reported.message : String(reported);
+  return tmuxDiagnosticStart(message).split(/\r?\n/, 1)[0]!.trim();
 }
 
 /** Injected executors may retain exec's one-line command wrapper instead of stderr. */
@@ -1366,6 +1374,14 @@ export class TmuxAdapter {
     return null;
   }
 
+  /** #3315: told what each classified probe of this adapter's server showed (reachable, or the no-server/socket
+   *  diagnostic). The daemon records only changes (terminal-server-reachability.ts); an observer error never changes
+   *  the probe's own result. */
+  serverObserver?: (observation: TerminalServerObservation) => void;
+  private noteServer(observation: TerminalServerObservation): void {
+    try { this.serverObserver?.(observation); } catch { /* reporting only */ }
+  }
+
   private inputGuard?: SeatDeliveryGuard;
   get deliveryGuard(): SeatDeliveryGuard | undefined { return this.inputGuard; }
   set deliveryGuard(guard: SeatDeliveryGuard | undefined) {
@@ -1699,9 +1715,16 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
+      this.noteServer({ reachable: true });
       return parseLines(output, parseSessionLine);
     } catch (err) {
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
+      // Classified from what tmux reported (its stderr when the exec kept it), as probeSession does: the wrapper's
+      // "Command failed:" line and stdout never decide it. Unknown and permission errors still throw the original.
+      const error = tmuxReportedError(err);
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
+        return [];
+      }
       throw err;
     }
   }
@@ -1766,13 +1789,16 @@ export class TmuxAdapter {
       const target = `=${name}`; // canonical session name, never a prefix lookup
       await this.run(["tmux", "has-session", "-t", target],
         `tmux has-session -t ${shellQuote(target)}`);
+      this.noteServer({ reachable: true });
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
       if (isSessionAbsenceError(error)) {
+        this.noteServer({ reachable: true }); // the server answered: the session is what is missing
         return { state: "absent" };
       }
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
         return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;

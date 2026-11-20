@@ -10,7 +10,7 @@ applies-when: |
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
 last-verified-against-source: b29a70f14fc11797d46cbd9f12d4e61a523c3d06
-last-updated: 2026-11-12
+last-updated: 2026-11-19
 ---
 
 # CLI Reference — Registered Commands and Options
@@ -140,7 +140,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--json` |
+| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--fresh <seats...>`<br>`--json` |
 
 ### daemon
 
@@ -658,7 +658,7 @@ herdr-app views (`--provider herdr-app`, plain `rig terminal open <view>` inside
 | `rig workflow revise <instanceId>` | — | `--apply`<br>`--expected-version <number>`<br>`--expected-digest <sha256>`<br>`--operation-key <key>`<br>`--actor-session <session>`<br>`--reason <text>`<br>`--json` |
 | `rig workflow operation <key>` | — | `--json` |
 | `rig workflow instantiate-lifecycle <missionPath>` | — | `--operation-key <key>` **required**<br>`--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--json` |
-| `rig workflow instantiate <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
+| `rig workflow instantiate <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--pod <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
 | `rig workflow project` | — | `--instance <id>` **required**<br>`--current-packet <qitem-id>` **required**<br>`--exit <kind>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--result-note <text>`<br>`--evidence-ref <ref>`<br>`--wait-for-proof <scope>`<br>`--blocked-on <ref>`<br>`--next-owner <session>`<br>`--acceptance-candidate <identity>`<br>`--acceptance-verdict <verdict>`<br>`--acceptance-evidence-ref <path>`<br>`--json` |
 | `rig workflow list` | — | `--status <s>`<br>`--json` |
 | `rig workflow specs` | — | `--json` |
@@ -666,7 +666,7 @@ herdr-app views (`--provider herdr-app`, plain `rig terminal open <view>` inside
 | `rig workflow show <instanceId>` | — | `--json` |
 | `rig workflow trace <instanceId>` | — | `--full`<br>`--json` |
 | `rig workflow continue <instanceId>` | — | `--json` |
-| `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
+| `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--pod <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
 | `rig workflow unregister [spec]` | — | `--prune-missing`<br>`--json` |
 | `rig workflow watch <instanceId>` | — | `--json` |
 | `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
@@ -1145,12 +1145,17 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat held-messages <seat>` | — | `--limit <n>`<br>`--offset <n>`<br>`--id <id>`<br>`--json` |
 | `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |
 | `rig seat status <seat>` | — | `--json` |
+| `rig seat cancel <seat>` | — | `--run-id <id>` **required**<br>`--native-turn-id <id>` **required**<br>`--request-id <id>` **required**<br>`--json` |
+| `rig seat set-input-route <seat>` | — | `--route <route>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig seat set-hook-bridge <seat>` | — | `--enabled <boolean>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig seat hook-bridge <seat>` | — | `--json` |
 | `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--recover`<br>`--json` |
 | `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
 | `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-statusline-throttle <seat>` | — | `--seconds <n>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
@@ -1252,7 +1257,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--in-place`<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |
-| `rig scope slice progress <slice-path>` | — | `--mission <name>`<br>`--add <text>`<br>`--set <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
+| `rig scope slice progress <slice-path>` | — | `--mission <name>`<br>`--add <text>`<br>`--set <text>`<br>`--current-state <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
 | `rig scope slice repair <slice-path>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice stage <slice-path> <new-stage>` | — | `--successor <id>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice verified <slice-path>` | — | `--against <source>`<br>`--mission <name>`<br>`--json` |
@@ -1262,7 +1267,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope mission show <mission>` | — | `--json` |
 | `rig scope mission create <name>` | — | `--template <kind>`<br>`--id <dot-id>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--no-notes`<br>`--no-mission-notes`<br>`--json` |
 | `rig scope mission graph <mission>` | — | `--json` |
-| `rig scope mission progress <mission>` | — | `--add <text>`<br>`--set <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
+| `rig scope mission progress <mission>` | — | `--add <text>`<br>`--set <text>`<br>`--current-state <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
 | `rig scope mission repair <mission>` | — | `--json` |
 | `rig scope mission stage <mission> <new-stage>` | — | `--successor <id>`<br>`--json` |
 | `rig scope mission verified <mission>` | — | `--against <source>`<br>`--json` |

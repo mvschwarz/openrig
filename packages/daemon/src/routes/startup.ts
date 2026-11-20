@@ -236,7 +236,18 @@ async function refreshNativeMetadata(c: Context, rigId: string) {
   if (refresher) await refresher.refresh(sessions(c).getLatestLiveSessions(rigId), { fillNullOnly: true });
 }
 
-startupRoutes.get("/prerequisites", async (c) => c.json(await defaultProbeRuntimes()));
+/** Plain reads share one in-flight probe; nothing is kept once it settles. Writes that act on the answer
+ *  (kernel setup, resume, the start choice) call `defaultProbeRuntimes` themselves for a probe of their own. */
+let readProbe: ReturnType<typeof defaultProbeRuntimes> | null = null;
+function probeRuntimesForRead(): ReturnType<typeof defaultProbeRuntimes> {
+  if (!readProbe) readProbe = defaultProbeRuntimes().finally(() => { readProbe = null; });
+  return readProbe;
+}
+
+/** Seats observed at once on a read, so a large rig doesn't fire a burst of tmux calls. */
+export const STARTUP_OBSERVE_CONCURRENCY = 4;
+
+startupRoutes.get("/prerequisites", async (c) => c.json(await probeRuntimesForRead()));
 startupRoutes.post("/terminal", (c) => exclusive(c, "terminal", async () => {
   const result = await tmux(c).startServer();
   return c.json(result, result.ok ? 200 : 409);
@@ -266,14 +277,22 @@ startupRoutes.get("/:rigId", async (c) => {
   if (!rig) return c.json({ ok: false, message: "Rig is no longer available." }, 404);
   const snapshot = currentSnapshot(c, rig);
   const plan = buildRestorePlanPreview(rig, snapshot, collectPreviewSessionRows(repo(c).db, rig, snapshot), undefined, Date.now(), readFreshOccupantRelations(repo(c).db, rig.rig.id));
-  const auth = await defaultProbeRuntimes();
+  const observations = new Array<Awaited<ReturnType<typeof observeSeat>>>(rig.nodes.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(STARTUP_OBSERVE_CONCURRENCY, rig.nodes.length) }, async () => {
+    while (next < rig.nodes.length) {
+      const i = next++;
+      observations[i] = await observeSeat(c, rig, rig.nodes[i]!);
+    }
+  });
+  const [auth] = await Promise.all([probeRuntimesForRead(), ...workers]);
   const history = sessions(c).getSessionsForRig(rig.rig.id);
   const seats = [];
-  for (const node of rig.nodes) {
+  for (const [i, node] of rig.nodes.entries()) {
     const forecast = plan.nodes.find((entry) => entry.logicalId === node.logicalId)!;
     const hasHistory = history.some((session) => session.nodeId === node.id);
     const available = node.runtime === "codex" ? auth.codex === "ok" : node.runtime === "claude-code" ? auth.claudeCode === "ok" : true;
-    const observed = await observeSeat(c, rig, node);
+    const observed = observations[i]!;
     seats.push({ ...forecast, hasHistory, nodeId: node.id, runtime: node.runtime, model: node.model,
       revision: startupRevision(repo(c).db, node), observed,
       contextPending: history.some((session) => session.nodeId === node.id && dep<import("../domain/startup-orchestrator.js").StartupOrchestrator>(c, "startupOrchestrator")?.canContinueStartup(node.id, session.id)),
@@ -342,7 +361,7 @@ async function reviewSelectedHistory(c: Context, retained = false) {
   // The saved snapshot still stands, but the seat's own record no longer matches it, most often because a /clear,
   // /resume or new conversation recorded a different conversation; refreshing would show the same saved one again.
   if (!state) return c.json({ ok: false, code: "selection_changed",
-    message: `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed runtime, resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
+    message: `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
   const forecast = buildRestorePlanPreview({ ...facts.rig, nodes: [facts.node] }, facts.snapshot,
     collectPreviewSessionRows(repo(c).db, { ...facts.rig, nodes: [facts.node] }, facts.snapshot), undefined, Date.now(), {},
     { nodeId, historySessionId: refs.historySessionId }).nodes[0]!;
