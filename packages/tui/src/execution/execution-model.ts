@@ -20,7 +20,7 @@ import { sliceWhole, wrapDetailLines, detailPage, listItem, sectionRule, type Co
 import { scopeContractLines, scopeIdentityLines, proofProvenanceLines, type ReadinessSnap, type MissionScopesSnap, type SliceScopeSnap } from "../scopes/scopes-model.js";
 
 export interface ExecutionViewSnap {
-  readiness?: { historicalStatus?: string | null; revision: string; state: string; activeSlices?: number; slices: Array<{ scope: string; readiness: import("../scopes/scopes-model.js").ReadinessSnap }> };
+  readiness?: { historicalStatus?: string | null; revision: string; state: string; activeSlices?: number; issues?: string[]; slices: Array<{ scope: string; readiness: import("../scopes/scopes-model.js").ReadinessSnap }> };
   view: "execution";
   mission: string;
   derived_at?: string;
@@ -315,8 +315,10 @@ function plannedOwnerText(slice: SliceFacts, execution: ExecutionViewSnap): stri
   const readiness = execution.readiness;
   if (record(arrangement)["value"] === INDETERMINATE || !readiness) return "unknown";
   if (readiness.slices.some(s => s.scope === slice.dir)) return "none declared";
-  // A readiness read that stopped part-way lists fewer members than it counted: membership is unknown, not absent.
-  return readiness.slices.length < (readiness.activeSlices ?? 0) ? "unknown" : null;
+  // A readiness read that stopped part-way lists fewer members than it counted, and one that failed before listing any
+  // reports an issue: membership is unknown, not absent. A complete read with no members reports none.
+  return readiness.slices.length < (readiness.activeSlices ?? 0) || (readiness.slices.length === 0 && (readiness.issues?.length ?? 0) > 0)
+    ? "unknown" : null;
 }
 
 /** What unlocks next, only when the projection actually says so. */

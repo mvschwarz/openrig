@@ -47,6 +47,15 @@ describe("the slice box's Planned line", () => {
     expect(overview(e)).toContain("Planned: unknown");
   });
 
+  it("says unknown when the readiness read failed before it counted any member, and nothing after a complete empty read", () => {
+    // A mission.yaml whose metadata isn't a mapping fails readMissionReadiness before it counts members; the arrangement
+    // never reads metadata, so it stays valid.
+    const failed = execution(valid, []);
+    (failed.readiness as unknown as { issues: string[] }).issues = ["mission metadata: expected a mapping"];
+    expect(overview(failed)).toContain("Planned: unknown");
+    expect(overview(execution(valid, []))).not.toContain("Planned:");
+  });
+
   it("still names a declared planned owner", () => {
     const e = execution(valid, ["one"]);
     e.q2_sequencing[0]!["planned_owners"] = [{ component: "build.minimal-gap", owner: "builder", source: "slice.yaml#sdlc.components[0].owner" }];
