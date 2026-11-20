@@ -17,7 +17,7 @@ import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
-import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
+import { claudeProviderFailureReason, isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import { deriveDisplayActivity, type ArbitratedSeatState, type EvidenceRungId } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -1549,6 +1549,8 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     arrive as `unknown` and contribute nothing — never guessed. The rig total
  *     and the seat row must not disagree about the same seat.
  *   - a held seat (`heldReason` present)
+ *   - a fresh Claude authentication or billing failure (`providerFailureNeedsAttention`, #3571). It keeps the
+ *     hook's `unknown` state, so it is never a `needs_input` request and an arbitrated clear doesn't cancel it.
  *   - a recorded startup error (`latestError` present)
  *   - an occupant a handover started without a required startup file (`startedWithoutRequired`, #2456)
  */
@@ -1561,9 +1563,44 @@ export function seatNeedsAttention(
     || entry.startupStatus === "attention_required"
     || entry.startupStatus === "failed"
     || (arbitratedNeedsInput ?? activity?.state === "needs_input")
+    || providerFailureNeedsAttention(activity, entry.runtime)
     || entry.heldReason != null
     || entry.latestError != null
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
+}
+
+/**
+ * A Claude StopFailure whose typed reason is an authentication or billing failure (#3571), from the seat's own runtime,
+ * still current: fresh, generation-valid and normalized as such (a stale or mismatched row comes back demoted). Only
+ * the documented auth and billing values qualify; a generic or unlisted provider error never asks for a person.
+ */
+export function providerFailureNeedsAttention(activity: AgentActivity | null | undefined, seatRuntime: string | null | undefined): boolean {
+  if (!activity || activity.evidenceSource !== "runtime_hook" || activity.stale === true || activity.fallback === true
+    || activity.state !== "unknown" || !activity.runtime || activity.runtime !== seatRuntime) return false;
+  const reason = claudeProviderFailureReason(activity.runtime, activity.rawEvent, activity.rawSubtype);
+  return (reason === "provider_auth_error" || reason === "provider_billing_error") && activity.reason === reason;
+}
+
+/** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
+ *  box is not one. */
+const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+
+/**
+ * The served activity for a seat whose newest hook is a current Claude authentication or billing failure: that hook,
+ * ahead of the cached pane reading, so the row shows the reason it counts for attention. Only a native prompt the pane
+ * observed strictly later outranks it; a draft in the input box doesn't. Kept out of `hookOrPaneActivity`, whose
+ * other readers (prompt-clear and reachable wake recovery, the usage-limit watchdog) keep the pane's reading: the
+ * report holds no send or wake.
+ */
+export function providerFailureActivity(
+  hookActivity: AgentActivity | null | undefined,
+  structural: StructuralObservation | null,
+  runtime: string | null | undefined,
+): AgentActivity | null {
+  if (!hookActivity || !providerFailureNeedsAttention(hookActivity, runtime)) return null;
+  if (structural?.state === "attention" && NATIVE_PROMPT_REASONS.has(structural.reason)
+    && Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")) return null;
+  return hookActivity;
 }
 
 /**
@@ -1991,6 +2028,10 @@ export async function attachAgentActivity(
       && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
       && (!motionRunning || (Number.isFinite(motionMs)
         && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
+
+    // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
+    const providerFailure = providerFailureActivity(hookActivity, structural, entry.runtime);
+    if (providerFailure) return { ...entry, agentActivity: providerFailure };
 
     // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
     // that frame's provenance instead.

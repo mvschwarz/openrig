@@ -118,6 +118,7 @@ export interface NodeEntry {
     sampledAt: string;
     evidence: string | null;
     rawEvent?: string | null;
+    rawSubtype?: string | null;
     stale?: boolean;
     fallback?: boolean;
   };
@@ -728,12 +729,23 @@ function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
 }
 
+/** #3571: a current Claude authentication or billing failure the daemon serves as the seat's activity, with Claude's
+ *  own error value when it is a plain identifier. Null for anything else, a generic provider error included. */
+export function providerFailureReason(n: NodeEntry): string | null {
+  const activity = n.agentActivity;
+  if (activity?.rawEvent !== "StopFailure" || activity.stale === true
+    || (activity.reason !== "provider_auth_error" && activity.reason !== "provider_billing_error")) return null;
+  const raw = activity.rawSubtype;
+  return raw && /^[a-z0-9_]{1,64}$/.test(raw) ? `${activity.reason} (${raw})` : activity.reason;
+}
+
 /** Why a seat that needs attention does, from what the daemon recorded: a missing session, a startup error, a held
- *  message, a missing required file, or the served needs-input reason. Otherwise "reason unavailable". */
+ *  message, a missing required file, the served needs-input reason, or a provider authentication or billing failure.
+ *  Otherwise "reason unavailable". */
 export function attentionReason(n: NodeEntry): string {
   return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
     ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
-    ?? questionReason(n) ?? "reason unavailable";
+    ?? questionReason(n) ?? providerFailureReason(n) ?? "reason unavailable";
 }
 
 /** Whether the daemon serves a live question for the seat, with its own precedence: the arbitrated needs-input answer,

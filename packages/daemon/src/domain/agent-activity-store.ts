@@ -4,7 +4,7 @@ import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
 import { validateSessionFileFormat } from "./resume-token-validation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
-import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
+import { claudeProviderFailureReason, isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent, RunnerObservation, RunnerObservations } from "./types.js";
@@ -676,6 +676,8 @@ function normalizeHookActivity(input: {
   const runtime = input.runtime;
   const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime, input.communityRunner === true, input.piRpc === true);
   let normalizedReason = reason;
+  // Claude's other StopFailure errors keep a typed reason (#3571), on the seat's own runtime as rate_limit does.
+  const providerFailure = runtime === input.seatRuntime ? claudeProviderFailureReason(runtime, rawEvent, rawSubtype) : null;
   if (rawEvent === "PermissionRequest") {
     normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
   } else if (rawEvent === "PermissionPromptConfirmed") {
@@ -685,6 +687,8 @@ function normalizeHookActivity(input: {
   } else if (rawEvent === "at_limit"
     || (runtime === input.seatRuntime && isClaudeRateLimitHook(runtime, rawEvent, rawSubtype))) {
     normalizedReason = "usage_limit";
+  } else if (providerFailure) {
+    normalizedReason = providerFailure;
   } else if (rawEvent === "Notification") {
     if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";
   } else if (rawEvent === "SessionStart") {

@@ -66,6 +66,18 @@ the existing live-hook fallback in effect; lifecycle, startup, held and error si
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
 
+Claude's other `StopFailure` errors keep a typed reason in the legacy `agentActivity`
+field, with `state: unknown` and the raw `error` value in `rawSubtype`.
+`authentication_failed`, `oauth_org_not_allowed` and `cloud_credential_error` read
+`provider_auth_error`; `billing_error` and `account_on_hold` read
+`provider_billing_error`. While fresh and from the current occupant, those two raise
+attention: the row serves the hook over the cached pane reading, and the reason column
+names it. They are not a question, so they hold no send or wake. Any other value,
+documented or not, reads `provider_error`, stays with the pane reading and raises no
+attention. A newer hook (Claude's idle notification included), an expired report or
+another occupant's report ends it, as for `usage_limit` in this field; a newer picker or
+permission prompt in the pane outranks it, and a draft in the input box doesn't.
+
 A handover whose successor started without a required file also raises attention. That's
 a projected guidance file or a guidance startup file marked `required` still missing from
 the guidance file, or, for a fresh or rebuild successor, a required `send_text` startup

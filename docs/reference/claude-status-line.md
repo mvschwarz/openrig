@@ -89,6 +89,13 @@ and occupant generation. Unknown identity or an expired event cannot trigger a
 usage-limit pause; a hook with a newer source timestamp supersedes the event,
 regardless of arrival order. The event expires after five minutes in any case.
 
+The hook's other documented `error` values never pause work. Authentication and
+billing failures raise attention with their own reason, and every other value reads
+as a generic provider error; see the
+[agent state taxonomy](agent-state-taxonomy.md#per-seat-attention-in-the-node-inventory).
+The hooks reference says `cloud_credential_error` arrives under that name from Claude
+Code 2.1.267, and an older Claude reports the same failure as `server_error` or `unknown`.
+
 A helper Claude started from a seat's shell inherits that seat's environment,
 so its rate-limit hook is attributed to that seat too. This is appropriate when
 the helper uses the same login, since the quota belongs to the account. A
