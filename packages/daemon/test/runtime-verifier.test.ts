@@ -109,6 +109,7 @@ describe("RuntimeVerifier", () => {
     [new Error("invalid configuration"), "error"],
     [Object.assign(new Error("inner tool missing"), { code: 127, stderr: "sh: 1: helper: not found" }), "error"],
     [Object.assign(new Error("spawn omp ENOENT"), { code: "ENOENT" }), "not_found"],
+    [Object.assign(new Error("spawn /bin/sh ENOENT"), { code: "ENOENT", path: "/bin/sh" }), "error"],
     [Object.assign(new Error("exit 127"), { code: 127, stderr: "/bin/sh: 1: omp: not found\n" }), "not_found"],
   ] as const)("classifies OMP probe failure %s as %s", async (failure, status) => {
     const exec = vi.fn(async () => { throw failure; });
@@ -125,6 +126,15 @@ describe("RuntimeVerifier", () => {
     expect(await new RuntimeVerifier({ exec, db }).verifyOmp("omp-tui")).toMatchObject({
       runtime: "omp-tui", status: "verified", error: null,
     });
+  });
+
+  it("keeps the probe summary in the verification row without retaining lengthy command output", async () => {
+    const failure = new Error("bad configuration: " + "x".repeat(2048) + "\nfull command output");
+    const exec = vi.fn().mockRejectedValue(failure);
+    const result = await new RuntimeVerifier({ exec, db }).verifyOmp("omp");
+    expect(result.error).toContain("bad configuration");
+    expect(result.error!.length).toBeLessThan(600);
+    expect(result.error).not.toContain("full command output");
   });
 
   // T6: codex --version succeeds -> verified

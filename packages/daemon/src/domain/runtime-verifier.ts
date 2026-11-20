@@ -25,9 +25,19 @@ export function probeTimeoutOutcome(
 
 /** A shell can also return 127 when an installed OMP fails to find one of its own dependencies. */
 function ompExecutableMissing(error: unknown): boolean {
-  const failure = error as { code?: unknown; stderr?: unknown } | null;
-  return failure?.code === "ENOENT" || (failure?.code === 127 && typeof failure.stderr === "string"
-    && /(?:^|[\s:])omp: (?:command )?not found\s*$|command not found: omp\s*$/m.test(failure.stderr));
+  const failure = error as { code?: unknown; path?: unknown; stderr?: unknown } | null;
+  if (failure?.code === "ENOENT") {
+    return failure.path === undefined || (typeof failure.path === "string" && /(?:^|\/)omp$/.test(failure.path));
+  }
+  return failure?.code === 127 && typeof failure.stderr === "string"
+    && /(?:^|[\s:])omp: (?:command )?not found\s*$|command not found: omp\s*$/m.test(failure.stderr);
+}
+
+function probeFailureSummary(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0]!;
+  const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  const detail = typeof stderr === "string" ? stderr.trim().split("\n", 1)[0] : undefined;
+  return (detail && detail !== message ? `${message}: ${detail}` : message).slice(0, 256);
 }
 
 // OPR.0.4.6.PI1 — Pi's documented Node engine floor (package.json engines).
@@ -194,9 +204,8 @@ export class RuntimeVerifier {
           if (!("fallBackToHelp" in outcome)) return this.buildVerification(canonicalName, outcome.status, null, null, outcome.error);
         }
         if (binary === "omp" && !(ompExecutableMissing(err) && ompExecutableMissing(helpErr))) {
-          const message = (failure: unknown) => failure instanceof Error ? failure.message : String(failure);
           return this.buildVerification(canonicalName, "error", null, null,
-            `omp --version failed: ${message(err)}; omp --help failed: ${message(helpErr)}`);
+            `omp --version failed: ${probeFailureSummary(err)}; omp --help failed: ${probeFailureSummary(helpErr)}`);
         }
         return this.buildVerification(canonicalName, "not_found", null, null, `${binary} not found`);
       }
