@@ -237,19 +237,25 @@ recorded answer and linked work". The steps below add no route and no promise; e
    ([Discover, read and answer](core-app.md#discover-read-and-answer)). It goes "through the existing Mission Control
    answer owner".
    - **What the receipt says happened:** `outcome: recorded` is a partial choice. `outcome: answered` means the existing
-     answer owner accepted the whole answer, and the receipt's `message` names which of three things it did:
-     - it returned the answer to the asking agent, as a new queue row that wakes it the way any new row does (a hosted
-       member with no wake trigger reads it only when it next checks its queue);
-     - it handed a permission request to its receiving agent;
-     - or it kept the answer on a request that is still waiting, because no agent could read it or the handoff couldn't
-       complete. Show this one to the person: their answer is saved, and no agent has it yet.
+     answer owner accepted the whole answer. Read the receipt's `submission.replyQitemId` first, then its optional
+     `message`:
+     - **`replyQitemId` names a row, with no `message`:** the answer was returned to the asking agent as that new row,
+       which wakes it the way any new row does (a hosted member with no wake trigger reads it only when it next checks
+       its queue).
+     - **`replyQitemId` names a row, and `message` says "Already answered":** that row is the original return, and no
+       new reply was sent.
+     - **`replyQitemId` is null:** a runner's permission request, answered in place. Its `message` says whether the
+       answer went to the receiving agent, or is kept on the request, which is still waiting because no agent could read
+       it or the handoff couldn't complete. Show the kept one to the person: their answer is saved, and no agent has it
+       yet. A request the answer closed, with no receiving agent here, has no `message`.
 
      Either way, `answered` "never proves a native effect".
    - **Retries:** after an uncertain response, retry the same id and payload. Each 503 in
      [the 503 table](core-app.md#discover-read-and-answer) says what's known about persistence, and
      `app_job_unavailable` with no `submission` says nothing about an earlier attempt.
 5. **Follow it to its actual result.** `GET /api/apps/v1/requests/<requestId>/result?actor=<person>` reads the actual
-   return, permission and linked-work facts, separately from the receipt (`GET /api/apps/v1/answers/<answerId>`).
+   return, permission and linked-work facts, separately from the receipt
+   (`GET /api/apps/v1/answers/<answerId>?actor=<person>`, the receipt's `links.self`).
    `GET /api/apps/v1/events` carries only invalidations; reread on each one, and follow
    [Refresh and interruption recovery](core-app.md#refresh-and-interruption-recovery) for polling and after a gap.
    - "Never invent a revision or infer completion from an absent card."
