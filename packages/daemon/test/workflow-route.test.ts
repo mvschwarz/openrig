@@ -699,6 +699,7 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(aborted).toMatchObject({ status: "aborted", closedPacketIds: [], alreadyClosedPacketIds: [reviewPacket] });
       expect(aborted.advisories).toHaveLength(1);
       expect(aborted.advisories![0]).toContain(`rig queue update ${created.qitemId} --state canceled`);
+      expect(aborted.advisories![0]).toContain("reviewer2@rig");
       expect(runtime.instanceStore.getByIdOrThrow(instanceId).status).toBe("aborted");
       expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("done");
       expect(queueRepo.getByIdOrThrow(created.qitemId).state).toBe("pending");
