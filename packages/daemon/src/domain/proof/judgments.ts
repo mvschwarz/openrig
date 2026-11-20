@@ -15,6 +15,8 @@ export interface Evidence { ref: string; sha256: string }
 export interface Judgment {
   version: 1; sequence: number; scope: string; id: string; operationId: string;
   itemId: string; itemRevision: string; policyRevision: string; policySource: string;
+  /** The policy's everyJudge when recorded (#3621). Receipts without it stay bound to the whole policy revision. */
+  policyEveryJudge?: boolean;
   previous: string | null; actor: string; provenance: string; at: string;
   verdict: JudgmentVerdict; reason: string; evidence: Evidence[];
   subject: { kind: "artifact" | "commit" | "patch-equivalent"; ref: string; comparison?: string };
@@ -152,6 +154,7 @@ function ledger(dir: string, io: ScopeFsDeps): Judgment[] {
     if (id !== hash(payload) || obj.version !== 1 || obj.sequence !== receipts.length + 1 || typeof obj.itemId !== "string" || typeof obj.itemRevision !== "string" || typeof obj.policyRevision !== "string" || typeof obj.actor !== "string" || typeof obj.operationId !== "string" || typeof obj.intent !== "string" || !["accept", "reject", "withdraw"].includes(String(obj.verdict)) || !Array.isArray(obj.evidence)) throw new JudgmentError("journal_invalid", `${home}/${name}: malformed or changed judgment; inspect history`);
     const subject = mapping(obj.subject, name);
     if ([obj.scope, obj.itemId, obj.itemRevision, obj.policyRevision, obj.policySource, obj.actor, obj.operationId, obj.intent, obj.reason, obj.provenance, obj.at].some(v => typeof v !== "string" || !v.trim()) || !Number.isFinite(Date.parse(String(obj.at))) || !["artifact", "commit", "patch-equivalent"].includes(String(subject.kind)) || typeof subject.ref !== "string" || !subject.ref.trim() || (subject.comparison !== undefined && typeof subject.comparison !== "string") || obj.evidence.some(e => !e || typeof e !== "object" || typeof e.ref !== "string" || !e.ref || typeof e.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(e.sha256))) throw new JudgmentError("journal_invalid", `${home}/${name}: malformed judgment fields`);
+    if (obj.policyEveryJudge !== undefined && typeof obj.policyEveryJudge !== "boolean") throw new JudgmentError("journal_invalid", `${home}/${name}: malformed judgment fields`);
     if (receipts.some(r => r.operationId === obj.operationId)) throw new JudgmentError("journal_conflict", `${home}/${name}: repeated operation identity`);
     const prior = receipts.filter(r => r.itemId === obj.itemId).at(-1);
     if (obj.previous !== (prior?.id ?? null)) throw new JudgmentError("journal_conflict", `${home}/${name}: conflicting correction lineage`);
@@ -202,9 +205,13 @@ export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readP
       // `judgment` stays the item's latest receipt from any judge: corrections chain on it.
       const judgment = receipts.filter(r => r.itemId === p.id).at(-1) ?? null;
       const evaluate = (j: Judgment): [ItemReadiness["state"], string] => {
-        if (!policy || j.scope !== scope || j.itemRevision !== revision || j.policyRevision !== policy.revision) return ["unknown", "Scope, item or policy changed; record a judgment on the current revision"];
-        if (j.verdict !== "accept") return [j.verdict === "reject" ? "rejected" : "withdrawn", j.reason];
+        // #3621: the item binds to the policy revision it was judged under, so a policy edit that keeps the actor listed and
+        // everyJudge as it was (adding a judge, say) leaves it current. Receipts that don't record everyJudge need the
+        // whole revision unchanged, as before.
+        const policyBound = !!policy && (j.policyRevision === policy.revision || j.policyEveryJudge === policy.everyJudge);
+        if (!policy || !policyBound || j.scope !== scope || j.itemRevision !== hash([scope, p.id, p.text, j.policyRevision])) return ["unknown", "Scope, item or policy changed; record a judgment on the current revision"];
         if (!policy.judges.includes(j.actor)) return ["unknown", "Judgment actor is outside the selected policy"];
+        if (j.verdict !== "accept") return [j.verdict === "reject" ? "rejected" : "withdrawn", j.reason];
         const valid = j.evidence.length > 0 && j.evidence.every(e => {
           if (!e || typeof e.ref !== "string" || typeof e.sha256 !== "string") return false;
           try {
@@ -302,7 +309,7 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   }
   const latest = receipts.filter(r => r.itemId === item.id).at(-1);
   if (input.expectedRevision !== item.revision || input.expectedPrevious !== (latest?.id ?? null)) throw new JudgmentError("revision_conflict", "Item or correction changed; inspect rig proof show and judge the current evidence", 409);
-  const payload = { version: 1 as const, scope: path.relative(root, dir).split(path.sep).join("/"), sequence: receipts.length + 1, operationId, itemId: item.id, itemRevision: item.revision, policyRevision: current.policy.revision, policySource: path.relative(root, current.policy.source), previous: latest?.id ?? null, actor, provenance, at: new Date().toISOString(), verdict: input.verdict, reason: input.reason, evidence, subject, intent };
+  const payload = { version: 1 as const, scope: path.relative(root, dir).split(path.sep).join("/"), sequence: receipts.length + 1, operationId, itemId: item.id, itemRevision: item.revision, policyRevision: current.policy.revision, policySource: path.relative(root, current.policy.source), policyEveryJudge: current.policy.everyJudge, previous: latest?.id ?? null, actor, provenance, at: new Date().toISOString(), verdict: input.verdict, reason: input.reason, evidence, subject, intent };
   const judgment: Judgment = { ...payload, id: hash(payload) };
   const home = contained(root, path.join(dir, "proof", "judgments"));
   fs.mkdirSync(home, { recursive: true });
