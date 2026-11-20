@@ -97,6 +97,34 @@ describe("#3529 orphaned sweep findings", () => {
     expect(status.snapshot().findingsUndelivered).toBe(1);
   });
 
+  it("hands back orphaned dangling-closure findings and reports those without a return route", async () => {
+    queue.attachOutbox(new OutboxHandler(db));
+    addRig("retired");
+    const missingSource = "sender@retired";
+    for (const sourceSession of [source, missingSource]) {
+      const row = await queue.create({ sourceSession, destinationSession: destination, body: "Check the sample", nudge: false });
+      await queue.update({ qitemId: row.qitemId, actorSession: destination, state: "done", closureReason: "handed_off_to", closureTarget: "next@archived" });
+    }
+    await sweep();
+    const originals = openFindings();
+    const routable = originals.find((row) => row.sourceSession === source);
+    const unroutable = originals.find((row) => row.sourceSession === missingSource);
+    if (!routable || !unroutable) throw new Error("fixture: expected both dangling-closure findings");
+    const routedBefore = status.snapshot().findingsRouted;
+    removeRig("archived");
+    removeRig("retired");
+
+    const recovered = await sweep();
+
+    expect(recovered.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "dangling-closure", qitemId: routable.qitemId, action: "created" }),
+      { kind: "dangling-closure", qitemId: unroutable.qitemId, findingQitemId: unroutable.qitemId, action: "unreported", destination },
+    ]));
+    expect(recovered.outcome, recovered.error).toBe("partial");
+    expect(openFindings()).toContainEqual(expect.objectContaining({ destinationSession: source, handedOffFrom: routable.qitemId }));
+    expect(status.snapshot()).toMatchObject({ findingsRouted: routedBefore + 1, findingsUndelivered: 1 });
+  });
+
   it("records a gap once and recovers when the missing rig returns without touching the work", async () => {
     const row = await work();
     removeRig("archived");

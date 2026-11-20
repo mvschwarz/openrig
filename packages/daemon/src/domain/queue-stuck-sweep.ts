@@ -1509,7 +1509,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!missingRig(ref.destination_session)) continue;
       const row = indexed(() => deps.queueRepo.getById(ref.qitem_id, { waiting: false }));
       if (!row || row.state !== "pending" || row.claimedAt || row.destinationSession !== ref.destination_session || deliveryHeld(row)) continue;
-      const kind = perRowKinds.find((kind) => kind === findingKindOf(row));
+      const kind = perRowKinds.find((kind) => kind === findingKindOf(row)?.replace(/^successor-verification-required$/, "dangling-closure"));
       if (!kind || !isFindingRow(row)) continue;
       const target = sourceAgent(row.sourceSession, row.destinationSession);
       if (target) {
