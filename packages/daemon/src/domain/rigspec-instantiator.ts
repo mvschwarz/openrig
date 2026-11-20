@@ -2375,6 +2375,10 @@ export class PodRigInstantiator {
     // A terminal-only seat is launched from `builtin:terminal`, which is not an agent spec: it selects no strategy, so there is nothing
     // to resolve and nothing to warn about, even though its materialized recipe is kept like any other seat's.
     if (node.runtime === "terminal") return { ok: false, reason: "a terminal seat selects no continuity strategy", silent: true };
+    // Only a Claude agent is planned a notice (continuity-policy-materializer): for any other runtime the plan is empty whatever the spec says,
+    // so its spec is not resolved (a Codex agent whose spec no longer resolves gets no warning about a notice it never had) and arming with the
+    // default strategy still retires a job a Claude start left behind (#3579 R2).
+    if (node.runtime !== "claude-code") return { ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: node.runtime };
     const seat = await this.resolveSeatConfigToday(rigId, nodeId);
     if (!seat.ok) return seat;
     return { ok: true, compactionStrategy: seat.config.config.compactionStrategy as CompactionStrategy, mechanic: seat.config.config.mechanic, runtime: node.runtime };

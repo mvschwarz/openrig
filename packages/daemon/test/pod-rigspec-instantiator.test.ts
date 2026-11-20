@@ -1378,6 +1378,37 @@ edges: []
     db.close();
   });
 
+  it("#3579 R2: a seat that is not Claude is not resolved against its spec: no warning for a notice it never had", async () => {
+    const agentPath = `${RIG_ROOT}/agents/impl/agent.yaml`;
+    const files: Record<string, string> = { [agentPath]: agentYaml("impl") };
+    const { db, rigRepo, inst } = setup(files);
+    const yaml = `
+version: "0.2"
+name: test-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        cwd: .
+    edges: []
+edges: []
+`;
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const rigId = result.result.rigId;
+    const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toEqual({ ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: "codex" });
+    // Its spec can no longer be read: still no resolution and no warning (a Claude seat in the same state warns, as the test above shows).
+    delete files[agentPath];
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toEqual({ ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: "codex" });
+    db.close();
+  });
+
   // CP2-R3: Topological ordering enforced (delegates_to edge)
   it("launches nodes in topological order based on edges", async () => {
     const files = {
