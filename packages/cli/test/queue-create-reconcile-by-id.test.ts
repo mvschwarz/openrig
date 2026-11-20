@@ -177,7 +177,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([]);
-    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "unknown", qitemId: ID });
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ error: "remote_queue_write_failed", outcome: "indeterminate", qitemId: ID });
     expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
   });
 
@@ -204,15 +204,11 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     }, ["--verify"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toHaveLength(0);
+    expect(readBacks(calls)).toHaveLength(1);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({
-      delivery: {
-        receiptSource: "terminal",
-        outcome: "not-requested",
-        detail: expect.stringContaining("This request sent no new work. Earlier wake and claim details are row history."),
-      },
+      persisted: true,
+      delivery: { outcome: "indeterminate" },
     });
-    expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("persisted");
     expect(stderr.join("\n")).toContain("not saved");
   });
 
@@ -283,14 +279,16 @@ describe("a queue create that got no answer is read back once by its ID", () => 
 
   it("a local create with no row yet stays INDETERMINATE, says it may still commit, and isn't sent again", async () => {
     const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)]);
-    expect(error).toBeNull();
+    expect(error).toBeInstanceOf(DaemonTimeoutError);
+    expect((error as DaemonTimeoutError).writeOutcome).toBe("unknown");
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
     const all = stderr.join("\n");
     expect(all).toContain(`No row ${ID} yet`);
     expect(all).toContain("may still commit");
-    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: ID });
-    expect(process.exitCode).toBe(1);
+    expect(all).toContain("The write outcome is INDETERMINATE");
+    expect(stdout).toHaveLength(0);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("a cross-host create the destination committed late reads back from that host, with its bearer, never printed", async () => {
@@ -312,8 +310,8 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(readBacks(calls)).toEqual([]);
     const all = stderr.join("\n");
     expect(all).toContain(`The CLI could not establish the queue for requested host 'vps-b'. The write outcome is still unknown. Keep this ID for recovery.`);
-    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: ID });
-    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ error: "remote_queue_write_failed", outcome: "indeterminate", qitemId: ID });
+    expect(process.exitCode).toBe(2);
   });
 
   it("recovers a selected-daemon create named by its host ID when the registry maps to the selected endpoint", async () => {
@@ -365,7 +363,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([]);
-    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "unknown", qitemId: ID });
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ error: "remote_queue_write_failed", outcome: "indeterminate", qitemId: ID });
     expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
   });
 
@@ -435,20 +433,14 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(readBacks(calls)).toHaveLength(1);
     const all = stderr.join("\n");
     expect(all).not.toContain("committed after all");
-    expect(error).toBeNull();
+    expect(error).toBeInstanceOf(DaemonTimeoutError);
+    expect((error as DaemonTimeoutError).writeOutcome).toBe("unknown");
     expect(all).toContain(`The row ID ${ID} exists, but its destination or body hash contradicts this request.`);
     expect(all).toContain("The write outcome stays unknown. Keep this ID for recovery.");
-    const output = JSON.parse(stdout.join("\n")) as Record<string, any>;
-    expect(output).toMatchObject({
-      error: "queue_create_outcome_unknown",
-      outcome: "unknown",
-      qitemId: ID,
-      recovery: expect.stringContaining(`--id '${ID}'`),
-    });
-    expect(output).not.toHaveProperty("contradiction");
-    expect(output).not.toHaveProperty("createWarning");
+    expect(all).toContain("The write outcome is INDETERMINATE");
+    expect(stdout).toHaveLength(0);
     expect(stderr.join("\n")).toContain("destination or body hash contradicts this request");
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("keeps a missing readback ID unreadable instead of calling it a different ID", async () => {

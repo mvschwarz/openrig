@@ -303,8 +303,6 @@ function keepAbsorbedRetryDeliveryAsHistory(
   if (!isAbsorbedCreateRetry(row)) return row;
   if (receiptSourceOf(destination, row) !== "gateway" && !gatewayAlsoPosts(row)) return row;
   const delivery = absorbedCreateRetryDeliveryResult(qitemId, destination, row, parked, hostId);
-  delete row.deliveryOutcome;
-  delete row.deliveryFailureDetail;
   row.delivery = delivery;
   return row;
 }
@@ -1734,10 +1732,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               })()
             : receipt;
           if (status < 400 && parkRequested) {
-            if (created.createOutcome === "unknown") {
-              unknownCreate(created);
-              return;
-            }
             const outputCreated: QueueRow = { ...created };
 
             if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
@@ -1752,16 +1746,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               if (advisory.code === "shared_channel_correspondence" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
             }
             if (opts.verify) {
-              if (isAbsorbedCreateRetry(created)) {
-                // The daemon returned an existing row for a same-ID retry.
-                // The retry did not create or deliver work, so do not query a
-                // delivery receipt for it.
-                const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested, hostResolved.hostId);
-                delete outputCreated.deliveryOutcome;
-                delete outputCreated.deliveryFailureDetail;
-                await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
-                return;
-              }
               const delivery = await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), qitemId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: true });
               await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt);
@@ -1781,13 +1765,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (status < 400 && typeof parkWarning?.message === "string") console.error(`Warning: ${parkWarning.message}`);
           const outputCreated: QueueRow = { ...created };
           if (status < 400) printCreateReturnRoute(created);
-          if (opts.verify && status < 400 && isAbsorbedCreateRetry(outputCreated)) {
-            const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested, hostResolved.hostId);
-            delete outputCreated.deliveryOutcome;
-            delete outputCreated.deliveryFailureDetail;
-            await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
-            return;
-          }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
           for (const advisory of advisories) {
@@ -1805,7 +1782,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           keepAbsorbedRetryDeliveryAsHistory(outputCreated, qitemId, hostResolved.destination, parkRequested, hostResolved.hostId);
           await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
         };
-        const usableCreateRow = (value: unknown): value is Record<string, unknown> =>
+        const usableCreateRow = (value: unknown): value is QueueRow =>
           isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state) && value.createOutcome !== "unknown";
         const unknownCreate = (envelope?: unknown) => {
           const received = isQueueRow(envelope) ? envelope : {};
@@ -1825,6 +1802,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           process.exitCode = 1;
         };
         if (res instanceof Error) {
+          // A pre-header disconnect can follow a committed create. Preserve the typed error,
+          // but do not let the shared renderer assert nondelivery.
+          if (res instanceof DaemonConnectionError) res.writeOutcome = "unknown";
           // No answer in time, a lost connection, or a response lost or unreadable after its headers: the create may have
           // committed, so read it back once by its ID.
           if (res instanceof DaemonTimeoutError || res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
@@ -1834,8 +1814,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               await finish(late.row, 200, late.remote ? "remote" : "neutral");
               return;
             }
-            unknownCreate();
-            return;
           }
           if (res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
             // Keep the sent ID available when the shared typed error renderer reports this failure.
@@ -1852,7 +1830,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             await finish(late.row, 200, late.remote ? "remote" : "neutral");
             return;
           }
-          unknownCreate(res.data);
+          printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
           return;
         }
         if (res.status < 400 && !usableCreateRow(res.data)) {

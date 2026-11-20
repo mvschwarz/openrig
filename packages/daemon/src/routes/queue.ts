@@ -876,7 +876,7 @@ export function queueRoutes(): Hono {
         ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
       if (!parkRequested) {
         if (!isObjectRecord(payload)) return c.json(payload, fwd.status as 200);
-        const { parkReceipt: _parkReceipt, parkWarning: _parkWarning, ...ordinaryCreate } = payload;
+        const { parkWarning: _parkWarning, ...ordinaryCreate } = payload;
         const existingAdvisories = Array.isArray(ordinaryCreate.advisories) ? ordinaryCreate.advisories : [];
         return added.length
           ? c.json({ ...ordinaryCreate, advisories: [...existingAdvisories, ...added] }, fwd.status as 200)

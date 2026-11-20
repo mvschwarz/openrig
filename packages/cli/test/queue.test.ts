@@ -1353,7 +1353,7 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
-    it("preserves a forwarder unknown envelope and exits nonzero without delivery verification", async () => {
+    it("routes a forwarder unknown envelope through the existing indeterminate receipt", async () => {
       const id = "qitem-forwarder-unknown-envelope";
       const createWarning = {
         code: "qitem_create_outcome_unknown",
@@ -1398,22 +1398,24 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
-    it("reads an unusable 2xx create reply back once by the sent ID", async () => {
+    it("keeps an unusable 2xx create reply indeterminate after one read-back", async () => {
       const id = "qitem-unusable-create-reply";
-      const stored = {
-        qitemId: id, state: "blocked", blockedOn: "external:condition",
-        sourceSession: STUB_SENDER, destinationSession: "bob@rig", body: "Wait",
-      };
       const { deps, calls } = makeDeps({ routes: {
         "POST /api/queue/create": { status: 201, data: { surprise: true } },
-        ["GET /api/queue/" + id]: { status: 200, data: stored },
+        ["GET /api/queue/" + id]: { status: 404, data: { error: "qitem_not_found" } },
       } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait",
         "--blocked-on", "external:condition", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, state: "blocked", body: "Wait" });
-      expect(result).not.toHaveProperty("createOutcome");
-      expect(result).not.toHaveProperty("parkReceipt");
+      expect(result).toMatchObject({
+        error: "queue_create_outcome_unknown",
+        outcome: "unknown",
+        createOutcome: "unknown",
+        qitemId: id,
+      });
+      expect(result.recovery).toContain(id);
+      expect(result).not.toHaveProperty("surprise");
+      expect(process.exitCode).toBe(1);
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/healthz")).toHaveLength(0);
@@ -1592,36 +1594,37 @@ describe("rig queue CLI", () => {
     it.each([
       { label: "parked", parkArgs: ["--blocked-on", "external:condition"] },
       { label: "unparked", parkArgs: [] },
-    ])("does not verify delivery or relabel an earlier gateway post on a $label same-ID retry", async ({ label, parkArgs }) => {
+    ])("uses the shared verifier for an earlier gateway post on a $label same-ID retry", async ({ label, parkArgs }) => {
       const id = `qitem-verify-existing-body-${label}`;
       const savedBody = "the existing saved body";
-      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, {
+      const row = validParkCreateResponse(id, {
         body: savedBody,
         deliveryOutcome: "posted",
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
         ...(parkArgs.length > 0 ? { parkWarning: { code: "qitem_park_not_confirmed", message: "The requested park is not confirmed." } } : {}),
-      }) } } });
+      });
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: row },
+        [`GET /api/queue/${id}`]: { status: 200, data: row },
+      } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", ...parkArgs, "--verify", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({
         qitemId: id,
         body: savedBody,
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
+        persisted: true,
         delivery: {
           receiptSource: "gateway",
-          outcome: "not-requested",
-          detail: expect.stringContaining("Prior row history: Slack receipt was posted."),
+          outcome: "posted",
+          connectorAccepted: true,
         },
       });
       expect(result.delivery).not.toHaveProperty("gateway");
       if (parkArgs.length > 0) expect(result.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
-      expect(result).not.toHaveProperty("persisted");
+      expect(result.delivery.detail).toBeUndefined();
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
-      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
-      if (label === "unparked") {
-        expect(result.delivery.detail).toContain("This request sent no new work.");
-        expect(result.delivery.detail).not.toContain("blocker and live timer");
-      }
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
       expect(process.exitCode).toBeUndefined();
     });
 
@@ -1672,8 +1675,8 @@ describe("rig queue CLI", () => {
       const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).not.toHaveProperty("deliveryOutcome");
-      expect(result).not.toHaveProperty("deliveryFailureDetail");
+      expect(result.deliveryOutcome).toBe("transport-failed");
+      expect(result.deliveryFailureDetail).toBe("old connector failure");
       expect(result.delivery).toMatchObject({
         outcome: "not-requested",
         detail: expect.stringContaining("Prior row history: Slack delivery transport-failed: old connector failure."),
@@ -1689,15 +1692,19 @@ describe("rig queue CLI", () => {
         deliveryOutcome: null,
         createWarning: { code: "qitem_body_not_saved", message: "The existing row body was not saved." },
       });
-      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: row },
+        [`GET /api/queue/${id}`]: { status: 200, data: row },
+      } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result.delivery).toMatchObject({
-        outcome: "not-requested",
-        detail: expect.stringContaining("Prior row history: Slack delivery not-alerted."),
+        outcome: "not-alerted",
+        detail: expect.stringContaining("created without --alert"),
       });
       expect(result.delivery.detail).not.toContain("still-pending");
-      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
+      expect(result).toMatchObject({ persisted: true });
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
     it.each([
@@ -1724,8 +1731,8 @@ describe("rig queue CLI", () => {
       const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).not.toHaveProperty("deliveryOutcome");
-      expect(result).not.toHaveProperty("deliveryFailureDetail");
+      expect(result.deliveryOutcome).toBe(extra.deliveryOutcome ?? null);
+      expect(result.deliveryFailureDetail).toBe(extra.deliveryFailureDetail);
       expect(result.delivery).toMatchObject({
         outcome: "not-requested",
         detail: expect.stringContaining(history),
@@ -1764,17 +1771,16 @@ describe("rig queue CLI", () => {
           destinationSession: storedDestination, body: storedBody,
         } } },
       });
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({
-        error: "queue_create_outcome_unknown",
-        outcome: "unknown",
-        qitemId: id,
-      });
-      expect(result).not.toHaveProperty("contradiction");
-      expect(result).not.toHaveProperty("createWarning");
-      expect(result).not.toHaveProperty("parkWarning");
-      expect(process.exitCode).toBe(1);
+      let error: unknown;
+      try {
+        await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(DaemonConnectionError);
+      expect((error as DaemonConnectionError).writeOutcome).toBe("unknown");
+      expect(logs).toHaveLength(0);
+      expect(process.exitCode).toBeUndefined();
       expect(errors.join("\n")).toContain("destination or body hash contradicts this request");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
