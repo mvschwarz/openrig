@@ -77,7 +77,8 @@ import type {
   HerdrTransportFactory,
 } from "./herdr-transport.js";
 import { blankShellArgv } from "./login-shell.js";
-import { findLiveHerdrWorkspace, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
+import { findLiveHerdrWorkspace, fixedSizeWorkspaceNote, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
+import { shellQuote } from "../../adapters/shell-quote.js";
 import { sameIdSet } from "./rig-viewer-records.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
 
@@ -879,8 +880,11 @@ export class HerdrAdapter implements TerminalProvider {
       notes.push(`Could not check existing Herdr workspaces (${err instanceof Error ? err.message : String(err)}); this open adds a new workspace and keeps the existing ones.`);
       return null;
     }
-    for (const id of found.stale) notes.push(`Workspace ${id} has an older or different plan for this view and was kept.`);
-    for (const id of found.unconfirmed) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known
+    const socket = this.deps.launch?.socketPath;
+    const close = (id: string) => `${socket ? `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(socket)} herdr` : "herdr"} workspace close ${shellQuote(id)}`;
+    for (const id of found.fixedSize) notes.push(fixedSizeWorkspaceNote(id, close(id)));
+    for (const id of found.stale) if (!found.fixedSize.includes(id)) notes.push(`Workspace ${id} has an older or different plan for this view and was kept.`);
+    for (const id of found.unconfirmed) if (!found.fixedSize.includes(id)) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known
     if (!found.live) return null;
     const { workspace_id: id, tab_id: tabId } = found.live;
     // The reuse counts only when the reply names this exact tab and workspace; anything less is one more uncertain

@@ -635,15 +635,17 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   }
 }
 
-function readWaveMap(db: Database.Database, missions: string[], projectIds?: readonly string[]): WaveMapData {
-  const missionWhere = missions.map(() => "tags LIKE ?").join(" OR ");
-  const row = db
-    .prepare(
-      `SELECT qitem_id, body, tags FROM queue_items
-        WHERE tags LIKE '%format:wave-map-v1%' AND (${missionWhere})
-        ORDER BY ts_created DESC`,
-    )
-    .all(...missions.map((mission) => `%mission:${mission}%`)) as Array<{ qitem_id: string; body: string | null; tags: string | null }>;
+/** The mission's wave-map row, chosen from the rows the candidate read already returned: those include every row whose
+ *  tags name the mission, so a second scan of the whole queue table isn't needed. Matching is case-insensitive, as LIKE
+ *  is, and the newest row wins. */
+function readWaveMap(candidates: readonly QueueRowLite[], missions: string[], projectIds?: readonly string[]): WaveMapData {
+  const needles = missions.map((mission) => `mission:${mission}`.toLowerCase());
+  const row = candidates
+    .filter((r) => {
+      const tags = r.tags?.toLowerCase() ?? "";
+      return tags.includes("format:wave-map-v1") && needles.some((needle) => tags.includes(needle));
+    })
+    .sort((a, b) => (a.ts_created < b.ts_created ? 1 : a.ts_created > b.ts_created ? -1 : 0));
   const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!projectIds || belongsToProject(r.tags, projectIds)));
   if (!selectedRow?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = selectedRow.body.match(WAVE_MAP_BLOCK);
@@ -767,6 +769,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   cataloguedProjectIds?: readonly string[];
   /** The selected project's former ids that can't apply, as the project read reports them. */
   aliasWarnings?: readonly string[];
+  /** The caller's request: once it's aborted (the client went away), the read stops at its next window. */
+  signal?: AbortSignal;
 }): Promise<Record<string, unknown>> {
   const projectionStarted = performance.now();
   const membershipIds = opts?.project ? (opts.projectIds ?? [opts.project]) : undefined;
@@ -847,11 +851,13 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   const candidateRead = cooperativeFile === null
     ? null
     : await readRowsCooperatively<QueueRowLite>(cooperativeFile, "queue_items",
-      `${candidateSelect} WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND (${missionWhere})`, candidateBinds);
+      `${candidateSelect} WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND (${missionWhere})`, candidateBinds,
+      undefined, undefined, { signal: opts?.signal });
   const candidateRows = candidateRead
     ? candidateRead.rows
     : deps.db.prepare(`${candidateSelect} WHERE (${missionWhere})`).all(...candidateBinds) as QueueRowLite[];
   const candidateMs = performance.now() - candidateStarted;
+  opts?.signal?.throwIfAborted();
 
   const missionRows = candidateRows.filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs));
   const rows = missionRows.filter(row => !membershipIds || belongsToProject(row.tags, membershipIds));
@@ -972,7 +978,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   // ---- arrangement authority: mission/slice YAML, with legacy EC-2 fallback ----
   const waveMap = mission === INDETERMINATE
     ? { rowId: INDETERMINATE as Indeterminate, waves: [] }
-    : readWaveMap(deps.db, missionReferences(missionsRoot, mission), membershipIds);
+    : readWaveMap(candidateRows, missionReferences(missionsRoot, mission), membershipIds);
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
