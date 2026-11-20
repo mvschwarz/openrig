@@ -119,18 +119,24 @@ describe("holding and releasing through the gateway", () => {
       summary: `Choose ${n}`, evidenceRef: `/proof/${n}.md`, transitionNote: "parked" });
     return row;
   }
-  function wire() {
+  function wire(opts: { slackReads?: boolean } = {}) {
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     return buildSlackGatewayWire({
       home, queueRepo: repo, registry: { loadHumanRegistry: () => registryWith(prefs), resolveSlackHandle }, outboundIntervalMs: 60_000,
       fetchImpl: async (url, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         if (String(url).includes("chat.postMessage")) {
-          posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          posts.push(body);
           return new Response(JSON.stringify({ ok: true, ts: `1724.9${posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
         }
-        return new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200, headers: { "content-type": "application/json" } });
+        if (opts.slackReads && String(url).includes("chat.update")) {
+          return new Response(JSON.stringify({ ok: true, ts: body.ts, channel: body.channel }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        // A real workspace answers the dedup's history read with what it posted; every other caller gets the empty read.
+        const messages = opts.slackReads ? posts.map((post, i) => ({ ...post, ts: `1724.9${i + 1}` })) : [];
+        return new Response(JSON.stringify({ ok: true, messages }), { status: 200, headers: { "content-type": "application/json" } });
       },
     });
   }
@@ -321,6 +327,24 @@ describe("holding and releasing through the gateway", () => {
     const out = await engine.dispatchEscalation(row, "test");
     expect(out).toMatchObject({ dispatched: true, decision: "interrupt" });
     expect(dispatched).toHaveLength(1);
+  });
+
+  it("a repeat of a notice whose quiet hours couldn't be read posts again carrying the note, not an edit", async () => {
+    // A repeat is content-equal but a NEW row (the dedup never edits the same ask twice); both are human updates.
+    const notice = () => repo.create({ sourceSession: "author@rig", destinationSession: `${HUMAN}@external`,
+      summary: "Build status", body: "Build failed on main.", humanIntent: "update", nudge: false });
+    const [first, repeat] = [await notice(), await notice()];
+    const w = wire({ slackReads: true });
+    const spy = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
+    try {
+      w.startServices?.();
+      w.dispatcher.dispatch(OUTBOUND_OP, `${HUMAN}@external`, await alertFor(first));
+      await settle();
+      w.dispatcher.dispatch(OUTBOUND_OP, `${HUMAN}@external`, await alertFor(repeat));
+      await settle();
+    } finally { spy.mockRestore(); w.stop(); }
+    expect(posts).toHaveLength(2);
+    expect(String(posts[1]!.text)).toContain("couldn't read your quiet hours");
   });
 });
 
