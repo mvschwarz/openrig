@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { migrate } from "../src/db/migrate.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -43,6 +45,9 @@ describe("a runtime switch's own processes don't act as the seat; nothing else c
 
   beforeEach(() => {
     db = createFullTestDb();
+    // The accepted relay delivers a reply to the asking seat and stages its wake through the attached outbox;
+    // createFullTestDb's core edge excludes outbox_entries (027), so this suite migrates it inline.
+    migrate(db, [outboxEntriesSchema]);
     const rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
     eventBus = new EventBus(db);
