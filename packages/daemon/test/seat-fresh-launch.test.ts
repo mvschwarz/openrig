@@ -251,11 +251,12 @@ describe("SeatLifecycleService.launchFresh", () => {
     const observe = vi.fn(async () => rows);
     listProcesses = observe;
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fresh occupant" });
-    expect(result.ok).toBe(mode === "valid");
+    const valid = mode === "valid" || mode === "no token";
+    expect(result.ok).toBe(valid);
     const current = sessionRegistry.getSessionsForRig(seat.rig.id).find(s => s.status === "running")!;
     expect(current.id).not.toBe(seat.session!.id);
-    expect(current.startupStatus).toBe(mode === "valid" ? "ready" : "attention_required");
-    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
+    expect(current.startupStatus).toBe(valid ? "ready" : "attention_required");
+    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(valid ? "verified" : "mismatch");
     expect(alive.has(seat.sessionName)).toBe(true);
   });
 

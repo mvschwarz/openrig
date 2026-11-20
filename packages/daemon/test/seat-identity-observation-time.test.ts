@@ -74,4 +74,54 @@ describe("identity verdict time belongs to its evidence sample", () => {
     } }).reconcileAll();
     expect(f.store.getForNode(other.id)).toMatchObject({ verdict: "mismatch", observedAt: time(2_000) });
   });
+
+  it.each([false, true])("a pane recheck cannot restamp native proof over a newer mismatch (strict=%s)", async strict => {
+    const f = fixture();
+    let clock = 1_000, paneReads = 0;
+    const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: f.registry, nodeId: f.node.id,
+      sessionName: f.name, runtime: "claude-code", expectedResumeToken: "saved-token",
+      requireExactResumeLineage: strict, now: () => new Date(clock),
+      tmux: {
+        listPanes: async () => {
+          if (++paneReads === 2) {
+            f.store.upsert({ ...f.verified, verdict: "mismatch", reason: "process_identity_mismatch" });
+            clock = 3_000;
+          }
+          return [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+        },
+        getPanePid: async () => 42, getPaneCommand: async () => strict ? "claude" : "sh",
+      },
+      listProcesses: async () => [
+        { pid: 42, ppid: 1, pgid: 42, tpgid: 43, executableName: "sh", command: "sh", startedAt: "start" },
+        { pid: 43, ppid: 42, pgid: 43, tpgid: 43, executableName: "claude", command: "claude --resume saved-token", startedAt: "start" },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "mismatch", observedAt: time(2_000) });
+  });
+
+  it.each(["normal", "read failure", "session absent"].flatMap(mode => [false, true].map(sessionChanged => ({ mode, sessionChanged }))))("a sweep drops an old selection after $mode (sessionChanged=$sessionChanged)", async ({ mode, sessionChanged }) => {
+    const f = fixture();
+    let clock = 1_000;
+    const replace = () => {
+      if (sessionChanged) {
+        const successor = f.registry.registerSession(f.node.id, f.name);
+        f.registry.updateStatus(successor.id, "running");
+      } else f.registry.updateBinding(f.node.id, { tmuxSession: f.name, tmuxPane: "%2" });
+      f.store.upsert({ ...f.verified, evidence: { ...f.verified.evidence, registeredPane: sessionChanged ? "%1" : "%2" } });
+      clock = 3_000;
+    };
+    await new SeatIdentityReconciler({ db, now: () => new Date(clock), tmux: {
+      listSessions: async () => mode === "session absent" ? [] : [{ name: f.name }],
+      probeSession: async () => { replace(); return { state: "absent", sessionName: f.name }; },
+      getPanePid: async () => {
+        replace();
+        if (mode === "read failure") throw new Error("fixture pane read failed");
+        return null;
+      },
+      getPaneCommand: async () => "claude",
+      listPanes: async () => [{ id: "%2", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+    } }).reconcileAll();
+    expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "verified", observedAt: time(2_000), evidence: { registeredPane: sessionChanged ? "%1" : "%2" } });
+  });
 });

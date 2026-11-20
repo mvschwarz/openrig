@@ -81,6 +81,7 @@ interface RunningSeatRow {
   runtime: string | null;
   session_name: string;
   session_id: string;
+  binding_session: string | null;
   tmux_pane: string | null;
   resume_token?: string | null;
   resume_provenance?: string | null;
@@ -152,7 +153,7 @@ export class SeatIdentityReconciler {
   private runningSeats(): RunningSeatRow[] {
     return this.db.prepare(`
       SELECT n.id as node_id, n.runtime as runtime,
-             s.id as session_id, s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
+             s.id as session_id, s.session_name as session_name, b.tmux_session as binding_session, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
              s.resume_provenance as resume_provenance,
              s.resume_rotated_from as resume_rotated_from,
              s.resume_rotated_process as resume_rotated_process,
@@ -167,6 +168,18 @@ export class SeatIdentityReconciler {
         AND s.session_name IS NOT NULL
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
     `).all() as RunningSeatRow[];
+  }
+
+  /** Awaited pane reads cannot publish a verdict for a superseded selection. */
+  private selectionIsCurrent(seat: RunningSeatRow): boolean {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM nodes n JOIN sessions s ON s.node_id = n.id
+      LEFT JOIN bindings b ON b.node_id = n.id
+      WHERE n.id = ? AND s.id = ? AND s.status = 'running' AND s.session_name = ?
+        AND s.id = (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+        AND n.runtime IS ? AND b.tmux_session IS ? AND b.tmux_pane IS ?
+        AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
+    `).get(seat.node_id, seat.session_id, seat.session_name, seat.runtime, seat.binding_session, seat.tmux_pane));
   }
 
   /** Nodes whose latest session `rig unclaim` released (detached, origin claimed). Unclaim leaves the process running,
@@ -253,6 +266,7 @@ export class SeatIdentityReconciler {
         const elsewhere = absent && await recordedProcessStillRunning(this.db, { nodeId: seat.node_id, sessionName: seat.session_name }, processes);
         if (generation !== this.generation) return;
         const gone = absent && !elsewhere;
+        if (!this.selectionIsCurrent(seat)) continue;
         this.store.upsert(gone ? this.sessionMissingVerdict(seat, probeAt) : this.tmuxUnavailableVerdict(seat, probeAt));
         // As on the observed path below: the run whose grant was captured before this sweep has ended.
         const observedGrant = observedGrants.get(seat.node_id);
@@ -342,6 +356,7 @@ export class SeatIdentityReconciler {
       try {
         const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes, readRunnerProcesses);
         if (generation !== this.generation) return;
+        if (!this.selectionIsCurrent(seat)) continue;
         this.store.upsert(verdict);
         const observedGrant = observedGrants.get(seat.node_id);
         if (observedGrant && (verdict.verdict === "pane_missing"
@@ -350,6 +365,7 @@ export class SeatIdentityReconciler {
         }
       } catch {
         if (generation !== this.generation) return;
+        if (!this.selectionIsCurrent(seat)) continue;
         // A single seat's tmux failure must not crash the loop; record it as
         // unavailable observation (non-green for Codex).
         this.store.upsert(this.tmuxUnavailableVerdict(seat, this.now().toISOString()));

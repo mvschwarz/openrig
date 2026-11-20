@@ -176,10 +176,11 @@ describe("Claude wrapper manual attention recovery", () => {
       }, ...(mode === "ambiguous" ? [{ ...native, pid: 102 }] : [])];
     });
     const result = await f.post();
-    expect(result.status).toBe(mode === "valid" ? 200 : 422);
-    expect(f.startup()).toBe(mode === "valid" ? "ready" : "attention_required");
-    expect(f.store.getForNode(f.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
-    if (mode === "valid") {
+    const valid = mode === "valid" || mode === "no token";
+    expect(result.status).toBe(valid ? 200 : 422);
+    expect(f.startup()).toBe(valid ? "ready" : "attention_required");
+    expect(f.store.getForNode(f.node.id)?.verdict).toBe(valid ? "verified" : "mismatch");
+    if (valid) {
       expect(result.body.evidence.kind).toBe("pane_identity_reverified");
       expect(f.listProcesses).toHaveBeenCalledTimes(2);
     }

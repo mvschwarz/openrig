@@ -174,9 +174,10 @@ describe("the explanation names only a cause the check tested", () => {
     expect(text).toContain("records no conversation");
     expect(text).not.toContain("needs the two to agree");
   });
-  it("a tokenless version-label Claude keeps the label text: nothing was compared", async () => {
-    const text = await detail("claude-code", [{ ...claude(RUNNING, 100), ppid: 1 }], { token: null, strict: false, command: "2.1.1" });
-    expect(text).toContain("foreground command '2.1.1' does not positively identify runtime 'claude-code'");
+  it("a tokenless version label with a non-Claude foreground stays negative", async () => {
+    const text = await detail("claude-code", [{ ...sleeper, pid: 100, ppid: 1 }], { token: null, strict: false, command: "2.1.1" });
+    expect(text).toContain("foreground command '2.1.1'");
+    expect(text).toContain("does not hold exactly one process the check recognises as Claude");
     expect(text).not.toContain("records no conversation");
   });
   it("a tokenless wrapper Claude that fails only on instability says it may have changed", async () => {

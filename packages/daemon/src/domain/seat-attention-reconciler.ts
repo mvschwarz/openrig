@@ -229,7 +229,6 @@ export async function rebindAndVerifyPaneIdentity(input: {
     try {
       const currentPanes = await input.tmux.listPanes(input.sessionName);
       const currentPid = await input.tmux.getPanePid(pane.id);
-      observedAt = now();
       return { ok: true as const, panes: currentPanes, pid: currentPid };
     } catch (error) { return { ok: false as const, error }; }
   };

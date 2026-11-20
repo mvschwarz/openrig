@@ -847,7 +847,8 @@ describe("launch-recorded community runner Core process evidence", () => {
     const f = fixture();
     f.listProcesses.mockImplementation(async () => { f.registry.updateBinding("n1", { tmuxPane: "%2" }); return [f.root]; });
     await f.rec.reconcileAll();
-    expect(f.verdict()?.verdict).toBe("unconfirmed");
+    // The sweep drops the superseded selection instead of publishing even an unconfirmed verdict for it.
+    expect(f.verdict()).toBeNull();
     expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
   });
 
