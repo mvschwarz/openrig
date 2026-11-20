@@ -1432,6 +1432,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   coldStartLaunch = (rigId, logicalId) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
     adapters: runtimeAdaptersMap,
     fsOps: { exists: (path: string) => fs.existsSync(path) },
+    requireCurrentOccupant: true,
   });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {

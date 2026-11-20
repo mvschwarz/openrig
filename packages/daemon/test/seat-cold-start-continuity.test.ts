@@ -135,7 +135,7 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     return new SeatColdStarter({
       db,
       deliveryGuard,
-      launchSingleNode: (id, logicalId) => orchestrator.launchSingleNode(id, logicalId),
+      launchSingleNode: (id, logicalId) => orchestrator.launchSingleNode(id, logicalId, { requireCurrentOccupant: true }),
       hasSession: name => tmux.hasSession(name),
       getNodeLaunchRecipe: () => recipeWithColdStart(),
       log: () => {},
@@ -210,5 +210,28 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     // Cold start only brings the seat up; the row stays pending, unchanged, for the queue's own pickup.
     expect(db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id = ?").get(created.qitemId)).toEqual(before);
     expect((before as { state: string }).state).toBe("pending");
+  });
+
+  it("parks when the snapshot's occupant is older than the seat's current session (stale snapshot, R2)", async () => {
+    // Conversation A is captured, then the seat runs a NEWER conversation B before going away.
+    // Resuming A from the stale snapshot would silently replace B — the door must park instead.
+    sessionRegistry.updateResumeToken(implSessionId(), "pi_session_file", SESSION_FILE);
+    db.prepare("UPDATE sessions SET restore_policy = 'resume_if_possible' WHERE id = ?").run(implSessionId());
+    snapshotCapture.captureSnapshot(rigId, "manual");            // snapshot occupant = A
+    sessionRegistry.updateStatus(implSessionId(), "exited");      // A ends
+    const newer = sessionRegistry.registerSession(implNodeId, SEAT_SESSION);   // B, a newer id
+    sessionRegistry.updateResumeToken(newer.id, "pi_session_file", "/home/pi/.pi/sessions/conv-99.jsonl");
+    db.prepare("UPDATE sessions SET restore_policy = 'resume_if_possible' WHERE id = ?").run(newer.id);
+    sessionRegistry.updateStatus(newer.id, "exited");             // B ends too; seat dormant, latest = B
+    const sessionsBefore = (db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n;
+
+    const resume = vi.fn(async () => ({ ok: true as const }));
+    const pi = { canResume: vi.fn(() => true), resume } as unknown as PiResumeAdapter;
+    const starter = starterFor(orchestratorWith(pi));
+    starter.notify(SEAT_SESSION);
+    await vi.waitFor(() => expect(ledger()?.startsWith("awaiting_decision")).toBe(true));
+
+    expect(resume).not.toHaveBeenCalled();
+    expect((db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n).toBe(sessionsBefore);
   });
 });

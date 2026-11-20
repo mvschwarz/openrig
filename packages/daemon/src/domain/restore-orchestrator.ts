@@ -734,6 +734,8 @@ export class RestoreOrchestrator {
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
+    /** Cold start only: park if the snapshot occupant is not the seat's current session (R2). */
+    requireCurrentOccupant?: boolean;
   }): Promise<NarrowLaunchResult> {
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
   }
@@ -748,6 +750,7 @@ export class RestoreOrchestrator {
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
+    requireCurrentOccupant?: boolean;
     namedAgent?: boolean;
     nonTargetMode: "unchanged" | "detach_and_hold";
   }): Promise<NarrowLaunchResult> {
@@ -911,7 +914,7 @@ export class RestoreOrchestrator {
       const planEntry = { node: liveChoice ? { ...node, cwd: liveChoice.cwd, model: liveChoice.model,
         effort: currentEffort?.effective ?? null, effortChoice: currentEffort?.choice ?? null } : node };
       const result = await this.restoreNodeWithCompensation(
-        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry }, subsetWarnings,
+        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry, requireCurrentOccupant: opts.requireCurrentOccupant }, subsetWarnings,
       );
       launched.push(result);
     }
@@ -1277,7 +1280,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean; requireCurrentOccupant?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1337,6 +1340,19 @@ export class RestoreOrchestrator {
     }
 
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    // R2 (#2829 review): a stale snapshot must never silently replace the seat's current
+    // conversation. If the snapshot's occupant is not the agent's latest session, park for a
+    // decision (an explicit history selection or --fresh deliberately overrides this).
+    if (opts?.requireCurrentOccupant && occupantResolution.kind === "resolved" && !selectedHistory && !freshRequested) {
+      const latestLive = this.sessionRegistry.getSessionsForRig(rigId)
+        .filter(row => row.nodeId === nodeId)
+        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+      if (latestLive && latestLive.id !== occupantResolution.session.id) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: `The snapshot's occupant is no longer ${node.logicalId}'s current session. No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          ...notStarted };
+      }
+    }
     const carried = opts?.resumePeriodicCarry && !selectedHistory && !freshRequested
       && occupantResolution.kind === "none" && liveNode?.id === nodeId
       ? data.periodicResumeSourcesByNode?.[nodeId] : undefined;
