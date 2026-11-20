@@ -995,8 +995,10 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 // revoked. Please log out and sign in again."), all starting the same way.
 //
 // The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
-// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message. Its
-// opening words must fit on that first row; the sign-in instruction may wrap onto any number of rows after it.
+// that starts any other way (a reply, a prompt, an indented quote) isn't Codex's message. Inside a fenced block the pane
+// leaves open, an unmarked row stays a quote and is excluded; a row carrying Codex's mark (CODEX_MARKED_REFUSAL_ROW) is
+// eligible, subject to the instruction and tail checks, and may still be quoted text. The message's opening words must
+// fit on its first row; the sign-in instruction may wrap onto any number of rows after it.
 const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
 const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
 const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;
