@@ -116,22 +116,21 @@ status output in a transcript or file. Evidence shares the observation's
 five-minute lifetime and existing seat/actor limits, is discarded lazily on the
 next observation/status read after expiry, and is lost on restart. No rule,
 permission/configuration write, hook decision, edited input, prompt submission
-or new attention behavior is produced. Its one delivery effect follows.
+or new attention or delivery behavior is produced. Its one other use follows.
 
-**Send readiness.** A request from the seat's main session that's newer than its
-latest Stop, running or idle hook, and not yet settled by that session's later
-tool batch, stops that hook from narrowing the current-prompt read for an
-ordinary send or a queue wake. The screen still decides: a dialog that read
-positively recognizes holds the send before any text or Enter, as it does past
-the send window. An ordinary input box, an unreadable pane, a subagent's
-request, a replaced occupant or an expired observation leaves delivery as it
-was. The request isn't evidence that a dialog is open: a hook or host can decide
-a permission request, or answer an MCP elicitation, with nothing displayed.
-Claude's `Elicitation` hook works the same way, settled by `ElicitationResult`
-or a later tool batch. Neither event changes activity or attention, and only
-the actor and time are kept: no server message, form field or response. A
-dialog the current-prompt read doesn't recognize still can't be told apart from
-ordinary input.
+**Send context.** When a direct send starts and the seat's main session has a
+request newer than its latest activity hook, not yet settled by that session's
+later tool batch, the send's result carries an `inputRequest` notice saying so,
+and `rig send` and `rig broadcast` print it. The send goes exactly as it would
+without the request: the notice changes no readiness, refusal or timing, and a
+prompt answer (`--dangerously-interact`) gets none. The request isn't evidence
+that a dialog is open: a hook or host can decide a permission request, or
+answer an MCP elicitation, with nothing displayed, and the notice says so. A
+subagent's request, a settled or expired observation and a replaced occupant
+give no notice. Claude's `Elicitation` hook works the same way, settled by
+`ElicitationResult` or a later tool batch. Neither event changes activity or
+attention, and only the actor and time are kept: no server message, form field
+or response.
 
 Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
 is treated as main, a valid ID identifies a subagent or in-process teammate, and

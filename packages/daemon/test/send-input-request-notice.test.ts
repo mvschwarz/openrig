@@ -1,7 +1,7 @@
-// A permission or elicitation request newer than a fresh Stop/running/idle hook stops that hook from narrowing the
-// current-prompt read: the screen decides, a dialog it positively reads holds the send, and nothing else is refused.
-// Native events go through the real relay, the activity ingress and the store; the sends through the real transport and
-// queue. The tmux adapter is a fixture whose writes are spies. Schema-based synthetic Claude payloads, no live dialog.
+// A permission or elicitation request the main session made after its latest activity report, still unsettled, is
+// context for the sender: the send's result carries a notice saying exactly that, and the send itself goes as it would
+// have without it. Native events go through the real relay, the activity ingress and the store; the sends through the
+// real transport and queue. The tmux adapter is a fixture whose writes are spies. Synthetic Claude payloads, no live dialog.
 import { createRequire } from "node:module";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -102,117 +102,122 @@ function fixture() {
   } as unknown as TmuxAdapter;
   const transport = new SessionTransport({ db, rigRepo, sessionRegistry: registry, tmuxAdapter: tmux,
     agentActivityStore: store, eventBus: new EventBus(db), now, sleep: async () => {} });
-  const send = async () => { time += 1000; return transport.send(sessionName, "STAND DOWN, do not ship"); };
+  const send = async (opts?: Parameters<SessionTransport["send"]>[2]) => { time += 1000; return transport.send(sessionName, "STAND DOWN, do not ship", opts); };
   const wrote = () => sendText.mock.calls.length + sendKeys.mock.calls.length;
   return { db, node, registry, store, sessionName, screen, transport, hook, send, wrote, sendText, now,
     tick: (ms: number) => { time += ms; } };
 }
 
-describe("a newer permission or elicitation request ends a fresh hook's narrowed read", () => {
-  it("a request after a fresh Stop, with its dialog drawn: refused before any write", async () => {
+/** The notice's exact words: what was observed, never that a dialog is open. */
+const noticeFor = (f: ReturnType<typeof fixture>, at: string) => `${f.sessionName}'s main session made a permission or elicitation request at ${at}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.`;
+
+describe("an unsettled permission or elicitation request is a notice on the send, never a change to it", () => {
+  it("a request after a fresh Stop, with a menu drawn: the send goes as it would without it, and carries the notice", async () => {
     const f = fixture();
     await f.hook({ hook_event_name: "Stop" });
-    await f.hook(ASK);
+    const request = await f.hook(ASK);
     const result = await f.send();
-    expect(result).toMatchObject({ ok: false, reason: "target_needs_input" });
-    expect(f.wrote()).toBe(0);
+    expect(result.ok).toBe(true);
+    expect(f.sendText).toHaveBeenCalled();
+    expect(result.inputRequest).toEqual({ observedAt: request.occurredAt, notice: noticeFor(f, String(request.occurredAt)) });
   });
 
-  it("control (unchanged): the same screen after a fresh Stop and no request still delivers", async () => {
+  it("control: the same screen after a fresh Stop and no request delivers the same way, with no notice", async () => {
     const f = fixture();
     await f.hook({ hook_event_name: "Stop" });
     const result = await f.send();
     expect(result.ok).toBe(true);
     expect(f.sendText).toHaveBeenCalled();
+    expect(result.inputRequest).toBeUndefined();
   });
 
-  it("a request after a fresh running hook, with its dialog drawn: refused before any write", async () => {
+  it("a request after a fresh running hook: delivered as without it, with the notice", async () => {
     const f = fixture();
     await f.hook({ hook_event_name: "UserPromptSubmit", prompt: "SYNTHETIC" });
     await f.hook(ASK);
-    expect(await f.send()).toMatchObject({ ok: false, reason: "target_needs_input" });
+    const result = await f.send();
+    expect(result.ok).toBe(true);
+    expect(f.sendText).toHaveBeenCalled();
+    expect(result.inputRequest).toBeDefined();
+  });
+
+  it("a refusal the send already makes stays the same refusal, with the notice beside it", async () => {
+    const f = fixture();
+    await f.hook({ hook_event_name: "Notification", notification_type: "permission_prompt" });
+    await f.hook(ASK);
+    const result = await f.send();
+    expect(result).toMatchObject({ ok: false, reason: "target_needs_input" });
     expect(f.wrote()).toBe(0);
+    expect(result.inputRequest).toBeDefined();
   });
 
-  it("a later tool batch from the same session settles the request: the fresh Stop's reading stands again", async () => {
+  it("a prompt answer gets no notice: it's aimed at the prompt", async () => {
     const f = fixture();
     await f.hook({ hook_event_name: "Stop" });
     await f.hook(ASK);
-    await f.hook({ hook_event_name: "PostToolBatch", tool_calls: [] });
-    expect((await f.send()).ok).toBe(true);
-    expect(f.sendText).toHaveBeenCalled();
+    const result = await f.send({ dangerouslyInteract: true, reason: "SYNTHETIC", actorSession: "planner@team" });
+    expect(result.inputRequest).toBeUndefined();
   });
 
-  it("a request decided with no dialog shown (an ordinary composer on screen) delivers", async () => {
+  it.each([
+    ["settled by a later tool batch from the same session", async (f: ReturnType<typeof fixture>) => {
+      await f.hook({ hook_event_name: "Stop" }); await f.hook(ASK); await f.hook({ hook_event_name: "PostToolBatch", tool_calls: [] });
+    }],
+    ["a subagent's request (not tied to the main pane)", async (f: ReturnType<typeof fixture>) => {
+      await f.hook({ hook_event_name: "Stop" }); await f.hook({ ...ASK, agent_id: "subagent-1" });
+    }],
+    ["a request older than the latest hook", async (f: ReturnType<typeof fixture>) => {
+      await f.hook(ASK); await f.hook({ hook_event_name: "Stop" });
+    }],
+    ["a replaced occupant's request", async (f: ReturnType<typeof fixture>) => {
+      const before = f.registry.currentOccupantTenure(f.node.id)!.generationUuid;
+      f.registry.mintOccupantTenure(f.node.id, "handover");
+      await f.hook({ hook_event_name: "Stop" }); await f.hook(ASK, { generation: before });
+    }],
+    // Past the send window the existing full read applies, so this one draws an ordinary composer.
+    ["a request past its five-minute lifetime", async (f: ReturnType<typeof fixture>) => {
+      f.screen.text = COMPOSER; await f.hook({ hook_event_name: "Stop" }); await f.hook(ASK); f.tick(300_000);
+    }],
+  ])("no notice for %s, and the send is unchanged", async (_name, arrange) => {
     const f = fixture();
-    f.screen.text = COMPOSER;
-    await f.hook({ hook_event_name: "Stop" });
-    await f.hook(ASK);
-    expect((await f.send()).ok).toBe(true);
+    await arrange(f);
+    const result = await f.send();
+    expect(result.inputRequest).toBeUndefined();
     expect(f.sendText).toHaveBeenCalled();
   });
 
-  it("an unreadable pane isn't a refusal: the fresh Stop's reading stands", async () => {
+  it("an unreadable pane: the send's own result, with the notice", async () => {
     const f = fixture();
     f.screen.text = null;
     await f.hook({ hook_event_name: "Stop" });
     await f.hook(ASK);
-    const result = await f.send();
-    expect(result.reason).not.toBe("target_needs_input");
-  });
-
-  it("a subagent's request isn't tied to the main pane: the fresh Stop's reading stands", async () => {
-    const f = fixture();
-    await f.hook({ hook_event_name: "Stop" });
-    await f.hook({ ...ASK, agent_id: "subagent-1" });
-    expect((await f.send()).ok).toBe(true);
-    expect(f.sendText).toHaveBeenCalled();
-  });
-
-  it("a request older than the fresh hook doesn't count", async () => {
-    const f = fixture();
-    await f.hook(ASK);
-    await f.hook({ hook_event_name: "Stop" });
-    expect((await f.send()).ok).toBe(true);
-    expect(f.sendText).toHaveBeenCalled();
-  });
-
-  it("a replaced occupant's request doesn't count against the new occupant", async () => {
-    const f = fixture();
-    const before = f.registry.currentOccupantTenure(f.node.id)!.generationUuid;
-    f.registry.mintOccupantTenure(f.node.id, "handover");
-    await f.hook({ hook_event_name: "Stop" });
-    await f.hook(ASK, { generation: before });
-    expect(f.store.getUnsettledInputRequestForNode(f.node.id, f.sessionName)).toBeNull();
-    expect((await f.send()).ok).toBe(true);
-    expect(f.sendText).toHaveBeenCalled();
-  });
-
-  it("a request past its lifetime no longer counts", async () => {
-    const f = fixture();
-    await f.hook(ASK);
-    expect(f.store.getUnsettledInputRequestForNode(f.node.id, f.sessionName)).not.toBeNull();
-    f.tick(300_000);
-    expect(f.store.getUnsettledInputRequestForNode(f.node.id, f.sessionName)).toBeNull();
+    const control = fixture();
+    control.screen.text = null;
+    await control.hook({ hook_event_name: "Stop" });
+    const [result, expected] = [await f.send(), await control.send()];
+    expect({ ok: result.ok, reason: result.reason }).toEqual({ ok: expected.ok, reason: expected.reason });
+    expect(result.inputRequest).toBeDefined();
   });
 });
 
 describe("MCP elicitations are observation and settlement inputs only", () => {
-  it("an elicitation after a fresh Stop, with a dialog drawn: refused before any write", async () => {
+  it("an elicitation after a fresh Stop: delivered as without it, with the notice", async () => {
     const f = fixture();
     await f.hook({ hook_event_name: "Stop" });
-    await f.hook(ELICIT);
-    expect(await f.send()).toMatchObject({ ok: false, reason: "target_needs_input" });
-    expect(f.wrote()).toBe(0);
+    const request = await f.hook(ELICIT);
+    const result = await f.send();
+    expect(result.ok).toBe(true);
+    expect(f.sendText).toHaveBeenCalled();
+    expect(result.inputRequest?.notice).toBe(noticeFor(f, String(request.occurredAt)));
   });
 
-  it.each(["accept", "decline", "cancel"])("its result (%s) settles it, and the fresh Stop's reading stands again", async action => {
+  it.each(["accept", "decline", "cancel"])("its result (%s) settles it: no notice", async action => {
     const f = fixture();
     await f.hook({ hook_event_name: "Stop" });
     await f.hook(ELICIT);
     await f.hook(elicitResult(action));
     expect(f.store.getUnsettledInputRequestForNode(f.node.id, f.sessionName)).toBeNull();
-    expect((await f.send()).ok).toBe(true);
+    expect((await f.send()).inputRequest).toBeUndefined();
   });
 
   it("a result at the same instant as the request doesn't settle it", async () => {
@@ -240,27 +245,17 @@ describe("MCP elicitations are observation and settlement inputs only", () => {
   });
 });
 
-describe("queue wakes take the same reading", () => {
+describe("queue wakes are unchanged by a request", () => {
   const queueOn = (f: ReturnType<typeof fixture>) => {
     const repo = new QueueRepository(f.db, new EventBus(f.db), { validateRig: () => true });
     repo.attachTransport(f.transport as never);
     return repo;
   };
 
-  it("a wake after a newer request, with its dialog drawn, is refused before any write", async () => {
+  it.each([true, false])("a wake after a fresh Stop is typed as it would be (request=%s)", async withRequest => {
     const f = fixture();
     await f.hook({ hook_event_name: "Stop" });
-    await f.hook(ASK);
-    const repo = queueOn(f);
-    const row = await repo.create({ sourceSession: "planner@team", destinationSession: f.sessionName, body: "x" });
-    await vi.waitFor(() => expect(repo.getById(row.qitemId)?.lastNudgeResult).toMatch(/^failed:/));
-    expect(repo.getById(row.qitemId)?.lastNudgeResult).toMatch(/target_needs_input|interactive prompt/);
-    expect(f.wrote()).toBe(0);
-  });
-
-  it("control: with no request, the same wake after a fresh Stop is typed", async () => {
-    const f = fixture();
-    await f.hook({ hook_event_name: "Stop" });
+    if (withRequest) await f.hook(ASK);
     const repo = queueOn(f);
     const row = await repo.create({ sourceSession: "planner@team", destinationSession: f.sessionName, body: "x" });
     await vi.waitFor(() => expect(repo.getById(row.qitemId)?.lastNudgeResult).toBeTruthy());
