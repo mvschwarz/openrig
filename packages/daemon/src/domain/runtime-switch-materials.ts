@@ -9,14 +9,16 @@ import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, selectedPluginPaths, type ResolutionContext } from "./profile-resolver.js";
 import { claudeConflictTargetPath, filterProtectedProjections, planProjection, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
-import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
+import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { readSeatEffort } from "./seat-effort.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 
-export type SwitchRuntime = "codex" | "claude-code" | "pi";
+/** A seat's runtime for a switch: a built-in one, or a community harness's name, which its installed preset defines. */
+export type SwitchRuntime = "codex" | "claude-code" | "pi" | (string & {});
 
 /** Where an effective target setting came from. `native_default` means OpenRig passes no flag. */
 export type RuntimeSwitchSettingSource = "explicit" | "agent_spec" | "native_default";
@@ -187,9 +189,13 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
     async prepare(binding, adapter) {
       const notes: string[] = [];
       if (runtime === "claude-code") notes.push(...ensureSeatSkillPlugin(seatSkills));
-      if (skillLoadout && runtime !== "pi") {
-        const reconcile = (selected: SkillLoadout) => reconcileSkillLoadout({ loadout: selected, runtime, cwd, apply: true,
-          topologyOwner: input.canonicalSession, location: seatSkillLocation(seatSkills, runtime) });
+      // A community harness takes no skills or guidance, so there is nothing to project for it, and the note says so.
+      if (skillLoadout && isCommunityHarnessRuntime(runtime)) {
+        notes.push(`${runtime} is a community harness: it takes no skills, so the seat's skill loadout isn't projected.`);
+      } else if (skillLoadout && runtime !== "pi") {
+        const skillRuntime = runtime as SkillRuntime;
+        const reconcile = (selected: SkillLoadout) => reconcileSkillLoadout({ loadout: selected, runtime: skillRuntime, cwd, apply: true,
+          topologyOwner: input.canonicalSession, location: seatSkillLocation(seatSkills, skillRuntime) });
         let projection = reconcile(skillLoadout);
         // As at launch: plugin skills that can't be projected don't stop the seat; it starts without them and says why.
         if (!projection.ok && skillLoadout.entries.some((entry) => entry.pluginId)) {

@@ -7,6 +7,7 @@ import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
+import { communityHarnessAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -272,7 +273,8 @@ export class SuccessorSessionLauncher {
     }
 
     const binding = successorBinding(input.node, departingSession, pane.id, cwd, input.occupantGeneration);
-    const adapter = input.node.runtime ? this.runtimeAdapters[input.node.runtime] : undefined;
+    // A built-in target has its adapter in the map; a community harness's comes from its installed preset.
+    const adapter = input.node.runtime ? (this.runtimeAdapters[input.node.runtime] ?? communityHarnessAdapter(this.runtimeAdapters, input.node.runtime)) : undefined;
     let preflightWarnings: string[] = [];
     if (adapter?.preflightLaunch) {
       try {
@@ -462,7 +464,7 @@ export class SuccessorSessionLauncher {
     preparedBinding?: NodeBinding,
   ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
     | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; launchedExecutable?: { path: string; isScript: boolean } }> {
-    const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
+    const adapter = node.runtime ? (this.runtimeAdapters[node.runtime] ?? communityHarnessAdapter(this.runtimeAdapters, node.runtime)) : undefined;
     if (!adapter) {
       return {
         ok: false,
