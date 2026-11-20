@@ -289,8 +289,11 @@ export class SeatColdStarter {
       this.log(`${seat.logicalId}: not cold-starting: ${why}`);
       return false;
     };
-    const selection = this.selectionRefusal(seat);
-    if (selection) return refuse(selection);
+    // Opt-in first, silently: a default-off seat is the common case and must not log on
+    // every evaluation (maintainer opt). Only opted-in seats reach the logged gates below.
+    if (this.optInRefusal(seat)) return false;
+    const stop = this.stopRefusal(seat);
+    if (stop) return refuse(stop);
 
     // The queue said no receiver; verify — a live session means someone is there.
     const physical = seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`;
@@ -323,10 +326,11 @@ export class SeatColdStarter {
     return refuse("no other seat of this rig is live (rig down)");
   }
 
-  private selectionRefusal(seat: SeatRow): string | null {
-    // Opt-in: the seat must still be in its persisted rig spec with the flag set
-    // (member wins over pod default). No recipe — pre-recipe seat, terminal node,
-    // or a member removed from the spec (deleted seat) — never cold-starts.
+  /** Opt-in gate: the seat must still be in its persisted rig spec with the flag set
+   *  (member wins over pod default). No recipe — pre-recipe seat, terminal node, or a
+   *  member removed from the spec (deleted seat) — never cold-starts. Checked first and
+   *  silently in eligible(): a default-off seat is not noteworthy (maintainer opt). */
+  private optInRefusal(seat: SeatRow): string | null {
     const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
     const dot = seat.logicalId.indexOf(".");
     const podId = dot > 0 ? seat.logicalId.slice(0, dot) : seat.logicalId;
@@ -335,8 +339,11 @@ export class SeatColdStarter {
     const specMember = specPod?.members.find(member => member.id === memberId);
     if (!recipe || !specMember) return "seat is not in the current rig spec";
     if (!((specMember.coldStart ?? specPod?.coldStart) === true)) return "no cold_start opt-in for this seat";
+    return null;
+  }
 
-    // WHO stopped the seat decides whether new work may wake it (maintainer term 1).
+  /** WHO stopped the seat decides whether new work may wake it (maintainer term 1). */
+  private stopRefusal(seat: SeatRow): string | null {
     const stop = classifyColdStartStop(this.deps.db, seat.nodeId);
     if (stop.kind === "intentional") {
       return stop.operator
@@ -347,6 +354,11 @@ export class SeatColdStarter {
       return "seat's latest start failed (superseded launch); a failed start is never auto-revived";
     }
     return null;
+  }
+
+  /** Combined gate for the pre-launch recheck (opt-in may have changed under the lease). */
+  private selectionRefusal(seat: SeatRow): string | null {
+    return this.optInRefusal(seat) ?? this.stopRefusal(seat);
   }
 
   /** Durable ledger: the attempt window opens at launch, then records the outcome.

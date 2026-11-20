@@ -192,6 +192,16 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  it("stays silent for a default-off seat (opt-in checked first, no log noise)", async () => {
+    const f = fixture();
+    f.setRecipe(specWith({}));
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    expect(f.logs).toHaveLength(0);
+    f.db.close();
+  });
+
   it("honours the pod-level flag when the member has none", async () => {
     const f = fixture();
     f.setRecipe(specWith({ pod: true }));
