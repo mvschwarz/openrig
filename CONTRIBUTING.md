@@ -59,6 +59,17 @@ npm run lint           # typecheck every package
 runs too. Use `npm install <package>` only when you're adding or changing a dependency, and commit
 the lockfile change with it.
 
+With npm 12, dependency install scripts are blocked unless the root
+`package.json` permits them in `allowScripts`. That field approves the locked
+esbuild versions so their postinstall binary checks run. better-sqlite3 loads its
+bundled prebuilt binary; approving its implicit `node-gyp rebuild` would add a
+native build-tool requirement even when that binary works, so it stays blocked.
+When updating esbuild, review its script and run
+[`npm install-scripts approve esbuild`](https://docs.npmjs.com/cli/v12/commands/npm-install-scripts/)
+to update the pinned entries alongside the lockfile. Other dependency scripts
+remain blocked. Keep these approvals in the project, without changing user or
+global npm settings.
+
 `npm test` builds the daemon and runs repository checks before the package suites. Read the
 specific failure. Each shipped skill has one editable home in this repository (see
 ["A shipped skill" in ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)). Edit its home, run
