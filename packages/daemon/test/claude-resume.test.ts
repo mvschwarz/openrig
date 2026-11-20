@@ -168,7 +168,7 @@ describe("ClaudeResumeAdapter", () => {
     const tmux = mockTmux();
     const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
     await adapter.resume("seat@rig", "claude_id", "original", "/repo", undefined, undefined, undefined, "node",
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "C:/owned/node.exe", undefined, undefined, undefined, "C:/owned tools/cli.js");
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "C:/owned/node.exe", undefined, undefined, undefined, undefined, "C:/owned tools/cli.js");
     expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec 'C:/owned/node.exe' 'C:/owned tools/cli.js'"));
     expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--resume 'original'"));
   });

@@ -29,6 +29,12 @@ vi.mock("node:child_process", async (importOriginal) => ({
 
 const NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
+
+/** The guidance's directory step. Native Windows enters a directory through PowerShell, and only quotes a
+ *  path outside its safe set; POSIX keeps `cd <path>` for a plain absolute path. */
+const directoryStep = (cwd: string) => process.platform === "win32"
+  ? `Set-Location -LiteralPath '${cwd.replaceAll("'", "''")}'`
+  : `cd ${cwd}`;
 const codexFloor = observeCodexSandbox("-s workspace-write");
 const withChoice = (daemonOptOut: boolean) => ({ ...codexFloor, daemonOptOut }) as AppliedLaunchObservation;
 
@@ -114,7 +120,7 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
       expect(resumeCommand).toBe("codex --no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
       expect(guidance.commands).toEqual([
         "codex --no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'",
-        "cd /workspace/app",
+        directoryStep("/workspace/app"),
       ]);
       expect(guidance.notes).not.toContain(NOT_RECORDED);
     });
@@ -125,7 +131,7 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
       expect(resumeCommand).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
       expect(guidance.commands).toEqual([
         "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'",
-        "cd /workspace/app",
+        directoryStep("/workspace/app"),
       ]);
       expect(guidance.notes).not.toContain(NOT_RECORDED);
     });
@@ -136,7 +142,7 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
       expect(resumeCommand).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
       expect(guidance.commands).toEqual([
         "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'sess-456'",
-        "cd /workspace/app",
+        directoryStep("/workspace/app"),
       ]);
       expect(guidance.notes).toContain(NOT_RECORDED);
     });
@@ -155,7 +161,7 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
     const { resumeCommand, guidance } = printed();
     expect(resumeCommand).toBeNull();
     expect(guidance.commands).toEqual([
-      "cd /workspace/app",
+      directoryStep("/workspace/app"),
       "codex --no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last",
     ]);
     expect(guidance.summary).toContain(
@@ -167,7 +173,7 @@ describe("rig ps resumeCommand and the node detail's recovery guidance", () => {
   it("without a stored conversation and an unrecorded choice, the picker command and summary omit --no-daemon", () => {
     const { guidance } = printed();
     expect(guidance.commands).toEqual([
-      "cd /workspace/app",
+      directoryStep("/workspace/app"),
       "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last",
     ]);
     expect(guidance.summary).toContain(

@@ -33,9 +33,17 @@ const relayParser = createRequire(import.meta.url)(relay) as { settingsRelayPath
 const activityCommand = (executable: string, script: string) => process.platform === "win32"
   ? "& " + [executable, script].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
   : `exec ${shellQuote(executable)} ${shellQuote(script)}`;
+// A runtime outside the ownership grammar keeps the legacy bare `node` word, which is unquoted in the
+// generated command so PATH resolution still applies.
+const legacyActivityCommand = (script: string) => process.platform === "win32"
+  ? "& " + ["node", script].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
+  : `exec node ${shellQuote(script)}`;
 const collectorCommand = (executable: string, ...args: string[]) => process.platform === "win32"
   ? "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Buffer.from("& " + [executable, ...args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" "), "utf16le").toString("base64")
   : "exec " + [executable, ...args].map(shellQuote).join(" ");
+const legacyCollectorCommand = (...args: string[]) => process.platform === "win32"
+  ? "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Buffer.from("& " + ["node", ...args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" "), "utf16le").toString("base64")
+  : "exec node " + args.map(shellQuote).join(" ");
 
 it.runIf(process.platform === "win32")("recognizes literal native short paths in both readers without accepting tilde expansion", () => {
   const executable = "C:/PROGRA~1/nodejs/node.exe", script = "C:/Users/USERNA~1/state/claude-activity-hooks/activity-relay.cjs";
@@ -119,8 +127,8 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
   fs.symlinkSync(process.execPath, executable);
   const a = f.adapter(executable);
   const first = await f.project(a);
-  expect(first.hooks.Stop[0].hooks[0].command).toBe(activityCommand("node", f.relayDest));
-  expect(first.statusLine.command).toBe(collectorCommand("node", f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")));
+  expect(first.hooks.Stop[0].hooks[0].command).toBe(legacyActivityCommand(f.relayDest));
+  expect(first.statusLine.command).toBe(legacyCollectorCommand(f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")));
   expect(relayParser.settingsRelayPath(first.hooks.Stop[0].hooks[0].command))
     .toEqual({ executable: "node", relay: f.relayDest });
   const bytes = fs.readFileSync(f.settings, "utf8");
