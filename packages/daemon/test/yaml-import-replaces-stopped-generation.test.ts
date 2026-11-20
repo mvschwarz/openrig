@@ -46,7 +46,8 @@ function setup(probe: Probe | undefined, opts: { launchOk?: boolean; attention?:
     hasSession: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242), getPaneCommand: vi.fn(async () => "claude"),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     ...(probe ? { probeSession: vi.fn(probe) } : {}),
   } as unknown as TmuxAdapter;

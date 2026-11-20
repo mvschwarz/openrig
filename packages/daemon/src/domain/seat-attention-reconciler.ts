@@ -14,9 +14,11 @@ import { isShellForeground } from "./shell-classifier.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
+import type { HarnessLaunchResult } from "./runtime-adapter.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = NativeProcessRow;
+type LaunchedExecutable = Extract<HarnessLaunchResult, { ok: true }>["launchedExecutable"];
 
 export type PaneIdentityReconcileResult =
   /** `nativeProcess`: the native runtime process the check matched, when it matched one (Codex, an exact-resume
@@ -67,6 +69,7 @@ async function describeLineageFailure(input: {
   listProcesses?: NativeProcessLister;
   expectedToken: string | null;
   rotation: ClaudeResumeRotation | null;
+  launchedExecutable?: LaunchedExecutable;
   /** The check required a resume (`requireExactResumeLineage`), not just a runtime. */
   exact: boolean;
 }): Promise<string | null> {
@@ -77,9 +80,12 @@ async function describeLineageFailure(input: {
     // One read serves every observation below, so the explanation costs one process-table read. A failed read
     // looks like an empty table (and a missing pane pid like no process), so neither may be reported as an absence.
     const pid = await input.tmux.getPanePid(input.target);
-    const rows = pid ? await Promise.resolve((input.listProcesses ?? listNativeProcesses)()).catch((): NativeProcessRow[] => []) : [];
+    const executable = input.launchedExecutable;
+    const nativeOptions = { selectedExecutable: executable?.path, scriptLaunch: executable?.isScript };
+    const rows = pid ? await Promise.resolve((input.listProcesses ?? (() => listNativeProcesses({
+      frozenExecutable: executable?.path, claudeLaunchPaths: executable?.isScript === true })))()).catch((): NativeProcessRow[] => []) : [];
     if (!pid || !rows.some((row) => row.pid === pid)) return "The pane's process could not be found in the process listing (the listing may have failed), so the runtime could not be verified";
-    const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows };
+    const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows, ...nativeOptions };
     const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact, requireArgv: true })
       : input.variant === "claude_conversation" ? !!await observeClaudePaneProcess({ ...observation, expectedToken: input.expectedToken, rotation: input.rotation })
       : input.variant === "claude_runtime" ? !!await observeClaudePaneRuntime(observation)
@@ -100,7 +106,8 @@ async function describeLineageFailure(input: {
         : "No process in the pane's process tree names a Claude executable";
     }
     const rejection = input.variant === "claude_runtime" ? { kind: "no_single_process" as const }
-      : explainNativeRejection(rows, pid, input.runtime, input.expectedToken, input.exact, input.rotation);
+      : explainNativeRejection(rows, pid, input.runtime, input.expectedToken, input.exact, input.rotation,
+        executable?.path, executable?.isScript);
     switch (rejection.kind) {
       case "no_single_process": {
         if (input.runtime === "claude-code") {
@@ -144,6 +151,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
    *  the same per-process check (`findExactNativeResumeProcess`). */
   resumeRotation?: ClaudeResumeRotation | null;
   listProcesses?: NativeProcessLister;
+  /** The executable frozen by this launch, including its script form; never rediscover the launch choice. */
+  launchedExecutable?: LaunchedExecutable;
   /** On a failed process check, read the process table again to say which part failed (default true).
    *  A caller that re-runs the check in a polling loop passes false until the attempt whose text it shows. */
   explainFailure?: boolean;
@@ -225,7 +234,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
     // A known token always requires exact proof. Only non-strict, tokenless
     // shell wrappers may use runtime occupancy; this never proves resume continuity.
     runtimeMatch = "match";
-    const observation = { target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses };
+    const observation = { target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses,
+      selectedExecutable: input.launchedExecutable?.path, scriptLaunch: input.launchedExecutable?.isScript };
     const native = expectedResumeToken !== null
       ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
         rotation: input.requireExactResumeLineage ? input.resumeRotation ?? null : storedRotation(input.db, input.nodeId, expectedResumeToken) })
@@ -314,7 +324,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
         : input.resumeRotation ?? null;
       const failedCheck = input.explainFailure !== false && !unverifiableByDesign && variant !== null && (input.runtime === "codex" || input.runtime === "claude-code")
         ? await describeLineageFailure({ variant, runtime: input.runtime, sessionName: input.sessionName, target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses,
-          exact, expectedToken: expectedResumeToken, rotation })
+          exact, expectedToken: expectedResumeToken, rotation, launchedExecutable: input.launchedExecutable })
         : null;
       return {
         ok: false,

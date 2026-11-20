@@ -9,7 +9,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { isClaudeResumeType } from "../adapters/claude-resume.js";
 import type { StartupAction, StartupProofSelection, StartupFailureStage } from "./types.js";
 import type {
-  RuntimeAdapter, NodeBinding, ResolvedStartupFile,
+  RuntimeAdapter, NodeBinding, ResolvedStartupFile, HarnessLaunchResult,
   ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
@@ -419,6 +419,7 @@ export class StartupOrchestrator {
     let appliedLaunch: AppliedLaunchObservation | undefined;
     let activityGrantId: string | undefined;
     let resumedProcess: { pid: number; startedAt: string } | undefined;
+    let launchedExecutable: Extract<HarnessLaunchResult, { ok: true }>["launchedExecutable"];
     const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
@@ -698,6 +699,7 @@ export class StartupOrchestrator {
             activityGrantId = launchResult.activityGrantId;
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
+            launchedExecutable = launchResult.launchedExecutable;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
               await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim(), launchResult.launchedProcess);
             }
@@ -1077,7 +1079,7 @@ export class StartupOrchestrator {
       const identity = await rebindAndVerifyPaneIdentity({ db: this.db, sessionRegistry: this.sessionRegistry,
         tmux: this.tmuxAdapter, nodeId: input.nodeId, sessionName: input.binding.tmuxSession,
         runtime: input.adapter.runtime, expectedResumeToken: session?.resumeToken,
-        listProcesses: this.listProcesses, assertCurrent: current });
+        launchedExecutable, listProcesses: this.listProcesses, assertCurrent: current });
       if (!current()) return changed();
       if (!identity.ok) {
         // Only a newly observed empty shell can license failed-start recovery. An unreadable pane is unknown.

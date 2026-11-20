@@ -32,7 +32,8 @@ function mockTmux(): TmuxAdapter {
     hasSession: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     getPaneCommand: vi.fn(async () => "codex"),
     capturePaneContent: vi.fn(async () => "OpenAI Codex (v0.0.0)\n› Ask Codex to do anything"),
@@ -95,7 +96,9 @@ describe("Agent Starter v1 vertical — real Codex adapter delivery (M2 R2)", ()
       const eventBus = new EventBus(db);
       const tmux = mockTmux();
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-      const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
+      const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {},
+        listProcesses: async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
+          executableName: "codex", command: "codex", argv: ["codex"], startedAt: "Tue Oct 20 05:00:01 2026" }] });
 
       const codexFs = mockCodexFs({
         [registryEntryPath]: CODEX_STARTER,

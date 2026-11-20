@@ -85,7 +85,8 @@ describe("late Codex fork identity", () => {
       readinessSettings: { resolveOne: () => ({ value: readinessSeconds }) } as unknown as Pick<SettingsStore, "resolveOne">,
       sleep: async () => {},
     });
-    orch = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux, sleep: async () => {} });
+    orch = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux,
+      listProcesses: async () => processRows, sleep: async () => {} });
     input = {
       rigId: rig.id, nodeId: node.id, sessionId: session.id,
       binding: { ...binding, cwd: node.cwd! }, adapter,
@@ -118,7 +119,8 @@ describe("late Codex fork identity", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
     expect(registry.resumeTokenMatches(input.sessionId, "codex_id", PARENT)).toBe(false);
     threadId = CHILD;
-    orch = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux, sleep: async () => {} });
+    orch = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux,
+      listProcesses: async () => processRows, sleep: async () => {} });
     expect(await lifecycle().continueStartup("builder@fork-recovery")).toMatchObject({ ok: true, continuityOutcome: "forked" });
     expect(identityReads.at(-1)).toEqual([901, STARTED]);
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);

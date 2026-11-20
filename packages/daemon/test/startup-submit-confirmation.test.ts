@@ -36,7 +36,9 @@ describe("startup prompt submission", () => {
     const tmux = {
       deliveryGuard: guard,
       probeSession: vi.fn(async () => ({ state: "present" as const })),
-      listPanes: vi.fn(async () => []),
+      listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+      getPanePid: vi.fn(async () => 4242),
+      getPaneCommand: vi.fn(async () => runtime === "codex" ? "codex" : "claude"),
       sendText: vi.fn(async (_name: string, text: string) => { composer += text; return { ok: true as const }; }),
       sendKeys: vi.fn(async (_name: string, keys: string[]) => {
         expect(keys).toEqual(["Enter"]);
@@ -60,7 +62,9 @@ describe("startup prompt submission", () => {
       launchHarness: vi.fn(async () => ({ ok: true })), checkReady: vi.fn(async () => ({ ready: true })),
     } as unknown as RuntimeAdapter;
     const orch = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus,
-      tmuxAdapter: tmux as unknown as TmuxAdapter, readFile, sleep });
+      tmuxAdapter: tmux as unknown as TmuxAdapter, readFile, sleep,
+      listProcesses: async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
+        executableName: "codex", command: "codex", argv: ["codex"], startedAt: "Tue Oct 20 05:00:01 2026" }] });
     const start = (overrides: Partial<StartupInput> = {}) => orch.startNode({ rigId: rig.id, nodeId: node.id, sessionId: session.id,
       binding: { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
         cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/fixture" },

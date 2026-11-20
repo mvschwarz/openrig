@@ -27,6 +27,7 @@ describe("auto-mode startup content requires the launched Claude identity", () =
     const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), eventBus = new EventBus(db);
     const rig = rigRepo.createRig("auto-startup"), node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code" });
     const name = "test-c@auto-startup", session = sessionRegistry.registerSession(node.id, name);
+    sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
     const calls: { kind: string; text?: string; keys?: string[] }[] = [];
     let processReads = 0;
@@ -59,7 +60,8 @@ describe("auto-mode startup content requires the launched Claude identity", () =
     });
     const binding: NodeBinding = { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
       cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/fixture", permissionMode: "auto" };
-    const result = await new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} }).startNode({
+    const result = await new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux,
+      listProcesses, sleep: async () => {} }).startNode({
       rigId: rig.id, nodeId: node.id, sessionId: session.id, binding, adapter,
       plan: { runtime: "claude-code", cwd: "/fixture", entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [] } as never,
       resolvedStartupFiles: [{ path: "startup.txt", absolutePath: "/fixture/startup.txt", ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
@@ -69,11 +71,11 @@ describe("auto-mode startup content requires the launched Claude identity", () =
     // Launch authorization is distinct from permission to paste/submit startup content.
     expect(calls.filter(c => c.kind === "launch")).toEqual([{ kind: "launch", text: `claude --permission-mode auto ${resumes ? "--resume" : "--session-id"} ${token} --name ${name}` }]);
     if (mode === "resume-missing") expect(result.startupStatus).toBe("attention_required");
-    expect({ ok: result.ok, content: calls.filter(c => c.kind === "content"), submit: calls.filter(c => c.kind === "submit") }).toEqual({
+    expect({ ok: result.ok, content: calls.filter(c => c.kind === "content"), submit: calls.filter(c => c.kind === "submit") }, JSON.stringify(result)).toEqual({
       ok: good, content: good ? [{ kind: "content", text: payload }] : [], submit: good ? [{ kind: "submit", keys: ["Enter"] }] : [],
     });
-    // Orchestrator checks readiness before content and once more at completion.
-    if (good && !resumes) expect(listProcesses).toHaveBeenCalledTimes(4);
+    // Readiness brackets content; the completion identity observation takes a fresh pair too.
+    if (good && !resumes) expect(listProcesses).toHaveBeenCalledTimes(6);
     // The process table is read only to decide whether the shell is idle; the launch script holds the foreground here.
     if (mode === "plain-shell") expect(result.ok ? [] : result.errors.join(" ")).toContain("not a proven idle shell");
     if (good) {
