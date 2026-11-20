@@ -85,12 +85,20 @@ async function httpFixture(failure?: "404" | "malformed", mountedVolumes?: strin
     { Id: supervisorId, Names: [`openshell-supervisor-${id}`], Labels: {} }];
   let volumes = [...ownedVolumes, "unrelated-volume"], volumeMissingRoute = false;
   const requests: Array<{ method: string | undefined; path: string | undefined }> = [];
-  const server = createHttpServer((req, res) => {
-    requests.push({ method: req.method, path: req.url });
-    if (failure === "404" || req.url?.startsWith("/libpod/") || volumeMissingRoute && req.url === "/volumes") {
-      res.writeHead(404, { "Content-Type": "text/plain" }); res.end("Not Found\n"); return;
-    }
-    if (failure === "malformed") { res.writeHead(200); res.end("not JSON\n"); return; }
+    const server = createHttpServer((req, res) => {
+      requests.push({ method: req.method, path: req.url });
+      // The reader discovers the Podman Libpod API version before every inventory read; the
+      // compatibility API's own ApiVersion describes Docker, not Libpod. A failure cell targets the
+      // inventory read, so the version probe still answers.
+      if (req.url === "/version") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ApiVersion: "1.44", Components: [{ Name: "Podman Engine", Details: { APIVersion: "6.1.4" } }] }));
+        return;
+      }
+      if (failure === "404" || req.url?.startsWith("/libpod/") || volumeMissingRoute && req.url === "/volumes") {
+        res.writeHead(404, { "Content-Type": "text/plain" }); res.end("Not Found\n"); return;
+      }
+      if (failure === "malformed") { res.writeHead(200); res.end("not JSON\n"); return; }
     let body: unknown;
     if (req.url === "/containers/json?all=true") body = containers;
     else if (req.url === `/containers/${workloadId}/json` || req.url === `/containers/${supervisorId}/json`)
@@ -134,8 +142,10 @@ it.skipIf(process.platform === "win32")("uses the engine's HTTP routes and posit
 it.skipIf(process.platform === "win32").each(["404", "malformed"] as const)("keeps an HTTP %s inventory response unconfirmed", async failure => {
   const f = await httpFixture(failure);
   await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
+  // The version probe succeeds and the first inventory read fails; nothing follows it.
   expect(f.requests).toHaveLength(2);
-  expect(f.requests[0]?.method).toBe("GET");
+  expect(f.requests[0]?.path).toBe("/version");
+  expect(f.requests.every(req => req.method === "GET")).toBe(true);
 });
 
 it.skipIf(process.platform === "win32")("captures a custom-image sandbox without inventing a workspace volume or selecting user mounts", async () => {

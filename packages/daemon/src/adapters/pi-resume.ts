@@ -184,7 +184,11 @@ export class PiResumeAdapter {
         textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, beforeInput, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok) {
-        return { ok: false, code: "resume_failed", message: textResult.message };
+        // The pre-input hook refusing means the selected history changed: nothing was typed, and the
+        // caller must ask again rather than treat this as a failed resume.
+        return textResult.code === "selection_changed"
+          ? { ok: false, code: "attention_required", message: textResult.message }
+          : { ok: false, code: "resume_failed", message: textResult.message };
       }
       try { authority?.dispatched(); }
       catch {
