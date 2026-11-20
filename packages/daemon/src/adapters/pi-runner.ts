@@ -1965,6 +1965,9 @@ export class RunnerCore {
   }
 
   private hasInFlightUnanchoredRefresh(): boolean {
+    // Only OMP v2 negotiates frame-drop detection; on non-v2 (Pi and OMP v1),
+    // invalid-JSON or unanswered full reads must not block later turns.
+    if (!this.frameDecoder) return false;
     for (const pending of this.pendingRefreshes.values()) {
       if (pending.requestSince === undefined && pending.seq > this.lastSettledRefreshSeq && !pending.suspectedOversizedDrop && !pending.mayHaveBeenDropped) return true;
     }

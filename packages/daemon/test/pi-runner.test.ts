@@ -2009,7 +2009,7 @@ describe("managed Pi input and attributed wake", () => {
 });
 
 describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and tail reader", () => {
-  it("uses since saved cursor, restores main live event persistence (OMP event.id vs Pi entryId-only), falls back to local tail, and keeps full reads for Pi --usage-facts", () => {
+  it("uses since saved cursor, restores main live event persistence (OMP event.id vs Pi entryId-only), falls back to local tail, and keeps full reads for Pi --usage-facts", async () => {
     const f = fakeIo();
     const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-10" });
     core.start();
@@ -2057,9 +2057,15 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     tailCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] } }));
     expect(fTail.sidecars.at(-1)?.lastEntryId).toBe("e-20");
 
-    // Active Pi --usage-facts keeps full get_entries refreshes without since.
+    // Active Pi --usage-facts keeps full get_entries refreshes without since and retries an unaccepted usage fact.
     const fUsage = fakeIo();
-    fUsage.io.postUsageFacts = () => {};
+    const postedUsage: Array<Record<string, unknown>> = [];
+    let postAttempt = 0;
+    fUsage.io.readFirstLine = () => JSON.stringify({ type: "session", version: 3, id: "s3", timestamp: "2026-10-14T12:00:00Z" });
+    fUsage.io.postUsageFacts = async (payload) => {
+      postedUsage.push(payload);
+      return ++postAttempt > 1;
+    };
     const usageCore = new RunnerCore(
       fUsage.io,
       { sessionName: SESSION, launchId: "launch-3" },
@@ -2067,9 +2073,115 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     );
     usageCore.start();
     usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s3" } }));
+    const usageEntry = {
+      type: "message",
+      id: "e-31",
+      parentId: "e-30",
+      timestamp: "2026-10-14T12:00:01Z",
+      message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } },
+    };
     usageCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
     expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [usageEntry] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(postedUsage).toHaveLength(1);
+    expect((postedUsage[0]!.facts as Array<{ entryId: string }>).map((fact) => fact.entryId)).toEqual(["e-31"]);
+
+    // First post returned false (unaccepted); the second full refresh re-posts the same fact.
+    usageCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [usageEntry] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(postedUsage).toHaveLength(2);
+    expect((postedUsage[1]!.facts as Array<{ entryId: string }>).map((fact) => fact.entryId)).toEqual(["e-31"]);
+
+    // Second post returned true (accepted); a third full refresh does not re-post the already-accepted fact.
+    usageCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", command: "get_entries", success: true, data: { entries: [usageEntry] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(postedUsage).toHaveLength(2);
   });
+
+  it.each(["pi", "omp"] as const)(
+    "unanswered or invalid-JSON full refreshes without v2 do not block turns 2 through 5 (%s)",
+    (runtime) => {
+      const endTurn = () => JSON.stringify(runtime === "omp" ? { type: "agent_end", isTerminal: true } : { type: "agent_end" });
+      const getEntriesCalls = (rpc: Record<string, unknown>[]) => rpc.filter((cmd) => cmd.type === "get_entries");
+
+      // Case 1: truncated/invalid JSON reply after turn 1, then unanswered turns 2..5, then live entryId turn 6.
+      const fTrunc = fakeIo();
+      fTrunc.io.readLastEntryId = () => null;
+      const truncCore = new RunnerCore(fTrunc.io, { sessionName: SESSION, launchId: `launch-trunc-${runtime}` }, { runtime });
+      truncCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      truncCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-trunc-${runtime}` } }));
+
+      truncCore.handlePiLine(endTurn());
+      expect(getEntriesCalls(fTrunc.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      const truncatedReply = '{"type":"response","id":"pi-runner-cursor-refresh"';
+      truncCore.handlePiLine(truncatedReply);
+      expect(fTrunc.lines).toContain(truncatedReply);
+      expect(fTrunc.lines.some((line) => line.startsWith("[omp-runner] ERROR rpc frame:"))).toBe(false);
+
+      for (let turn = 2; turn <= 5; turn++) {
+        truncCore.handlePiLine(endTurn());
+        expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", id: `pi-runner-cursor-refresh:${turn}` });
+      }
+      expect(getEntriesCalls(fTrunc.rpc)).toEqual([
+        { type: "get_entries", id: "pi-runner-cursor-refresh" },
+        { type: "get_entries", id: "pi-runner-cursor-refresh:2" },
+        { type: "get_entries", id: "pi-runner-cursor-refresh:3" },
+        { type: "get_entries", id: "pi-runner-cursor-refresh:4" },
+        { type: "get_entries", id: "pi-runner-cursor-refresh:5" },
+      ]);
+
+      truncCore.handlePiLine(JSON.stringify({ type: "message_end", entryId: "live-1" }));
+      truncCore.handlePiLine(endTurn());
+      expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-1", id: "pi-runner-cursor-refresh:6" });
+
+      // Case 2: valid JSON without entries after turn 1, then unanswered turns 2..5, then recovery on turn 5 reply.
+      const fUnans = fakeIo();
+      fUnans.io.readLastEntryId = () => null;
+      const unansCore = new RunnerCore(fUnans.io, { sessionName: SESSION, launchId: `launch-unans-${runtime}` }, { runtime });
+      unansCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-unans-${runtime}` } }));
+
+      unansCore.handlePiLine(endTurn());
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: {} }));
+      for (let turn = 2; turn <= 5; turn++) {
+        unansCore.handlePiLine(endTurn());
+        expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", id: `pi-runner-cursor-refresh:${turn}` });
+      }
+      expect(getEntriesCalls(fUnans.rpc)).toHaveLength(5);
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:5", command: "get_entries", success: true, data: { entries: [{ id: "e-recovered-5" }] } }));
+      expect(fUnans.sidecars.at(-1)?.lastEntryId).toBe("e-recovered-5");
+      unansCore.handlePiLine(endTurn());
+      expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-recovered-5", id: "pi-runner-cursor-refresh:6" });
+
+      // Control 1: unrelated non-JSON stdout noise without v2 still preserves a valid pending refresh reply.
+      const fNoise = fakeIo();
+      fNoise.io.readLastEntryId = () => null;
+      const noiseCore = new RunnerCore(fNoise.io, { sessionName: SESSION, launchId: `launch-noise-${runtime}` }, { runtime });
+      noiseCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      noiseCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-noise-${runtime}` } }));
+      noiseCore.handlePiLine(endTurn());
+      noiseCore.handlePiLine("unrelated non-json stdout noise");
+      noiseCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-after-noise" }] } }));
+      expect(fNoise.sidecars.at(-1)?.lastEntryId).toBe("e-after-noise");
+
+      // Control 2: a confirmed transport-limit oversized error without v2 still suppresses later unanchored full reads.
+      const fBig = fakeIo();
+      fBig.io.readLastEntryId = () => null;
+      const bigCore = new RunnerCore(fBig.io, { sessionName: SESSION, launchId: `launch-big-${runtime}` }, { runtime });
+      bigCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      bigCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-big-${runtime}` } }));
+      bigCore.handlePiLine(endTurn());
+      bigCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "RPC response exceeded the transport limit" }));
+      const rpcCountAfterOversized = fBig.rpc.length;
+      bigCore.handlePiLine(endTurn());
+      expect(fBig.rpc).toHaveLength(rpcCountAfterOversized);
+    },
+  );
 
   it("explicit empty OMP entryId takes precedence and leaves lastEntryId unchanged, matching main", () => {
     const f = fakeIo();
