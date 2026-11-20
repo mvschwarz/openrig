@@ -154,7 +154,7 @@ composition: { mission: ../../mission.yaml }
     subject.db.close();
   });
 
-  // `rig scope slice create --depends-on` records only execution.depends_on (#3615); that alone is not a step contract.
+  // `rig scope slice create --execution-depends-on` records only execution.depends_on (#3615); that alone is not a step contract.
   it("keeps an active slice whose execution names only dependencies inspectable but ineligible", () => {
     writeFileSync(join(missionDir, "slices", "01-build", "slice.yaml"), `schema: openrig.slice/v0alpha1
 kind: slice

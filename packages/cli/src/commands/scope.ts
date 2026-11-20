@@ -128,9 +128,10 @@ composition:
 # Optional team and SDLC sections are added here.
 `;
 
-/** Readiness and eligibility read only `execution.depends_on` (sdlc-conventions EC-1), so `--depends-on` edges are
- *  recorded here too; with none given, no list is written (absence stays "not recorded", not "none"). */
-const sliceManifest = (dependsOn: string[]) => `schema: openrig.slice/v0alpha1
+/** Proof readiness reads build-order edges only from `execution.depends_on` (sdlc-conventions EC-1); `--execution-depends-on`
+ *  is the explicit way to write them. Without it no `execution` block is written, so the slice keeps no recorded edges
+ *  and no execution contract. Edges never make a slice runnable: lifecycle eligibility also needs that contract. */
+const sliceManifest = (executionDependsOn: string[] | undefined) => `schema: openrig.slice/v0alpha1
 kind: slice
 composition:
   mission: ../../mission.yaml
@@ -138,7 +139,7 @@ composition:
     spec: SPEC.md
     progress: PROGRESS.md
     proof: PROOF.md
-${dependsOn.length > 0 ? `execution:\n  depends_on: ${JSON.stringify(dependsOn)}\n` : ""}# Optional assignment, SDLC, and evidence sections are added here.
+${executionDependsOn ? `execution:\n  depends_on: ${JSON.stringify(executionDependsOn)}\n` : ""}# Optional assignment, SDLC, and evidence sections are added here.
 `;
 
 function emit(out: Stdout, payload: unknown, json: boolean, lines?: string[]): void {
@@ -343,7 +344,8 @@ function buildSliceCreateCommand(): Command {
     .option("--template <kind>", `Template: ${SLICE_TEMPLATE_KINDS.join(" | ")}`, "placeholder")
     .option("--title <text>", "Display title (defaults to titlecased slug)")
     .option("--intent <text>", "Authored intent stored in SPEC.md frontmatter (defaults to title)")
-    .option("--depends-on <dot-id...>", "Build-order dependencies on sibling slice dot-IDs (slice.yaml execution.depends_on, mirrored in SPEC.md)")
+    .option("--depends-on <dot-id...>", "Advisory build-order dependencies on sibling slice dot-IDs")
+    .option("--execution-depends-on <dot-id...>", "Build-order edges on sibling slice dot-IDs written to slice.yaml execution.depends_on, which proof readiness reads (not copied to SPEC.md)")
     .option("--readme-only", "Write progress_rail: readme-only in README frontmatter instead of scaffolding PROGRESS.md")
     .option("--json", "Machine-readable output")
     .action(async (missionName: string, rawSlug: string, opts, command) => {
@@ -374,24 +376,31 @@ function buildSliceCreateCommand(): Command {
         const missionId = ensureMissionId(mission, missionsRoot);
         let id = sliceIdFromMission(missionId, nn);
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        const executionDependsOn = Array.isArray(opts.executionDependsOn)
+          ? [...new Set(opts.executionDependsOn as string[])]
+          : undefined;
+        const dependencyLists: Array<[flag: string, ids: string[]]> = [
+          ["--depends-on", dependsOn],
+          ["--execution-depends-on", executionDependsOn ?? []],
+        ];
         // Validate before reserving any number; re-check self-dependency if a
         // competing creator claimed the initial candidate.
         let sliceFolder: string;
         let sliceAbs: string;
         for (;;) {
-          for (const dependency of dependsOn) {
+          for (const [flag, ids] of dependencyLists) for (const dependency of ids) {
             if (dependency === id) {
               throw new ScopeCliError({
                 fact: `Slice ${id} cannot depend on itself.`,
                 consequence: "Slice not created.",
-                action: "Use a different sibling slice ID, or omit --depends-on.",
+                action: `Use a different sibling slice ID, or omit ${flag}.`,
               });
             }
             if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
               throw new ScopeCliError({
                 fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
                 consequence: "Slice not created.",
-                action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
+                action: `Use a sibling ID shaped like ${missionId}.<n>, or omit ${flag}.`,
               });
             }
           }
@@ -447,7 +456,7 @@ function buildSliceCreateCommand(): Command {
             const progressPath = path.join(sliceAbs, "PROGRESS.md");
             fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
           }
-          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), sliceManifest(dependsOn), "utf8");
+          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), sliceManifest(executionDependsOn), "utf8");
           // Publish the completion sentinel only after its entire contents exist.
           const proofTemporary = `${proofPath}.openrig-${process.pid}.tmp`;
           fs.writeFileSync(proofTemporary, proofBody, { encoding: "utf8", flag: "wx" });
