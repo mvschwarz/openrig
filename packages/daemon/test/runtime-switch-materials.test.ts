@@ -220,6 +220,47 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
     expect(() => plan(seat("codex"), "codex", "claude-code")).toThrow(/agent spec \(impl\) wasn't found where its last launch read it/);
   });
 
+  // A seat's `local:` ref names its spec by the rig root, which isn't recorded. The seat's saved startup context is the
+  // only other witness, and it doesn't carry the owner root of every file — an agent with no startup files leaves none.
+  // These read the `local:` ref itself: absolute remainders directly, relative ones against the rig root a launch found.
+  describe("a `local:` agent_ref whose saved startup context has no owner root", () => {
+    /** The seat's saved context, minus anything that would carry the agent folder from the spec's own files. */
+    const contextless = (node: Node, from: SwitchRuntime): ParsedStartupContext => {
+      const saved = savedContext(node, from);
+      saved.resolvedStartupFiles = [];
+      saved.plan.entries = [];
+      return saved;
+    };
+    const planFrom = (node: Node, from: SwitchRuntime) =>
+      planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig", runtime: "claude-code", explicit: {},
+        saved: contextless(node, from), openrigHome: home, resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+
+    it("resolves an absolute remainder without a recorded rig root", () => {
+      const node = seat("codex");
+      node.agentRef = `local:${agentDir}`;
+      expect(planFrom(node, "codex").resolvedSpec?.name).toBe("impl");
+    });
+
+    it("resolves a relative remainder against the rig.yaml a launch read it from", () => {
+      // The rig root is the nearest ancestor carrying a rig.yaml; the seat's cwd sits below it.
+      writeFileSync(nodePath.join(tmp, "rig", "rig.yaml"), "version: \"0.2\"\nname: seat-rig\npods: []\n");
+      const node = seat("codex");
+      node.cwd = nodePath.join(tmp, "rig", "project");
+      mkdirSync(node.cwd, { recursive: true });
+      expect(planFrom(node, "codex").resolvedSpec?.name).toBe("impl");
+    });
+
+    it("refuses a relative remainder that names no spec under the anchor, rather than searching elsewhere", () => {
+      writeFileSync(nodePath.join(tmp, "rig", "rig.yaml"), "version: \"0.2\"\nname: seat-rig\npods: []\n");
+      const node = seat("codex");
+      node.cwd = nodePath.join(tmp, "rig", "project");
+      mkdirSync(node.cwd, { recursive: true });
+      node.agentRef = "local:agents/missing";
+      expect(() => planFrom(node, "codex"))
+        .toThrow(/agent spec \(impl\) wasn't found where its last launch read it/);
+    });
+  });
+
   // #2456: the switch's preparation writes the successor's guidance through the target adapter, as a start does. A block
   // OpenRig wrote is refreshed from its changed source, and one a person edited since is kept.
   describe("the preparation and a managed guidance block OpenRig wrote (#2456)", () => {
