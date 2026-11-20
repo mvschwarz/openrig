@@ -40,6 +40,13 @@ describe("the slice box's Planned line", () => {
     expect(overview(execution(valid, ["two"]))).not.toContain("Planned:");
   });
 
+  it("says unknown for a slice a partial readiness list never reached, not that it's outside the composition", () => {
+    // readMissionReadiness counts every active member, then can stop part-way (a repeated metadata.id).
+    const e = execution(valid, ["two"]);
+    (e.readiness as unknown as { activeSlices: number }).activeSlices = 2;
+    expect(overview(e)).toContain("Planned: unknown");
+  });
+
   it("still names a declared planned owner", () => {
     const e = execution(valid, ["one"]);
     e.q2_sequencing[0]!["planned_owners"] = [{ component: "build.minimal-gap", owner: "builder", source: "slice.yaml#sdlc.components[0].owner" }];

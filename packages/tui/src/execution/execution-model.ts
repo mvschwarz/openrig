@@ -303,16 +303,20 @@ function assigneeText(slice: SliceFacts): string | null {
   return owners.length ? owners.join(", ") : null;
 }
 /** The planned owner the view read from slice.yaml `sdlc.components[].owner` through the mission's arrangement (#3616):
- *  "none declared" when it read none, "unknown" only when the arrangement was malformed, and null (an empty cell) where
- *  that source is absent: no mission.yaml, or a slice outside the active composition, whose owners the view doesn't read. */
+ *  "none declared" when it read none, "unknown" when the arrangement was malformed or the slice's membership couldn't be
+ *  read, and null (an empty cell) where that source is absent: no mission.yaml, or a slice outside the active composition,
+ *  whose owners the view doesn't read. */
 function plannedOwnerText(slice: SliceFacts, execution: ExecutionViewSnap): string | null {
   const build = slice.plannedOwners.filter(p => p.component === "build.minimal-gap");
   const named = [...new Set((build.length ? build : slice.plannedOwners).map(p => seatShort(p.owner)))].join(", ");
   if (named) return named;
   const arrangement = execution.sources["arrangement"];
   if (arrangement === undefined) return null;
-  if (record(arrangement)["value"] === INDETERMINATE || !execution.readiness) return "unknown";
-  return execution.readiness.slices.some(s => s.scope === slice.dir) ? "none declared" : null;
+  const readiness = execution.readiness;
+  if (record(arrangement)["value"] === INDETERMINATE || !readiness) return "unknown";
+  if (readiness.slices.some(s => s.scope === slice.dir)) return "none declared";
+  // A readiness read that stopped part-way lists fewer members than it counted: membership is unknown, not absent.
+  return readiness.slices.length < (readiness.activeSlices ?? 0) ? "unknown" : null;
 }
 
 /** What unlocks next, only when the projection actually says so. */
