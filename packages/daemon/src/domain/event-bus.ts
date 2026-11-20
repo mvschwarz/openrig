@@ -134,17 +134,17 @@ export class EventBus {
   }
 
   /**
-   * Run one caller-owned synchronous transaction under the W2b notification
-   * envelope. Every token persisted through EventBus during the callback must
-   * be registered before it returns. The exact object-identity sets are
-   * compared before commit; committed rows are then delivered from the log.
+   * Run a caller-owned synchronous transaction under the W2b notification
+   * envelope. A nested caller joins the active envelope through a savepoint.
+   * Every token persisted through EventBus during the callback must be
+   * registered before the outer callback returns. The exact object-identity
+   * sets are compared before commit; committed rows are then delivered from
+   * the log.
    */
   withNotifyEnvelope<T>(callback: (register: NotifyRegister) => T): T {
     if (this.activeEnvelope) {
-      throw new NotifyEnvelopeError(
-        "nested_notify_envelope",
-        "notify envelope cannot be nested",
-      );
+      const envelope = this.activeEnvelope;
+      return this.discardOnThrow(() => callback((token) => envelope.registered.add(token)));
     }
 
     const envelope: ActiveEnvelope = { persisted: new Set(), registered: new Set() };

@@ -31,6 +31,7 @@ describe.skipIf(!fs.existsSync(cliEntry))("a busy but alive daemon gets the real
     home = fs.mkdtempSync(path.join(os.tmpdir(), "busy-daemon-"));
     server = http.createServer((req, res) => {
       const url = req.url ?? "";
+      let requestBody = "";
       if (url.startsWith("/healthz")) {
         if (healthz === "ok") return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ status: "ok" }));
         if (healthz === "unhealthy") return void res.writeHead(503).end();
@@ -44,14 +45,17 @@ describe.skipIf(!fs.existsSync(cliEntry))("a busy but alive daemon gets the real
         return;
       }
       requests.push(`${req.method} ${url.split("?")[0]}`);
-      req.resume();
+      req.on("data", (chunk: Buffer) => { requestBody += chunk.toString("utf8"); });
       req.on("end", () => {
         if (url.startsWith("/api/stream/emit")) {
           if (emitHangs) { held.add(res); return; }
           return void res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ streamItemId: "s-1" }));
         }
         if (url.startsWith("/api/queue/create")) {
-          return void res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ qitemId: "qitem-20261021000000-aaaa", state: "pending" }));
+          const created = JSON.parse(requestBody) as { qitemId: string; destinationSession: string; body: string };
+          return void res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({
+            qitemId: created.qitemId, sourceSession: "lead@build", destinationSession: created.destinationSession, body: created.body, state: "pending",
+          }));
         }
         res.writeHead(200, { "Content-Type": "application/json" }).end("[]");
       });

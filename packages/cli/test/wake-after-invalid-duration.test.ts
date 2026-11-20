@@ -51,6 +51,8 @@ const block = (value: string, ...extra: string[]) =>
   ["queue", "block", "qitem-park", "--on", "external:cooldown", "--wake-after", value, ...extra];
 const update = (value: string, ...extra: string[]) =>
   ["queue", "update", "qitem-park", "--state", "blocked", "--blocked-on", "external:cooldown", "--wake-after", value, ...extra];
+const create = (value: string, ...extra: string[]) =>
+  ["queue", "create", "--destination", "worker@rig", "--body", "work", "--wake-after", value, ...extra];
 
 describe("--wake-after: an invalid duration is refused loudly, before any daemon call", () => {
   // A seat identity, so a valid run really reaches the daemon client and "no daemon call" below
@@ -66,6 +68,7 @@ describe("--wake-after: an invalid duration is refused loudly, before any daemon
   it.each([
     ["queue block", block],
     ["queue update", update],
+    ["queue create", create],
   ])("%s --wake-after 7d prints the accepted formats and the bad value to stderr and exits 1", async (_name, argv) => {
     const { deps, calls } = makeQueueDeps();
     const { out, err, exitCode } = await runCli(createProgram({ queueDeps: deps }), argv("7d"));
@@ -103,6 +106,13 @@ describe("--wake-after: an invalid duration is refused loudly, before any daemon
       await runCli(createProgram({ queueDeps: deps }), block(value, "--json"));
       expect(calls.find((c) => c.path === "/api/queue/qitem-park/update")?.body).toMatchObject({ wakeAfterSeconds: seconds });
     }
+  });
+
+  it("queue create sends a valid duration as seconds", async () => {
+    const { deps, calls } = makeQueueDeps();
+    await runCli(createProgram({ queueDeps: deps }), create("15m", "--summary", "Wait", "--json"));
+    expect(calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")?.body)
+      .toMatchObject({ wakeAfterSeconds: 900 });
   });
 });
 

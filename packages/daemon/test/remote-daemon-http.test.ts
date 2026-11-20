@@ -114,6 +114,24 @@ describe("remoteJsonRequest — structured outcomes (never hangs, never throws)"
     });
     expect(res).toMatchObject({ ok: false, kind: "network", detail: "ECONNREFUSED" });
   });
+
+  it("a pre-header POST network loss keeps the forwarded write outcome indeterminate", async () => {
+    const res = await remoteJsonRequest(HOST, "/api/queue/create", {
+      method: "POST",
+      body: { qitemId: "qitem-lost-forward" },
+      timeoutMs: 1000,
+      env: ENV,
+      fetchImpl: (async () => {
+        throw new Error("ECONNRESET");
+      }) as typeof fetch,
+    });
+    expect(res).toMatchObject({
+      ok: false,
+      kind: "network",
+      outcome: "indeterminate",
+      detail: "ECONNRESET",
+    });
+  });
 });
 
 describe("fanout-contract — the shared intra-P4 payload (arch adjudication: 15 defines, 21 imports)", () => {

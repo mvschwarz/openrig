@@ -232,11 +232,12 @@ describe("queue create scope advisories preserve admission and output", () => {
     stdout.length = 0;
     stderr.length = 0;
     handoffResponses = [];
+    const fixtureBase = "http://queue-handoff.fixture.invalid";
     const client = {
       post: async (url: string, body: unknown, options?: { headers?: Record<string, string> }) => {
         handoffTransportHeaders = options?.headers;
         handoffRequestBody = body as Record<string, unknown>;
-        const response = await app.request(url, { method: "POST",
+        const response = await app.request(new URL(url, fixtureBase).toString(), { method: "POST",
           headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope", ...(options?.headers ?? {}) },
           body: JSON.stringify(body) });
         const data = await response.json() as Record<string, unknown>;
@@ -1189,22 +1190,25 @@ describe("queue create scope advisories preserve admission and output", () => {
   }
 
   function recoveredClient(app: Hono, target: Fixture, typedLoss: boolean, readHealth?: (observation: number) => string | null) {
-    const calls = { posts: [] as string[], readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[],
+    const calls = { posts: [] as string[], writeTargets: [] as Array<{ base: string; url: string }>,
+      readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[],
       postBodies: [] as unknown[], committedBeforeLoss: [] as unknown[], healthReads: 0,
       healthResults: [] as Array<string | null> };
     const factory: QueueDeps["clientFactory"] = (base: string) => ({
+      baseUrl: base,
       senderIdentity: async () => ({ session: "writer@scope", originUnknown: false }),
       post: async (url: string, body: unknown) => {
         calls.posts.push(url);
+        calls.writeTargets.push({ base, url });
         calls.postBodies.push(body);
-        const response = await app.request(url, { method: "POST",
+        const response = await app.request(new URL(url, base).toString(), { method: "POST",
           headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
           body: JSON.stringify(body) });
         calls.postStatuses.push(response.status);
         if (typedLoss) {
           await response.text();
           calls.committedBeforeLoss.push(target.daemon.deps.queueRepo.getById((body as { qitemId: string }).qitemId));
-          throw new DaemonResponseError(response.status, "fixture lost committed response body");
+          throw new DaemonResponseError(response.status, "fixture lost committed response body", response.headers);
         }
         return { status: response.status, data: await response.json(), headers: response.headers };
       },
@@ -1221,7 +1225,8 @@ describe("queue create scope advisories preserve admission and output", () => {
           }
         }
         calls.readbacks.push({ base, url });
-        const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(url.slice("/api/queue/".length)));
+        const resolved = new URL(url, base);
+        const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(resolved.pathname.slice("/api/queue/".length)));
         return row ? { status: 200, data: row } : { status: 404, data: { error: "not_found" } };
       },
     }) as unknown as ReturnType<QueueDeps["clientFactory"]>;
@@ -1325,6 +1330,12 @@ describe("queue create scope advisories preserve admission and output", () => {
     const health = await source.daemon.app.request("/healthz");
     expect(health.status).toBe(200);
     expect(await health.json()).toMatchObject({ selfHostId: source.hostId });
+    const registryUrl = "http://own-host-recovery.invalid:39001";
+    const home = path.join(scratch, "cli-home-own-host-recovery");
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: ${source.hostId}\n    transport: http\n    url: ${registryUrl}\n`);
+    vi.stubEnv("OPENRIG_HOME", home);
+    vi.stubEnv("OPENRIG_URL", registryUrl);
     const unchanged = preserveAuthored(source);
     const { factory, calls } = recoveredClient(source.app, source, true, readHealth);
     const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
@@ -1340,11 +1351,15 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(source.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE body = ?").get("scope contract body")).toEqual({ n: 1 });
     expect(calls.posts).toEqual(["/api/queue/create"]);
     expect(calls.postStatuses).toEqual([201]);
+    expect(calls.writeTargets.map(call => call.base)).toEqual(calls.readbacks.map(call => call.base));
+    expect(calls.writeTargets.map(call => call.url)).toEqual(["/api/queue/create"]);
     expect(calls.postBodies).toEqual([expect.objectContaining({ hostId: source.hostId,
       destinationSession: "worker@scope", qitemId: "qitem-create-contract", tags })]);
     expect(calls.committedBeforeLoss).toEqual([stored]);
-    expect(calls.healthReads).toBeGreaterThan(0);
+    expect(calls.healthReads).toBe(0);
+    expect(calls.healthResults).toEqual([]);
     expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
+    expect(calls.readbacks[0]?.base).toBe(registryUrl);
     expect(stderr.join("\n")).toContain("committed after all: row qitem-create-contract");
     unchanged();
     return calls;
@@ -1360,23 +1375,16 @@ describe("queue create scope advisories preserve admission and output", () => {
   });
 
   it.each(["--host", "qualified destination"] as const)(
-    "keeps own-host %s recovery advice unknown when the first identity read fails but the later match succeeds",
+    "uses the registered endpoint for own-host %s recovery without reading host identity",
     async form => {
-      const registryUrl = "http://own-host-recovery.invalid:39001";
-      const home = path.join(scratch, "cli-home-own-host-recovery");
-      fs.mkdirSync(home);
-      fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: ${source.hostId}\n    transport: http\n    url: ${registryUrl}\n`);
-      vi.stubEnv("OPENRIG_HOME", home);
-
-      const calls = await recoverOwnHost(form, observation => {
-        if (observation === 1) throw new Error("fixture first identity read is unavailable");
-        return source.hostId;
+      const calls = await recoverOwnHost(form, () => {
+        throw new Error("create receipt recovery must not request host identity");
       });
 
-      expect(calls.healthResults).toEqual(["unreadable", source.hostId]);
-      expect(calls.healthReads).toBe(2);
+      expect(calls.healthResults).toEqual([]);
+      expect(calls.healthReads).toBe(0);
       expect(calls.readbacks).toEqual([{
-        base: registryUrl,
+        base: "http://own-host-recovery.invalid:39001",
         url: "/api/queue/qitem-create-contract",
       }]);
       expect(scopeLines()).toContain("mission:missing-mission");
@@ -1387,8 +1395,6 @@ describe("queue create scope advisories preserve admission and output", () => {
 
   function healthAfterMatchedRecovery(later: "different" | "null" | "unreadable") {
     return (observation: number): string | null => {
-      // The target and source checks see the real host. Only the later advice read changes.
-      if (observation <= 2) return source.hostId;
       if (later === "unreadable") throw new Error("fixture health became unreadable after matching recovery");
       return later === "null" ? null : "replacement-fixture";
     };
@@ -1396,24 +1402,29 @@ describe("queue create scope advisories preserve admission and output", () => {
 
   it.each((["--host", "qualified destination"] as const).flatMap(form =>
     (["different", "null", "unreadable"] as const).map(later => ({ form, later }))))(
-    "keeps matched own-host $form recovery local when later health is $later", async ({ form, later }) => {
+    "keeps registered own-host $form recovery independent of a post-write health value of $later", async ({ form, later }) => {
       const calls = await recoverOwnHost(form, healthAfterMatchedRecovery(later));
-      const evidence = "observed health sequence: " + JSON.stringify(calls.healthResults);
-      expect.soft(scopeLines(), evidence).toContain("mission:missing-mission");
-      expect.soft(scopeLines(), evidence).toMatch(/\bunavailable\b/i);
-      expect.soft(scopeLines(), evidence).toMatch(/\boutcome\b|\bresult\b/i);
-      expect.soft(scopeLines(), evidence).toMatch(/response recovery/i);
-      expect.soft(scopeLines(), evidence).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
+      expect(calls.healthReads).toBe(0);
+      expect(calls.healthResults).toEqual([]);
+      expect(calls.readbacks[0]?.base).toBe("http://own-host-recovery.invalid:39001");
+      expect.soft(scopeLines()).toContain("mission:missing-mission");
+      expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
+      expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
+      expect.soft(scopeLines()).toMatch(/response recovery/i);
+      expect.soft(scopeLines()).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
     },
   );
 
   it.each(["--host", "qualified destination"] as const)(
-    "keeps own-host %s outcome unknown when health becomes unreadable before source matching", async form => {
+    "keeps an unregistered own-host %s outcome unknown without an identity lookup", async form => {
       expect(source.hostId).toEqual(expect.any(String));
       expect(getSelfHostId()).toBe(source.hostId);
+      const home = path.join(scratch, "cli-home-unregistered-own-host");
+      fs.mkdirSync(home);
+      vi.stubEnv("OPENRIG_HOME", home);
+      vi.stubEnv("OPENRIG_URL", "http://selected-own-host.invalid:39001");
       const unchanged = preserveAuthored(source);
-      const { factory, calls } = recoveredClient(source.app, source, true, observation => {
-        if (observation === 1) return source.hostId;
+      const { factory, calls } = recoveredClient(source.app, source, true, () => {
         throw new Error("fixture health unreadable while matching the stored source");
       });
       const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
@@ -1430,10 +1441,14 @@ describe("queue create scope advisories preserve admission and output", () => {
       expect(calls.committedBeforeLoss).toEqual([stored]);
       expect(calls.posts).toEqual(["/api/queue/create"]);
       expect(calls.postStatuses).toEqual([201]);
-      expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
+      expect(calls.healthReads).toBe(0);
+      expect(calls.healthResults).toEqual([]);
+      expect(calls.readbacks.map(call => call.url)).toEqual([]);
+      expect(stderr.join("\n")).toContain("Queue create request ID: qitem-create-contract");
       expect(stdout).toEqual([]);
-      expect(stderr.join("\n")).toContain("couldn't read this daemon's host id to tell whether its source is this create's");
+      expect(stderr.join("\n")).toContain("could not establish the queue for requested host");
       expect(stderr.join("\n")).toContain("outcome is still unknown");
+      expect(stderr.join("\n")).toContain("Keep this ID for recovery");
       expect(stderr.join("\n")).not.toContain("committed after all");
       expect(scopeLines()).not.toMatch(/scope check|\bforwarded\b/i);
       unchanged();
