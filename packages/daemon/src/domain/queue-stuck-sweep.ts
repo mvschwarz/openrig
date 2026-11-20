@@ -651,7 +651,7 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
     `age: ${c.ageMinutes} min\n` +
     `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
     `why: ${c.why}\n` +
-    `This is a diagnostic about ${c.row.qitemId}, not a second assignment. Read ${c.row.qitemId}, then resume, route or park it; ` +
+    `This is a diagnostic about ${c.row.qitemId}, not a second assignment. Read ${c.row.qitemId} and act on it: pick it up, resume, route or park it, as fits; ` +
     `the sweep closes this finding itself once ${c.row.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${c.row.qitemId}.`
   );
 }

@@ -1169,7 +1169,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
     await runSweep();
     const [generic] = await findingsFor(stalled.qitemId);
-    expect(generic!.body).toContain(`\nThis is a diagnostic about ${stalled.qitemId}, not a second assignment. Read ${stalled.qitemId}, then resume, route or park it; `
+    expect(generic!.body).toContain(`\nThis is a diagnostic about ${stalled.qitemId}, not a second assignment. Read ${stalled.qitemId} and act on it: pick it up, resume, route or park it, as fits; `
       + `the sweep closes this finding itself once ${stalled.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${stalled.qitemId}.`);
     const [custody] = await findingsFor(closed.qitemId);
     expect(custody!.body).toContain(`\nThis is a diagnostic about ${closed.qitemId}, not a second assignment: the checks and notes above settle it, `
