@@ -175,6 +175,51 @@ describe("dev-checkout layouts re-anchor only when the stored file is missing", 
   });
 });
 
+// The lost-host exercise: an install at /old-home/opt/openrig (no known layout) whose home moved to /new-home. Its
+// files follow the running install only once they're gone and the running install has the same file, so a folder that
+// merely looks like daemon/{assets,specs} is left alone while it exists, and nothing points at a file that isn't there.
+describe("an install no known layout names re-anchors only when its file is gone and the running install has it", () => {
+  const OLD = "/old-home/opt/openrig/daemon";
+  const RUN_ASSETS = "/new-home/opt/openrig/daemon/assets";
+  const RUN_SPECS = "/new-home/opt/openrig/daemon/specs";
+  const runningOnly = (p: string) => p.startsWith("/new-home/");
+  const both = () => true;
+  const neither = () => false;
+
+  it("a built-in follows the running install once its own copy is gone", () => {
+    const stored = { path: "openrig-start.md", absolutePath: `${OLD}/assets/guidance/openrig-start.md`, ownerRoot: `${OLD}/assets`, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUN_ASSETS, RUN_SPECS, runningOnly))
+      .toEqual({ ...stored, absolutePath: `${RUN_ASSETS}/guidance/openrig-start.md`, ownerRoot: RUN_ASSETS });
+    expect(reanchorBuiltinStartupFile(stored, RUN_ASSETS, RUN_SPECS, both)).toBe(stored);
+    expect(reanchorBuiltinStartupFile(stored, RUN_ASSETS, RUN_SPECS, neither)).toBe(stored);
+  });
+
+  it("a shipped-spec startup file and projection resource follow the same rule", () => {
+    const culture = { path: "culture/CULTURE.md", absolutePath: `${OLD}/specs/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${OLD}/specs/rigs/launch/kernel`, ...meta };
+    expect(reanchorBuiltinStartupFile(culture, RUN_ASSETS, RUN_SPECS, runningOnly)).toMatchObject({
+      absolutePath: `${RUN_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${RUN_SPECS}/rigs/launch/kernel`,
+    });
+    expect(reanchorBuiltinStartupFile(culture, RUN_ASSETS, RUN_SPECS, both)).toBe(culture);
+    const hooks = { category: "runtime_resource", effectiveId: "shared:claude-activity-hooks", resourcePath: "runtime/claude-activity-hooks.json",
+      sourcePath: `${OLD}/specs/agents/shared`, absolutePath: `${OLD}/specs/agents/shared/runtime/claude-activity-hooks.json` };
+    expect(reanchorShippedProjectionEntry(hooks, RUN_SPECS, runningOnly)).toEqual({
+      ...hooks, sourcePath: `${RUN_SPECS}/agents/shared`, absolutePath: `${RUN_SPECS}/agents/shared/runtime/claude-activity-hooks.json`,
+    });
+    expect(reanchorShippedProjectionEntry(hooks, RUN_SPECS, neither)).toBe(hooks);
+  });
+
+  it("a plugin selected under the OpenRig home follows the running home, and the spec that selected it follows the install", () => {
+    const plugin = { category: "plugin", effectiveId: "shared:openrig-core", sourceSpec: "shared", resourcePath: "openrig-home:plugins/openrig-core",
+      sourcePath: `${OLD}/specs/agents/shared`, absolutePath: "/old-home/.openrig/plugins/openrig-core" };
+    expect(reanchorShippedProjectionEntry(plugin, RUN_SPECS, runningOnly, "/new-home/.openrig")).toEqual({
+      ...plugin, sourcePath: `${RUN_SPECS}/agents/shared`, absolutePath: "/new-home/.openrig/plugins/openrig-core",
+    });
+    // In place, nothing moves: the same entry comes back.
+    const inPlace = { ...plugin, sourcePath: `${RUN_SPECS}/agents/shared`, absolutePath: "/new-home/.openrig/plugins/openrig-core" };
+    expect(reanchorShippedProjectionEntry(inPlace, RUN_SPECS, both, "/new-home/.openrig")).toBe(inPlace);
+  });
+});
+
 describe("legacy persisted shapes are returned exactly as stored", () => {
   it("startup file without ownerRoot (or path) does not throw and is unchanged", () => {
     const noOwner = { path: "required-onboarding.md", absolutePath: "/tmp/never-read/required-onboarding.md", required: true } as unknown as { path: string; absolutePath: string; ownerRoot: string };

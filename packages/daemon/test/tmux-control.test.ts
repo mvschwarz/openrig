@@ -320,6 +320,35 @@ describe("tmuxControlExec", () => {
     }
   });
 
+  it("a successful capture during startup backoff does not mean a control client is attached", async () => {
+    let clock = 0;
+    let seatReady = false;
+    const client = fakeClient();
+    const start = vi.fn(() => client.child);
+    const capture = ["tmux", "capture-pane", "-p", "-t", "=seat@rig:"];
+    const exec = tmuxControlExec(async (argv) => argv[1] === "list-sessions"
+      ? (seatReady ? "3.8|\n" : "3.8|other-owner\n") : "spawned capture\n", {
+      now: () => clock, spawnClient: start,
+    });
+    try {
+      expect(await exec(capture)).toBe("spawned capture\n");
+      seatReady = true;
+      clock = 999;
+      expect(await exec(capture)).toBe("spawned capture\n");
+      expect(start).not.toHaveBeenCalled();
+      expect(exec.status().state).toBe("allowed");
+
+      clock = 1_000;
+      const connected = exec(capture);
+      await vi.waitFor(() => expect(client.written).toHaveLength(1));
+      client.answer("control capture");
+      expect(await connected).toBe("control capture\n");
+      expect(exec.status().state).toBe("on");
+    } finally {
+      await exec.close();
+    }
+  });
+
   it("#161 says once per server version that control mode is off, why, and what to do", async () => {
     let server = "3.4|\n";
     let clock = 0;

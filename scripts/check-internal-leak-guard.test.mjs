@@ -67,6 +67,17 @@ test("without a rules file the term checks are skipped with a note; the file the
     const missing = guard({ OPENRIG_LEAK_GUARD_RULES: join(repo, "absent.json") });
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /Rules file not found/);
+
+    // A caller that cannot act on a scan whose term checks never ran asks for the refusal with
+// --require-rules. Nothing in the repository passes it today; it is opt-in, and the packaging step
+// deliberately keeps the default so a contributor or job without a rules file can still run.
+    const required = spawnSync(process.execPath,
+      [GUARD, "--repo", repo, "--mode", "full", "--require-rules"],
+      { cwd: repo, encoding: "utf8", env });
+    assert.notEqual(required.status, 0);
+    assert.match(required.stderr, /refusing to report a clean scan/);
+    // The refusal happens before any scan, so the run reports no finding and no scanned file.
+    assert.equal(/README\.md|private-term|finding/i.test(required.stdout), false, "no scan result is reported");
   });
 });
 

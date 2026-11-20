@@ -3,6 +3,10 @@ import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import { resolveActiveSnapshotSession } from "./active-occupant.js";
 import { effectiveRestorePolicy } from "./restore-policy.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { compareConversations, describeSharedConversation, describeUnavailable, type ConversationSeat } from "./shared-conversation.js";
+
+/** Pre-restore blockers that concern one seat's own startup content: they hold only that seat, and only if restore launches it. */
+export const SEAT_STARTUP_BLOCKERS = new Set(["required_startup_file_missing", "startup_owner_root_missing"]);
 
 // Shared read-only validation. Keep restore's refusal order and replay eligibility here.
 export function validatePreRestore(
@@ -15,6 +19,15 @@ export function validatePreRestore(
     currentRuntimes?: Record<string, string | null | undefined>;
     /** Current explicit seat selections; a missing key is unknown, null is an explicit absence. */
     currentCodexProfiles?: Record<string, string | null>;
+    /** This run's `--cwd` (already resolved): every seat launches and receives its checkpoint there instead. */
+    cwdOverride?: string;
+    /** The current recorded session status of each seat, by logical id (the node inventory's sessionStatus): how the
+     *  shared-conversation report names the seats it would resume. A seat not listed is "unknown"; without the map, the
+     *  snapshot's own record. */
+    currentStatuses?: Record<string, string | null | undefined>;
+    /** Seats kept attached to an external CLI: restore does not launch them, so they are not among the seats it
+     *  resumes (restore compares them as agents outside it). */
+    attachedLogicalIds?: string[];
   },
 ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
   const blockers: RestoreValidationBlocker[] = [];
@@ -97,7 +110,7 @@ export function validatePreRestore(
       warnings.push(`Restore pre-validation: ${node.logicalId} had Codex profile ${node.codexConfigProfile} in this snapshot, but its current seat selection has no named profile. Restore uses the current selection; an ordinary floor launch uses workspace-write instead. Review rig seat set-permissions before restoring if this change is unintended. The snapshot does not prove what a prior process enforced.`);
     }
     const checkpoint = checkpoints[node.id] ?? null;
-    if (checkpoint && !node.cwd) {
+    if (checkpoint && !(opts.cwdOverride || node.cwd)) {
       add({
         code: "checkpoint_missing_node_cwd",
         severity: "critical",
@@ -196,6 +209,16 @@ export function validatePreRestore(
     }
   }
 
+  // #3218 item 3: two seats this restore would resume on the same recorded conversation are named, with the
+  // conversation, so the person can decide. A reported gap, not a guard: nothing is refused or picked.
+  // A seat held for startup (a missing required startup file) is not launched, so it is not on the resumed side here
+  // (the maintainer's 3rd review of #3250); restore compares it as a current partner.
+  const shared = compareConversations(resumingConversationSeats(data, { ...opts, heldLogicalIds: heldForStartupLogicalIds(blockers, nodes) }));
+  for (const group of shared.groups) {
+    warnings.push(`Restore pre-validation: ${describeSharedConversation(group)}`);
+  }
+  if (shared.unavailable.length) warnings.push(`Restore pre-validation: ${describeUnavailable(shared.unavailable)}`);
+
   const servicesRecord = opts.servicesRecord ?? null;
   if (servicesRecord) {
     if (pathLike(servicesRecord.rigRoot) && !exists(servicesRecord.rigRoot)) {
@@ -230,4 +253,60 @@ function pathLike(value: unknown): value is string {
     || value.startsWith("../")
     || value.startsWith("~")
   );
+}
+
+/** The logical ids of the seats a startup blocker holds (a missing required startup file or owner root): restore
+ *  doesn't launch them (#3250, the maintainer's 3rd review). */
+export function heldForStartupLogicalIds(blockers: readonly RestoreValidationBlocker[], nodes: readonly { id: string; logicalId: string }[] | null): string[] {
+  const held = new Set(blockers.filter((blocker) => SEAT_STARTUP_BLOCKERS.has(blocker.code) && blocker.nodeId).map((blocker) => blocker.nodeId));
+  return (nodes ?? []).filter((node) => held.has(node.id)).map((node) => node.logicalId);
+}
+
+/** The occupants a restore of this snapshot would resume (the resume policy, not listed fresh, not kept attached to an
+ *  external CLI, not held for startup, not a terminal), as ConversationSeat keyed by logical id (#3218 item 3). Shared
+ *  by validatePreRestore and the restore's partner check. */
+const UNREADABLE = Object.freeze({ unreadable: true });
+
+export function resumingConversationSeats(
+  data: SnapshotData,
+  opts: {
+    freshLogicalIds?: string[];
+    currentRuntimes?: Record<string, string | null | undefined>;
+    currentStatuses?: Record<string, string | null | undefined>;
+    attachedLogicalIds?: string[];
+    /** Seats a startup blocker holds: restore doesn't launch them. */
+    heldLogicalIds?: string[];
+  },
+): ConversationSeat[] {
+  if (!Array.isArray(data.nodes)) return [];
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  const resuming: ConversationSeat[] = [];
+  for (const node of resolveSnapshotRestoreTopology(data).intendedNodes) {
+    try {
+      if (opts.freshLogicalIds?.includes(node.logicalId) || opts.attachedLogicalIds?.includes(node.logicalId)
+        || opts.heldLogicalIds?.includes(node.logicalId)) continue;
+      const currentRuntime = opts.currentRuntimes?.[node.logicalId] ?? node.runtime;
+      if (currentRuntime === "terminal") continue;
+      const resolution = resolveActiveSnapshotSession({ ...data, sessions }, node.id);
+      if (resolution.kind !== "resolved") continue;
+      const policy = effectiveRestorePolicy({
+        savedRuntime: node.runtime,
+        currentRuntime,
+        recordedSessions: sessions.filter((recorded) => recorded.nodeId === node.id),
+      }, resolution.session.restorePolicy);
+      if (policy !== "resume_if_possible") continue;
+      resuming.push({
+        seat: node.logicalId,
+        // the current record, as for the agents outside it: the snapshot's own says "running" for a seat rig down
+        // stopped after taking it (the maintainer's review of #3250)
+        state: (opts.currentStatuses ? opts.currentStatuses[node.logicalId] : resolution.session.status) ?? "unknown",
+        resumeType: resolution.session.resumeType,
+        resumeToken: resolution.session.resumeToken,
+      });
+    } catch {
+      // malformed saved data never stops a restore: the comparison is unavailable for this agent
+      resuming.push({ seat: node.logicalId, resumeType: UNREADABLE, resumeToken: UNREADABLE });
+    }
+  }
+  return resuming;
 }

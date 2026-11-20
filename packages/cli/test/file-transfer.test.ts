@@ -353,6 +353,29 @@ describe("buildRsyncArgv — closed-builder properties (every permutation)", () 
     const argv = buildRsyncArgv({ src: local("/tmp/a.md"), dst: remote("/srv/briefs/a.md"), dryRun: false });
     expect(argv[argv.length - 1]).toBe("vps-a.tail.net:/srv/briefs/a.md");
   });
+
+  it.each([
+    ["::1", "[::1]"],
+    ["2001:db8::1", "[2001:db8::1]"],
+    ["fe80::1%eth0", "[fe80::1%eth0]"],
+    ["[::1]", "[::1]"],
+    ["openrig@::1", "openrig@[::1]"],
+    ["openrig@[::1]", "openrig@[::1]"],
+    ["127.0.0.1", "127.0.0.1"],
+    ["openrig@vps-a.tail.net", "openrig@vps-a.tail.net"],
+  ])("formats target %s in both transfer directions", (target, operandHost) => {
+    const host = { ...VPS, target };
+    const registryLoader = () => ({ ok: true as const, registry: { hosts: [host] } });
+    const expected = `${operandHost}:/srv/file.md`;
+    for (const [src, dst, index] of [
+      ["vps-a:/srv/file.md", "/tmp/local.md", -2],
+      ["/tmp/local.md", "vps-a:/srv/file.md", -1],
+    ] as const) {
+      const result = planFileCopy(src, dst, { registryLoader });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(buildRsyncArgv(result.plan).at(index)).toBe(expected);
+    }
+  });
 });
 
 // ── classification (executor taxonomy minus the daemon class) ───────────────

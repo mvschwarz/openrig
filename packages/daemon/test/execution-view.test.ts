@@ -29,6 +29,7 @@ import { queueTransitionWakesSchema } from "../src/db/migrations/073_queue_trans
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { buildExecutionView, type ExecutionViewDeps } from "../src/domain/execution-view.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 import { ViewProjector, ViewProjectorError } from "../src/domain/view-projector.js";
 import { Hono } from "hono";
 import { viewsRoutes } from "../src/routes/views.js";
@@ -1026,6 +1027,14 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(result.rows[0].sources.build_info.basis).toContain("OpenRig daemon");
   });
 
+  it("shows a lane in its project's view once the project tag is added to its existing row", async () => {
+    const deps = { db, slicesRoot: () => missionsRoot, rigsRoot: () => rigsRoot };
+    const lanesOf = async () => ((await buildExecutionView(deps, { mission: MISSION, project: "demo" })).q1_lanes as Record<string, unknown>[]).map((lane) => lane.slice);
+    expect(await lanesOf()).toEqual([]);
+    new QueueRepository(db, new EventBus(db)).addTags({ qitemId: "qitem-lane-31", actorSession: "desk@exec-fixture", tags: ["project:demo"] });
+    expect(await lanesOf()).toEqual(["OPR.9.9.31"]);
+  });
+
   it("uses project-local review drops without joining unbound global artifacts", async () => {
     for (const row of db.prepare("SELECT qitem_id, tags FROM queue_items").all() as {qitem_id: string; tags: string}[]) {
       const tags = JSON.parse(row.tags) as string[];
@@ -1255,6 +1264,26 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       try { await expect(projector.show("execution", { mission: MISSION })).rejects.toThrow("history unavailable"); } finally { loud.restore(); }
       expect(loud.readFor).toContain("qitem-lane-31");
     });
+  });
+
+  it("current-park boundary: execution view drops an old arm after leaving blocked and reparking without a wake", async () => {
+    db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, ?, 'lead@exec-fixture')`).run("2026-08-29T22:00:00.000Z", "in-progress");
+    db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, ?, 'lead@exec-fixture')`).run("2026-08-29T22:01:00.000Z", "blocked");
+    const park = ((await show()).q5_park as Record<string, unknown>[]).find(r => r.qitem_id === "qitem-parked-33");
+    expect(park).toMatchObject({ pickup_state: "parked", park_kind: "indeterminate", wake_target: null });
+  });
+
+  it("current-park boundary: execution view chooses the newest arm and keeps it across blocked notes", async () => {
+    const arm = db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, 'blocked', 'lead@exec-fixture')`).run("2026-08-29T22:00:00.000Z");
+    db.prepare(`INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref)
+      VALUES (?, 'qitem-parked-33', 'armed', 'timer', 'wake-timer-new')`).run(arm.lastInsertRowid);
+    db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, 'blocked', 'lead@exec-fixture')`).run("2026-08-29T22:01:00.000Z");
+    const park = ((await show()).q5_park as Record<string, unknown>[]).find(r => r.qitem_id === "qitem-parked-33");
+    expect(park).toMatchObject({ park_kind: "deliberate-with-wake", wake_target: "wake-timer-new" });
   });
 
   it("park honesty: armed wake => deliberate-with-wake; removing the wake flips park_kind to INDETERMINATE, never idle/dead", async () => {

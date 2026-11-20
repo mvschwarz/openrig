@@ -137,6 +137,13 @@ export function caseContext(cell, { caseId, kind, version }) {
       cell.record({ step: "person-keys", caseId, keys });
       await cell.tmux(["send-keys", "-t", cell.session, ...keys]);
     },
+    /** Keys the fixture itself presses to leave a state it set up (a scripted operator action, never a person's
+     *  answer); recorded as such in the steps and the verdict. */
+    async operatorKeys(why, ...keys) {
+      cell.record({ step: "fixture-operator-keys", caseId, keys, why });
+      verdict.info(`fixture operator action (scripted, not a person): ${why}`, keys);
+      await cell.tmux(["send-keys", "-t", cell.session, ...keys]);
+    },
     composer: () => composerText(kind, screen.last()?.screen ?? ""),
     composerOf: (text) => composerText(kind, text ?? ""),
 
@@ -154,12 +161,19 @@ export function caseContext(cell, { caseId, kind, version }) {
     async leaveCopyMode() { cell.record({ step: "person-leaves-copy-mode", caseId }); await cell.tmux(["send-keys", "-t", cell.session, "-X", "cancel"]); },
     async inMode() { return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{pane_in_mode}"])).trim() === "1"; },
 
-    /** Arm the logging tmux to type `text` as a person into the seat's pane between OpenRig's last read of the input
-     *  box and its next paste there (once). */
-    armDraftInjection(text) {
-      const spec = { pane: cell.paneId, text, bufferPrefix: "openrig_" };
+    /** Arm the logging tmux to type `text` as a person into the seat's pane once, at OpenRig's next paste there:
+     *  `at: "pre-paste"` (default) types it after OpenRig's last read of the input box and before the paste;
+     *  `at: "pre-enter"` lets the paste finish first and types it before OpenRig's read that precedes its Enter. */
+    armDraftInjection(text, { at = "pre-paste" } = {}) {
+      const spec = { pane: cell.paneId, text, bufferPrefix: "openrig_", at };
       writeFileSync(join(cell.env.DELIVERY_INJECT_DIR, "arm.json"), JSON.stringify(spec));
       cell.record({ step: "arm-injection", caseId, ...spec });
+    },
+    /** Resize the seat's window, as a person resizing their terminal would; returns the size tmux then reports. */
+    async resize(width, height) {
+      cell.record({ step: "person-resizes", caseId, width, height });
+      await cell.tmux(["resize-window", "-t", cell.session, "-x", String(width), "-y", String(height)]);
+      return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{window_width}x#{window_height}"])).trim();
     },
     /** What the injection did, or null if no paste came to fire it. */
     injection() {
@@ -183,11 +197,33 @@ export function caseContext(cell, { caseId, kind, version }) {
       verdict.info("watchdog reminder registered", { jobId, intervalSeconds });
       return jobId;
     },
+    /** The job and its recent evaluations (`recentHistory`): what each occurrence did, with its delivery status, code
+     *  and reason. Null when it can't be read. */
+    async watchdogStatus(jobId) {
+      const out = await cell.rig(["watchdog", "status", jobId, "--json"], { allowFail: true });
+      try { return JSON.parse(out.stdout); } catch { return null; }
+    },
+    /** OpenRig's own watchdog occurrence rows (rig queue outbox-list watchdog@system): each names its job in
+     *  auditPointer. Null when they can't be read. */
+    async watchdogOccurrences() {
+      const out = await cell.rig(["queue", "outbox-list", "watchdog@system", "--limit", "500", "--json"], { allowFail: true });
+      try { const rows = JSON.parse(out.stdout); return Array.isArray(rows) ? rows : null; } catch { return null; }
+    },
+    /** Let the stand-in answer turns held on `gate`. */
+    releaseGate(gate) { cell.record({ step: "release-gate", caseId, gate }); cell.standIn.release(gate); },
     async stopWatchdog(jobId) { await cell.rig(["watchdog", "stop", jobId, "--json"], { allowFail: true }); },
 
     async setGuard(mode) {
       const out = await cell.rig(["seat", "set-typing-guard", cell.session, "--mode", mode, "--reason", `delivery suite ${caseId}`, "--json"]);
       verdict.info(`typing guard set to ${mode}`, out.stdout.trim().slice(0, 400));
+      try { return JSON.parse(out.stdout); } catch { return null; }
+    },
+    /** Release one held message's quota; it delivers nothing. The route requires a sender, so the suite names itself. */
+    async retireHeld(outboxId) {
+      const out = await cell.rig(["seat", "retire-held-message", cell.session, outboxId, "--reason", `delivery suite ${caseId}`, "--json"], { allowFail: true, as: "delivery-suite@dlv" });
+      let state = null;
+      try { state = JSON.parse(out.stdout)?.entry?.deliveryState ?? null; } catch { state = null; }
+      return { exit: out.exit, state, stdout: out.stdout.trim().slice(0, 600) };
     },
     async setDraftDelivery(value) {
       await cell.rig(["config", "set", "transport.draft_delivery", value]);

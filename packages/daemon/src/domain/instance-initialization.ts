@@ -26,6 +26,8 @@ export interface OpenRigInstanceInitializationResult {
   createdPaths: string[];
   conflicts: InitializationConflict[];
   dryRun: boolean;
+  /** workspace.root already holds a project of its own (this project.yaml): the scaffold left it as it is. */
+  workspaceExistingProject?: string;
 }
 
 export function openRigContextLibraryRoots(contextRoot: string): [string, string] {
@@ -103,7 +105,8 @@ export function ensureOpenRigInstance(
     ensureDefaultWorkspace({ root: workspaceRoot, fs });
   }
 
-  return { ok: true, home: options.home, createdPaths, conflicts: [], dryRun };
+  return { ok: true, home: options.home, createdPaths, conflicts: [], dryRun,
+    ...(workspacePlan.existingProject ? { workspaceExistingProject: workspacePlan.existingProject } : {}) };
 }
 
 export function formatInstanceInitializationConflicts(

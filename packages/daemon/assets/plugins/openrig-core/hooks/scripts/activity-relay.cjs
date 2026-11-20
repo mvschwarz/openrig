@@ -312,27 +312,47 @@ function resolveEndpoint(env = process.env) {
   return { baseUrl, token };
 }
 
-async function postHookPayload(payload, env = process.env) {
-  const { baseUrl, token } = resolveEndpoint(env);
-  if (!baseUrl || !token || !payload || typeof fetch !== "function") return;
+// #3416 (2): node:http rather than the global fetch. This script runs once per hook event, and the first fetch call
+// loads Node's bundled HTTP client (undici), which more than doubles the CPU of a run; node:http is already in the binary.
+// The post carries the same JSON body and bearer token, waits at most 1.5 s for the answer, closes the connection when the
+// answer arrives, and swallows every error.
+const POST_TIMEOUT_MS = 1500;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
-  try {
-    await fetch(new URL("/api/activity/hooks", baseUrl).toString(), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-  } catch {
-    // Provider hooks must not block the agent loop if OpenRig is unavailable.
-  } finally {
-    clearTimeout(timeout);
-  }
+function postHookPayload(payload, env = process.env) {
+  const { baseUrl, token } = resolveEndpoint(env);
+  if (!baseUrl || !token || !payload) return Promise.resolve();
+  return new Promise((resolve) => {
+    let request = null;
+    const timer = setTimeout(() => { if (request) request.destroy(); resolve(); }, POST_TIMEOUT_MS);
+    const done = () => { clearTimeout(timer); resolve(); };
+    try {
+      const url = new URL("/api/activity/hooks", baseUrl);
+      const client = url.protocol === "http:" ? require("node:http") : url.protocol === "https:" ? require("node:https") : null;
+      if (!client) return done();
+      const body = Buffer.from(JSON.stringify(payload), "utf8");
+      // A fresh connection, closed after the answer: nothing pooled keeps this short-lived process waiting.
+      request = client.request(url, {
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/json",
+          "authorization": `Bearer ${token}`,
+          "content-length": body.length,
+        },
+      }, (response) => {
+        // As with fetch, the answer's arrival ends the post. Its body is not needed, so the connection closes here: a
+        // daemon that sends headers and then stalls can't hold the hook past the answer.
+        response.on("error", () => {});
+        request.destroy();
+        done();
+      });
+      // Provider hooks must not block the agent loop if OpenRig is unavailable.
+      request.on("error", done);
+      request.end(body);
+    } catch {
+      done();
+    }
+  });
 }
 
 function buildSessionIdentityPayload(providerPayload, env = process.env, now = () => new Date()) {
@@ -411,11 +431,12 @@ function uid() {
 const SETTINGS_RELAY_TAIL = "state/claude-activity-hooks/activity-relay.cjs";
 
 // Keep this finite Node-command grammar in parity with parseManagedClaudeNodeCommand.
-// Canonical POSIX quotes and literal unquoted words only; no expansion or wrappers.
+// Canonical POSIX quotes and literal unquoted words only, optionally after one leading `exec` (the shape OpenRig writes
+// since #3416; the one without it is an earlier version's); no expansion or other wrappers.
 function settingsRelayPath(command) {
   if (/[\r\n]/.test(command)) return null;
   const token = /'(?:[^']|'"'"')*'|[-A-Za-z0-9_./:@%+=,]+/.source;
-  const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim());
+  const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim().replace(/^exec[ \t]+/, ""));
   if (!m) return null;
   const decode = token => token.startsWith("'") ? token.slice(1, -1).split(`'"'"'`).join("'") : token;
   const quote = value => "'" + value.replace(/'/g, `'"'"'`) + "'";

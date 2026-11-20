@@ -94,6 +94,47 @@ const transitions = (id: string) => db.prepare(
   "SELECT actor_session, state, transition_note, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid",
 ).all(id) as TransitionRow[];
 
+describe("rig queue block audit note and continuation readback", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it("keeps the audit note out of the resume plan for a whitespace-only continuation", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev-x@rig");
+    const item = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "review" });
+    const blocker = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-y@rig", body: "dependency" });
+    const note = "source checked; no resume plan supplied";
+    const { out, exit } = await runCli([
+      "block", item.qitemId, "--on", blocker.qitemId, "--note", note, "--continuation", " \t\n ", "--json",
+    ]);
+    expect(exit, out).toBeFalsy();
+    expect(repo.transitionLog.listForQitem(item.qitemId).at(-1)?.transitionNote).toBe(note);
+    expect(repo.currentParkContinuation(item.qitemId)).toBeNull();
+  });
+
+  it.each([false, true])("keeps the audit note with continuation=%s in the real transition store", async (withContinuation) => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev-x@rig");
+    const item = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "review" });
+    const blocker = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-y@rig", body: "dependency" });
+    const note = "source checked\nproof retained";
+    const continuation = "resume the review after the dependency";
+    const { out, exit } = await runCli([
+      "block", item.qitemId, "--on", blocker.qitemId, "--note", note,
+      ...(withContinuation ? ["--continuation", continuation] : []), "--json",
+    ]);
+    expect(exit, out).toBeFalsy();
+    expect(repo.getByIdOrThrow(item.qitemId)).toMatchObject({ state: "blocked", blockedOn: blocker.qitemId });
+    const recorded = repo.transitionLog.listForQitem(item.qitemId).at(-1);
+    expect(recorded?.transitionNote).toContain(note);
+    // Wakes/refocus require the existing exact prefix. Keeping the note must not hide the resume plan.
+    if (withContinuation) {
+      expect(recorded?.transitionNote).toBe(`continuation: ${continuation}\n\n${note}`);
+      expect(repo.currentParkContinuation(item.qitemId)).toBe(`${continuation}\n\n${note}`);
+    } else {
+      expect(recorded?.transitionNote).toBe(note);
+      expect(repo.currentParkContinuation(item.qitemId)).toBeNull();
+    }
+  });
+});
+
 describe("#2866 rig queue update --source <name>@external (note only, external actor)", () => {
   let id: string;
   beforeEach(async () => {

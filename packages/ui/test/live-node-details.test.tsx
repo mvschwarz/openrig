@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent, within } from "@testing-library/react";
 import { createTestRouter } from "./helpers/test-router.js";
 import { LiveNodeDetails } from "../src/components/LiveNodeDetails.js";
 import { DrawerSelectionContext, type DrawerSelection } from "../src/components/AppShell.js";
@@ -134,6 +134,51 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     }]));
     return <div data-testid="activity-warmup" />;
   }
+
+  it("labels runner context samples in the existing overview and detail", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, contextUsage: { ...NODE_DETAIL.contextUsage, source: "runner_reported" } });
+    renderDetails();
+    expect((await screen.findByTestId("seat-overview-cell-context-percent")).textContent).toContain("42% (runner-reported)");
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    const context = within(await screen.findByTestId("detail-context-usage"));
+    expect(context.getByText("runner-reported")).toBeDefined();
+    expect(context.getByText("42%")).toBeDefined();
+    expect(context.getByText("58%")).toBeDefined();
+    expect(context.getByText("320,000")).toBeDefined();
+  });
+
+  it("labels counts-only runner facts without inventing a context percentage", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, contextUsage: { availability: "unknown", reason: "window_capacity_unknown", source: "runner_reported",
+      usedPercentage: null, remainingPercentage: null, contextWindowSize: null, totalInputTokens: 1000, totalOutputTokens: 100,
+      sampledAt: NODE_DETAIL.contextUsage.sampledAt, fresh: true } });
+    renderDetails();
+    const tokens = await screen.findByTestId("seat-overview-cell-total-tokens");
+    expect(tokens.textContent).toContain("1.1k");
+    expect(tokens.textContent).toContain("runner-reported");
+    expect(screen.getByTestId("seat-overview-cell-context-percent").textContent).not.toContain("%");
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    const section = await screen.findByTestId("detail-context-usage");
+    const context = within(section);
+    expect(context.getByText("unknown (window_capacity_unknown)")).toBeDefined();
+    expect(context.getByText("runner-reported")).toBeDefined();
+    expect(context.getByText("Input tokens").parentElement?.textContent).toBe("Input tokens1,000");
+    expect(context.getByText("Output tokens").parentElement?.textContent).toBe("Output tokens100");
+    expect(context.getByText(NODE_DETAIL.contextUsage.sampledAt)).toBeDefined();
+    expect(context.queryByText("Window")).toBeNull();
+    expect(section.textContent).not.toContain("%");
+  });
+
+  it("shows zero reported tokens without filling absent unknown-capacity fields", async () => {
+    mockNodeDetail({ ...NODE_DETAIL, contextUsage: { availability: "unknown", reason: "window_capacity_unknown", source: "runner_reported",
+      usedPercentage: null, remainingPercentage: null, contextWindowSize: null, totalInputTokens: 0, fresh: true } });
+    renderDetails();
+    fireEvent.click(await screen.findByTestId("live-tab-details"));
+    const context = within(await screen.findByTestId("detail-context-usage"));
+    expect(context.getByText("unknown (window_capacity_unknown)")).toBeDefined();
+    expect(context.getByText("Input tokens").parentElement?.textContent).toBe("Input tokens0");
+    expect(context.queryByText("Output tokens")).toBeNull();
+    expect(context.queryByText("Sampled")).toBeNull();
+  });
 
   // HG-1 — default tab is Overview.
   it("HG-1: default tab is Overview on landing", async () => {

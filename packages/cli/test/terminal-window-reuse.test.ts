@@ -79,7 +79,7 @@ describe("reopening a Herdr view in a desktop window", () => {
     await f.run();
     expect(f.focus).toHaveBeenCalledExactlyOnceWith("first");
     expect(f.post).not.toHaveBeenCalled();
-    expect(f.exec).toHaveBeenCalledWith("/fixture/bin/tmux", ["-S", socket, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+    expect(f.exec).toHaveBeenCalledWith("/fixture/bin/tmux", ["-S", socket, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_flags}"]);
   });
 
   it.each([[undefined, true], ["daemon-named", true], [undefined, false], ["daemon-named", false]] as const)("following binds the exact custom endpoint before tab selection (session=%s matches=%s)", async (session, matches) => {
@@ -373,6 +373,16 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, notes: expect.arrayContaining([expect.stringContaining("Could not check existing Herdr workspaces")]) });
   });
 
+  it("pins cleanup guidance to the inventory's socket with no session selected, whatever the caller's shell names (CodeRabbit, PR 3560)", async () => {
+    const f = fixture([{ workspace_id: "old", tab_id: "old-tab", label: label() }]);
+    f.windowDeps.env = { ...f.windowDeps.env, HERDR_SOCKET_PATH: "/other/server.sock", HERDR_SESSION: "elsewhere" };
+    f.processInfo.mockResolvedValue(JSON.stringify({ result: { process_info: { pane_id: "unrelated", foreground_processes: [] } } }));
+    await f.run();
+    const notes: string[] = JSON.parse(logs[0]!).notes;
+    expect(notes.join("\n")).toContain("env -u HERDR_SESSION HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr' workspace close 'old'");
+    expect(notes.join("\n")).not.toMatch(/(^|: )herdr workspace close/m);
+  });
+
   it.each(["openrig:kernel#l1", "openrig:kernel#fedcba9876543210#l1/1"])("creates the current plan and names the retained stale workspace for %s", async oldLabel => {
     const old = { workspace_id: "old-space", tab_id: "old-tab", label: oldLabel };
     const f = fixture([old]);
@@ -380,7 +390,38 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(f.post).toHaveBeenCalledTimes(1);
     expect(f.focus).not.toHaveBeenCalled();
     expect(f.tabs[0]).toEqual(old);
-    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, notes: expect.arrayContaining([expect.stringContaining("herdr workspace close 'old-space'")]) });
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, notes: expect.arrayContaining([expect.stringContaining(`env -u HERDR_SESSION HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr' workspace close 'old-space'`)]) });
+  });
+
+  it.each([["the current plan", label()], ["an older plan", "openrig:kernel#fedcba9876543210#l1"]])("names a workspace of %s whose writable tiles ignore their size, with its close command, and creates once", async (_plan, oldLabel) => {
+    const old = { workspace_id: "old-space", tab_id: "old-tab", label: oldLabel };
+    const f = fixture([old]);
+    f.clients.mockResolvedValue("101\tfixture-tui\t0\tattached,ignore-size\n102\tfixture-advisor\t0\tattached\n103\tfixture-operator\t0\tattached");
+    await f.run();
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.tabs[0]).toEqual(old);
+    const notes: string[] = JSON.parse(logs[0]!).notes;
+    expect(notes.filter(note => note.includes("old-space"))).toEqual([expect.stringMatching(/^Workspace old-space shows this view with tiles an OpenRig before 0\.7\.10 opened, .+: env -u HERDR_SESSION HERDR_SOCKET_PATH='\/daemon home\/herdr\.sock' '\/fixture\/bin\/herdr' workspace close 'old-space'$/)]);
+    expect(f.exec.mock.calls.some(([, args]) => args.includes("close"))).toBe(false);
+  });
+
+  it("names an older plan's fixed-size workspace beside the live copy it reuses", async () => {
+    const f = fixture([
+      { workspace_id: "old-space", tab_id: "old-tab", label: "openrig:kernel#fedcba9876543210#l1" },
+      { workspace_id: "live", tab_id: "fresh", label: label() },
+    ]);
+    const seats = ["tui", "advisor", "operator"];
+    f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId,
+      foreground_processes: [{ pid: (paneId.startsWith("old-tab-") ? 901 : 101) + seats.findIndex(seat => paneId.endsWith(seat)) }] } } }));
+    f.clients.mockResolvedValue([...seats.map((seat, i) => `${101 + i}\tfixture-${seat}\t0\tattached`),
+      ...seats.map((seat, i) => `${901 + i}\tfixture-${seat}\t0\tattached,ignore-size`)].join("\n"));
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("fresh");
+    expect(f.post).not.toHaveBeenCalled();
+    const notes: string[] = JSON.parse(logs[0]!).notes;
+    expect(notes.filter(note => note.includes("old-space"))).toEqual([expect.stringMatching(/^Workspace old-space shows this view with tiles an OpenRig before 0\.7\.10 opened, .+: env -u HERDR_SESSION HERDR_SOCKET_PATH='\/daemon home\/herdr\.sock' '\/fixture\/bin\/herdr' workspace close 'old-space'$/)]);
+    expect(notes.some(note => note.includes("'live'"))).toBe(false);
   });
 
   it("retains the current preview's absent and degraded members when reusing a partial view", async () => {
