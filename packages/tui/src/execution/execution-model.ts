@@ -302,9 +302,17 @@ function assigneeText(slice: SliceFacts): string | null {
   const owners = [...new Set(slice.work.map(w => seatShort(w["seat"])).filter(Boolean))];
   return owners.length ? owners.join(", ") : null;
 }
-function plannedOwnerText(slice: SliceFacts): string {
+/** The planned owner the view read from slice.yaml `sdlc.components[].owner` through the mission's arrangement (#3616):
+ *  "none declared" when it read none, "unknown" only when the arrangement was malformed, and null (an empty cell) where
+ *  that source is absent: no mission.yaml, or a slice outside the active composition, whose owners the view doesn't read. */
+function plannedOwnerText(slice: SliceFacts, execution: ExecutionViewSnap): string | null {
   const build = slice.plannedOwners.filter(p => p.component === "build.minimal-gap");
-  return [...new Set((build.length ? build : slice.plannedOwners).map(p => seatShort(p.owner)))].join(", ") || "unknown";
+  const named = [...new Set((build.length ? build : slice.plannedOwners).map(p => seatShort(p.owner)))].join(", ");
+  if (named) return named;
+  const arrangement = execution.sources["arrangement"];
+  if (arrangement === undefined) return null;
+  if (record(arrangement)["value"] === INDETERMINATE || !execution.readiness) return "unknown";
+  return execution.readiness.slices.some(s => s.scope === slice.dir) ? "none declared" : null;
 }
 
 /** What unlocks next, only when the projection actually says so. */
@@ -357,7 +365,7 @@ function padCell(text: string, width: number): string {
   return value + " ".repeat(Math.max(0, width - value.length));
 }
 
-function graphNode(slice: SliceFacts, width: number): ContentLine[] {
+function graphNode(slice: SliceFacts, width: number, planned: string | null): ContentLine[] {
   const inside = width - 2;
   const state = stateWord(slice);
   const owners = assigneeText(slice);
@@ -369,7 +377,7 @@ function graphNode(slice: SliceFacts, width: number): ContentLine[] {
   return [
     semantic([{ text: "┌" + padCell(`─ ${slice.id} `, inside).replace(/ +$/, m => "─".repeat(m.length)) + "┐", token: "accentBright" }], width),
     cell(slice.name, "bright"), cell(`${stateMark(state)} ${state}`, stateToken(state)),
-    cell(owners ? `Owner: ${owners}` : `Planned: ${plannedOwnerText(slice)}`, "dim"),
+    cell(owners ? `Owner: ${owners}` : planned === null ? "" : `Planned: ${planned}`, "dim"),
     cell(`After: ${after}`, "dim"),
     semantic([{ text: `└${"─".repeat(inside)}┘`, token: "chrome" }], width),
   ];
@@ -382,7 +390,7 @@ function graphChunk(execution: ExecutionViewSnap, members: SliceFacts[], width: 
   const out: ContentLine[] = [];
   for (let start = 0; start < members.length; start += perRow) {
     const chunk = members.slice(start, start + perRow);
-    const boxes = chunk.map(slice => graphNode(slice, nodeWidth));
+    const boxes = chunk.map(slice => graphNode(slice, nodeWidth, plannedOwnerText(slice, execution)));
     const zones = chunk.map((slice, index) => ({ start: index * (nodeWidth + gap), end: index * (nodeWidth + gap) + nodeWidth, action: sliceAction(execution, slice) }));
     for (let line = 0; line < 6; line++) {
       const segs = boxes.flatMap((box, index) => [...(index ? [{ text: " ".repeat(gap) }] : []), ...box[line]!.segs!]);
