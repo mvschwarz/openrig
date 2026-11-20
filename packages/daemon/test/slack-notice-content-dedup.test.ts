@@ -231,4 +231,19 @@ describe("status notice content dedup", () => {
     expect(repo.listTransitions(repeat.item.qitemId).some((t) => t.transitionNote?.includes("reason=identical-content"))).toBe(false);
     expect(repo.listTransitions(repeat.item.qitemId).some((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "))).toBe(true);
   });
+
+  it("posts an identical repeat with a disclosure when the wire cannot read quiet hours", async () => {
+    await dispatch((await notice()).payload);
+    const repeat = await notice();
+    // A missing table is treated as an older schema, so make the query fail on an
+    // existing table: this reaches the live wire path, not a flag set before dispatch.
+    db.exec("ALTER TABLE human_quiet_windows RENAME COLUMN entity_id TO unreadable_entity_id");
+
+    await dispatch(repeat.payload);
+
+    expect(posts).toHaveLength(2);
+    expect(posts[1]?.text).toContain("OpenRig couldn't read your quiet hours.");
+    expect(edits).toHaveLength(0);
+  });
+
 });
