@@ -110,8 +110,8 @@ function seat(runtime: TestRuntime, adapters = {}) {
   };
   return {
     hook, post, seatEnv, now, stageSwitch, app,
-    adopt: () => {
-      sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+    adopt: (pane: string | null = "%1") => {
+      sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: pane });
       return sessions.registerClaimedSession(node.id, name, "adopt");
     },
     rebind: () => sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%2" }),
@@ -259,6 +259,25 @@ describe("OMP session identity through the activity endpoint", () => {
     expect(await s.post({ ...body, sessionFile: next })).toMatchObject({ tokenPersisted: true });
     expect(s.token(adopted.id)).toEqual({ resume_type: "omp_tui_session_file", resume_token: next });
     expect(s.token()).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
+  });
+
+  it("waits for an exact pane binding before reading a retained native writer's identity", async () => {
+    const file = history(); fs.writeFileSync(file, "conversation");
+    const inspected: Array<string | undefined> = [];
+    const s = seat("omp-tui", { "omp-tui": { readLiveSessionFile: async (_session: string, _generation: string, pane?: string) => {
+      inspected.push(pane);
+      return { ok: true, sessionFile: file };
+    } } });
+    const row = s.adopt(null);
+    const env = s.seatEnv;
+    const body = { runtime: "omp-tui", eventFamily: "session_identity", hookEvent: "SessionStart", sessionId: "native-id",
+      sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
+    expect(await s.post(body, 409)).toMatchObject({ code: "binding_mismatch", tokenPersisted: false });
+    expect(inspected).toEqual([]);
+    expect(s.token(row.id)).toEqual({ resume_type: null, resume_token: null });
+    s.rebind();
+    expect(await s.post(body)).toMatchObject({ tokenPersisted: true });
+    expect(inspected).toEqual(["%2"]);
   });
 
   it.each(["adoption", "rebind"])("retries native identity when %s changes the destination during the file read", async change => {

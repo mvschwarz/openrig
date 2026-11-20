@@ -241,7 +241,8 @@ describe("live seat runtime switch", () => {
       // Reconstruct the launcher as after a daemon restart: no in-memory aliases may be needed.
       const restartedLauncher = makeLauncher();
       const restarted = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles,
-        launcher: restartedLauncher, sleep: async () => {}, listProcesses: processes });
+        launcher: restartedLauncher, sleep: async () => {}, listProcesses: processes,
+        boundPaneForSession: session => session === SEAT ? sessionRegistry.getBindingForNode(nodeId)?.tmuxPane ?? null : null });
       expect(restartedLauncher.paths(SEAT)).toEqual(launcher.paths(staging));
       expect(restarted.readSessionFile(SEAT)).toMatchObject({ ok: true, sessionFile: expect.stringContaining(staging) });
       if (scenario === "success") {
@@ -261,6 +262,9 @@ describe("live seat runtime switch", () => {
         const binding = sessionRegistry.getBindingForNode(nodeId)!;
         expect(await restarted.checkReady({ ...binding, cwd: project })).toMatchObject({ ready: true });
         expect(makeLauncher().paths(SEAT)).toEqual(launcher.paths(staging));
+        // The durable storage proof does not prove the sidecar's writer is still alive during an identity read.
+        processes.mockResolvedValueOnce([{ pid: writerPid, ppid: 901, command: "omp", startedAt: writerStart }]).mockResolvedValueOnce([]);
+        expect(await restarted.readLiveSessionFile(SEAT, undefined, binding.tmuxPane!)).toMatchObject({ ok: false });
         // Reusing the address and pane with a replacement process cannot expose the previous writer's files.
         writerPid = 903;
         sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");

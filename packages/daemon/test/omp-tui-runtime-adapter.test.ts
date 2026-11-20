@@ -49,17 +49,19 @@ function fakeSeat(files: Record<string, string>, omp: Omp = (launchId) => ({ rea
     sendKeys: vi.fn(async () => ({ ok: true })),
     getPanePid: vi.fn(async () => 101),
     hasSession: vi.fn(async () => true),
-    getPaneCommand: vi.fn(async () => paneCommand),
+    getPaneCommand: vi.fn(async (_target?: string) => paneCommand),
     capturePaneContent: vi.fn(async () => ""),
   };
   const launcher = new OmpSeatLauncher({
     tmux: tmux as unknown as TmuxAdapter, fsOps: fs, stateRoot, seatExtensionPath: extension, sleep: async () => {},
     newLaunchId: () => "attempt-1", now: () => "2026-11-11T00:00:00.000Z",
   });
+  const listProcesses = vi.fn(async () => [{ pid: 102, ppid: 101, command: "omp", startedAt: "2026-11-10T00:00:00Z" }]);
+  const boundPaneForSession = vi.fn((_session: string): string | null => null);
   const adapter = new OmpTuiRuntimeAdapter({ tmux: tmux as unknown as TmuxAdapter, fsOps: fs, launcher, sleep: async () => {},
-    listProcesses: async () => [{ pid: 102, ppid: 101, command: "omp", startedAt: "2026-11-10T00:00:00Z" }] });
+    listProcesses, boundPaneForSession });
   const sent = () => vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1] ?? "";
-  return { fs, tmux, launcher, adapter, sent, setPaneCommand: (command: string) => { paneCommand = command; } };
+  return { fs, tmux, launcher, adapter, sent, listProcesses, boundPaneForSession, setPaneCommand: (command: string) => { paneCommand = command; } };
 }
 
 const binding = (extra: Record<string, unknown> = {}) => ({ tmuxSession: seat, cwd: "/work", model: "openrouter/example", launchPosture: "floor", ...extra }) as never;
@@ -247,6 +249,26 @@ describe("OMP readiness", () => {
     // OMP was killed: its last sidecar still says ready, but the pane is back at the shell.
     setPaneCommand("-zsh");
     expect(await adapter.checkReady(binding())).toMatchObject({ ready: false, code: "runner_exited" });
+  });
+
+  it.each(["exited", "replaced"])("refuses the stale identity file after the bound pane's writer is %s", async change => {
+    const files = { [currentFile]: "history", [paths.statePath]: JSON.stringify({ ready: true, launchId: "launch",
+      generation: "original", pid: 102, sessionFile: currentFile, updatedAt: "2026-11-11T00:00:00Z" }) };
+    const { adapter, listProcesses, tmux } = fakeSeat(files);
+    const original = { pid: 102, ppid: 101, command: "omp", startedAt: "2026-11-10T00:00:00Z" };
+    listProcesses.mockResolvedValueOnce([original]).mockResolvedValueOnce(change === "exited" ? []
+      : [{ ...original, startedAt: "2026-11-11T00:00:01Z" }]);
+    expect(await adapter.readLiveSessionFile(seat, "original", "%4")).toEqual({ ok: false, reason: "process_unreadable" });
+    expect(tmux.getPanePid.mock.calls).toEqual([["%4"], ["%4"]]);
+  });
+
+  it.each(["provided", "lookup"])("checks readiness in the bound pane (%s) while a different pane in its session is active", async source => {
+    const { adapter, tmux, boundPaneForSession } = fakeSeat({ [paths.statePath]: JSON.stringify({ ready: true, launchId: "launch",
+      auth: "ok", pid: 102, sessionFile: currentFile, updatedAt: "2026-11-11T00:00:00Z" }) });
+    tmux.getPaneCommand.mockImplementation(async target => target === "%4" ? "omp" : "zsh");
+    if (source === "lookup") boundPaneForSession.mockReturnValue("%4");
+    expect(await adapter.checkReady(binding({ tmuxPane: source === "provided" ? "%4" : null }))).toEqual({ ready: true });
+    expect(tmux.getPaneCommand).toHaveBeenCalledWith("%4");
   });
 
   it("reads OMP's own exit record, and a seat that hasn't reported yet as still starting", async () => {

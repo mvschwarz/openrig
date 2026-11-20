@@ -554,10 +554,10 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       let tokenPersisted: boolean | null;
       if (adoptedGeneration) {
         const binding = sessionRegistry.getBindingForNode(resolved.nodeId);
-        if (binding?.attachmentType === "external_cli" || binding?.tmuxSession !== sessionName) {
+        if (binding?.attachmentType === "external_cli" || binding?.tmuxSession !== sessionName || !binding.tmuxPane) {
           return c.json({ ok: false, code: "binding_mismatch", tokenPersisted: false }, 409);
         }
-        const ownFile = await omp?.readLiveSessionFile?.(resolved.sessionName, generation!, binding.tmuxPane ?? undefined);
+        const ownFile = await omp?.readLiveSessionFile?.(resolved.sessionName, generation!, binding.tmuxPane);
         // Another no-launch adoption can retain this writer while replacing the row that owns its token.
         // Let the writer retry against that destination with fresh pane evidence.
         tokenPersisted = store.db.transaction(() => {

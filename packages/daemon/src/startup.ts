@@ -1186,7 +1186,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
   const piAdapter = new PiRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
   const ompAdapter = new OmpRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, stateRootForSession: ompStateRootForSession, runnerEntryPath: piRunnerEntryPath });
-  const ompTuiAdapter = new OmpTuiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: ompFsOps, launcher: ompSeatLauncher });
+  const ompTuiAdapter = new OmpTuiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: ompFsOps, launcher: ompSeatLauncher,
+    boundPaneForSession: session => {
+      const address = sessionRegistry.resolveAddress(session);
+      if (address?.sessionName !== session) return null;
+      const binding = sessionRegistry.getBindingForNode(address.nodeId);
+      return binding?.attachmentType === "tmux" && binding.tmuxSession === session ? binding.tmuxPane : null;
+    },
+  });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
