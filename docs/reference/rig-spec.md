@@ -978,9 +978,10 @@ The daemon cold-starts a seat only when all of these hold:
     separate feature) stops a seat as operator `daemon:seat-reaper` with reason
     `idle_reap` precisely so new work can wake it again;
   - a seat that was never stopped intentionally (a crash, a lost session) is dormant;
-  - a rolled-back launch (`superseded` row, a failed start) is retryable only if no
-    intentional stop was recorded afterward, under the same backoff as any other attempt;
-- the seat's tmux session is gone.
+  - a rolled-back launch (`superseded` row, a failed start) is refused like an intentional
+    stop — a failed start is never auto-revived;
+- the seat's tmux session is gone (a probe that throws is not evidence of absence — the
+  seat is left alone, fail-closed).
 
 Stop attribution is tied to the exact session id, not its reusable tmux name. An old
 reaper stop cannot authorize reviving a later generation stopped by a person or `rig down`.
@@ -993,10 +994,12 @@ lease, and applies the normal restore decision: a
 `resume_if_possible` seat with a usable token resumes its conversation, and a seat
 whose conversation cannot be resumed parks as `awaiting-decision` with no session
 started rather than being silently replaced by a fresh one.
+A cold start also parks as `awaiting-decision` when the snapshot's occupant is no longer
+the seat's current session: a stale snapshot never silently replaces a newer conversation.
 
 Simultaneous arrivals are coalesced into one launch, attempts are at least a minute
 apart, and a seat that fails to start three times in a row stops cold-starting
-until liveness is observed or 15 minutes have passed since the last attempt. Refusal
+until liveness is observed or a launch succeeds — the cap never expires by time. Refusal
 evaluations coalesce per seat within each queue drain pass, with a one-second TTL;
 the next pass checks liveness again. Once the seat is running, the queue's existing
 unroutable-wake retry delivers the waiting rows; no new scheduler is involved.
