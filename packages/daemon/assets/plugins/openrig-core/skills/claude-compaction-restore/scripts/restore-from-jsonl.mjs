@@ -490,7 +490,13 @@ async function main() {
   // comes from the transcript), so they start in a staging folder beside it. Packet readers match `<session id>-*`.
   const outRoot = path.resolve(args.out);
   fs.mkdirSync(outRoot, { recursive: true });
-  const staging = fs.mkdtempSync(path.join(outRoot, ".partial-"));
+  // A stop part way (the PreCompact hook's time limit sends SIGTERM) still removes the staging folder.
+  let staging = null;
+  process.once("SIGTERM", () => {
+    if (staging) fs.rmSync(staging, { recursive: true, force: true });
+    process.exit(143);
+  });
+  staging = fs.mkdtempSync(path.join(outRoot, ".partial-"));
   let summary;
   let outputPaths;
   try {

@@ -13,6 +13,11 @@ const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 // same injected clock + sessionId no longer collide on the same `${sessionId}-${stamp}`
 // dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = /tmp.
 const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
+// The restore script gets less than this hook's 30 s timeout (hooks/claude.json), so a transcript too large to finish in
+// time still gets the manual-route note below instead of a cancelled hook. OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS
+// shortens it for tests, like the seams above.
+const timeoutOverride = Number(process.env.OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS);
+const restoreTimeoutMs = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 25_000;
 const defaultRestoreInstruction =
   "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
 
@@ -265,9 +270,12 @@ try {
 
   const customMessage = readClaudeCompactionMessage();
 
-  const result = spawnSync(process.execPath, args, { encoding: "utf8" });
+  const result = spawnSync(process.execPath, args, { encoding: "utf8", timeout: restoreTimeoutMs });
   if (result.status !== 0) {
-    const baseFailure = `Claude compaction restore packet generation failed: ${(result.stderr || result.stdout || "unknown error").trim()}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
+    const reason = result.error?.code === "ETIMEDOUT"
+      ? `stopped after ${restoreTimeoutMs / 1000} s to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer)`
+      : (result.stderr || result.stdout || "unknown error").trim();
+    const baseFailure = `Claude compaction restore packet generation failed: ${reason}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
     emit({
       continue: true,
       systemMessage: buildSystemMessage(baseFailure, customMessage),

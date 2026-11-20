@@ -2,7 +2,7 @@
 // Node can make (buffer.constants.MAX_STRING_LENGTH, about 512 MB), and a whole-file read there produced no packet at all,
 // so managed compaction went without one too. The large transcript here is generated, not a real one.
 import { describe, it, expect, afterEach } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { constants } from "node:buffer";
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,5 +68,27 @@ describe("restore-from-jsonl reads the transcript a line at a time", () => {
     expect(readFileSync(result.packet!.narrative, "utf8")).toBe("\n## user\n\nfirst\n\n## assistant\n\nsecond\n\n## user\n\nthird");
     expect(existsSync(join(out, `lines-fixture-2026-11-20T06-00-00-000Z`, "transcript.txt"))).toBe(true);
     expect(readdirSync(out).filter(entry => entry.startsWith(".partial-"))).toEqual([]);
+  });
+
+  it("removes its staging folder when it's stopped part way, as the PreCompact hook's time limit stops it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restore-stop-")); dirs.push(dir);
+    const file = join(dir, "stop.jsonl");
+    // About 64 MB, so the script is still reading when it's stopped.
+    const output = "build output ".repeat(80_000);
+    const fd = openSync(file, "w");
+    writeSync(fd, `${JSON.stringify({ type: "user", sessionId: "stop-fixture", message: { role: "user", content: "Start." } })}\n`);
+    for (let i = 0; i < 64; i += 1) {
+      writeSync(fd, `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: `t${i}`, content: output }] } })}\n`);
+    }
+    closeSync(fd);
+    const out = join(dir, "packets");
+    const child = spawn(process.execPath, [SCRIPT, "--out", out, "--cwd", dir, "--json", file], { stdio: "ignore" });
+    const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
+    const staged = () => existsSync(out) && readdirSync(out).some((entry) => entry.startsWith(".partial-"));
+    for (let i = 0; i < 2_000 && !staged(); i += 1) await new Promise((wait) => setTimeout(wait, 5));
+    expect(staged()).toBe(true);
+    child.kill("SIGTERM");
+    expect(await exited).toBe(143);
+    expect(readdirSync(out)).toEqual([]);
   });
 });
