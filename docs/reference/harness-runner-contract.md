@@ -133,10 +133,11 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 ## 4. Activity: report turn boundaries
 
 Managed hosted Pi and OMP, Pi-RPC presets and declared community runners can receive an actual-launch credential in
-`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
-process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
-never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
-credential; knowing a generation or the install token does not supply run authority.
+`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`.
+
+Give the launch credential to the component that reports this launch's activity. That component can be a runner or the harness's own lifecycle hooks. Reports must describe events and observations from the seat and launch they name; a tool command or generated message is not evidence that a turn ended, a permission prompt opened or a model changed. The credential identifies the reporting launch, not an independently verified native conversation or model. Keep credential values out of command arguments, launch records and logs. See the [author guide's trust model](author-contracts.md#trust-model) for the scope of local cooperation and configured isolation.
+
+A report carrying runId still uses the credential bound to that run. Generation, sequence, freshness and lifecycle checks continue to determine which reports apply to the current seat. The existing install-token path remains a separate source of reports; it does not acquire run-bound provenance by naming a run.
 
 Issuing or delivering this optional credential never blocks an otherwise supported launch or restore. If the launch
 anchor, PID, generation or private credential channel is unavailable, the existing unbound install-token path remains;
@@ -329,7 +330,7 @@ permission or input handling in existing built-in runtimes or require every poss
 
 ### Optional run-bound native input and wake (version 1)
 
-The optional native-channel implementation uses the launch's `OPENRIG_RUN_ID` and private `OPENRIG_ACTIVITY_HOOK_TOKEN` grant. The runner retains them; its native child and tools do not receive the credential. `GET /api/activity/runner-channel` is run-filtered SSE, and one `POST` resource at that same path carries hello, acceptance, submitted and result messages. There is no command file or global event-feed subscription.
+The optional native-channel implementation uses the launch's `OPENRIG_RUN_ID` and private `OPENRIG_ACTIVITY_HOOK_TOKEN` grant. Give the launch credential to the component that reports this launch's activity. That component can be a runner or the harness's own lifecycle hooks. `GET /api/activity/runner-channel` is run-filtered SSE, and one `POST` resource at that same path carries hello, acceptance, submitted and result messages. There is no command file or global event-feed subscription.
 
 Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,wake,cancel}}`. Capabilities are explicit booleans intersected with the recorded runner kind and Core implementation availability. They describe this live implementation, not native identity or program qualification. Core selects generic recorded runner kinds, never a community app-name whitelist. Builtin Pi/OMP remain kind0, preset-owned runners kind1, and OpenRig-hosted Pi-RPC kind2. A shared protocol or wrapper does not qualify a program or confer another runtime's invocation mapping.
 
