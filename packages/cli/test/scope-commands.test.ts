@@ -2190,6 +2190,20 @@ describe("a nested project's mission ids", () => {
     expect(fs.existsSync(path.join(nested(), "missions", "work"))).toBe(true);
   });
 
+  it("still creates the mission when the enclosing project's missions can't be read, and says the check couldn't run", async () => {
+    writeFile(path.join(nested(), "project.yaml"), "metadata:\n  id: ops\n");
+    // A file where the enclosing missions folder should be: reading it fails (ENOTDIR) for any user.
+    fs.rmSync(path.join(root, "missions"), { recursive: true, force: true });
+    writeFile(path.join(root, "missions"), "not a folder\n");
+    const r = await run(["mission", "create", "work", "--json"], path.join(nested(), "missions"));
+    expect(r.exitCode).toBe(0);
+    const mission = JSON.parse(r.stdout).mission;
+    expect(mission.id).toBe("OPR.99.0.1");
+    expect(mission.advisories).toHaveLength(1);
+    expect(mission.advisories[0]).toMatch(/^The enclosing project's mission IDs couldn't be checked for OPR\.99\.0\.1: .*ENOTDIR/);
+    expect(fs.existsSync(path.join(nested(), "missions", "work"))).toBe(true);
+  });
+
   it("keeps OPR, with a warning, for a scope.idPrefix that isn't 2-3 uppercase letters", async () => {
     writeFile(path.join(nested(), "project.yaml"), "scope:\n  idPrefix: ops\n");
     const r = await run(["mission", "create", "later", "--id", "OPR.99.0.7", "--json"], path.join(nested(), "missions"));

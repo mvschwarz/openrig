@@ -1147,12 +1147,17 @@ function buildMissionCreateCommand(): Command {
             id = inferMissionDotId(name, ordinal, idPrefix);
           }
         }
-        // A project nested in another: an id the enclosing project's missions already use is named, not refused.
-        const enclosing = enclosingMissionsRoot(missionsRoot);
-        if (enclosing) {
-          for (const node of readParentScope(enclosing).filter((node) => node.id === id)) {
-            rootAdvisories.push(`Mission ID ${id} is already used by ${node.path} in the enclosing project's missions (${enclosing}). Edit this mission's id: before creating its slices, since their ids inherit it. For later missions, set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml, or pass --id.`);
+        // A project nested in another: an id the enclosing project's missions already use is named, not refused. It's
+        // advisory, so a check that can't read the enclosing project says so, and the create goes on as before.
+        try {
+          const enclosing = enclosingMissionsRoot(missionsRoot);
+          if (enclosing) {
+            for (const node of readParentScope(enclosing).filter((node) => node.id === id)) {
+              rootAdvisories.push(`Mission ID ${id} is already used by ${node.path} in the enclosing project's missions (${enclosing}). Edit this mission's id: before creating its slices, since their ids inherit it. For later missions, set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml, or pass --id.`);
+            }
           }
+        } catch (error) {
+          rootAdvisories.push(`The enclosing project's mission IDs couldn't be checked for ${id}: ${(error as Error).message}`);
         }
         // Resolve titles + render templates before any filesystem side
         // effects. A stale current or legacy notes-template override must
