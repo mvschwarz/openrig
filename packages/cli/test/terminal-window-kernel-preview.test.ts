@@ -47,6 +47,7 @@ function fixture() {
   const fetchImpl: typeof fetch = async (url, init) => app.request(String(url), init);
   const baseUrl = "http://127.0.0.1:7433";
   const launched: string[] = [], commands: string[][] = [];
+  let pane = 0, window = 0;
   const deps: WindowDeps = {
     columns: async () => process.stdout.columns,
     platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture/home" }, exists: () => false,
@@ -59,7 +60,12 @@ function fixture() {
       commands.push(args);
       if (args.includes("default-size")) return "160x40";
       if (args.includes("window-size")) return "latest";
-      return "%1";
+      if (args.includes("#{session_id}|#{window_id}|#{pane_id}")) {
+        if (args.includes("new-session") || args.includes("new-window")) window++;
+        return `$1|@${window}|%${++pane}`;
+      }
+      if (args.includes("#{pane_id}")) return `%${++pane}`;
+      return "";
     },
     launch: async () => {}, sleep: async () => {}, id: () => "fixture",
   };

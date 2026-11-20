@@ -12,8 +12,16 @@ const normalize = (text: string): string => text.replace(/\s+/g, "");
 // so a mode-bar line is also known by its leading marker.
 const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
 const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
-// Only a known effort hint or installed-update notice may share the paste-hint row.
-const PASTE_HINT = /^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))))?$/;
+// Claude Code 2.1.326's context warning, which a long-lived seat shows at the footer's right (#2429): with auto-compact
+// on, `N% until auto-compact`, `auto-compact is next` or `N% context used`; without it, `Context low (N% remaining)`,
+// alone or with `· /compact to free up space`; either may end in `· /model <alias>` instead.
+const PERCENT = String.raw`(?:100|[1-9]?\d)%`;
+const CONTEXT_NOTICE = String.raw`(?:(?:${PERCENT} until auto-compact|auto-compact is next|${PERCENT} context used)`
+  + String.raw`(?: · \/model [A-Za-z0-9._\[\]-]+)?`
+  + String.raw`|Context low \(${PERCENT} remaining\)(?: · (?:\/compact to free up space|\/model [A-Za-z0-9._\[\]-]+))?)`;
+// Only a known effort hint, installed-update notice, auto-update failure or context warning may share the paste-hint
+// row. A wide pane draws the failure there in full; a narrow one gives it its own row, skipped as a status warning.
+const PASTE_HINT = new RegExp(String.raw`^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))|✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor|✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)|${CONTEXT_NOTICE}))?$`);
 export const isClaudePasteHint = (line: string): boolean => PASTE_HINT.test(line.replace(VIM_MODE_PREFIX, ""));
 export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");
@@ -82,8 +90,9 @@ export function inspectStartupStagedText(pane: string | null, expected: string, 
 }
 
 // Claude 2.1.289 shows a long bracketed paste as this label until it is submitted; +M is the number of
-// newlines in the pasted text (8 of 8 pastes in retained native runs). Matched on the normalized body.
-export const COLLAPSED_PASTE = /^\[Pastedtext#\d+\+(\d+)lines\]$/;
+// newlines in the pasted text (8 of 8 pastes in retained native runs). Matched on the normalized body. A paste with no
+// newline (a single line over 800 characters in 2.1.326) shows no count: `[Pasted text #N]` (#2429).
+export const COLLAPSED_PASTE = /^\[Pastedtext#\d+(?:\+(\d+)lines)?\]$/;
 
 export const STARTUP_UNCONFIRMED_REASON = {
   staged: "the prompt still looked staged in the input box",
@@ -96,7 +105,7 @@ export const STARTUP_UNCONFIRMED_REASON = {
 export function startupOwnCollapsedPaste(pane: string | null, expected: string, runtime: string | null = null): boolean {
   const { body } = composerRegion(pane, runtime);
   const label = body === null ? null : COLLAPSED_PASTE.exec(body);
-  return label !== null && Number(label[1]) === expected.split("\n").length - 1;
+  return label !== null && Number(label[1] ?? 0) === expected.split("\n").length - 1;
 }
 
 // A fresh Claude's first input, as startup sends it; a runtime switch's handover to a Claude successor uses the same rules.

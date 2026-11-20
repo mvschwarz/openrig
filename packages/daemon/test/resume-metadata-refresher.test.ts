@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { describe, it, expect, vi } from "vitest";
 import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import { deriveResumeToken } from "../src/domain/resume-token-capture.js";
+import { observeClaudePaneStartedAt } from "../src/domain/native-process-lineage.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -55,6 +56,30 @@ function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbNam
 }
 
 describe("ResumeMetadataRefresher", () => {
+  it("shares snapshot observations across Claude seats while retaining two samples per proof", async () => {
+    const stamp = vi.fn();
+    const sessionRegistry = { markResumeProbeResult: stamp } as unknown as SessionRegistry;
+    const start = "Sun Oct 11 12:00:00 2026";
+    const later = "Sun Oct 11 12:01:00 2026";
+    const tmux = mockTmux({ getPanePid: vi.fn(async (name: string) => Number(name)) });
+    const rows = [10, 20, 30].flatMap(pid => [
+      { pid, ppid: 1, pgid: pid, tpgid: pid + 1, executableName: "bash", command: "bash", startedAt: start },
+      { pid: pid + 1, ppid: pid, pgid: pid + 1, tpgid: pid + 1, executableName: "claude", command: "claude", startedAt: pid === 30 ? later : start },
+    ]);
+    const list = vi.fn(async () => rows);
+    const refresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: tmux,
+      contextUsageStore: { readSidecar: () => ({ ok: true as const, data: { session_id: "token", sampled_at: new Date(Date.parse(start) + 1000).toISOString() } }) },
+      claudeStartedAtForPass: pass => name => observeClaudePaneStartedAt({ target: name, tmux, listProcesses: pass.lister(list) }),
+    });
+    const seats = [10, 20, 30].map(pid => ({ sessionId: String(pid), sessionName: String(pid), runtime: "claude-code", resumeType: "claude_id", resumeToken: "token" }));
+    await refresher.refresh(seats, { fillNullOnly: true });
+    expect(stamp).toHaveBeenCalledTimes(2);
+    expect(stamp).not.toHaveBeenCalledWith("30", "resumable");
+    expect(list).toHaveBeenCalledTimes(4);
+    await refresher.refresh(seats, { fillNullOnly: true });
+    expect(list).toHaveBeenCalledTimes(8);
+  });
+
   it("PERF FIX 2 — the periodic snapshot refresh is SINGLE-ATTEMPT per codex seat: no x8 retry burst under failing discovery", async () => {
     const sessionRegistry = {
       isForkClaimingHeldToken: vi.fn(() => false),

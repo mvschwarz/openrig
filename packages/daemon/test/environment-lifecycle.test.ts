@@ -8,12 +8,18 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { EnvironmentPlatform, sha256 } from "../src/domain/environment-platform.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { RunnerChannel } from "../src/domain/runner-channel.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-async function fixture(attached = false, automatic = true, beforeGeneration = false) {
+async function fixture(attached = false, automatic = true, beforeGeneration = false, nativeChannelSchema = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-lifecycle-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
-  const db = createFullTestDb(); cleanup.push(() => db.close());
+  const db = nativeChannelSchema ? createDb() : createFullTestDb(); cleanup.push(() => db.close());
+  if (nativeChannelSchema) migrate(db, ALL_MIGRATIONS);
   const resource = { id: "compute-one", name: "worker-one", workspace: "workspace", phase: "Ready", operationId: "create-one" };
   let present = attached, running = true, unavailable = false, loseStop = false, stopCalls = 0, deleteCalls = 0, creates = 0;
   let dependents = { workload: false, supervisor: false, volumes: false };
@@ -49,9 +55,25 @@ async function fixture(attached = false, automatic = true, beforeGeneration = fa
   }
   const effect = (name: string, operationId = "effect-one") => request("/binding-one/effect", { operationId, generation: "generation-one", effect: name });
   const lifecycle = new EnvironmentLifecycle(new EnvironmentPlatform(db, driver), queue, join(root, "retained"));
-  return { root, db, driver, queue, lifecycle, request, effect, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
+  return { root, db, node, driver, queue, lifecycle, request, effect, app: f.app, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
 }
 describe("owned and attached environment effects", () => {
+  it.each([false, true])("an existing contained execution does not become a hosted native runner (attached=%s)", async attached => {
+    const f = await fixture(attached, true, false, true), grants = new ActivityGrantStore(f.db), channel = new RunnerChannel(grants, new OutboxHandler(f.db));
+    const counts = f.counts();
+    expect(f.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(f.node.id)).toEqual({ input_route: "typed" });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM environment_operations WHERE kind='launch' AND state='confirmed'").get()).toEqual({ n: 1 });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM bindings WHERE node_id=?").get(f.node.id)).toEqual({ n: 0 });
+    expect(grants.activeForNode(f.node.id)).toBeNull();
+    for (const kind of ["input", "wake", "cancel"] as const) expect(channel.capable(f.node.id, kind)).toBe(false);
+    for (const kind of ["input", "wake"] as const) expect(() => channel.admit(f.node.id, { outboxId: kind, senderSession: "sender", destinationSession: "worker@lifecycle",
+      body: "never offered", kind, inputRoute: "native", payload: kind === "wake" ? { question: "never offered" } : { text: "never offered" } })).toThrow(/capable/);
+    expect(() => channel.cancel(f.node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@lifecycle",
+      target: { runId: "absent-hosted-run", nativeTurnId: "absent-invocation" } }))
+      .toThrow(expect.objectContaining({ code: "runner_unavailable", status: 409 }));
+    expect(channel.outbox.runnerReceipt("cancel-refusal")).toBeNull();
+    expect(f.counts()).toEqual(counts);
+  });
   async function failedProjection(attached = false) {
     const f = await fixture(attached, true, true), platform = new EnvironmentPlatform(f.db, f.driver);
     vi.spyOn(f.driver, "read").mockRejectedValueOnce(new Error("guest root read denied"));
@@ -104,6 +126,30 @@ describe("owned and attached environment effects", () => {
     const result = await f.request("/binding-one/effect", { operationId: "bad-selection", effect: "delete-owned", generation: null, resourceId: f.resource.id });
     expect(result.status).toBe(409); expect(result.body.code).toBe("environment_generation_changed");
     expect(f.counts().deleteCalls).toBe(0);
+  });
+  it("records the effect's requester from the transport header, superseding a body claim", async () => {
+    const f = await fixture();
+    const res = await f.app.request("/api/environments/binding-one/effect", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-openrig-session": "coordinator@lifecycle" },
+      body: JSON.stringify({ operationId: "effect-requester", generation: "generation-one", effect: "stop-native", requestedBy: "body-claim@lifecycle" }),
+    });
+    expect(res.status, JSON.stringify(await res.json())).toBe(200);
+
+    const row = f.db.prepare("SELECT state, receipt_json FROM environment_operations WHERE operation_id='effect-requester'").get() as { state: string; receipt_json: string | null } | undefined;
+    expect(row?.state).toBe("confirmed");
+    expect(JSON.parse(row!.receipt_json!).requestedBy).toBe("coordinator@lifecycle");
+  });
+  it("keeps asking for a sender when an effect request carries no session header", async () => {
+    const f = await fixture();
+    const res = await f.app.request("/api/environments/binding-one/effect", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operationId: "effect-no-sender", generation: "generation-one", effect: "stop-native" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe("actor_required");
+    expect(f.counts().stopCalls).toBe(0);
   });
   it("does not dispatch pre-generation deletion if projection establishes a generation during observation", async () => {
     const f = await failedProjection(), list = f.driver.list;
@@ -290,4 +336,106 @@ it("keeps an uncertain delete requested and reconciles the same operation withou
   expect((f.db.prepare("SELECT state FROM environment_operations WHERE operation_id=?").get(request.operationId) as { state: string }).state).toBe("requested");
   await f.request("/binding-one/effect", request);
   expect(deletion).toHaveBeenCalledTimes(1);
+});
+describe("recreation after a restart replaces the engine socket", () => {
+  // The predecessor's delete took its inventory on the socket as it was then; a restart gave the same path a new object.
+  const previous = { version: 1, socket: "/run/user/1000/podman/podman.sock", socketDevice: 58, socketInode: 566, uid: 1000, host: "provider.test",
+    resourceId: "compute-one", workspace: "workspace", workloadId: "a".repeat(64), supervisorId: "b".repeat(64), volumes: ["openshell-control-compute-one", "openshell-channel-compute-one"] };
+  const replaced = { socket: previous.socket, socketDevice: 59, socketInode: 61, uid: 1000, host: "provider.test" };
+  async function recreation(options: { endpointChanged?: boolean; remaining?: Record<string, boolean> } = {}) {
+    const changed = options.endpointChanged ?? true, f = await fixture();
+    expect((await f.request("/binding-one/checkpoint", { operationId: "checkpoint-one", generation: "generation-one" })).status).toBe(200);
+    f.db.prepare("INSERT INTO environment_operations(operation_id,binding_id,kind,request_json,state,receipt_json) VALUES ('inventory-compute-one','binding-one','cleanup-inventory',?,'confirmed',?)")
+      .run(JSON.stringify({ resourceId: "compute-one", engineSocket: previous.socket }), JSON.stringify(previous));
+    f.disappear();
+    const { version: _version, resourceId: _resourceId, workspace: _workspace, workloadId: _workloadId, supervisorId: _supervisorId, volumes: _volumes, ...unchanged } = previous;
+    let engine = changed ? { ...replaced } : { ...unchanged };
+    const reads: unknown[] = [];
+    let remaining = { workload: false, supervisor: false, volumes: false, ...options.remaining };
+    Object.assign(f.driver, {
+      recreationCleanupState: async (_binding: unknown, selection: unknown) => {
+        reads.push(selection);
+        return { remaining: { ...remaining }, endpoint: changed ? replaced : unchanged, endpointChanged: changed };
+      },
+      captureCleanup: async (binding: { resource: { id: string } }, socket: string) => ({ version: 1, ...engine, socket, resourceId: binding.resource.id, workspace: "workspace",
+        workloadId: "c".repeat(64), supervisorId: "d".repeat(64), volumes: [] }),
+    });
+    // The provider fixture returns a different immutable ID on explicit successor creation.
+    f.resource.id = "compute-two"; f.resource.name = "worker-two";
+    const recreate = () => f.request("/binding-one/recreate", { operationId: "recreate-one", generation: "generation-one", checkpointId: "checkpoint-one", resumeType: "community:openshell-claude",
+      resumeToken: f.native.nativeId, placement: { gateway: "gateway", workspace: "workspace", name: "worker-two", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy: join(f.root, "policy.yaml") } });
+    const inventory = (id: string) => JSON.parse((f.db.prepare("SELECT receipt_json FROM environment_operations WHERE operation_id=?").get(`inventory-${id}`) as { receipt_json: string }).receipt_json);
+    return { ...f, recreate, reads, inventory, moveEngine: (change: Partial<typeof replaced>) => { engine = { ...engine, ...change }; },
+      reappear: (change: Record<string, boolean>) => { remaining = { ...remaining, ...change }; } };
+  }
+
+  it("recreates from the checkpoint and reports the predecessor's cleanup as unknown, keeping its inventory", async () => {
+    const f = await recreation(), result = await f.recreate();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(result.body).toMatchObject({ state: "confirmed", predecessorResourceId: "compute-one", successorResourceId: "compute-two", nativeId: f.native.nativeId,
+      predecessorCleanup: "unknown", predecessorEngine: { socket: previous.socket, previous: { socketDevice: 58, socketInode: 566 }, current: { socketDevice: 59, socketInode: 61 } } });
+    expect(result.body.predecessorCleanupDetail).toContain("isn't established");
+    expect(f.reads).toEqual([previous]);
+    expect(f.counts().creates).toBe(2);
+    // The successor's inventory is recorded against the current socket; the predecessor's stays for its owner.
+    expect(f.inventory("compute-two")).toMatchObject({ socketDevice: 59, socketInode: 61, resourceId: "compute-two" });
+    expect(f.inventory("compute-one")).toEqual(previous);
+  });
+
+  it("still refuses, before any create, when the predecessor's dependents are present on the current engine", async () => {
+    const f = await recreation({ remaining: { volumes: true } }), result = await f.recreate();
+    expect(result.status).toBe(409);
+    expect(result.body.code).toBe("environment_cleanup_unconfirmed");
+    expect(result.body.message ?? result.body.error).toContain("This attempt didn't create a successor");
+    expect(f.counts().creates).toBe(1);
+  });
+
+  it("keeps the successor-name collision refusal", async () => {
+    const f = await recreation();
+    vi.spyOn(f.driver, "list").mockResolvedValue({ complete: true, resources: [{ id: "compute-other", name: "worker-two", workspace: "workspace", phase: "Ready", operationId: "another-operation" }] });
+    const result = await f.recreate();
+    expect(result.status).toBe(409); expect(result.body.code).toBe("environment_name_in_use");
+    expect(f.counts().creates).toBe(1);
+  });
+
+  it("refuses after create when the successor lands on another engine, keeps it unbound, and reconciles on retry without a second create", async () => {
+    const f = await recreation();
+    f.moveEngine({ socketInode: 62 });
+    const refused = await f.recreate();
+    expect(refused.status).toBe(409); expect(refused.body.code).toBe("environment_restore_host_changed");
+    expect(refused.body.message ?? refused.body.error).toContain("kept unbound");
+    expect(refused.body.message ?? refused.body.error).not.toContain("didn't create a successor");
+    expect(f.counts().creates).toBe(2);
+    expect(new EnvironmentPlatform(f.db, f.driver).get("binding-one")!.resource!.id).toBe("compute-one");
+    f.moveEngine({ socketInode: 61 });
+    const retried = await f.recreate();
+    expect(retried.status, JSON.stringify(retried.body)).toBe(200);
+    expect(retried.body).toMatchObject({ state: "confirmed", successorResourceId: "compute-two", predecessorCleanup: "unknown" });
+    expect(f.counts().creates).toBe(2);
+  });
+
+  it("doesn't deny an earlier attempt's successor when its retry refuses before reconciling it", async () => {
+    const f = await recreation();
+    f.moveEngine({ socketInode: 62 });
+    expect((await f.recreate()).body.code).toBe("environment_restore_host_changed");
+    expect(f.counts().creates).toBe(2);
+    // The retry reads the predecessor again before it finds the successor, and now sees one of its volumes.
+    f.reappear({ volumes: true });
+    const retried = await f.recreate();
+    expect(retried.status).toBe(409); expect(retried.body.code).toBe("environment_cleanup_unconfirmed");
+    expect(retried.body.error).toContain("an earlier attempt of this operation may have");
+    expect(retried.body.error).not.toMatch(/No successor was created/);
+    // The earlier successor is still there and still unbound, and nothing was created again.
+    expect((await f.driver.list()).resources).toEqual([expect.objectContaining({ id: "compute-two", name: "worker-two" })]);
+    expect(new EnvironmentPlatform(f.db, f.driver).get("binding-one")!.resource!.id).toBe("compute-one");
+    expect(f.counts().creates).toBe(2);
+  });
+
+  it("confirms the predecessor's cleanup when the socket is unchanged, and keeps requiring that same engine", async () => {
+    const f = await recreation({ endpointChanged: false }), result = await f.recreate();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(result.body).toMatchObject({ state: "confirmed", predecessorCleanup: "confirmed" });
+    expect(result.body.predecessorEngine).toBeUndefined();
+    expect(f.inventory("compute-two")).toMatchObject({ socketDevice: 58, socketInode: 566 });
+  });
 });

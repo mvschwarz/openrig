@@ -1,3 +1,4 @@
+import type { AgentActivityStore } from "./agent-activity-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unli
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
 import { declaredRuntimeHomes } from "./seat-runtime-home.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
+import { hasPiUsageEntriesTable } from "./pi-usage-entries-store.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import {
   contextUsageDirectory,
@@ -18,6 +20,7 @@ export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 
 export interface ContextUsageStoreOpts {
   stateDir: string;
+  runnerObservations?: Pick<AgentActivityStore, "getRunnerObservation">;
   codexHomeDir?: string | null;
   /** Explicit CODEX_HOME. codexHomeDir above is the legacy OS-home input. */
   codexHome?: string;
@@ -25,6 +28,9 @@ export interface ContextUsageStoreOpts {
   // reading sampled BEFORE the current occupant booted (a prior generation) is rejected instead of
   // driving the threshold. null = UNKNOWN → the gate is inert (note-2).
   resolveOccupantBootAt?: (nodeId: string) => string | null;
+  /** #3044 C3: the LIVE occupant's generation for a node. A reading that recorded it is that occupant's own, whatever
+   *  its time: a recovered successor sampled before the commit registered it. null = UNKNOWN → the time gate decides. */
+  resolveOccupantGeneration?: (nodeId: string) => string | null;
 }
 
 interface SidecarRaw {
@@ -62,6 +68,7 @@ interface ContextUsageRow {
   current_usage: string | null;
   transcript_path: string | null;
   sampled_at: string | null;
+  occupant_generation?: string | null;
   updated_at: string;
 }
 
@@ -94,13 +101,17 @@ export class ContextUsageStore {
   private codexHomeDir: string | null;
   private codexHome?: string;
 
+  private readonly runnerObservations?: Pick<AgentActivityStore, "getRunnerObservation">;
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
+  private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
+    this.runnerObservations = opts.runnerObservations;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
     this.codexHome = opts.codexHome;
     this.resolveOccupantBootAt = opts.resolveOccupantBootAt;
+    this.resolveOccupantGeneration = opts.resolveOccupantGeneration;
   }
 
   /**
@@ -111,8 +122,11 @@ export class ContextUsageStore {
    * no sampled_at — the gate is inert (note-2: never treat unknown as stale), leaving
    * session_mismatch + freshness as the remaining guards. boot_at is SQLite datetime('now') (UTC,
    * no zone marker), so it is parsed as UTC; a bare Date.parse would read it as local time.
+   * #3044 C3: a reading recorded with the live occupant's generation is its own, so the time doesn't apply.
    */
-  private isPriorGenerationReading(nodeId: string, sampledAt: string | null): boolean {
+  private isPriorGenerationReading(nodeId: string, row: ContextUsageRow): boolean {
+    if (row.occupant_generation && row.occupant_generation === this.resolveOccupantGeneration?.(nodeId)) return false;
+    const sampledAt = row.sampled_at;
     if (!sampledAt) return false;
     const bootAt = this.resolveOccupantBootAt?.(nodeId) ?? null;
     if (!bootAt) return false;
@@ -135,10 +149,18 @@ export class ContextUsageStore {
    * writes its own sidecar. Missing file = no-op; best-effort (a leftover is caught downstream by
    * the freshness gate). NOTE: this is the DISK sidecar (name-keyed); the context_usage DB table is
    * node_id-keyed + already session_mismatch-gated, so it needs no invalidation here.
+   * #3044 C3: a recovery adopts a successor that has already run under the same name, so its own sample may be the
+   * file. `keepGeneration` names that successor's generation: a sidecar the cleanup reads recording it is kept, anything
+   * else is removed. Best effort: the collector replaces the file from another process, so a sample written between
+   * this read and the delete can still be removed, until the successor's next write.
    */
-  invalidateOccupantSidecar(sessionName: string): void {
+  invalidateOccupantSidecar(sessionName: string, keepGeneration?: string): void {
     const filePath = this.getSidecarPath(sessionName);
     try {
+      if (keepGeneration !== undefined) {
+        const sidecar = this.readSidecarAt(filePath);
+        if (sidecar.ok && sidecar.data?.occupant_generation === keepGeneration) return;
+      }
       if (existsSync(filePath)) unlinkSync(filePath);
     } catch {
       /* best-effort — a stale leftover is still gated by isFresh downstream */
@@ -191,9 +213,57 @@ export class ContextUsageStore {
     });
   }
 
+  /** Read a Pi seat's own spend from the usage entries its runner already posts, and normalize it. Pi posts no
+   *  context-window sample, so the window size is unknown here and usedPercentage stays null: the token
+   *  threshold and the burn series work from the cumulative counters, while a percent threshold honestly
+   *  cannot (absent, never invented). Only `origin = 'own'` entries count, and only the seat's CURRENT Pi
+   *  session: a fork's copied entries and an earlier launch are history, not this occupant's context.
+   *  Until an entry reaches this launch's start, report no_data; after a resumed conversation posts,
+   *  its whole session counts, including entries from before the relaunch. */
+  readPiUsageAndNormalize(input: { nodeId: string; seatSession: string; sessionStartedAt: string }): ContextUsage {
+    if (!hasPiUsageEntriesTable(this.db)) return this.unknownUsage("no_data");
+    const row = this.db
+      .prepare(
+        `SELECT pi_session_id AS piSessionId,
+                SUM(input_tokens + cache_read_tokens + cache_write_tokens) AS totalInput,
+                SUM(output_tokens) AS totalOutput,
+                MAX(entry_timestamp) AS sampledAt
+           FROM pi_usage_entries
+          WHERE seat_session = ? AND origin = 'own'
+            AND pi_session_id = (
+              SELECT pi_session_id FROM pi_usage_entries
+               WHERE seat_session = ? AND origin = 'own'
+               ORDER BY entry_timestamp DESC, id DESC LIMIT 1)
+          GROUP BY pi_session_id`,
+      )
+      .get(input.seatSession, input.seatSession) as
+        | { piSessionId: string; totalInput: number | null; totalOutput: number | null; sampledAt: string | null }
+        | undefined;
+    if (!row?.piSessionId || row.sampledAt === null) return this.unknownUsage("no_data");
+    if (Date.parse(row.sampledAt) < parseSqliteUtcMs(input.sessionStartedAt)) return this.unknownUsage("no_data");
+    return {
+      availability: "known",
+      reason: null,
+      source: "pi_usage_entries",
+      usedPercentage: null,
+      remainingPercentage: null,
+      contextWindowSize: null,
+      totalInputTokens: row.totalInput ?? 0,
+      totalOutputTokens: row.totalOutput ?? 0,
+      currentUsage: null,
+      transcriptPath: null,
+      sessionId: row.piSessionId,
+      sessionName: input.seatSession,
+      sampledAt: row.sampledAt,
+      fresh: this.isFresh(row.sampledAt),
+      clientCostEstimateUsd: null,
+      occupantGeneration: this.resolveOccupantGeneration?.(input.nodeId) ?? null,
+    };
+  }
+
   /** Resolve an explicitly selected native thread, even before its first token count. */
-  readCodexTranscriptPath(threadId: string): string | null {
-    return this.readCodexThread(threadId)?.rollout_path ?? null;
+  readCodexTranscriptPath(threadId: string, codexHome?: string): string | null {
+    return this.readCodexThread(threadId, codexHome)?.rollout_path ?? null;
   }
 
   /** Normalize raw sidecar data into a ContextUsage record. */
@@ -235,6 +305,7 @@ export class ContextUsageStore {
       sampledAt,
       fresh,
       clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
+      occupantGeneration: typeof raw.occupant_generation === "string" ? raw.occupant_generation : null,
     };
   }
 
@@ -290,8 +361,8 @@ export class ContextUsageStore {
         node_id, session_id, session_name, availability, reason, source,
         used_percentage, remaining_percentage, context_window_size,
         total_input_tokens, total_output_tokens, current_usage,
-        transcript_path, sampled_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        transcript_path, sampled_at, occupant_generation, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(node_id) DO UPDATE SET
         session_id = excluded.session_id,
         session_name = excluded.session_name,
@@ -306,6 +377,7 @@ export class ContextUsageStore {
         current_usage = excluded.current_usage,
         transcript_path = excluded.transcript_path,
         sampled_at = excluded.sampled_at,
+        occupant_generation = excluded.occupant_generation,
         updated_at = datetime('now')
     `).run(
       nodeId,
@@ -322,16 +394,46 @@ export class ContextUsageStore {
       usage.currentUsage,
       usage.transcriptPath,
       usage.sampledAt,
+      usage.occupantGeneration ?? null,
     );
+  }
+
+  /** Accepted runner events own current facts. The context table cannot revive a prior run or omitted component. */
+  private runnerUsage(nodeId: string, sessionName: string): ContextUsage | null {
+    const seat = this.db.prepare(`SELECT n.runtime,s.session_name,s.created_at FROM nodes n JOIN sessions s ON s.node_id=n.id
+      WHERE n.id=? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { runtime: string | null; session_name: string; created_at: string } | undefined;
+    // Pi's posted entries own its cumulative spend, not the generic runner context observation or a cached row.
+    if (seat?.runtime === "pi") {
+      if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
+      return this.readPiUsageAndNormalize({ nodeId, seatSession: sessionName, sessionStartedAt: seat.created_at });
+    }
+    if (!this.runnerObservations) return null;
+    // Preserve all existing built-in collectors.
+    if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "terminal", "stub"].includes(seat.runtime)) return null;
+    if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
+    const read = this.runnerObservations.getRunnerObservation(nodeId, "context", { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: seat.runtime });
+    if (!read.report) return this.unknownUsage(read.reason === "stale" || read.reason === "session_mismatch" ? read.reason : "no_data");
+    const report = read.report, context = report.observations.context!;
+    const percent = context.usedPercentage ?? (context.usedTokens !== undefined && context.windowTokens !== undefined
+      ? context.usedTokens / context.windowTokens * 100 : null);
+    return { ...this.unknownUsage("window_capacity_unknown"),
+      availability: percent === null ? "unknown" : "known",
+      reason: percent === null ? (context.windowTokens === undefined ? "window_capacity_unknown" : "no_data") : null,
+      source: "runner_reported", usedPercentage: percent, remainingPercentage: percent === null ? null : 100 - percent,
+      contextWindowSize: context.windowTokens ?? null, totalInputTokens: context.inputTokens ?? null,
+      totalOutputTokens: context.outputTokens ?? null, currentUsage: context.usedTokens === undefined ? null : String(context.usedTokens),
+      sessionId: report.observations.session?.nativeRef ?? null, sessionName, sampledAt: report.occurredAt, fresh: true };
   }
 
   /** Get context usage for a single node. Session-aware: mismatched session returns unknown. */
   getForNode(nodeId: string, currentSessionName: string | null): ContextUsage {
     if (!currentSessionName) return this.unknownUsage("not_managed");
     currentSessionName = physicalSessionName(this.db, currentSessionName);
+    const reported = this.runnerUsage(nodeId, currentSessionName);
+    if (reported) return reported;
 
     const row = this.db.prepare("SELECT * FROM context_usage WHERE node_id = ?").get(nodeId) as ContextUsageRow | undefined;
-    if (!row) return this.unknownUsage("no_data");
+    if (!row || row.source === "runner_reported") return this.unknownUsage("no_data");
 
     // Session mismatch guard: prevent stale cross-session inheritance
     if (row.session_name && row.session_name !== currentSessionName) {
@@ -341,7 +443,7 @@ export class ContextUsageStore {
     // GHOST-STAGE (c-id): generation guard. Under handover the name is REUSED, so session_mismatch
     // passes while the table still holds the retiree's pre-boot reading (the mixed-gen window).
     // Reject readings from before the live occupant booted → insufficient-data, evaluate current-gen only.
-    if (this.isPriorGenerationReading(nodeId, row.sampled_at)) {
+    if (this.isPriorGenerationReading(nodeId, row)) {
       return this.unknownUsage("stale_generation");
     }
 
@@ -369,8 +471,10 @@ export class ContextUsageStore {
         continue;
       }
 
+      const reported = this.runnerUsage(entry.nodeId, entry.currentSessionName);
+      if (reported) { result.set(entry.nodeId, reported); continue; }
       const row = rowMap.get(entry.nodeId);
-      if (!row) {
+      if (!row || row.source === "runner_reported") {
         result.set(entry.nodeId, this.unknownUsage("no_data"));
         continue;
       }
@@ -381,7 +485,7 @@ export class ContextUsageStore {
       }
 
       // GHOST-STAGE (c-id): generation guard — see getForNode. Reject pre-boot (prior-gen) readings.
-      if (this.isPriorGenerationReading(entry.nodeId, row.sampled_at)) {
+      if (this.isPriorGenerationReading(entry.nodeId, row)) {
         result.set(entry.nodeId, this.unknownUsage("stale_generation"));
         continue;
       }
@@ -453,8 +557,11 @@ export class ContextUsageStore {
     }
   }
 
-  private readCodexThread(threadId: string): CodexThreadRow | null {
-    for (const dbPath of this.resolveCodexStateDbPaths()) {
+  private readCodexThread(threadId: string, codexHome?: string): CodexThreadRow | null {
+    // A qualified seat read is confined to the same home as its PID/start-time evidence.
+    // Unqualified telemetry readers keep their existing multi-home discovery.
+    const paths = codexHome ? resolveCodexDbPaths("", "state", undefined, codexHome) : this.resolveCodexStateDbPaths();
+    for (const dbPath of paths) {
       try {
         const codexDb = new Database(dbPath, { readonly: true });
         try {
@@ -474,8 +581,8 @@ export class ContextUsageStore {
 
   private resolveCodexStateDbPaths(): string[] {
     const daemon = this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
-    // A seat with its own CODEX_HOME keeps its threads there. A thread id is unique across homes, so each declared home is
-    // searched after the daemon's.
+    // Unqualified telemetry discovery searches declared homes after the daemon's.
+    // Qualified native-identity reads supply one explicit home instead (copies may share a UUID).
     const seats = declaredRuntimeHomes(this.db, "codex").flatMap(home => resolveCodexDbPaths("", "state", undefined, home));
     return [...new Set([...daemon, ...seats])];
   }

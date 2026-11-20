@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { codexCommandResumeToken, explainNativeRejection, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { claudeCommandForkParent, codexCommandResumeToken, explainNativeRejection, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneEmptyShell, verifyPaneIdleShell, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
@@ -20,6 +20,19 @@ function codexCommand(row: NativeProcessRow, command: string, argv = command.spl
 }
 const check = (listProcesses: () => NativeProcessRow[] | Promise<NativeProcessRow[]>, overrides = {}) => verifyCodexPaneProcess({
   target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses, expectedToken: token, requireResume: true, ...overrides,
+});
+
+// A launch wrapper killed a child without reaping it and then exec'd Codex, so the zombie, still named codex with no
+// argv, sits in the foreground group under the live Codex (KoscheiiB/openrig#73).
+describe("a zombie child of the live Codex", () => {
+  const zombie: NativeProcessRow = { pid: 14, ppid: 13, pgid: 11, tpgid: 11, executableName: "codex", command: "[codex] <defunct>", argv: null, startedAt };
+  it("isn't a candidate when its state reads Z: the live Codex is the seat", async () => {
+    const observed = await check(() => [...rows(), { ...zombie, state: "Z" }]);
+    expect(observed?.process.pid).toBe(13);
+  });
+  it("still competes when its state wasn't read, as before", async () => {
+    expect(await check(() => [...rows(), zombie])).toBeNull();
+  });
 });
 
 describe("Codex resume options (#1400)", () => {
@@ -485,6 +498,9 @@ describe("Claude identity with inline settings in ps output", () => {
     })],
     // #2508: a proxy that writes its settings with spaces between JSON members, as ps shows the argument.
     ["spaced JSON", '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", "ANTHROPIC_AUTH_TOKEN": "fixture"}}'],
+    // A seat's auto mode prose: spaces, braces, quotes and identity-shaped text stay inside the one value.
+    ["auto mode prose", operationalLaunchArgs("claude-code", { teamPermissionDefault: true, claudeAutoMode: { environment: ["$defaults",
+      "Routine: claude --resume different and --session-id different; braces {like} this, \"quotes\" and it's fine"] } })[1]!],
   ];
   function input(args: string) {
     const list = [
@@ -706,6 +722,31 @@ describe("observeClaudeDelivery's idle-shell policy: delivery versus launch", ()
   });
 });
 
+// Linux rows carry the run state read with them. A shell waking (R) and sleeping again (S) between two samples is still
+// the same shell; a different start time is another shell.
+describe("an idle shell whose run state changes between samples", () => {
+  const startedAt = "Fri Oct 9 07:00:00 2026";
+  const shell: NativeProcessRow = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "/bin/bash", executableName: "bash", startedAt, state: "S" };
+  const woke: NativeProcessRow = { ...shell, state: "R" };
+  const input = (...samples: NativeProcessRow[][]) => {
+    let call = 0;
+    return { target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses: async () => samples[Math.min(call++, samples.length - 1)]! };
+  };
+
+  it("still reads idle, empty and one shell", async () => {
+    expect.soft(await verifyPaneIdleShell(input([shell], [woke]))).toBe(true);
+    expect.soft(await verifyPaneEmptyShell(input([woke], [shell]))).toBe(true);
+    expect.soft((await observeClaudeDelivery(input([shell], [woke]), { unknownKeepsIdle: false })).state).toBe("idle_shell");
+  });
+
+  it("a shell with another start time is still another shell", async () => {
+    const replaced: NativeProcessRow = { ...woke, startedAt: "Fri Oct 9 07:00:05 2026" };
+    expect(await verifyPaneIdleShell(input([shell], [replaced]))).toBe(false);
+    expect(await verifyPaneEmptyShell(input([shell], [replaced]))).toBe(false);
+    expect((await observeClaudeDelivery(input([shell], [replaced]), { unknownKeepsIdle: false })).state).toBe("conflict");
+  });
+});
+
 // #1079: a `codex` launcher that spawns (not execs) Codex, which spawns its native
 // child, as in the report: pane -> sh -> codex (launcher) -> codex -> codex (native).
 describe("Codex behind a spawning launcher", () => {
@@ -882,5 +923,29 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
     });
   it("delivery still reports a conflict when two Claude processes name different conversations without a fork", async () => {
     expect((await delivery(realRows(`claude --session-id ${other} --name dev@rig`), token)).state).toBe("conflict");
+  });
+});
+
+// #3044: the parent a fork launch forked from, read from the command line by the identity proof's own parser, and only
+// from a command line the proof accepts as a fork (its own --session-id, its parent's --resume, --fork-session).
+describe("claudeCommandForkParent", () => {
+  const parent = "11111111-1111-4111-8111-111111111111";
+  const own = "22222222-2222-4222-8222-222222222222";
+  it.each([
+    `claude --resume ${parent} --fork-session --session-id ${own}`,
+    `claude --resume=${parent} --fork-session --session-id ${own} --name seat@rig`,
+    `claude --fork-session --session-id=${own} --resume=${parent}`,
+    `claude --no-chrome --session-id ${own} --fork-session --resume ${parent}`,
+  ])("names the parent of %s", (command) => {
+    expect(claudeCommandForkParent(command)).toBe(parent);
+  });
+  it.each([
+    `claude --resume ${parent} --session-id ${own}`,
+    `claude --resume ${parent}`,
+    `claude --resume ${parent} --fork-session`,
+    `claude --session-id ${own}`,
+    "",
+  ])("names none for a command line that is no fork the proof accepts: %s", (command) => {
+    expect(claudeCommandForkParent(command)).toBeNull();
   });
 });

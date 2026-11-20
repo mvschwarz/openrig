@@ -2,17 +2,18 @@
 // multi-line paste (D01, D02, D03, D04, D08, D09, D15), on both programs. Each case's expected result is Quality's, in
 // expected.yaml beside this file; a case here only acts and checks what that file says.
 //
-// A case is { id, title, programs, script(kind), claudeSettings?, run(ctx) }. `script` is the stand-in's; `run` acts
+// A case is { id, title, programs, script(kind), claudeSettings?, claudeEnv?, run(ctx) }. `script` is the stand-in's; `run` acts
 // through ctx (harness/case-context.mjs) and records checks on ctx.verdict. A check states what was seen, so a FAIL
 // reads as evidence, not a bare verdict.
 
+import { NotRun } from "../harness/case-context.mjs";
 import { arrivedAs, conversation, markersIn, orderAndMerge, partWith } from "../harness/oracle.mjs";
 
 const ACK = "ack {{marker}}";
 const MARK = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
 
 /** The common close of a delivery: delivered exactly once, intact, alone in its turn, and answered on screen. */
-async function deliveredOnce(ctx, marker, body, { label = marker, alone = true } = {}) {
+export async function deliveredOnce(ctx, marker, body, { label = marker, alone = true } = {}) {
   const { verdict } = ctx;
   const seen = await ctx.waitDelivered(marker);
   await ctx.sleep(2000); // a late duplicate has time to arrive before the count is final
@@ -45,6 +46,14 @@ async function deliveredOnce(ctx, marker, body, { label = marker, alone = true }
     verdict.check(`${label}: alone in its turn (no merge)`, markers.length === 1, markers);
   }
   return turn;
+}
+
+/** Whether one received turn carries `body` intact, exactly or through a listed program transform: deliveredOnce's own
+ *  byte check, for a delivery judged without the attempt's record. */
+export function bodyIntact(ctx, turn, marker, body) {
+  const { part } = partWith(turn, marker, body);
+  const wireSha256s = ctx.writtenSince("1970-01-01T00:00:00Z").map((w) => w.wireSha256);
+  return { ...arrivedAs(part, body, { kind: ctx.kind, version: ctx.version, wireSha256s }), bytes: part?.bytes ?? null, expectedBytes: Buffer.byteLength(body) };
 }
 
 function sendAccepted(ctx, sent, label) {
@@ -187,7 +196,7 @@ export const CASES = [
       sendAccepted(ctx, await ctx.send(againBody), "the explicit new send");
       await deliveredOnce(ctx, again, againBody, { label: "the explicit new send", alone: false });
       verdict.check("the held message reached the model only through that new send", ctx.deliveries(held).turns.length === 1, ctx.deliveries(held).turns.map((t) => t.seq));
-      verdict.info("footer variants not run in this cell: Claude's context hint and its auto-update failure footer (full and clipped at 80x24) need a program state this harness doesn't produce yet", null);
+      verdict.info("footer variants not run in this cell: Claude's auto-update failure footer (clipped at 80x24, and in full) is D04-footer's; its context hint needs a program state this harness doesn't produce yet", null);
     },
   },
 
@@ -282,7 +291,16 @@ export const CASES = [
       }
       const input = await ctx.readComposer();
       verdict.check("nothing was left unsubmitted in the input", !input.includes("still-text"), input);
-      verdict.info("#2800 control (unreadable input: --dangerously-interact pastes with a warning and no Enter) is not run in this cell: it needs an unreadable-input state the harness doesn't produce yet", null);
+      verdict.info("#2800 control (unreadable input: --dangerously-interact pastes with a warning and no Enter) is its own case, D15-2800-unreadable", null);
     },
+  },
+  {
+    // The oracle's #2800 control for D15 (expected.yaml:119), registered on its own so D15 can't read as covering it.
+    id: "D15-2800-unreadable",
+    title: "multi-line paste, #2800 control: with an unreadable input box, rig send --dangerously-interact pastes with a warning and doesn't press Enter",
+    programs: ["claude", "codex"],
+    notRun: "the harness can't produce an unreadable input box: on this OpenRig the clipped and full auto-update footers read as empty since #3016, and copy mode is D08's own state, which OpenRig leaves or holds by mode rather than reading as unknown (as D12-C, d12.mjs:336)",
+    script: () => ({ rules: [{ say: "ack {{marker}}" }] }),
+    async run() { throw new NotRun(this.notRun); },
   },
 ];

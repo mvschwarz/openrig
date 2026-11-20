@@ -107,17 +107,24 @@ describe("terminal and transport bearer diagnostics", () => {
   const terminalToken = "SYNTHETIC_TERMINAL_SECRET";
   const missionControlToken = "SYNTHETIC_MISSION_CONTROL_SECRET";
   const routes = [
-    { path: "/api/terminal/follow", body: { view: "synthetic", enabled: true } },
-    { path: "/api/terminal/viewer/ensure", body: { view: "synthetic", expectedPlan: "plan",
+    { path: "/api/terminal/follow", method: "POST" as const, body: { view: "synthetic", enabled: true } },
+    { path: "/api/terminal/viewer/ensure", method: "POST" as const, body: { view: "synthetic", expectedPlan: "plan",
       member: { hostId: "host", nodeId: "node" } } },
-    { path: "/api/transport/capture", body: { session: "test" } },
+    { path: "/api/terminal/open-all", method: "POST" as const, body: { provider: "herdr" } },
+    { path: "/api/terminal/close-all", method: "POST" as const, body: { provider: "herdr" } },
+    { path: "/api/transport/capture", method: "POST" as const, body: { session: "test" } },
   ];
 
   function fixture(token: string | null = terminalToken) {
     const effect = vi.fn(async () => ({ ok: true }));
     const app = new Hono();
     app.use("*", async (c, next) => {
-      c.set("terminalService" as never, { followView: effect, ensureViewer: effect } as never);
+      c.set("terminalService" as never, {
+        followView: effect,
+        ensureViewer: effect,
+        openAll: effect,
+        closeAll: effect,
+      } as never);
       c.set("sessionTransport" as never, {
         resolveSessions: async () => ({ ok: true, sessions: [{ sessionName: "test", tmuxSession: "test" }] }),
         capture: effect,
@@ -132,11 +139,11 @@ describe("terminal and transport bearer diagnostics", () => {
   }
 
   const post = (app: Hono, route: typeof routes[number], authorization?: string) => app.request(route.path, {
-    method: "POST", headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
+    method: route.method, headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
     body: JSON.stringify(route.body),
   });
 
-  describe.each(routes)("$path", route => {
+  describe.each(routes)("$method $path", route => {
     it.each([
       { authorization: undefined, reason: "missing Authorization header" },
       { authorization: "Basic SYNTHETIC_HEADER_SECRET", reason: "Authorization header must be 'Bearer <token>'" },

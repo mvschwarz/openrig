@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
@@ -152,6 +152,43 @@ it("maps attributed mission outcomes to their exact bound project and keeps curr
   } finally { f.db.close(); }
 });
 
+
+it.each(["b", "former-b"])("keeps later mission outcomes when an earlier workflow's mission folder was removed (project %s)", async (healthyProject) => {
+  const f = fixture();
+  try {
+    f.write(join(f.root, "b/project.yaml"), { metadata: { id: "b" }, aliases: ["former-b"], proofPolicy: { judges: ["judge@fixture"] } });
+    const trail = new WorkflowStepTrailLog(f.db);
+    const bind = (project: string, identity: string, at: string) => {
+      const p = realpathSync(join(f.root, project));
+      const instances = new WorkflowInstanceStore(f.db, () => new Date(at));
+      const instance = instances.create({ workflowName: "mission-release", workflowVersion: "1", createdBySession: "judge@fixture", lifecycle: { operationKey: project, compiledInputDigest: project, binding: { identity: { project: identity, mission: "release" }, sources: [{ kind: "project", path: join(p, "project.yaml") }, { kind: "mission", path: join(p, "missions/release/mission.yaml") }] } } });
+      f.row(`judgment-${project}`, "judge@fixture", "done");
+      trail.record({ instanceId: instance.instanceId, stepId: "accept-outcome", stepRole: "judge", closureReason: "done", closedAt: at, actorSession: "judge@fixture", priorQitemId: `judgment-${project}`, closureEvidence: { summary: `${project} edition accepted` } });
+      return instance.instanceId;
+    };
+    // The route reads newest first: the missing mission must precede the healthy one.
+    const healthy = bind("b", healthyProject, "2026-01-01T00:00:00.000Z");
+    const missing = bind("a", "a", "2026-01-02T00:00:00.000Z");
+    const before = await f.read();
+    expect(before.items.filter(i => i.id.startsWith("workflow:")).map(i => i.id).sort()).toEqual([`workflow:${healthy}`, `workflow:${missing}`].sort());
+    const removedMission = join(realpathSync(join(f.root, "a")), "missions/release");
+    rmSync(removedMission, { recursive: true });
+
+    const read = await f.read(`workflow:${healthy}`);
+    expect.soft(read.items.filter(i => i.id.startsWith("workflow:")).map(i => i.id)).toEqual([`workflow:${healthy}`]);
+    expect.soft(read.detail?.item.project?.id).toBe("b");
+    expect.soft(read.detail?.lines.join("\n")).toContain("b edition accepted");
+    expect.soft(read.sources.filter(s => s.source === "mission outcomes").map(s => s.state)).toEqual(["available"]);
+    expect.soft(read.sources.find(s => s.source === `mission outcomes/${missing}`)).toMatchObject({ state: "unavailable", detail: expect.stringContaining(removedMission) });
+    const { retainAttentionSources } = await import("../../tui/src/attention/source-continuity.js");
+    const retained = retainAttentionSources(read, before);
+    expect(retained.retained).toBe(true);
+    expect(retained.read.items.filter(i => i.id.startsWith("workflow:"))).toEqual([
+      read.items.find(i => i.id === `workflow:${healthy}`),
+      before.items.find(i => i.id === `workflow:${missing}`),
+    ]);
+  } finally { f.db.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
 
 it("carries failed-reader coverage through Attention and retains only missing health items in the TUI", async () => {
   let failed = false;

@@ -6,10 +6,16 @@ import { resolveCrashCartKey } from "../src/crash-cart/keys.js";
 
 describe("local startup target", () => {
   it("starts only the intended local daemon, leaving occupant selection to the user", () => {
+    // The default bind is 127.0.0.1 plus Tailscale when present, so naming 127.0.0.1 would drop the Tailscale listener.
     expect(daemonStartArgs("http://127.0.0.1:17433")).toEqual([
-      "daemon", "start", "--no-kernel", "--host", "127.0.0.1", "--port", "17433",
+      "daemon", "start", "--no-kernel", "--port", "17433",
     ]);
   });
+  it.each([["http://localhost:7433", "localhost"], ["http://[::1]:7433", "::1"]])(
+    "names %s's host, which the default bind doesn't listen on", (target, host) => {
+      expect(daemonStartArgs(target)).toEqual(["daemon", "start", "--no-kernel", "--host", host, "--port", "7433"]);
+    },
+  );
   it.each(["https://example.test", "http://10.0.0.2:7433", "http://user:password@localhost:7433", "http://localhost:7433/other"])(
     "does not turn %s into local startup authority", (target) => {
       expect(() => daemonStartArgs(target)).toThrow("no local daemon was started");

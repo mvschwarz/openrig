@@ -114,6 +114,19 @@ describe("delivery suite stand-ins: the Claude Code Messages API", () => {
     expect(standIn.requests().map((r) => [r.path, r.served])).toEqual([["/v1/messages/count_tokens", "other"], ["/api/hello", "not-found"]]);
   });
 
+  it("answers a registry GET for a scripted package with a newer version whose tarball it doesn't serve", async () => {
+    const standIn = await start("messages", { script: { rules: [], registry: { "@anthropic-ai/claude-code": "2.1.999" } } });
+    const meta = await (await fetch(`${standIn.url}/@anthropic-ai%2fclaude-code`)).json();
+    expect(meta["dist-tags"]).toMatchObject({ latest: "2.1.999", stable: "2.1.999" });
+    const tarball = meta.versions["2.1.999"].dist.tarball;
+    expect(tarball).toBe(`${standIn.url}/@anthropic-ai/claude-code/-/claude-code-2.1.999.tgz`);
+    expect((await fetch(tarball)).status).toBe(404);
+    expect((await fetch(`${standIn.url}/left-pad`)).status).toBe(404);
+    expect(standIn.requests().map((r) => [r.path, r.served])).toEqual([
+      ["/@anthropic-ai%2fclaude-code", "registry"], ["/@anthropic-ai/claude-code/-/claude-code-2.1.999.tgz", "not-found"], ["/left-pad", "not-found"]]);
+    expect(() => loadScript({ registry: { "@anthropic-ai/claude-code": "latest" } })).toThrow(/registry/);
+  });
+
   it("reads the typed text and tool results out of the request's last turn", () => {
     expect(messagesTurnOf({ messages: [{ role: "user", content: "plain" }] })).toEqual({ kind: "user", text: "plain", parts: [{ text: "plain", source: "text" }] });
     expect(messagesTurnOf({ messages: [{ role: "assistant", content: "hi" }] })).toEqual({ kind: "other", text: "", parts: [] });
@@ -309,11 +322,57 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect(events((await pending).text).at(-1)!.event).toBe("response.completed");
   });
 
+  it("names a gate after the turn's marker, so releasing one turn leaves another held", async () => {
+    const standIn = await start("messages", { script: { rules: [{ gate: "{{marker}}", say: "late" }] } });
+    const done: string[] = [];
+    const first = post(`${standIn.url}/v1/messages`, userTurn("Busy turn DLV-D18-busy-a1")).then((r) => { done.push("a1"); return r; });
+    const second = post(`${standIn.url}/v1/messages`, userTurn("Busy turn DLV-D18-busy-b2")).then((r) => { done.push("b2"); return r; });
+    await new Promise((r) => setTimeout(r, 150));
+    standIn.release("DLV-D18-busy-a1");
+    await first;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(done).toEqual(["a1"]);
+    standIn.release("DLV-D18-busy-b2");
+    await second;
+    expect(done).toEqual(["a1", "b2"]);
+  });
+
   it("uses a rule only as many times as it says, then falls through", async () => {
     const standIn = await start("messages", { script: { rules: [{ say: "first", times: 1 }, { say: "after" }] } });
     const text = async () => events((await post(`${standIn.url}/v1/messages`, userTurn("DLV-x"))).text)
       .filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text).join("");
     expect([await text(), await text(), await text()]).toEqual(["first", "after", "after"]);
+  });
+
+  // D12: a step found by words earlier in the conversation, a reply built from what the pattern captured, and a turn's
+  // own usage.
+  it("matches a rule against the request's whole history when it says within: history, and against the last turn otherwise", async () => {
+    const standIn = await start("messages", { script: { rules: [{ when: "DLV-earlier", within: "history", say: "from history" }, { say: "plain" }] } });
+    const conversation = { model: "m", stream: true, messages: [
+      { role: "user", content: "first DLV-earlier" }, { role: "assistant", content: "ok" }, { role: "user", content: "now DLV-later" }] };
+    const text = async (body: unknown) => events((await post(`${standIn.url}/v1/messages`, body)).text)
+      .filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text).join("");
+    expect(await text(conversation)).toBe("from history");
+    expect(await text(userTurn("only DLV-later"))).toBe("plain");
+  });
+
+  it("fills {{when:name}} in a reply and in a tool's input from the groups its pattern captured", async () => {
+    const standIn = await start("messages", { script: { rules: [
+      { when: String.raw`map to "(?<path>[^"]+)"`, times: 1, tool: { name: "Write", input: { file_path: "{{when:path}}", content: "at {{when:path}}" } } },
+      { when: String.raw`say (?<word>\w+)`, say: "you said {{when:word}}" },
+    ] } });
+    const stream = events((await post(`${standIn.url}/v1/messages`, userTurn('write the map to "/tmp/a b/MAP.md.tmp"'))).text);
+    expect(JSON.parse(stream.find((e) => e.event === "content_block_delta")!.data.delta.partial_json))
+      .toEqual({ file_path: "/tmp/a b/MAP.md.tmp", content: "at /tmp/a b/MAP.md.tmp" });
+    const said = events((await post(`${standIn.url}/v1/messages`, userTurn("say hello"))).text)
+      .filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text).join("");
+    expect(said).toBe("you said hello");
+  });
+
+  it("reports a rule's own usage on its reply, over the defaults", async () => {
+    const standIn = await start("messages", { script: { rules: [{ say: "big", usage: { input_tokens: 190000 } }] } });
+    const stream = events((await post(`${standIn.url}/v1/messages`, userTurn("DLV-usage"))).text);
+    expect(stream[0].data.message.usage).toMatchObject({ input_tokens: 190000, output_tokens: 1 });
   });
 
   it("writes every request to the JSONL log as it arrives", async () => {

@@ -10,14 +10,14 @@
 
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
-import type { WorkflowExitKind, WorkflowStepTrailEntry } from "./workflow-types.js";
+import type { WorkflowStepTrailEntry, WorkflowTrailReason } from "./workflow-types.js";
 
 export interface WorkflowStepTrailRecordInput {
   instanceId: string;
   stepId: string;
   stepRole: string;
   closedAt: string;
-  closureReason: WorkflowExitKind;
+  closureReason: WorkflowTrailReason;
   closureEvidence?: Record<string, unknown> | null;
   actorSession: string;
   /** null for terminal closures (`done`, `failed`, `waiting`). */
@@ -119,7 +119,7 @@ function rowToEntry(row: TrailRow): WorkflowStepTrailEntry {
     stepId: row.step_id,
     stepRole: row.step_role,
     closedAt: row.closed_at,
-    closureReason: row.closure_reason as WorkflowExitKind,
+    closureReason: row.closure_reason as WorkflowTrailReason,
     closureEvidence: row.closure_evidence_json
       ? (JSON.parse(row.closure_evidence_json) as Record<string, unknown>)
       : null,

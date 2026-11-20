@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { startCommand, lastStopState } from "../src/commands/start.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -130,9 +131,10 @@ describe("rig start (OPR.0.3.4.1)", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => { server.close(); });
+  afterAll(() => { server.close(); resetFetchAllowlist(); });
 
   beforeEach(() => {
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     upBodies = [];
     launches = [];
     nodesReads = 0;
@@ -200,6 +202,183 @@ describe("rig start (OPR.0.3.4.1)", () => {
   }
 
   // ---- HEADLESS FLAGS ----
+
+  it("fresh-primes only the selected logical seat in the named rig", async () => {
+    routes["/api/rigs/summary"] = () => [
+      { id: "rig-1", name: "one", nodeCount: 1, lifecycleState: "recoverable" },
+      { id: "rig-2", name: "two", nodeCount: 1, lifecycleState: "recoverable" },
+    ] as unknown as Record<string, unknown>;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", mode: "restore", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }], mutated: false }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one"]); });
+    const applies = upBodies.filter(body => body.plan === false);
+    expect(applies).toHaveLength(2);
+    expect(applies.find(body => body._rigIdRoute === "rig-1")).toMatchObject({ freshLogicalIds: ["dev.impl"] });
+    expect(applies.find(body => body._rigIdRoute === "rig-2")).not.toHaveProperty("freshLogicalIds");
+  });
+
+  it.each(["dev.impl", "dev.missing@one", "dev.impl@absent"])("rejects unsafe fresh selector %s before any restore", async ref => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", mode: "restore", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" },
+        { logicalId: "dev.external", intendedAction: "leave-attached" }], mutated: false }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const { exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", ref]); });
+    expect(exitCode).toBe(1);
+    expect(upBodies.filter(body => body.plan === false)).toHaveLength(0);
+  });
+
+  it("rejects a fresh selector when two selected rigs share its name", async () => {
+    routes["/api/rigs/summary"] = () => ["rig-1", "rig-2"].map(id =>
+      ({ id, name: "same", nodeCount: 1, lifecycleState: "recoverable" })) as unknown as Record<string, unknown>;
+    routes["/api/rigs/:id/up"] = () => ({ status: "plan", mode: "restore", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }], mutated: false });
+    const { logs, exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@same"]); });
+    expect(exitCode).toBe(1);
+    expect(logs.join(" ")).toContain("same (rig-1), same (rig-2)");
+    expect(upBodies.filter(body => body.plan === false)).toHaveLength(0);
+  });
+
+  it("accepts exact rig ids and deduplicates selectors without conflating identical logical ids", async () => {
+    routes["/api/rigs/summary"] = () => ["rig-1", "rig-2"].map(id => ({ id, name: "same", lifecycleState: "recoverable" })) as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }] };
+    await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@rig-1", "dev.impl@rig-1", "dev.impl@rig-2"]); });
+    expect(upBodies.filter(b => b.plan === false).map(b => b.freshLogicalIds)).toEqual([["dev.impl"], ["dev.impl"]]);
+  });
+
+  it.each([false, true])("reports external and omitted fresh seats and daemon warnings (json=%s)", async json => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }, { logicalId: "dev.external", intendedAction: "leave-attached" }] }
+      : { status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "dev.external", status: "left_attached" }], warnings: ["snapshot omitted dev.impl"] };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one", "dev.external@one", ...(json ? ["--json"] : [])]); });
+    if (json) {
+      const result = JSON.parse(logs.at(-1)!);
+      expect(result.restoredRigs[0]).toMatchObject({ freshRequestedNotApplied: ["dev.impl", "dev.external"], warnings: ["snapshot omitted dev.impl"] });
+    } else {
+      expect(logs.join(" ")).toContain("dev.external: fresh requested, not applied");
+      expect(logs.join(" ")).toContain("dev.impl: fresh requested, not applied");
+      expect(logs.join(" ")).toContain("snapshot omitted dev.impl");
+    }
+  });
+
+  it("reports a selected rig that becomes running before restore as fresh not applied", async () => {
+    setupCandidateRig("one"); let reads = 0;
+    routes["/api/rigs/summary"] = () => [{ id: "rig-1", name: "one", lifecycleState: ++reads === 1 ? "recoverable" : "running" }] as never;
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one", "--json"]); });
+    expect(JSON.parse(logs.at(-1)!).restoredRigs[0]).toMatchObject({ status: "already_running", freshRequestedNotApplied: ["dev.impl"] });
+    expect(upBodies.filter(b => b.plan === false)).toHaveLength(0);
+  });
+
+  it("with --last skips a running selected seat but still restores other rigs", async () => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-1", name: "one", lifecycleState: "running" }, { id: "rig-2", name: "two", lifecycleState: "recoverable" }] as never;
+    routes["/api/rigs/:id/nodes"] = () => [{ logicalId: "dev.impl", sessionStatus: "detached", intentionallyStopped: false }] as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "dev.impl", status: "resumed" }] };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--fresh", "dev.impl@one", "--json"]); });
+    expect(JSON.parse(logs.at(-1)!).skippedFresh).toMatchObject([{ logicalId: "dev.impl", reason: "rig already running" }]);
+    expect(upBodies.filter(b => b.plan === false).map(b => b._rigIdRoute)).toEqual(["rig-2"]);
+  });
+
+  it("labels a skipped fresh seat by rig id when another rig shares its name", async () => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-1", name: "same", lifecycleState: "running" }, { id: "rig-2", name: "same", lifecycleState: "recoverable" }] as never;
+    routes["/api/rigs/:id/nodes"] = () => [{ logicalId: "dev.impl", sessionStatus: "detached", intentionallyStopped: false }] as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--fresh", "dev.impl@rig-1"]); });
+    expect(logs.join("\n")).toContain("dev.impl@same (rig-1): fresh requested, not applied");
+    expect(logs.join("\n")).toContain("same (rig-2): fully_restored");
+  });
+
+  it("keeps a confirmed restore when an accepted follow-up launch throws", async () => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }, { logicalId: "dev.qa", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "partially_restored", nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }, { logicalId: "dev.qa", status: "awaiting-decision" }] };
+    const options = deps(async () => true), prog = new Command();
+    prog.addCommand(startCommand({ ...options, clientFactory: url => {
+      const client = new DaemonClient(url), post = client.post.bind(client);
+      client.post = (async (path: string, body: unknown, config?: unknown) => {
+        if (path.startsWith("/api/seat/launch/")) throw new Error("connection closed");
+        return post(path, body, config as never);
+      }) as typeof client.post;
+      return client;
+    } }));
+    const { logs } = await captureLogs(async () => { await prog.parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one", "--json"]); });
+    const result = JSON.parse(logs.find(line => line.startsWith("{"))!).restoredRigs;
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ rigId: "rig-1", status: "partially_restored", nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }, { logicalId: "dev.qa", status: "awaiting-decision" }], followUpFailures: [{ logicalId: "dev.qa", error: "connection closed" }] });
+    expect(result[0].freshOutcomeUnknown).toBeUndefined();
+  });
+
+  it("with --last refuses an unknown seat in a running rig before restoring anything", async () => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-1", name: "one", lifecycleState: "running" }, { id: "rig-2", name: "two", lifecycleState: "recoverable" }] as never;
+    routes["/api/rigs/:id/nodes"] = () => [{ logicalId: "dev.real", sessionStatus: "detached", intentionallyStopped: false }] as never;
+    routes["/api/rigs/:id/up"] = () => ({ status: "plan", nodes: [{ logicalId: "dev.real", intendedAction: "resume-original" }] });
+    const { exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--fresh", "dev.missing@one"]); });
+    expect(exitCode).toBe(1);
+    expect(upBodies.filter(b => b.plan === false)).toHaveLength(0);
+  });
+
+  it("with --last reports a deliberately stopped rig and restores the others", async () => {
+    setupStoppedRigs([DOWNED, CRASHED]);
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--fresh", "dev.seat0@downed", "--json"]); });
+    expect(JSON.parse(logs.at(-1)!).skippedFresh).toMatchObject([{ logicalId: "dev.seat0", reason: "rig stopped on purpose" }]);
+    expect(upBodies.filter(b => b.plan === false).map(b => b._rigIdRoute)).toEqual(["rig-crashed"]);
+  });
+
+  it("distinguishes preview failure from an unknown seat in JSON before any restore", async () => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = () => ({ _httpStatus: 503, code: "preview_broken", error: "database unavailable" });
+    const { logs, exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one", "--json"]); });
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(logs.at(-1)!).error).toContain("database unavailable (preview_broken)");
+    expect(upBodies.filter(b => b.plan === false)).toHaveLength(0);
+  });
+
+  it.each([false, true])("reports restore_error fresh outcome as unknown (json=%s)", async json => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { _httpStatus: 400, code: "restore_error", error: "completion record failed" };
+    const { logs, exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one", ...(json ? ["--json"] : [])]); });
+    expect(exitCode).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.at(-1)!).restoredRigs[0];
+      expect(result).toMatchObject({ rigId: "rig-1", status: "restore_error", freshOutcomeUnknown: ["dev.impl"] });
+      expect(result.freshRequestedNotApplied).toBeUndefined();
+    } else {
+      expect(logs.join(" ")).toContain("dev.impl: fresh outcome unknown");
+      expect(logs.join(" ")).not.toContain("fresh requested, not applied");
+    }
+  });
+
+  it.each([false, true])("identifies same-named rigs with distinct results (json=%s)", async json => {
+    routes["/api/rigs/summary"] = () => ["rig-1", "rig-2"].map(id => ({ id, name: "same", lifecycleState: "recoverable" })) as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : body._rigId === "rig-1" ? { status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }] }
+        : { _httpStatus: 409, code: "rig_not_stopped", error: "still running" };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@rig-1", "dev.impl@rig-2", ...(json ? ["--json"] : [])]); });
+    if (json) expect(JSON.parse(logs.at(-1)!).restoredRigs).toMatchObject([{ rigId: "rig-1", status: "fully_restored" }, { rigId: "rig-2", status: "rig_not_stopped", freshRequestedNotApplied: ["dev.impl"] }]);
+    else { expect(logs.join(" ")).toContain("same (rig-1): fully_restored"); expect(logs.join(" ")).toContain("same (rig-2): still running"); }
+  });
+
+  it.each([false, true])("skips an unverified agent on a running rig when its node lookup fails (json=%s)", async json => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-1", name: "one", lifecycleState: "running" }, { id: "rig-2", name: "two", lifecycleState: "recoverable" }] as never;
+    routes["/api/rigs/:id/nodes"] = (_req, body) => body._rigId === "rig-1" ? { _httpStatus: 503 } : [{ logicalId: "dev.impl", sessionStatus: "detached", intentionallyStopped: false }] as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--fresh", "dev.impl@one", ...(json ? ["--json"] : [])]); });
+    expect(upBodies.filter(b => b.plan === false).map(b => b._rigIdRoute)).toEqual(["rig-2"]);
+    if (json) expect(JSON.parse(logs.at(-1)!).skippedFresh).toMatchObject([{ rigId: "rig-1", logicalId: "dev.impl", reason: expect.stringContaining("seat unverified") }]);
+    else expect(logs.join(" ")).toContain("seat unverified");
+  });
 
   it("--last restores all candidates with ZERO prompts", async () => {
     setupCandidateRig("my-rig");
@@ -397,7 +576,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(exitCode).toBe(1);
     const parsed = jsonResult(logs);
     expect(parsed.keptDown).toEqual([]);
-    expect(parsed.restoredRigs).toEqual([{ rigName: "partial-live", status: "rig_not_stopped", nodes: [] }]);
+    expect(parsed.restoredRigs).toEqual([{ rigId: "rig-partial-live", rigName: "partial-live", status: "rig_not_stopped", error: "Rig still has live sessions", nodes: [] }]);
   });
 
   // T5 no-CLI-memory
@@ -638,7 +817,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
       expect(exitCode).toBe(1);
       const result = JSON.parse(logs.find((line) => line.startsWith("{"))!);
       expect(result.candidates).toEqual([{ rigName: "on-demand", lifecycleState: "degraded" }]);
-      expect(result.restoredRigs).toEqual([{ rigName: "on-demand", status: "rig_not_stopped", nodes: [] }]);
+      expect(result.restoredRigs).toEqual([{ rigId: "rig-1", rigName: "on-demand", status: "rig_not_stopped", error: "Rig still has live sessions", nodes: [] }]);
       expect(upBodies.map((body) => body.plan)).toEqual([true, false]);
     });
 
@@ -656,7 +835,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
       expect(exitCode ?? 0).toBe(0);
       const result = JSON.parse(logs.find((line) => line.startsWith("{"))!);
       expect(result.candidates).toEqual([{ rigName: "on-demand", lifecycleState: "degraded" }]);
-      expect(result.restoredRigs).toEqual([{ rigName: "on-demand", status: "already_running", nodes: [] }]);
+      expect(result.restoredRigs).toEqual([{ rigId: "rig-1", rigName: "on-demand", status: "already_running", nodes: [] }]);
       expect(upBodies.map((body) => body.plan)).toEqual([true]);
     });
   });
@@ -1020,7 +1199,7 @@ describe("S20 — start auto-start: routing env never becomes bind intent", () =
     const { default: net } = await import("node:net");
     const { EventEmitter } = await import("node:events");
     const socket = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn(), connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }))); } });
-    const socketSpy = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as import("node:net").Socket);
+    const socketSpy = vi.spyOn(net, "Socket").mockImplementation(function () { return socket as unknown as import("node:net").Socket; });
     const savedHost = process.env["OPENRIG_HOST"];
     process.env["OPENRIG_HOST"] = "100.64.55.66"; // the distinct-value discriminator
     let spawnedEnv: Record<string, string> = {};

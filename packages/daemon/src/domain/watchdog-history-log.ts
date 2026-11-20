@@ -1,5 +1,9 @@
 import type Database from "better-sqlite3";
-import { ulid } from "ulid";
+import { monotonicFactory } from "ulid";
+
+// Increasing ids within a millisecond, so the readers' `history_id DESC` tiebreak is newest first for entries with
+// the same evaluated_at.
+const ulid = monotonicFactory();
 
 /**
  * Watchdog history log (PL-004 Phase C; append-only audit writer).
@@ -18,6 +22,25 @@ import { ulid } from "ulid";
 /** `refused`: the seat was at an interactive prompt and no text was sent. `failed`: any other failed delivery; its
  * reason (and whether text may have landed) is in `evaluationNotes`. */
 export type WatchdogOutcome = "sent" | "refused" | "failed" | "skipped" | "terminal";
+
+/** At a queue-only seat (#3076) OpenRig's reminder is never typed, and its delivery is recorded as what it became, with
+ *  the outcome `sent`: `queued_as_row`, a cold row in the seat's queue (no nudge); `noted_on_parked_row`, a note on the
+ *  parked row of the seat the reminder is about, already in that queue; `noted_on_queued_row`, a note on the job's
+ *  earlier cold row, still pending and unclaimed. Only `ok` means typed. */
+export const QUEUED_AS_ROW = "queued_as_row";
+export const NOTED_ON_PARKED_ROW = "noted_on_parked_row";
+export const NOTED_ON_QUEUED_ROW = "noted_on_queued_row";
+export type QueueOnlyDeliveryCode = typeof QUEUED_AS_ROW | typeof NOTED_ON_PARKED_ROW | typeof NOTED_ON_QUEUED_ROW;
+
+export function isQueueOnlyDeliveryCode(code: unknown): code is QueueOnlyDeliveryCode {
+  return code === QUEUED_AS_ROW || code === NOTED_ON_PARKED_ROW || code === NOTED_ON_QUEUED_ROW;
+}
+
+/** Whether a recorded delivery reached its seat: typed (`ok`), or in its queue at a queue-only seat. A reader that
+ *  asks "did the reminder reach the owner" reads this, not `ok` alone. */
+export function deliveryReachedSeat(status: string | null | undefined): boolean {
+  return status === "ok" || isQueueOnlyDeliveryCode(status);
+}
 
 export interface WatchdogHistoryRecordInput {
   jobId: string;

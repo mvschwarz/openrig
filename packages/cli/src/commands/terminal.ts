@@ -22,7 +22,7 @@ import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
@@ -87,6 +87,51 @@ export interface OpenViewResult {
   reusedWorkspace?: { id: string; tabId: string; view: string };
   /** On window failures, false means no desktop launch was attempted. */
   windowAttempted?: boolean;
+}
+
+export interface OpenAllRigResult {
+  rig: string;
+  rigId?: string;
+  view: string;
+  outcome: "opened" | "reused" | "absent" | "skipped" | "failed";
+  opened: string[];
+  absent: { seat: string; host: string | null; reason: string }[];
+  degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
+  skipped: { seat: string; reason: string }[];
+  workspaceId?: string;
+  code?: string;
+  error?: string;
+  notes?: string[];
+  cleanup?: "closed" | "already_gone" | "unknown";
+}
+
+export interface OpenAllResult {
+  ok: boolean;
+  provider: string;
+  session?: string;
+  rigs: OpenAllRigResult[];
+  window?: { app: string; surface: string };
+  windowAttempted?: boolean;
+  code?: string;
+  error?: string;
+  notes?: string[];
+}
+
+export interface CloseAllViewerResult {
+  view: string;
+  provider: "herdr" | "tmux";
+  target: string;
+  outcome: "closed" | "already_gone" | "kept" | "failed";
+  reason?: string;
+  code?: string;
+}
+
+export interface CloseAllResult {
+  ok: boolean;
+  viewers: CloseAllViewerResult[];
+  code?: string;
+  error?: string;
+  notes?: string[];
 }
 
 // Opening applies pages through several bounded provider round trips; it is
@@ -167,6 +212,71 @@ function printOpen(json: boolean, r: OpenViewResult, status: number, viaWindow =
   }
 }
 
+function printOpenAll(json: boolean, r: OpenAllResult, status: number): void {
+  const rigs = r && typeof r === "object" && Array.isArray(r.rigs) ? r.rigs : null;
+  const notes = r && typeof r === "object" && Array.isArray(r.notes) ? r.notes : [];
+  if (json) {
+    console.log(JSON.stringify(r));
+  } else if (!rigs) {
+    console.log((r && typeof r === "object" && typeof r.error === "string" && r.error) || "Daemon returned an invalid bulk terminal open response.");
+    for (const n of notes) console.log(`  note: ${n}`);
+  } else {
+    const lines: string[] = [];
+    const active = rigs.filter(rig => rig.outcome === "opened" || rig.outcome === "reused").length;
+    lines.push(r.error
+      ? r.error
+      : `Bulk terminal open (${r.provider}): ${active} rig(s) opened/reused out of ${rigs.length}.`);
+    // A rig by its name; its view (rig:<id>) too when another rig in this result has the same name.
+    const named = (rig: OpenAllRigResult) => typeof rig.rig === "string" && rig.rig ? rig.rig : null;
+    const label = (rig: OpenAllRigResult) => {
+      const name = named(rig);
+      if (!name) return rig.view;
+      return rigs.filter(other => named(other) === name).length > 1 ? `${name} (${rig.view})` : name;
+    };
+    for (const rig of rigs) {
+      const openedCount = Array.isArray(rig.opened) ? rig.opened.length : 0;
+      lines.push(`  [${rig.outcome}] ${label(rig)}${openedCount ? ` (${openedCount} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
+      for (const a of Array.isArray(rig.absent) ? rig.absent : []) lines.push(`    ○ ${a.seat} — absent: ${a.reason}`);
+      for (const d of Array.isArray(rig.degraded) ? rig.degraded : []) lines.push(`    ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
+      for (const s of Array.isArray(rig.skipped) ? rig.skipped : []) lines.push(`    skipped ${s.seat}: ${s.reason}`);
+      for (const n of Array.isArray(rig.notes) ? rig.notes : []) lines.push(`    note: ${n}`);
+    }
+    for (const n of notes) lines.push(`  note: ${n}`);
+    console.log(lines.join("\n"));
+  }
+  // The daemon reports ok:true when some rig opened/reused, so a top-level ok:false (for example a
+  // terminal_session_mismatch) is a hard failure even when returned rows say opened/reused; those rows stay in the output.
+  if (status >= 400 || !rigs || !r.ok) {
+    process.exitCode = status >= 500 ? 2 : 1;
+  }
+}
+
+function printCloseAll(json: boolean, r: CloseAllResult, status: number): void {
+  const viewers = r && typeof r === "object" && Array.isArray(r.viewers) ? r.viewers : null;
+  const notes = r && typeof r === "object" && Array.isArray(r.notes) ? r.notes : [];
+  if (json) {
+    console.log(JSON.stringify(r));
+  } else if (!viewers) {
+    console.log((r && typeof r === "object" && typeof r.error === "string" && r.error) || "Daemon returned an invalid bulk terminal close response.");
+    for (const n of notes) console.log(`  note: ${n}`);
+  } else {
+    const lines: string[] = [];
+    if (r.error) lines.push(r.error);
+    else if (viewers.length === 0) lines.push(notes[0] ?? "no OpenRig rig viewers recorded");
+    else {
+      for (const v of viewers) {
+        lines.push(`  [${v.outcome}] ${v.view} (${v.provider}:${v.target})${v.reason ? ` — ${v.reason}` : ""}`);
+      }
+    }
+    for (const n of notes) if (viewers.length > 0) lines.push(`  note: ${n}`);
+    console.log(lines.join("\n"));
+  }
+  const anyFailed = !!viewers && viewers.some(v => v.outcome === "failed");
+  if (status >= 400 || !viewers || !r.ok || anyFailed) {
+    process.exitCode = status >= 500 ? 2 : 1;
+  }
+}
+
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
     "Open the OpenRig view and agent conversations in terminal tiles",
@@ -180,8 +290,9 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
 
   cmd
     .command("open")
-    .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
+    .argument("[view]", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
+    .option("--all", "Open one viewer per local rig in sorted rig-name order")
     .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering; tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted outside herdr-app); inside a herdr-app terminal --window still asks for a desktop window, and plain open reuses herdr-app")
@@ -198,13 +309,45 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .option("--grace-ms <ms>", "Departure grace, default 4000, at most 60000", Number)
     .option("--focus-retention-ms <ms>", "Extra focused-reading retention, default 12000, at most 300000", Number)
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string;
+    .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string;
       follow?: boolean; maxTiles?: number; pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[];
       suppressionMs?: number; graceMs?: number; focusRetentionMs?: number }) => {
       const deps = getDeps();
       const session = opts.session?.trim();
       const { maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } = opts;
       const hasControls = [maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs].some(v => v !== undefined);
+      if (opts.all) {
+        const failBulk = (code: string, error: string, provider = opts.provider?.trim() ?? "herdr") => {
+          printOpenAll(opts.json ?? false, { ok: false, provider, rigs: [], code, error }, 400);
+        };
+        if (view !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with a <view> argument."); return; }
+        if (opts.follow !== undefined || hasControls) { failBulk("invalid_arguments", "--all cannot be combined with --follow or following controls."); return; }
+        if (opts.expectedPlan !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with --expected-plan."); return; }
+        if (opts.appHome !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with --app-home."); return; }
+        const named = opts.provider?.trim();
+        if (named && ["herdr-app", "cmux", "rex"].includes(named)) {
+          failBulk("unsupported_provider", `--all supports herdr or tmux --window; ${named} is unsupported.`, named); return;
+        }
+        if (named === "tmux" && !opts.window) {
+          failBulk("tmux_requires_window", "tmux requires --window with --all.", "tmux"); return;
+        }
+        await withClient(deps, async (client) => {
+          if (opts.window || !named) {
+            const res = await openAllTerminalWindows(client, named, deps.windowDeps, session);
+            printOpenAll(opts.json ?? false, res, 200);
+            return;
+          }
+          const res = await client.post<OpenAllResult>("/api/terminal/open-all",
+            { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
+            { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          printOpenAll(opts.json ?? false, res.data, res.status);
+        });
+        return;
+      }
+      if (!view) {
+        printResult(opts.json ?? false, { ok: false, code: "view_required", error: "Provide <view> or pass --all." }, 400);
+        return;
+      }
       const following: FollowControls | undefined = opts.follow !== undefined || hasControls
         ? { enabled: opts.follow !== false, maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } : undefined;
       const herdrApp = herdrAppClient(opts, deps);
@@ -219,6 +362,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             providers?: Array<{ status?: { available?: boolean; launch?: { socketPath?: string } } }>;
           }>(
             `/api/terminal/status?provider=herdr-app&appHome=${encodeURIComponent(selectedHerdrApp.appHome)}`,
+            { headers: terminalAuthHeaders() },
           );
           const report = probe.data?.providers?.[0]?.status ?? probe.data;
           if (probe.status >= 400 || typeof report?.available !== "boolean") {
@@ -256,7 +400,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         }
         let expectedPlan = opts.expectedPlan;
         if (session !== undefined) {
-          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider ?? "herdr")}&session=${encodeURIComponent(session)}`);
+          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider ?? "herdr")}&session=${encodeURIComponent(session)}`, { headers: terminalAuthHeaders() });
           if (preview.status >= 400 || preview.data.session !== session || typeof preview.data.planId !== "string") {
             printResult(opts.json ?? false, { error: preview.data.error ?? "The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.", code: "terminal_session_unconfirmed" }, preview.status >= 400 ? preview.status : 409); return;
           }
@@ -289,19 +433,81 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .action(async (opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<unknown>("/api/terminal/views");
+        const res = await client.get<unknown>("/api/terminal/views", { headers: terminalAuthHeaders() });
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
 
   cmd
-    .command("close <view>")
-    .description("Close a herdr-app Rig view (rv-…): its cells leave the layout, then only its own viewers end; seats keep running")
+    .command("close")
+    .argument("[view]", "Close a herdr-app Rig view (rv-…), or pass --all for OpenRig-owned rig viewers")
+    .description("Close a herdr-app Rig view (rv-…) or OpenRig-recorded rig viewers (--all); seats keep running")
+    .option("--all", "Close OpenRig-recorded rig viewers created by OpenRig")
+    .option("--provider <name>", "Limit --all close to herdr or tmux")
+    .option("--session <name>", "Herdr session on the daemon's host for --all close")
     .option("--app-home <dir>", "herdr-app home the view is in (default: herdr-app's own)")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { appHome?: string; json?: boolean }) => {
+    .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; appHome?: string; json?: boolean }) => {
       const deps = getDeps();
       const env = deps.env ?? process.env;
+      const trimmedProvider = opts.provider?.trim();
+      if (opts.all) {
+        if (view !== undefined) {
+          printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "invalid_arguments", error: "--all cannot be combined with a <view> argument." }, 400);
+          return;
+        }
+        if (opts.appHome !== undefined) {
+          printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "invalid_arguments", error: "--all cannot be combined with --app-home." }, 400);
+          return;
+        }
+        if (opts.provider !== undefined && !trimmedProvider) {
+          printCloseAll(opts.json ?? false, { ok: false, viewers: [], code: "unknown_provider", error: "unknown provider '' — expected herdr or tmux" }, 400);
+          return;
+        }
+        await withClient(deps, async (client) => {
+          const res = await client.post<CloseAllResult>("/api/terminal/close-all",
+            { ...(trimmedProvider ? { provider: trimmedProvider } : {}), ...(opts.session !== undefined ? { session: opts.session.trim() } : {}) },
+            { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          printCloseAll(opts.json ?? false, res.data, res.status);
+        });
+        return;
+      }
+      if (!view) {
+        printResult(opts.json ?? false, { ok: false, code: "view_required", error: "Provide <view> or pass --all." }, 400);
+        return;
+      }
+      if (opts.provider !== undefined && trimmedProvider !== "herdr-app") {
+        const res: OpenViewResult = {
+          provider: trimmedProvider || "herdr-app",
+          ok: false,
+          opened: [],
+          absent: [],
+          degraded: [],
+          pages: 0,
+          code: "close_unsupported",
+          error: "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.",
+        };
+        if (opts.json) { printResult(true, res, 400); return; }
+        console.log(`Not closed: ${res.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.session !== undefined) {
+        const res: OpenViewResult = {
+          provider: "herdr-app",
+          ok: false,
+          opened: [],
+          absent: [],
+          degraded: [],
+          pages: 0,
+          code: "unsupported_terminal_session",
+          error: "herdr-app selects its client by app home, not by session; pass --all --session <name> for Herdr bulk viewers.",
+        };
+        if (opts.json) { printResult(true, res, 400); return; }
+        console.log(`Not closed: ${res.error}`);
+        process.exitCode = 1;
+        return;
+      }
       await withClient(deps, async (client) => {
         const res = await client.post<OpenViewResult>("/api/terminal/close", { view, provider: "herdr-app",
           herdrApp: { appHome: opts.appHome ? resolve(opts.appHome) : herdrAppHome(env) } }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
@@ -328,7 +534,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         if (opts.provider === "herdr-app") path += `&appHome=${encodeURIComponent(opts.appHome ? resolve(opts.appHome) : herdrAppHome(deps.env ?? process.env))}`;
         const session = opts.session?.trim();
         if (session !== undefined) path += `${opts.provider ? "&" : "?"}session=${encodeURIComponent(session)}`;
-        const res = await client.get<{ session?: string; error?: string }>(path);
+        const res = await client.get<{ session?: string; error?: string }>(path, { headers: terminalAuthHeaders() });
         if (session !== undefined && res.status < 400 && res.data.session !== session) {
           printResult(opts.json ?? false, { error: "The daemon did not confirm the requested Herdr session. Update the daemon before inspecting a named session.", code: "terminal_session_unconfirmed" }, 409); return;
         }
@@ -346,7 +552,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           if (client.baseUrl && !isLocalTmuxHost(client.baseUrl)) {
             throw new Error("Terminal attachment uses local tmux; run this command on the selected daemon's machine.");
           }
-          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status", { headers: terminalAuthHeaders() });
           if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
           if (response.data.tmux?.serverArgs === undefined) {
             throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");

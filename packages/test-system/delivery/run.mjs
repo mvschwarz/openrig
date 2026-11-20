@@ -7,15 +7,19 @@
 //
 //   node run.mjs run --installs <dir> --openrig <version | path to rig's bin-wrapper.js> --out <dir>
 //                    [--claude 2.1.322,2.1.311] [--codex 0.167.2,0.167.1] [--cases D01,D02,...] [--cell-timeout <seconds>]
+//                    [--tmux <path to a tmux binary>]
 //     Every case on every listed program version, one cell at a time, each cell in its own loopback-only namespace
 //     with a fresh home, a stand-in model and a private daemon. Writes <out>/RESULT.json and RESULT.md, and a raw
 //     bank per cell. A cell that can't run is NOT RUN with its reason, never skipped silently.
+//     --tmux runs every cell on that tmux (the daemon's calls, its server and the harness's own reads) instead of the
+//     one on PATH. Its version is what the binary itself reports, pinned with its path and sha256; one that's missing
+//     or doesn't report a version makes every cell NOT RUN with the reason, never a guessed label.
 //
 // Evidence level of every cell here: native-standin (the real program on a local stand-in model).
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { containedArgv, probeContainment } from "./harness/contain.mjs";
@@ -33,7 +37,32 @@ function args(argv) {
   return out;
 }
 const list = (value) => (typeof value === "string" ? value.split(",").map((v) => v.trim()).filter(Boolean) : []);
-const sha256File = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+// Files are hashed through one 1 MiB buffer, so a native payload of hundreds of MB is never held whole in memory. The
+// digest is the same as hashing the whole file at once.
+const READ_BUFFER = Buffer.allocUnsafe(1 << 20);
+function sha256File(path) {
+  const hash = createHash("sha256");
+  const fd = openSync(path, "r");
+  try { for (let n; (n = readSync(fd, READ_BUFFER, 0, READ_BUFFER.length, null)) > 0;) hash.update(READ_BUFFER.subarray(0, n)); }
+  finally { closeSync(fd); }
+  return hash.digest("hex");
+}
+
+/** Whether a file starts with the ELF magic, reading only its first 4 bytes. A read may return fewer bytes than asked
+ *  for before the end of the file, so the head is filled until it has 4 bytes or a read returns none. */
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+function isElf(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const head = Buffer.alloc(4);
+    let filled = 0;
+    for (let n; filled < 4 && (n = readSync(fd, head, filled, 4 - filled, filled)) > 0;) filled += n;
+    return filled === 4 && head.equals(ELF_MAGIC);
+  }
+  catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
 
 /** Where a pinned install keeps its entry point. */
 function installEntry(installs, kind, version) {
@@ -66,6 +95,15 @@ function treeDigest(dir) {
   return { files: lines.length, sha256: createHash("sha256").update(lines.join("")).digest("hex") };
 }
 
+/** The suite a run ran: its git commit and whether the tree was clean, where git can say, and a digest of the case,
+ *  harness and stand-in files, which holds either way. */
+function suitePin() {
+  const git = (args) => { const r = spawnSync("git", args, { cwd: HERE, encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : null; };
+  const status = git(["status", "--porcelain", "--", "."]);
+  return { commit: git(["rev-parse", "HEAD"]), clean: status === null ? null : status === "",
+    files: Object.fromEntries(["cases", "harness", "stand-ins"].map((d) => [d, treeDigest(join(HERE, d))])) };
+}
+
 /** The exact program a cell runs, read when the run starts, before any cell:
  *  - its version as it reports itself;
  *  - entryPointSha256: the file on PATH (a launcher for Codex and OpenRig, so this alone doesn't pin what runs);
@@ -87,17 +125,27 @@ function pin(kind, entry) {
     const scope = pkgName.split("/")[0];
     out.payloads = existsSync(join(modules, scope)) ? readdirSync(join(modules, scope), { recursive: true, withFileTypes: true })
       .filter((d) => d.isFile()).map((d) => join(d.parentPath ?? d.path, d.name))
-      .filter((path) => { try { return readFileSync(path).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])); } catch { return false; } })
+      .filter(isElf)
       .map((path) => ({ path: path.slice(modules.length + 1), sha256: sha256File(path) })) : [];
   }
   return out;
 }
 
-function hostPins() {
-  const tmux = spawnSync("tmux", ["-V"], { encoding: "utf8" });
+/** The host, and the tmux every cell runs on: `requested` (--tmux) or the one on PATH. `tmuxUnavailable` says why the
+ *  requested binary can't be used; its version is only ever what it reports itself. */
+function hostPins(requested = null) {
   const osRelease = existsSync("/etc/os-release") ? readFileSync("/etc/os-release", "utf8").match(/^PRETTY_NAME="?([^"\n]*)/m)?.[1] : null;
-  const tmuxPath = spawnSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).stdout.trim();
-  return { node: process.version, tmux: tmux.stdout.trim(), tmuxPath, os: osRelease, kernel: spawnSync("uname", ["-r"], { encoding: "utf8" }).stdout.trim() };
+  const tmuxPath = requested ? resolve(requested) : spawnSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).stdout.trim();
+  const host = { node: process.version, tmux: null, tmuxPath, tmuxRequested: requested ? true : false, tmuxReal: null, tmuxSha256: null,
+    os: osRelease, kernel: spawnSync("uname", ["-r"], { encoding: "utf8" }).stdout.trim() };
+  if (!tmuxPath || !existsSync(tmuxPath)) return { ...host, tmuxUnavailable: `no tmux binary at ${tmuxPath || "(none on PATH)"}` };
+  const version = spawnSync(tmuxPath, ["-V"], { encoding: "utf8", timeout: 10_000 });
+  const reported = (version.stdout ?? "").trim();
+  if (version.status !== 0 || !/^tmux \S+/.test(reported)) {
+    return { ...host, tmuxUnavailable: `${tmuxPath} didn't report a tmux version (exit ${version.status ?? version.signal}: ${(version.stderr || reported).trim().slice(0, 200)})` };
+  }
+  const real = realpathSync(tmuxPath);
+  return { ...host, tmux: reported, tmuxReal: real, tmuxSha256: sha256File(real) };
 }
 
 async function runSuite(opts) {
@@ -115,7 +163,7 @@ async function runSuite(opts) {
   for (const id of wanted) if (!CASES.some((c) => c.id === id)) throw new Error(`no case ${id} in this suite yet`);
 
   const expectedPath = join(HERE, "cases", "expected.yaml");
-  const pins = { level: LEVEL, host: hostPins(), openrig: pin("openrig", openrigEntry), expected: { path: "cases/expected.yaml", sha256: sha256File(expectedPath) }, programs: {} };
+  const pins = { level: LEVEL, host: hostPins(typeof opts.tmux === "string" ? opts.tmux : null), openrig: pin("openrig", openrigEntry), expected: { path: "cases/expected.yaml", sha256: sha256File(expectedPath) }, suite: suitePin(), programs: {} };
   const containment = opts["no-contain"] ? { ok: false, reason: "--no-contain given" } : probeContainment();
   pins.containment = containment;
 
@@ -141,6 +189,10 @@ async function runSuite(opts) {
       const base = { case: c.id, title: c.title, program: kind, version, level: LEVEL };
       if (stopped) { cells.push({ ...base, result: "NOT RUN", reason: `the run was stopped (${stopped})` }); continue; }
       if (!c.programs.includes(kind)) { cells.push({ ...base, result: "NOT RUN", reason: `${c.id} isn't defined for ${kind}` }); continue; }
+      // A case whose capability doesn't exist yet is registered by name and recorded NOT RUN with its source reason;
+      // no cell opens for it.
+      if (c.notRun) { cells.push({ ...base, result: "NOT RUN", reason: c.notRun }); continue; }
+      if (pins.host.tmuxUnavailable) { cells.push({ ...base, result: "NOT RUN", reason: `tmux isn't available: ${pins.host.tmuxUnavailable}` }); continue; }
       if (!programPin) { cells.push({ ...base, result: "NOT RUN", reason: `${kind} ${version} isn't installed (run.mjs install)` }); continue; }
       if (!containment.ok) { cells.push({ ...base, result: "NOT RUN", reason: `no loopback-only namespace: ${containment.reason}` }); continue; }
       console.log(`cell ${cellId} ...`);
@@ -244,7 +296,7 @@ async function cellMain(specPath) {
   });
   try {
     cell = await openCell({ dir: join(spec.dir, "world"), arm: spec.arm, program: { kind: spec.kind, bin: spec.programEntry }, openrig: spec.openrigEntry,
-      realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null });
+      realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null, claudeEnv: c.claudeEnv ?? null });
   } catch (error) {
     outcome = { result: "NOT RUN", reason: `the seat didn't open: ${String(error.message ?? error).split("\n")[0]}`, detail: String(error.stack ?? error).slice(0, 4000) };
   }
@@ -292,8 +344,9 @@ function resultMarkdown({ generatedAt, pins, cells }) {
     "",
     `- OpenRig: ${pins.openrig.version} (package tree ${pins.openrig.packageTree?.sha256.slice(0, 16) ?? "not read"}…, entry point ${pins.openrig.entryPointSha256.slice(0, 16)}…)`,
     ...programs,
-    `- tmux ${pins.host.tmux}, node ${pins.host.node}, ${pins.host.os} (${pins.host.kernel})`,
+    `- tmux ${pins.host.tmux ?? `unavailable (${pins.host.tmuxUnavailable})`} at ${pins.host.tmuxPath}${pins.host.tmuxSha256 ? ` (sha256 ${pins.host.tmuxSha256.slice(0, 16)}…)` : ""}${pins.host.tmuxRequested ? ", requested with --tmux" : ""}, node ${pins.host.node}, ${pins.host.os} (${pins.host.kernel})`,
     `- Expected results: ${pins.expected.path}, sha256 ${pins.expected.sha256}`,
+    `- Suite: ${pins.suite?.commit ?? "commit unknown"}${pins.suite?.clean === false ? " (with uncommitted changes)" : ""}; ${Object.entries(pins.suite?.files ?? {}).map(([d, t]) => `${d} ${t.sha256.slice(0, 16)}…`).join(", ")}`,
     `- Containment: ${pins.containment.ok ? "loopback-only network namespace per cell" : `none (${pins.containment.reason})`}`,
     "",
     "| Case | Title | Program | Result | Level | Why |",

@@ -1,3 +1,9 @@
+import { hookBridgeRoutes } from "./routes/hook-bridge.js";
+import type { RunnerChannel } from "./domain/runner-channel.js";
+import { CoreAppJob } from "./domain/core-app-job.js";
+import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
+import { coreAppRoutes } from "./routes/core-app.js";
+import { CoreAppAccess } from "./domain/core-app-access.js";
 import { EnvironmentLifecycle } from "./domain/environment-lifecycle.js";
 import { EnvironmentPlatform, type EnvironmentDriver } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
@@ -37,8 +43,11 @@ import type { DiscoveryRepository } from "./domain/discovery-repository.js";
 import type { ClaimService } from "./domain/claim-service.js";
 import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
+import { rigDeliveryDrainRoutes } from "./routes/rig-delivery-drain.js";
 import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
 import { teamOperationsCapabilities } from "./domain/team-operations.js";
+import { MEMBER_CONNECTION_CONTRACT, ROUTE_DECLARATIONS } from "./domain/connection-contract.js";
+import { resolveMemberConnection } from "./domain/member-connection.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -152,6 +161,7 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
+  runnerChannel?: RunnerChannel;
   environmentDriver?: EnvironmentDriver;
   environmentArtifactRoot?: string;
   environmentStateRoot?: string;
@@ -231,6 +241,9 @@ export interface AppDeps {
   /** S01 — the wake-or-escalate ladder's heartbeat + open-escalations count (ADDITIVE on
    *  healthz; absent = legacy body). Part of the operator rung's stated delivery floor. */
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
+  /** #3315 — whether the daemon reaches its tmux server(s), a separate axis from the daemon being up: healthz keeps
+   *  `status: "ok"` and adds `terminals` (ADDITIVE; absent = legacy body). */
+  terminalReachability?: import("./domain/terminal-server-reachability.js").TerminalServerReachability;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
   shadowCapture?: import("./domain/shadow-capture.js").ShadowCapture;
@@ -366,6 +379,7 @@ export interface AppDeps {
    * auto share one back-half state machine — no second restore path).
    */
   compactionEnforcer?: ClaudeCompactionEnforcer;
+  piCompactionService?: import("./domain/pi-compaction-service.js").PiCompactionService;
   /**
    * GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator, constructed once in startup and
    * injected so SeatHandoverService.commit()'s re-key call actually FIRES (dev-driver's fold added
@@ -376,6 +390,8 @@ export interface AppDeps {
   agentActivityStore?: AgentActivityStore;
   seatAttentionReconciler?: import("./domain/seat-attention-reconciler.js").SeatAttentionReconciler;
   activityHookToken?: string;
+  /** Slice 13: opted-in Claude seats' hook bridge (the waiters' routes and the seat preference). */
+  hookBridge?: import("./domain/hook-bridge.js").HookBridge;
   serviceOrchestrator?: import("./domain/service-orchestrator.js").ServiceOrchestrator;
   composeAdapter?: import("./adapters/compose-services-adapter.js").ComposeServicesAdapter;
   uiDistDir?: string | null;
@@ -621,6 +637,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("podBundleSourceResolver" as never, deps.podBundleSourceResolver);
     c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
     c.set("transcriptStore" as never, deps.transcriptStore);
+    c.set("runnerChannel" as never, deps.runnerChannel);
     c.set("sessionTransport" as never, deps.sessionTransport);
     c.set("askService" as never, deps.askService);
     c.set("wakeResolveService" as never, deps.wakeResolveService);
@@ -679,6 +696,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("healthCheckpoints" as never, deps.healthCheckpoints);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("compactionEnforcer" as never, deps.compactionEnforcer);
+    c.set("piCompactionService" as never, deps.piCompactionService);
     c.set("occupantInvalidator" as never, deps.occupantInvalidator);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);
@@ -689,6 +707,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("seatActivityService" as never, deps.seatActivityService);
     c.set("seatStructuralActivityService" as never, deps.seatStructuralActivityService);
     c.set("activityHookToken" as never, deps.activityHookToken);
+    c.set("hookBridge" as never, deps.hookBridge);
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);
     c.set("composeAdapter" as never, deps.composeAdapter);
     c.set("kernelBootTracker" as never, deps.kernelBootTracker);
@@ -777,8 +796,11 @@ export function createApp(deps: AppDeps): Hono {
     // S01 — the wake ladder's heartbeat is half of the operator rung's honest delivery
     // floor (escalation view + daemon-health); same additive contract.
     const wakeLadder = deps.wakeLadderStatus ? { wakeLadder: deps.wakeLadderStatus.snapshot() } : {};
+    // #3315 — the daemon answering (status "ok") is not its terminals answering: `terminals` says whether its tmux
+    // server is reachable, from memory, without calling tmux. ADDITIVE; absent = legacy body.
+    const terminals = deps.terminalReachability ? { terminals: deps.terminalReachability.snapshot() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -792,12 +814,21 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...terminals,
     });
   });
 
   app.route("/api/rigs", rigsRoutes);
+  app.route("/api/rigs/:rigId/delivery-drain", rigDeliveryDrainRoutes);
   app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
   app.get("/api/team-operations/capabilities", (c) => c.json(teamOperationsCapabilities()));
+  // What each delivery route declares it supports, and with ?session=, the route and declaration of the member that
+  // address names.
+  app.get("/api/member-connection/capabilities", (c) => {
+    const member = c.req.query("session")?.trim();
+    return c.json({ contract: MEMBER_CONNECTION_CONTRACT, routes: ROUTE_DECLARATIONS,
+      ...(member ? { member: resolveMemberConnection(deps.rigRepo.db, deps.queueRepo, member) } : {}) });
+  });
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
@@ -859,6 +890,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/provider", providerRoutes());
   app.route("/api/environments", environmentRoutes);
   app.route("/api/seat", seatRoutes);
+  app.route("/api/hook-bridge", hookBridgeRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());
   app.route("/api/queue", queueRoutes());
@@ -867,6 +899,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
+  const coreAppAccess = deps.queueRepo ? new CoreAppAccess(deps.queueRepo.db, deps.queueRepo) : undefined;
+  app.route("/api/apps", coreAppRoutes({ access: coreAppAccess, operatorToken: deps.missionControlBearerToken,
+    job: coreAppAccess && deps.queueRepo && deps.missionControlWriteContract
+      ? new CoreAppJob(coreAppAccess, deps.queueRepo, deps.eventBus, deps.missionControlWriteContract, new MissionControlActionLog(deps.queueRepo.db)) : undefined }));
   app.route(
     "/api/mission-control",
     missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),

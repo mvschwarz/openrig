@@ -114,6 +114,25 @@ describe("rig launch --seats", () => {
     expect(logs.join("\n")).not.toContain("Launched");
   });
 
+  it.each([
+    ["no saved snapshot names this seat yet, so which launch path restore takes for it isn't known."],
+    ["restore takes this seat's runtime from its resume token, which this read doesn't know."],
+    ["this seat has no saved startup context, so this read can't settle whether restore resumes its saved conversation or starts it fresh, or which permission that path uses."],
+  ])("--plan prints an unsettled target's permission as unknown with the reason: %s", async (reason) => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 200,
+        data: { ok: true, planOnly: true, snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          targetNodes: [{ nodeId: "n-1", logicalId: "dev.driver", permission: { basis: "unknown", runtime: "claude-code", summary: `Unknown: ${reason}` } }],
+          nonTargetEffects: { mode: "detach_and_hold", reason: "operator hold", affected: [{ logicalId: "dev.guard", reason: "operator hold" }] } },
+      },
+    });
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--hold-reason", "operator hold", "--plan"]);
+    expect(logs.join("\n")).toContain(`Targets:\n  dev.driver: Unknown: ${reason}`);
+    expect(logs.join("\n")).not.toContain("On restore");
+  });
+
   it("passes --plan through and renders non-target effects without claiming launch", async () => {
     const deps = makeDeps({
       "launch-subset": {
@@ -122,6 +141,8 @@ describe("rig launch --seats", () => {
           ok: true,
           planOnly: true,
           snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          targetNodes: [{ nodeId: "n-1", logicalId: "dev.driver",
+            permission: { basis: "planned", summary: "On restore: --permission-mode acceptEdits, from OpenRig's team default (no policy or seat choice is recorded)." } }],
           nonTargetEffects: {
             mode: "detach_and_hold",
             reason: "operator hold",
@@ -144,6 +165,8 @@ describe("rig launch --seats", () => {
       undefined,
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
+    // Each target and the permission this launch will start it with.
+    expect(logs.join("\n")).toContain("Targets:\n  dev.driver: On restore: --permission-mode acceptEdits, from OpenRig's team default");
     expect(logs.join("\n")).toContain("dev.guard: operator hold");
     expect(process.exitCode).toBeUndefined();
   });
@@ -471,7 +494,9 @@ describe("rig launch --seats", () => {
     const cmd = launchCommand(deps);
     await cmd.parseAsync(["node", "rig", "rig-1", "dev.driver"]);
 
-    expect(logs.some((l) => l.includes("already running"))).toBe(true);
+    // A live session isn't proof its agent is running, so the line says what OpenRig knows.
+    expect(logs.some((l) => l.startsWith("Node dev.driver has a live session in rig ")
+      && l.endsWith(", so it wasn't relaunched. Its agent isn't proven running."))).toBe(true);
     expect(logs.some((l) => l.includes("Launched"))).toBe(false);
   });
 
@@ -562,6 +587,30 @@ describe("rig launch --seats", () => {
     await cmd.parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver,typo.seat"]);
 
     expect(errors.some((l) => l.includes("Unmatched") && l.includes("typo.seat"))).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("reports a --seats name more than one seat answers to, beside the seats it launched", async () => {
+    const message = "\"dev-driver\" matches more than one seat in rig \"rig-1\": dev.driver (dev-driver@rig-1), ops.other (dev-driver). Name one by its logical id.";
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 201,
+        data: {
+          ok: true,
+          launched: [{ nodeId: "n2", logicalId: "dev.guard", status: "fresh" }],
+          held: [],
+          alreadyRunning: [],
+          failedTargets: [],
+          ambiguousSeats: [{ seat: "dev-driver", candidates: [{ logicalId: "dev.driver", sessionName: "dev-driver@rig-1" }, { logicalId: "ops.other", sessionName: "dev-driver" }], message }],
+        },
+      },
+    });
+
+    const cmd = launchCommand(deps);
+    await cmd.parseAsync(["node", "rig", "rig-1", "--seats", "dev-driver,dev.guard"]);
+
+    expect(logs.some((l) => l.includes("Launched: dev.guard"))).toBe(true);
+    expect(errors).toContain(message);
     expect(process.exitCode).toBe(1);
   });
 });
