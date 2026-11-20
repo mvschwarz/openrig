@@ -47,7 +47,7 @@ These change how recovery and delivery decide. This release doesn't claim a meas
 
 A workflow instance can be bound to a pod. A workflow packet's Continuation line names `--evidence-ref` when its step needs a receipt, as `rig workflow show` does, and `rig workflow route` and `rig workflow resume` point to that exact command. Scope and proof default to the calling rig's project. Current-state progress updates carry a timestamp. An empty plan lock written with CRLF line endings is refused. Block notes are kept beside continuations. ([#3161](https://github.com/mvschwarz/openrig/pull/3161), [#3533](https://github.com/mvschwarz/openrig/pull/3533), [#3151](https://github.com/mvschwarz/openrig/pull/3151), [#3156](https://github.com/mvschwarz/openrig/pull/3156), [#3517](https://github.com/mvschwarz/openrig/pull/3517), [#3499](https://github.com/mvschwarz/openrig/pull/3499))
 
-One workflow's unreadable mission no longer hides the attention view's other outcomes. A renamed project keeps its rows by its declared former ids, and rows no project claims are counted. A boundary setting's change is recorded on the event stream. ([#3492](https://github.com/mvschwarz/openrig/pull/3492), [#3267](https://github.com/mvschwarz/openrig/pull/3267), [#3373](https://github.com/mvschwarz/openrig/pull/3373))
+One workflow's unreadable mission no longer hides the attention view's other outcomes. A renamed project keeps its rows by its declared former ids, and rows no project claims are counted. Changes to `files.allowlist` and `progress.scan_roots` through the daemon's settings API are recorded on the event stream on a best-effort basis after saving; direct `rig config set` and `rig config reset` writes are not covered. ([#3492](https://github.com/mvschwarz/openrig/pull/3492), [#3267](https://github.com/mvschwarz/openrig/pull/3267), [#3373](https://github.com/mvschwarz/openrig/pull/3373))
 
 ## Settings, seats and tools
 
@@ -60,7 +60,8 @@ The TUI degrades its control socket instead of ending the launcher, completes co
 ## Known limits
 
 - While a tmux server is gone, a stale probe observation can still release or reapply the delivery hold. Later observations correct it, with no guaranteed recovery time. The outage record is in memory, so a daemon restarted during a loss records it again.
-- A restore can still read a Claude seat as resumed before Claude has drawn its screen, and a send can still land on Claude's workspace trust dialog. Check the seat's screen after a restore before relying on it.
+- A restore or `rig start` can label a Claude seat `resumed` before its conversation is confirmed, including when Claude reports that no conversation was found. A send can still land on Claude's workspace trust dialog. Check the seat's screen after a restore or start before relying on it.
+- A `rig send` message sent while Claude's `AskUserQuestion` dialog is open can become the answer to that question. This was observed on Claude Code 2.1.322 and 2.1.323 with both OpenRig 0.7.19 and 0.7.20.
 - Linked Codex configuration files keep version-specific hook-trust limits, as in 0.7.19. This release doesn't migrate existing noncanonical state or include the linked-path alias change. Review any hook prompt yourself; don't treat this upgrade as prior consent.
 - The seat pool's migration and stored block apply on upgrade even though nothing arms a pool.
 - A return route records where questions should go; it doesn't guarantee arrival. Choice prompts and other hosts keep their own paths.
