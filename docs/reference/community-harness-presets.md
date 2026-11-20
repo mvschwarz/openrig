@@ -297,6 +297,29 @@ CLI.
 
 Copy both and maintain them as your own.
 
+## An example: agy
+
+[`community-harness-examples/agy/`](community-harness-examples/agy/) has a preset and a small launcher for the
+Antigravity CLI (`agy`). It was checked once, with agy 1.5.13 and Gemini 4 Neon on one account. It isn't a
+Google-supported integration, and it doesn't use `agy acp`.
+- **A fresh launch spends one small model turn.** agy allocates a conversation id only at its first prompt. So the
+  launcher runs one headless turn (`agy -p "Reply with exactly: ready" --output-format json`), reads `conversation_id`
+  from its JSON, reports it, then opens that conversation with `agy --conversation <id>`.
+- **The resume check:** `agy --conversation <unknown id>` doesn't fail; it starts a new conversation without refusing.
+  So on a resume the launcher checks that `conversations/<id>.db` exists in the seat's agy home. When it doesn't, the
+  launcher reports `error: "missing"` and starts nothing.
+- **Setup goes in the preset's `command`.** The seat's pane gets only the daemon's minimal environment. So the preset
+  passes the seat's agy home, the agy executable and the folder holding `rig` as the launcher's arguments (`--agy-home`,
+  `--agy`, `--rig-path`), and agy must be reachable from the pane.
+- **Let agy run `rig`:** agy asks before each shell command. Allowing `rig` in the seat's own agy settings,
+  `permissions.allow: ["command(rig)"]` in `.gemini/antigravity-cli/settings.json` under the seat's agy home, removed
+  those prompts in the check. OpenRig relays no approvals.
+- **What OpenRig reads:** the seat's effective model is unknown. Activity is read from the screen only. In the one
+  check, the seat read `working` while agy waited at its prompt; that's a suspected false positive, and its cause is
+  unknown.
+
+Copy both and maintain them as your own.
+
 ## An example: Pi's terminal UI
 
 [`community-harness-examples/pi-tui/`](community-harness-examples/pi-tui/) has a preset and a small launcher that run Pi's
