@@ -201,8 +201,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   private resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
   private resolveHooksEnabled?: () => Promise<boolean>;
-  // OPR.0.4.1.10 FR-B — absolute path to the daemon's own shipped activity-relay.cjs,
-  // resolved by startup from import.meta.dirname. Used by ensureCodexActivityHooks
+  // OPR.0.4.1.10 FR-B — absolute path to the daemon's own staged activity-relay.cjs,
+  // resolved by startup under OPENRIG_HOME. Used by ensureCodexActivityHooks
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
   // version-matched to the running daemon (NOT ${PLUGIN_ROOT}, NOT a per-cwd copy).
   private activityRelayPath?: string;

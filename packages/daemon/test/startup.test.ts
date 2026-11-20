@@ -864,6 +864,12 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
       const configPath = path.join(codexHome, "config.toml");
       expect(fs.readFileSync(configPath, "utf8")).toContain(`[projects."${workspace}"]`);
       expect(fs.existsSync(path.join(daemonHome, ".codex", "config.toml"))).toBe(false);
+      const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+      if (!(adapter instanceof CodexRuntimeAdapter)) throw new Error("expected the production Codex adapter");
+      adapter.ensureCodexActivityHooks();
+      const relay = path.join(OPENRIG_HOME, "runtime/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
+      expect(fs.readFileSync(configPath, "utf8")).toContain(`node "${relay}"`);
+      expect(fs.readFileSync(relay)).toEqual(fs.readFileSync(path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs")));
     } finally {
       result?.db.close();
       restoreEnv(saved);
