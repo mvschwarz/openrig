@@ -329,7 +329,7 @@ export class RigInstantiator {
 // -- Pod-aware instantiator (AgentSpec reboot) --
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
+import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS, poolAdvisories } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
@@ -658,19 +658,21 @@ export class PodRigInstantiator {
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
+    // #3395: the pool advisories join this launch path's warnings once (the structured preflight does not add them)
+    const warnings = [...preflight.warnings, ...poolAdvisories(raw)];
     if (!preflight.ready) {
-      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
+      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings };
     }
     // A pod added to a running rig inherits the rig's layers; stop before it exists if a required one is gone,
     // when at least one added member reads startup files.
     if (opts?.targetRigId && targetRig && rigSpec.pods.some((pod) => pod.members.some((m) => this.runtimeTakesStartupFiles(m.runtime)))) {
       const missingInherited = this.inheritedStartupFileErrors(opts.targetRigId, targetRig.rig.name);
       if (missingInherited.length > 0) {
-        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings: preflight.warnings };
+        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings };
       }
     }
 
-    return this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, opts);
+    return this.materializeValidatedSpec(rigSpec, rigRoot, warnings, opts);
   }
 
   /**
@@ -1034,7 +1036,11 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
-    return this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+    const launched = await this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+    // #3395: the pool advisories join this launch path's warnings once (the shared launch core does not add them)
+    const pool = poolAdvisories(raw);
+    if (!launched.ok || pool.length === 0) return launched;
+    return { ...launched, result: { ...launched.result, warnings: [...(launched.result.warnings ?? []), ...pool] } };
   }
 
   /**
@@ -1217,6 +1223,8 @@ export class PodRigInstantiator {
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
     });
+    // #3395: the pool advisories join this launch path's warnings once, here; the launch half below does not add them
+    preflight.warnings.push(...poolAdvisories(rawSpec));
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }

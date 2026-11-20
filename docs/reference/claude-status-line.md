@@ -131,7 +131,10 @@ blocker once and retains the existing durable wake delivery behavior.
 A parked row's watchdog wake that a Claude seat refuses at its usage-limit
 menu records `usage limit until <reset>` and retries at that stated reset,
 when OpenRig holds the seat's own typed usage-limit report with a readable
-reset. Otherwise, and for a Codex seat, the ordinary retry applies.
+reset. Otherwise, and for a Codex seat, the ordinary retry applies. The hold
+is rechecked: a seat that recovers is retried sooner, and a changed or
+unreadable report returns to the ordinary retry, so the wake can come before
+the stated reset.
 
 Authentication, billing and overloaded errors are not classified as usage
 limits. Claude limit banners are not scraped from the terminal, and older

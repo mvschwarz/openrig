@@ -2577,6 +2577,46 @@ state: 2-named
       }
     });
 
+    // #3395 C6/C7: the advisory text, counted in the whole outcome, so a second copy anywhere fails
+    const advisory = "dev.impl pool.max: must be at least min (4); pool not used";
+    const occurrences = (outcome: unknown) => JSON.stringify(outcome).split(advisory).length - 1;
+
+    it("Launch paths (`materializeStructured`, `launchMaterialized`, `addMemberToPod`) return the pool advisory in their warnings exactly once.", async () => {
+      const { db, inst, clearOccupancy } = poolSetup();
+      try {
+        const bad = { max: 2, min: 4 };
+        const structured = await inst.materializeStructured(RigSpecCodec.parse(yamlSpec(bad)), RIG_ROOT);
+        expect(structured.ok, JSON.stringify(structured)).toBe(true);
+        if (!structured.ok) return;
+        expect(structured.result.warnings.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(structured)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const launched = await inst.launchMaterialized(yamlSpec(bad), RIG_ROOT, structured.result.rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        if (!launched.ok) return;
+        expect(launched.result.warnings?.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(launched)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const clean = await inst.launchMaterialized(yamlSpec({ max: 3 }), RIG_ROOT, structured.result.rigId);
+        expect(JSON.stringify(clean)).not.toContain(" pool.");
+      } finally {
+        db.close();
+      }
+    });
+
+    it("Import returns the pool advisory in `warnings` exactly once (C6, through the load front).", async () => {
+      const { db, inst } = poolSetup();
+      try {
+        const imported = await inst.instantiate(yamlSpec({ max: 2, min: 4 }, "import-rig"), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        expect(occurrences(imported)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
     it("A fresh launch of the model seat from its launch recipe leaves the stored block as it is.", async () => {
       const { db, rigRepo, inst, clearOccupancy } = poolSetup();
       try {
