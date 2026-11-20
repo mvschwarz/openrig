@@ -301,7 +301,10 @@ export class SeatColdStarter {
           .run(now.toISOString(), seat.nodeId);
         return refuse("seat's tmux session is live");
       }
-    } catch { /* an unprobeable session is not positive liveness; continue */ }
+    } catch {
+      // R5: a probe that throws is not evidence of absence — fail closed and leave the seat alone.
+      return refuse("seat's tmux probe failed; leaving the seat alone");
+    }
 
     const ledger = this.ledgerRefuses(seat.nodeId, now);
     if (ledger === "interval") return refuse("an attempt was made recently");

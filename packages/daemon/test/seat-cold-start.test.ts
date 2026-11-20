@@ -316,6 +316,19 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  it("leaves the seat alone when its tmux probe throws (fail closed)", async () => {
+    const f = fixture();
+    f.deps.hasSession = async name => {
+      if (name === "dev-impl@fleet") throw new Error("tmux probe failed");
+      return true; // a peer is live, so only the target probe failure can block the launch
+    };
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    expect(f.logs.some(line => line.includes("probe"))).toBe(true);
+    f.db.close();
+  });
+
   it.each(["stop", "opt-out", "identity"])("rechecks %s after awaited probes and before launch", async change => {
     const f = fixture();
     f.deps.hasSession = async name => {
