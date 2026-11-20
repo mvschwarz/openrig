@@ -31,6 +31,18 @@ describe("ProcessCensus", () => {
     expect(list).toHaveBeenCalledTimes(2);
   });
 
+  it("refreshes once for concurrent identity rechecks and retries after a failed recheck", async () => {
+    const list = vi.fn(async () => ROWS);
+    const census = new ProcessCensus({ list, now: () => 0 });
+    await census.list();
+    list.mockRejectedValueOnce(new Error("process list unavailable"));
+    const checks = await Promise.allSettled([census.listFresh(), census.listFresh()]);
+    expect(checks.map(check => check.status)).toEqual(["rejected", "rejected"]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(await census.list()).toEqual(ROWS);
+    expect(list).toHaveBeenCalledTimes(3);
+  });
+
   it("a FAILED enumeration rejects every coalesced caller, caches nothing, and the next call retries", async () => {
     let calls = 0;
     const list = vi.fn(async () => {

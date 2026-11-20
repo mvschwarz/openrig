@@ -43,6 +43,17 @@ export class ProcessCensus {
     if (this.lastRows && this.now() - this.lastAt <= this.freshnessMs) {
       return this.lastRows;
     }
+    return this.enumerate();
+  }
+
+  /** Recheck identity with an enumeration started after this call. An earlier in-flight ps might
+   * have sampled the process before our final pane lookup. Concurrent waiters share the next ps. */
+  async listFresh(): Promise<ProcessRow[]> {
+    try { await this.inFlight; } catch { /* This earlier enumeration cannot satisfy the recheck. */ }
+    return this.enumerate();
+  }
+
+  private enumerate(): Promise<ProcessRow[]> {
     if (this.inFlight) return this.inFlight;
     this.inFlight = this.listFn().then(
       (rows) => {
@@ -52,7 +63,8 @@ export class ProcessCensus {
         return rows;
       },
       (err) => {
-        // Honest failure: nothing cached, next call retries.
+        // A failed identity recheck invalidates the earlier snapshot as well.
+        this.lastRows = null;
         this.inFlight = null;
         throw err;
       },

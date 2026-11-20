@@ -33,10 +33,13 @@ function fixture(runtime = "claude-code", bulk = true) {
   const path = join(dir, `${id}.jsonl`);
   const claudeRecord = (timestamp: string | undefined = stamp, model = "response-model") => JSON.stringify({ timestamp, type: "assistant", message: { role: "assistant", model, content: "PRIVATE_MARKER_NOT_A_MODEL" } }) + "\n";
   const rpc = runtime === "pi" || runtime === "omp";
-  writeFileSync(path, rpc ? [
+  const rpcRecord = (model: string) => [
     { type: "session", version: 3, id: "pi-session", timestamp: new Date(boot).toISOString(), cwd: dir },
-    { type: "message", id: "own-message", timestamp: stamp, message: { role: "assistant", provider: "example", model: "response-model", stopReason: "stop", content: [] } },
-  ].map((r) => JSON.stringify(r)).join("\n") + "\n" : claudeRecord());
+    { type: "message", id: "own-message", timestamp: stamp, message: { role: "assistant", provider: "example", model, stopReason: "stop", content: [] } },
+  ].map(r => JSON.stringify(r)).join("\n") + "\n";
+  writeFileSync(path, rpc ? rpcRecord("response-model") : claudeRecord());
+  const fallbackPath = runtime === "omp" ? join(dir, "fallback.jsonl") : path;
+  if (runtime === "omp") writeFileSync(fallbackPath, rpcRecord("fallback-model"));
   identities.upsert({ nodeId: node.id, verdict: "verified", evidenceSource: "pane_process", reason: null,
     evidence: { registeredPane: "%1", observedPid: 10, observedCommand: "claude", matchedLayer: 1 }, sessionName: "editor@studio", observedAt: stamp });
   let command = `${runtime === "codex" ? "codex" : "claude"} --session-id ${id}`;
@@ -56,8 +59,8 @@ function fixture(runtime = "claude-code", bulk = true) {
     model: "openrouter/z-ai/glm-5.3", updatedAt: stamp };
   const ompTuiState = vi.fn(() => ({ ...ompState }));
   const reader = new CurrentModelReader({ sessions, identities, runnerObservations: reports, ompTuiState,
-    context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
-    codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
+    context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: fallbackPath, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
+    codexRollout: () => fallbackPath, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
     readAllPaneProcesses: bulk ? readAllPaneProcesses : undefined, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
   });
   const input = { nodeId: node.id, canonicalSessionName: "editor@studio", runtime, sessionStatus: "running" };
@@ -251,6 +254,56 @@ it("reads the native writer through nested wrappers and rejects an unrelated liv
   expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: f.ompState.model });
   f.processRows[2]!.ppid = 31;
   expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", model: null });
+});
+
+it.each(["exited", "pid-reused", "moved", "unavailable"])("withholds the native model when its writer is %s at the final census", async change => {
+  const f = fixture("omp-tui");
+  const [shell, writer] = f.processRows;
+  f.list.mockResolvedValueOnce(f.processRows);
+  if (change === "unavailable") f.list.mockRejectedValueOnce(new Error("process census failed"));
+  else if (change === "exited") f.list.mockResolvedValueOnce([shell!]);
+  else f.list.mockResolvedValueOnce([shell!, { ...writer!, ...(change === "moved" ? { ppid: 99 } : { startedAt: f.stamp }) }]);
+
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", model: null,
+    reason: change === "unavailable" ? "native-read-unavailable" : "occupant-changed-during-read" });
+  expect(f.list).toHaveBeenCalledTimes(2);
+});
+
+it("waits out a process census already in flight before the native model's final pane check", async () => {
+  const f = fixture("omp-tui");
+  const census = f.reader.processCensus;
+  await census.list(); // This cached initial snapshot can be served during another caller's ps.
+  let release!: (rows: typeof f.processRows) => void;
+  f.list.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const previous = census.listFresh();
+  await vi.waitFor(() => expect(f.list).toHaveBeenCalledTimes(2));
+  const finalCensus = vi.spyOn(census, "listFresh");
+  const result = f.reader.observe(f.input);
+  await vi.waitFor(() => expect(finalCensus).toHaveBeenCalledOnce());
+  expect(f.getPanePid).toHaveBeenCalledTimes(2);
+  // The earlier census still saw the child. Only the census begun after the pane read sees its exit.
+  f.list.mockResolvedValueOnce([f.processRows[0]!]);
+  release(f.processRows);
+  await previous;
+  expect(await result).toMatchObject({ status: "unknown", model: null, reason: "occupant-changed-during-read" });
+  expect(f.list).toHaveBeenCalledTimes(3);
+});
+
+it("rechecks the current occupant after the final OMP writer census resolves", async () => {
+  const f = fixture("omp-tui");
+  f.list.mockResolvedValueOnce(f.processRows).mockImplementationOnce(async () => {
+    f.sessions.mintOccupantTenure(f.node.id, "replacement");
+    return f.processRows;
+  });
+  expect(await f.reader.observeInventory([f.input])).toMatchObject([{ model: null, reason: "occupant-changed-during-read" }]);
+});
+
+it.each([true, false])("shares one final OMP writer census across inventory seats (bulk panes: %s)", async bulk => {
+  const f = fixture("omp-tui", bulk);
+  f.list.mockResolvedValueOnce(f.processRows).mockResolvedValueOnce([]);
+  const observations = await f.reader.observeInventory([f.input, f.input]);
+  expect(observations.map(row => row.reason)).toEqual(["occupant-changed-during-read", "occupant-changed-during-read"]);
+  expect(f.list).toHaveBeenCalledTimes(2);
 });
 
 it("reads the native OMP model from the current pane's extension, fencing replacements and stale samples", async () => {

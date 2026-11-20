@@ -11,7 +11,7 @@ import { ProcessCensus } from "../process-census.js";
 import {
   resolveIdentityVerifiedClaudeRecord, resolveIdentityVerifiedPiRecord,
   resolveLiveCodexThreadId, readCurrentPiOccupantModel,
-  type CurrentGenerationDeps, type PiOccupantRecordInput, type PiRecordSelection,
+  type CurrentGenerationDeps, type PiOccupantRecordInput, type PiRecordSelection, type ProcessRow,
 } from "./current-generation-record.js";
 import {
   readClaudeModelObservation, readCodexModelObservation, readPiModelObservation,
@@ -48,7 +48,11 @@ interface Deps {
   now?: () => number;
 }
 type InventoryNode = { nodeId: string; canonicalSessionName: string | null; runtime: string | null; sessionStatus: string | null };
-type PendingObservation = { pane: string | null; finish: (pid: number | null, unavailableReason?: string) => ModelObservation };
+type PendingObservation = {
+  pane: string | null;
+  recheckOmpWriter?: boolean;
+  finish: (pid: number | null, unavailableReason?: string, finalProcesses?: ProcessRow[] | null) => ModelObservation;
+};
 type Selection = { ok: true; path: string; notBeforeMs?: number } | { ok: false; reason: string };
 type Binding = { tmuxSession: string | null; tmuxPane: string | null };
 /** The verified current Pi runner plus its newest own turn, read with the occupant unchanged throughout. */
@@ -186,36 +190,40 @@ export class CurrentModelReader {
     return fact;
   }
 
-  /** Two bulk pane queries per inventory, one shared lazy process census, no per-seat tmux execs.
-   * The final query starts AFTER all record selections/reads, including cache hits. */
-  async observeInventory(nodes: InventoryNode[]): Promise<ModelObservation[]> {
-    const listProcesses = this.processCensus.cycleLister();
-    if (!this.deps.readAllPaneProcesses) {
-      // Native readers keep their existing per-seat checks; report callbacks finish after every peer's await.
-      const observations = await Promise.all(nodes.map(n => ["claude-code", "codex", "pi", "omp", "omp-tui"].includes(n.runtime ?? "")
-        ? this.observe(n, listProcesses) : this.prepare(n, { ...this.deps.native, listProcesses })));
-      return observations.map(p => "finish" in p ? p.finish(null) : p);
-    }
-    let before: ReturnType<NonNullable<Deps["readAllPaneProcesses"]>> | undefined;
-    const native = { ...this.deps.native, listProcesses, getPanePid: async (pane: string) => {
-      before ??= this.deps.readAllPaneProcesses!();
-      return (await before)?.get(pane)?.pid ?? null;
-    } };
-    const prepared = await Promise.all(nodes.map(n => this.prepare(n, native)));
-    if (!prepared.some(p => "finish" in p && p.pane !== null)) return prepared.map(p => "finish" in p ? p.finish(null) : p);
-    let after: Map<string, { pid: number | null }> | null = null;
-    try { after = await this.deps.readAllPaneProcesses(); } catch { /* UNKNOWN, never a fallback subprocess storm. */ }
-    return prepared.map(p => "finish" in p ? p.finish(p.pane === null ? null : after?.get(p.pane)?.pid ?? null, after === null ? "native-read-unavailable" : "pane-unavailable") : p);
+  /** Both pane samples are bulk reads when supported. A native OMP writer needs one further
+   * process census, shared by all such seats after their record and pane reads complete. */
+  observeInventory(nodes: InventoryNode[]): Promise<ModelObservation[]> {
+    return this.observeNodes(nodes, this.processCensus.cycleLister(), this.deps.readAllPaneProcesses);
   }
 
   async observe(node: InventoryNode, listProcesses = this.processCensus.cycleLister()): Promise<ModelObservation> {
-    const prepared = await this.prepare(node, { ...this.deps.native, listProcesses });
-    if (!("finish" in prepared)) return prepared;
-    if (prepared.pane === null) return prepared.finish(null);
-    let finalPid: number | null = null;
-    let unavailableReason = "pane-unavailable";
-    try { finalPid = await this.deps.native.getPanePid(prepared.pane); } catch { unavailableReason = "native-read-unavailable"; }
-    return prepared.finish(finalPid, unavailableReason);
+    const [result] = await this.observeNodes([node], listProcesses);
+    return result!;
+  }
+
+  private async observeNodes(nodes: InventoryNode[], listProcesses: CurrentGenerationDeps["listProcesses"],
+    readAllPanes?: Deps["readAllPaneProcesses"]): Promise<ModelObservation[]> {
+    let before: ReturnType<NonNullable<typeof readAllPanes>> | undefined;
+    const getPanePid = readAllPanes ? async (pane: string) => {
+      before ??= readAllPanes();
+      return (await before)?.get(pane)?.pid ?? null;
+    } : this.deps.native.getPanePid;
+    const prepared = await Promise.all(nodes.map(node => this.prepare(node, { ...this.deps.native, listProcesses, getPanePid })));
+    let after: ReturnType<NonNullable<typeof readAllPanes>> | undefined;
+    const panes = await Promise.all(prepared.map(async observation => {
+      if (!("finish" in observation) || observation.pane === null) return { pid: null };
+      try {
+        if (!readAllPanes) return { pid: await this.deps.native.getPanePid(observation.pane) };
+        after ??= readAllPanes();
+        const rows = await after;
+        return { pid: rows?.get(observation.pane)?.pid ?? null, reason: rows ? "pane-unavailable" : "native-read-unavailable" };
+      } catch { return { pid: null, reason: "native-read-unavailable" }; }
+    }));
+    const needsProcesses = prepared.some((observation, i) => "finish" in observation && observation.recheckOmpWriter && panes[i]!.pid !== null);
+    const finalProcesses = needsProcesses ? await this.processCensus.listFresh().catch(() => null) : null;
+    // No await between the final process snapshot, occupant/sidecar rechecks and publication.
+    return prepared.map((observation, i) => "finish" in observation
+      ? observation.finish(panes[i]!.pid, panes[i]!.reason, finalProcesses) : observation);
   }
 
   private async prepare(node: InventoryNode, native: CurrentGenerationDeps): Promise<ModelObservation | PendingObservation> {
@@ -254,12 +262,15 @@ export class CurrentModelReader {
         const process = ompProcessInPane(await native.listProcesses(), pid, state);
         const started = Date.parse(process?.startedAt ?? "");
         if (!Number.isFinite(started)) return unknown("record-identity-missing-or-ambiguous");
-        return { pane: binding.tmuxPane, finish: (finalPid, unavailableReason = "pane-unavailable") => {
+        return { pane: binding.tmuxPane, recheckOmpWriter: true, finish: (finalPid, unavailableReason = "pane-unavailable", rows) => {
           if (!this.occupantUnchanged(node.nodeId, sessionName, generation, binding, pid, finalPid)) return unknown("occupant-changed-during-read");
           if (!finalPid) return unknown(unavailableReason);
           const latest = read();
           if (!latest?.ready || latest.exited || latest.pid !== state.pid || latest.launchId !== state.launchId ||
               latest.nodeId !== node.nodeId || latest.generation !== state.generation) return unknown("occupant-changed-during-read");
+          if (!rows) return unknown("native-read-unavailable");
+          const currentWriter = ompProcessInPane(rows, finalPid, latest);
+          if (Date.parse(currentWriter?.startedAt ?? "") !== started) return unknown("occupant-changed-during-read");
           if (typeof latest.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(latest.model)) return unknown("model-identifier-unreadable");
           const at = Date.parse(latest.updatedAt), now = (this.deps.now ?? Date.now)();
           if (!Number.isFinite(at) || at < Math.max(boot, started) || at > now || now - at >= FRESHNESS_THRESHOLD_MS) return unknown("model-sample-not-current");
