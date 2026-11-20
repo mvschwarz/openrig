@@ -113,7 +113,8 @@ These facts stay separate on the row:
     member itself. A notice to a creator lists only that creator's rows: when another creator's row joins, the notice moves to
     the next recipient. It says whether the member has read its own pending inbox recently: a check-in, never a receipt or a
     claim. A member with a declared route (a delegation parent or `escalates_to`) gets one finding per unclaimed row at that
-    route instead.
+    route instead. A finding is a diagnostic about its row, not a second assignment: read the row, then resume, route or park
+    it. Closing the finding alone doesn't complete the row, and the sweep closes the finding itself once the row moves.
   - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
   - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.
