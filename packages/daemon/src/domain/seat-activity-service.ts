@@ -284,6 +284,7 @@ export class SeatActivityService {
     if (snapshot.length === 0) return;
     const permissionRevision = seat.permissionRevision;
     const occupant = seat.arbitrated.lastSwap;
+    const readStartedAt = this.now().toISOString();
     seat.permissionPolling = true;
     try {
       const visible = canCapture && this.permissionPromptReader
@@ -304,6 +305,7 @@ export class SeatActivityService {
         updated = true;
       }
       if (!updated) return;
+      seat.permissionReadStartedAt = readStartedAt;
       this.reportPermissionObservation(seatNodeId!, seat, "needs-input-chrome", this.now().toISOString(),
         !claude && visible === null ? "permission_request_unverified" : "permission_prompt");
     } finally {
@@ -672,7 +674,8 @@ export class SeatActivityService {
     if (!seat || seat.retired || (seat.inventory?.runtime ?? "codex") !== "codex" || seat.permissions.size === 0) return null;
     const requests = [...seat.permissions.values()];
     if (requests.some(request => request.confirmed)) return "blocked";
-    const readAt = Date.parse(seat.permissionEvidence?.observedAt ?? "");
+    // When the last read's capture began: a refusal or request during a slow capture comes after what it saw.
+    const readAt = Date.parse(seat.permissionReadStartedAt ?? "");
     const raised = Date.parse(raisedAt ?? "");
     if (requests.some(request => request.nextCheckMs === 0) || !Number.isFinite(readAt)
         || (Number.isFinite(raised) && readAt < raised + PERMISSION_REQUEST_GRACE_MS)) return "unknown";
@@ -1110,6 +1113,8 @@ interface SeatLadderState {
   permissionRevision: number;
   permissionPolling: boolean;
   permissionEvidence: ArbitratedSeatState["needsInputEvidence"];
+  /** When the last applied pane read of the permission requests began; read only by `codexPermissionState`. */
+  permissionReadStartedAt?: string;
   sessionName: string;
   retired: boolean;
   inventory: AdapterRungInventory | null;

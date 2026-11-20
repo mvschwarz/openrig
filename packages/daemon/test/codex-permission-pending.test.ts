@@ -223,6 +223,22 @@ describe("Codex pending permission requests", () => {
     expect(fixture.service.codexPermissionState("seat", second)).toBe("clear");
   });
 
+  it("doesn't clear a refusal that landed during the capture it reads", async () => {
+    const fixture = setup();
+    fixture.request("turn");
+    let finishCapture!: (visible: boolean) => void;
+    fixture.reader.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve; }));
+    fixture.advance(3_000);
+    const polling = fixture.service.pollSeat("session");
+    await vi.waitFor(() => expect(fixture.reader).toHaveBeenCalledOnce());
+    fixture.advance(3_500); // the refusal at 3.2 s comes after this capture began
+    finishCapture(false);
+    await polling;
+    const raisedAt = new Date(0).toISOString();
+    expect(fixture.service.codexPermissionState("seat", raisedAt, new Date(3_200).toISOString())).toBe("unknown");
+    expect(fixture.service.codexPermissionState("seat", raisedAt, new Date(2_900).toISOString())).toBe("clear");
+  });
+
   it("does not resurrect a permission when Stop arrives during capture", async () => {
     let finishCapture!: (visible: boolean) => void;
     const fixture = setup({ reader: () => new Promise(resolve => { finishCapture = resolve; }) });
@@ -386,6 +402,19 @@ describe("real Codex permission hook chain", () => {
     await at(fixture, 1_000);
     expect(ladder.prompt(500)).toBe("unknown");
     expect(ladder.permission()).toBe("unknown");
+  });
+
+  it("the oracle's grace holds at the refusal reader even when the activity read alone would clear it", async () => {
+    const fixture = setup("tmux", "gen-1");
+    await fixture.hook("PermissionRequest");
+    fixture.advance(1_000);
+    const read = makePromptStateReader({ db: fixture.db,
+      // As a seat whose hooks are trusted would read: working, no prompt counted, observed after the refusal.
+      getSeatState: () => ({ activity: "working", needsInput: { count: 0, reason: null },
+        needsInputEvidence: { rung: "lifecycle-hooks", observedAt: new Date(1_000).toISOString() } }),
+      getLatestHook: sessionName => fixture.store.getLatestForNode({ sessionName, order: "arrival" }),
+      getCodexPermissionState: (id, raisedAt, after) => fixture.service.codexPermissionState(id, raisedAt, after) });
+    expect(read(fixture.sessionName, new Date(500).toISOString())).toBe("unknown");
   });
 
   it("with no request tracked (the oracle rebuilt), the hook still reads blocked, fresh or stale, as before", async () => {
