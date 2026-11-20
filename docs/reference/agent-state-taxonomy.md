@@ -70,13 +70,18 @@ Claude's other `StopFailure` errors keep a typed reason in the legacy `agentActi
 field, with `state: unknown` and the raw `error` value in `rawSubtype`.
 `authentication_failed`, `oauth_org_not_allowed` and `cloud_credential_error` read
 `provider_auth_error`; `billing_error` and `account_on_hold` read
-`provider_billing_error`. While fresh and from the current occupant, those two raise
-attention: the row serves the hook over the cached pane reading, and the reason column
-names it. They are not a question, so they hold no send or wake. Any other value,
+`provider_billing_error`. The current occupant's last such failure raises attention
+until a hook shows a newer turn (a prompt, a question to a person, a `Stop` or
+`PostToolBatch`, or another `StopFailure`) or another occupant takes the seat; as for any
+hook, an occupant that can't be told shows nothing. Claude's idle notification and the
+five-minute hook freshness window alone don't end it, and hook freshness is unchanged
+for everything else. The row serves that failure, with its original event time, over the cached pane
+reading, and the reason column names it. It says the last reported failure hasn't been
+superseded, not that OpenRig checked the account; a newer turn doesn't certify a repair.
+A newer picker or permission prompt in the pane outranks it, and a draft in the input box
+doesn't. These failures aren't a question, so they hold no send or wake. Any other value,
 documented or not, reads `provider_error`, stays with the pane reading and raises no
-attention. A newer hook (Claude's idle notification included), an expired report or
-another occupant's report ends it, as for `usage_limit` in this field; a newer picker or
-permission prompt in the pane outranks it, and a draft in the input box doesn't.
+attention.
 
 A handover whose successor started without a required file also raises attention. That's
 a projected guidance file or a guidance startup file marked `required` still missing from

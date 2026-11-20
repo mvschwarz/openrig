@@ -397,49 +397,9 @@ export class AgentActivityStore {
     //      transient; mm2 is unaffected — its daemon carries no occupant_tenures table until 0.5.1).
     //      Ignorance and evidence get DIFFERENT verdicts; the two paths must not collapse.
     // Gate runs only when a resolver is injected (else legacy clock-only, no label).
-    let generationProvenance: "resolved" | "unresolved" | undefined;
-    if (this.resolveOccupantGeneration) {
-      let liveGeneration: string | null;
-      try {
-        liveGeneration = this.resolveOccupantGeneration(nodeId);
-      } catch {
-        // Resolver EXCEPTION (e.g. a transient ledger/db fault) ⇒ DEGRADE to a distinct unknown
-        // branch: never crash the read, never render fresh. Distinct from a clean null (unresolvable).
-        return this.generationDegraded(activity, referenceTime);
-      }
-      const recordedGeneration = activity.generation ?? null;
-      if (liveGeneration !== null && recordedGeneration !== null) {
-        if (this.isRegisteredOccupantGeneration) {
-          let registered: boolean;
-          try {
-            registered = this.isRegisteredOccupantGeneration(nodeId, recordedGeneration);
-          } catch {
-            return this.generationDegraded(activity, referenceTime);
-          }
-          if (!registered) {
-            return this.generationUnresolved(activity, referenceTime, "generation_unresolvable");
-          }
-        }
-        if (recordedGeneration !== liveGeneration) {
-          // A generation followed only by no-launch adoptions is still the live process's (#2796); a launch after it
-          // is what makes it a prior tenure.
-          let continued: boolean;
-          try {
-            continued = this.isOccupantContinuedByAdoption?.(nodeId, recordedGeneration) === true;
-          } catch {
-            return this.generationDegraded(activity, referenceTime);
-          }
-          if (!continued) return this.generationMismatch(activity, referenceTime);
-        }
-        generationProvenance = "resolved";
-      } else {
-        return this.generationUnresolved(
-          activity,
-          referenceTime,
-          liveGeneration === null ? "generation_unresolvable" : "generation_unverifiable",
-        );
-      }
-    }
+    const verdict = this.occupantVerdict(nodeId, activity, referenceTime);
+    if ("demoted" in verdict) return verdict.demoted;
+    const generationProvenance = verdict.provenance;
 
     const eventTime = activity.eventAt ? Date.parse(activity.eventAt) : NaN;
     if (Number.isFinite(eventTime) && referenceTime.getTime() - eventTime > this.freshnessMs) {
@@ -480,6 +440,93 @@ export class AgentActivityStore {
         COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC
       LIMIT 1`).get(nodeId, sessionName, sessionName) as EventPayloadRow | undefined;
     return row ? parseActivityPayload(row.payload) : null;
+  }
+
+  /** The occupant verdict getLatestForNode gives a record (W2a-1, above): a demoted row when the record isn't the
+   *  live occupant's or that can't be told, else the provenance it is delivered with. */
+  private occupantVerdict(nodeId: string, activity: AgentActivity, referenceTime: Date):
+    { demoted: AgentActivity } | { provenance: "resolved" | "unresolved" | undefined } {
+    if (this.resolveOccupantGeneration) {
+      let liveGeneration: string | null;
+      try {
+        liveGeneration = this.resolveOccupantGeneration(nodeId);
+      } catch {
+        // Resolver EXCEPTION (e.g. a transient ledger/db fault) ⇒ DEGRADE to a distinct unknown
+        // branch: never crash the read, never render fresh. Distinct from a clean null (unresolvable).
+        return { demoted: this.generationDegraded(activity, referenceTime) };
+      }
+      const recordedGeneration = activity.generation ?? null;
+      if (liveGeneration !== null && recordedGeneration !== null) {
+        if (this.isRegisteredOccupantGeneration) {
+          let registered: boolean;
+          try {
+            registered = this.isRegisteredOccupantGeneration(nodeId, recordedGeneration);
+          } catch {
+            return { demoted: this.generationDegraded(activity, referenceTime) };
+          }
+          if (!registered) {
+            return { demoted: this.generationUnresolved(activity, referenceTime, "generation_unresolvable") };
+          }
+        }
+        if (recordedGeneration !== liveGeneration) {
+          // A generation followed only by no-launch adoptions is still the live process's (#2796); a launch after it
+          // is what makes it a prior tenure.
+          let continued: boolean;
+          try {
+            continued = this.isOccupantContinuedByAdoption?.(nodeId, recordedGeneration) === true;
+          } catch {
+            return { demoted: this.generationDegraded(activity, referenceTime) };
+          }
+          if (!continued) return { demoted: this.generationMismatch(activity, referenceTime) };
+        }
+        return { provenance: "resolved" };
+      } else {
+        return { demoted: this.generationUnresolved(
+          activity,
+          referenceTime,
+          liveGeneration === null ? "generation_unresolvable" : "generation_unverifiable",
+        ) };
+      }
+    }
+    return { provenance: undefined };
+  }
+
+  /** #3571: the current occupant's last typed Claude authentication or billing failure that no newer turn has
+   *  superseded, or null. Walks the session's recent records newest first by the emitter's order, as getLatestForNode
+   *  orders them. Any record that shows a newer turn ends it: a running record, a question to a person (asked only
+   *  inside a turn), a Stop or PostToolBatch, or another StopFailure (Claude sends StopFailure instead of Stop, so each
+   *  ends its own turn). An idle notification, a compaction or session-start record, or another occupant's record that
+   *  shows no turn doesn't. The failure keeps its original event time, typed reason and raw value, and must be the live
+   *  occupant's by getLatestForNode's generation rules: an unknown, unresolvable or replaced occupant reads null. Only
+   *  the node's newest SOURCE_ORDER_WINDOW records are read. It isn't aged by the freshness window: it reports that the
+   *  last failure hasn't been superseded, not a fresh check of the account. */
+  latestUnsupersededProviderFailure(input: { nodeId?: string | null; sessionName: string; now?: Date }): AgentActivity | null {
+    const sessionName = physicalSessionName(this.db, input.sessionName);
+    const nodeId = input.nodeId ?? this._resolveSession({ sessionName })?.node_id;
+    if (!nodeId) return null;
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE json_extract(payload, '$.sessionName') = ?
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).iterate(nodeId, sessionName) as IterableIterator<EventPayloadRow>;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity) continue;
+      if (activity.state === "running" || activity.state === "needs_input"
+        || activity.rawEvent === "Stop" || activity.rawEvent === "PostToolBatch") return null;
+      if (activity.rawEvent !== "StopFailure") continue;
+      const reason = claudeProviderFailureReason(activity.runtime, activity.rawEvent, activity.rawSubtype);
+      if ((reason !== "provider_auth_error" && reason !== "provider_billing_error") || activity.reason !== reason) return null;
+      const referenceTime = input.now ?? this.now();
+      const verdict = this.occupantVerdict(nodeId, activity, referenceTime);
+      if ("demoted" in verdict) return null;
+      return { ...activity, sampledAt: referenceTime.toISOString(), fallback: false, stale: false,
+        generationProvenance: verdict.provenance };
+    }
+    return null;
   }
 
   /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is REGISTERED FOR THIS NODE and

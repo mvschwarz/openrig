@@ -8,6 +8,7 @@ import {
   arbitratedNeedsInputSignal,
   hookOrPaneActivity,
   providerFailureActivity,
+  retainedProviderFailure,
   getNodeInventoryForAllRigs,
   readAssignedWorkBySession,
   type AssignedWorkCounts,
@@ -306,7 +307,8 @@ export class PsProjectionService {
         // neither, as on the row.
         const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
         const activity = identityVerdictConfirmsExecutorStopped(node.identityVerdict) ? null
-          : providerFailureActivity(hook, structural, node.runtime)
+          : providerFailureActivity(retainedProviderFailure(this.agentActivity, { nodeId: node.nodeId, sessionName: session,
+            runtime: node.runtime, now: nowDate }, hook), structural, node.runtime)
             ?? hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
         if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated), countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount)) attentionCount++;
       }

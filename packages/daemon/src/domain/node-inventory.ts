@@ -1598,13 +1598,26 @@ export function providerFailureNeedsAttention(activity: AgentActivity | null | u
   return (reason === "provider_auth_error" || reason === "provider_billing_error") && activity.reason === reason;
 }
 
+/** #3571: the current occupant's last Claude authentication or billing failure that no newer turn has superseded, for
+ *  a Claude seat whose newest hook isn't a turn. A store that can't read it (a partial double) gives the newest hook,
+ *  which providerFailureActivity still judges as before. */
+export function retainedProviderFailure(
+  store: Partial<Pick<AgentActivityStore, "latestUnsupersededProviderFailure">> | null | undefined,
+  seat: { nodeId?: string | null; sessionName: string | null | undefined; runtime: string | null | undefined; now?: Date },
+  newest: AgentActivity | null | undefined,
+): AgentActivity | null {
+  if (seat.runtime !== "claude-code" || !seat.sessionName || newest?.state === "running" || newest?.state === "needs_input") return null;
+  if (typeof store?.latestUnsupersededProviderFailure !== "function") return newest ?? null;
+  return store.latestUnsupersededProviderFailure({ nodeId: seat.nodeId, sessionName: seat.sessionName, now: seat.now });
+}
+
 /** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
  *  box is not one. */
 const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
 
 /**
- * The served activity for a seat whose newest hook is a current Claude authentication or billing failure: that hook,
- * ahead of the cached pane reading, so the row shows the reason it counts for attention. Only a native prompt from a
+ * The served activity for a seat with a current Claude authentication or billing failure (`retainedProviderFailure`):
+ * that hook, ahead of the cached pane reading, so the row shows the reason it counts for attention. Only a native prompt from a
  * capture that began strictly after the failure outranks it (a capture's completion can lag the bytes it read, and
  * without a start time the failure stays); a draft in the input box doesn't. Kept out of `hookOrPaneActivity`, whose
  * other readers (prompt-clear and reachable wake recovery, the usage-limit watchdog) keep the pane's reading: the
@@ -1705,9 +1718,12 @@ export function attachTerminalActivityAndWork(
     }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
-    const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
+    const latest = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
       ? deps.agentActivity?.getLatestForNode({ nodeId: entry.nodeId, sessionName: entry.canonicalSessionName, now,
         order: entry.runtime === "claude-code" ? "source" : "arrival" }) ?? null : null;
+    const hook = !sessionMissing && entry.agentActivity == null
+      ? retainedProviderFailure(deps.agentActivity, { nodeId: entry.nodeId, sessionName: entry.canonicalSessionName,
+        runtime: entry.runtime, now }, latest) ?? latest : latest;
     return {
       ...entry,
       terminalActive,
@@ -2048,7 +2064,8 @@ export async function attachAgentActivity(
         && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
 
     // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
-    const providerFailure = providerFailureActivity(hookActivity, structural, entry.runtime);
+    const providerFailure = providerFailureActivity(retainedProviderFailure(deps.activityStore, { nodeId: entry.nodeId,
+      sessionName: entry.canonicalSessionName, runtime: entry.runtime, now: sampledAt }, hookActivity), structural, entry.runtime);
     if (providerFailure) return { ...entry, agentActivity: providerFailure };
 
     // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report

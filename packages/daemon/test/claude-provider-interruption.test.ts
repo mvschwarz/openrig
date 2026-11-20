@@ -9,7 +9,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { AgentActivityStore, AGENT_ACTIVITY_FRESHNESS_MS, latestHookWaitsOnPerson } from "../src/domain/agent-activity-store.js";
 import { deriveRelayEvents } from "../src/domain/claude-activity-hooks.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { attachAgentActivity, hookOrPaneActivity, seatNeedsAttention } from "../src/domain/node-inventory.js";
+import { attachAgentActivity, attachTerminalActivityAndWork, hookOrPaneActivity, seatNeedsAttention } from "../src/domain/node-inventory.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
 import { deriveUsageLimitPools } from "../src/domain/provider/provider-signals.js";
@@ -531,17 +531,87 @@ describe("Claude provider interruptions (#99)", () => {
       expect(entry!.agentActivity).toMatchObject({ state: "unknown", reason: "provider_auth_error", evidenceSource: "runtime_hook" });
     });
 
-    it("ends when Claude's idle notification follows it, as any newer hook does", () => {
+    it("retains the failure past Claude's idle notification, with its original time", async () => {
       report({ hook_event_name: "StopFailure", error: "billing_error" }, identity, "2025-01-01T11:58:00.000Z");
-      expect(seatNeedsAttention(seat, latest(), null)).toBe(true);
       report({ hook_event_name: "Notification", notification_type: "idle_prompt" }, identity, "2025-01-01T11:59:00.000Z");
       expect(latest()).toMatchObject({ state: "idle", rawEvent: "Notification" });
-      expect(seatNeedsAttention(seat, latest(), null)).toBe(false);
+      const served = await displayActivity();
+      expect(served).toMatchObject({ state: "unknown", reason: "provider_billing_error", rawSubtype: "billing_error",
+        eventAt: "2025-01-01T11:58:00.000Z", stale: false, evidenceSource: "runtime_hook" });
+      expect(seatNeedsAttention(seat, served!, null)).toBe(true);
+      expect(latestHookWaitsOnPerson(latest(), "claude-code")).toBe(false);
+    });
+
+    it("retains the failure past the five-minute window, without lifting hook freshness for anything else", async () => {
+      const hookAge = AGENT_ACTIVITY_FRESHNESS_MS + 60_000;
+      const served = await displayLimit({ hookAge, paneAge: 0 }, "authentication_failed");
+      expect(served).toMatchObject({ state: "unknown", reason: "provider_auth_error", stale: false,
+        eventAt: new Date(Date.parse(T0) - hookAge).toISOString() });
+      expect(seatNeedsAttention(seat, served!, null)).toBe(true);
+      expect(latest()).toMatchObject({ state: "unknown", reason: "stale_runtime_hook", stale: true });
+    });
+
+    it("is superseded by a newer turn, which doesn't certify a repair", async () => {
+      report({ hook_event_name: "StopFailure", error: "authentication_failed" }, identity, "2025-01-01T11:50:00.000Z");
+      report({ hook_event_name: "UserPromptSubmit" }, identity, "2025-01-01T11:55:00.000Z");
+      report({ hook_event_name: "Stop" }, identity, "2025-01-01T11:56:00.000Z");
+      report({ hook_event_name: "Notification", notification_type: "idle_prompt" }, identity, "2025-01-01T11:57:00.000Z");
+      const served = await displayActivity();
+      expect(served?.reason).not.toMatch(/^provider_/);
+      expect(seatNeedsAttention(seat, served!, null)).toBe(false);
+    });
+
+    it.each([
+      { name: "a Stop", hook: { hook_event_name: "Stop" }, expected: { reason: "idle_prompt" } },
+      { name: "a tool batch", hook: { hook_event_name: "PostToolBatch" }, expected: { reason: "idle_prompt" } },
+      // Claude sends StopFailure instead of Stop: a newer one ends its own turn, and a newer limit shows as the limit.
+      { name: "a newer rate limit", hook: { hook_event_name: "StopFailure", error: "rate_limit" }, expected: { reason: "usage_limit" }, idle: false },
+      { name: "a newer generic error", hook: { hook_event_name: "StopFailure", error: "server_error" }, expected: { reason: "idle_prompt" } },
+    ])("is superseded by $name from a newer turn whose prompt wasn't recorded", async ({ hook, expected, idle = true }) => {
+      report({ hook_event_name: "StopFailure", error: "authentication_failed" }, identity, "2025-01-01T11:59:57.000Z");
+      report(hook, identity, "2025-01-01T11:59:58.000Z");
+      if (idle) report({ hook_event_name: "Notification", notification_type: "idle_prompt" }, identity, "2025-01-01T11:59:59.000Z");
+      expect(store.latestUnsupersededProviderFailure({ sessionName: SESSION })).toBeNull();
+      const served = await displayActivity();
+      expect(served).toMatchObject(expected);
+      if (expected.reason !== "usage_limit") expect(seatNeedsAttention(seat, served!, null)).toBe(false);
+    });
+
+    it("is superseded by a newer question to a person", async () => {
+      report({ hook_event_name: "StopFailure", error: "billing_error" }, identity, "2025-01-01T11:59:57.000Z");
+      report({ hook_event_name: "PermissionRequest", tool_name: "Bash" }, identity, "2025-01-01T11:59:58.000Z");
+      report({ hook_event_name: "Notification", notification_type: "idle_prompt" }, identity, "2025-01-01T11:59:59.000Z");
+      expect(store.latestUnsupersededProviderFailure({ sessionName: SESSION })).toBeNull();
+      expect((await displayActivity())?.reason).not.toMatch(/^provider_/);
+    });
+
+    it("counts on a row that serves no pane reading, as the rig count does", () => {
+      report({ hook_event_name: "StopFailure", error: "authentication_failed" }, identity, "2025-01-01T11:50:00.000Z");
+      report({ hook_event_name: "Notification", notification_type: "idle_prompt" }, identity, "2025-01-01T11:51:00.000Z");
+      const [row] = attachTerminalActivityAndWork([{ ...seat, agentActivity: null }] as Parameters<typeof attachTerminalActivityAndWork>[0],
+        { db, agentActivity: store, now: new Date(T0) });
+      expect(row!.needsAttention).toBe(true);
+    });
+
+    it("is superseded by a new occupant", async () => {
+      report({ hook_event_name: "StopFailure", error: "billing_error" }, identity, "2025-01-01T11:58:00.000Z");
+      liveGeneration = "generation-replacement";
+      report({ hook_event_name: "SessionStart" }, { ...identity, OPENRIG_OCCUPANT_GENERATION: "generation-replacement" },
+        "2025-01-01T11:59:00.000Z");
+      const served = await displayActivity();
+      expect(served?.reason).not.toMatch(/^provider_/);
+      expect(seatNeedsAttention(seat, served!, null)).toBe(false);
+    });
+
+    it("keeps a newer failure when an older turn arrives after it", async () => {
+      report({ hook_event_name: "StopFailure", error: "authentication_failed" }, identity, "2025-01-01T11:59:59.000Z");
+      report({ hook_event_name: "UserPromptSubmit" }, identity, "2025-01-01T11:59:58.000Z");
+      expect(await displayActivity()).toMatchObject({ state: "unknown", reason: "provider_auth_error",
+        eventAt: "2025-01-01T11:59:59.000Z" });
     });
 
     it.each([
       { name: "newer permission", hookAge: 2000, paneAge: 1000, permission: true, expected: "permission_prompt" },
-      { name: "expired failure", hookAge: AGENT_ACTIVITY_FRESHNESS_MS + 1000, paneAge: 0, expected: "idle_prompt" },
       { name: "replaced occupant", hookAge: 1000, paneAge: 0, expected: "idle_prompt" },
       { name: "unknown occupant", hookAge: 1000, paneAge: 0, expected: "idle_prompt" },
     ])("keeps the display's chronology and identity guards: $name", async input => {
@@ -552,7 +622,7 @@ describe("Claude provider interruptions (#99)", () => {
       if (input.expected === "idle_prompt") expect(seatNeedsAttention(seat, latest(), null)).toBe(false);
     });
 
-    it("ends with a newer turn, whatever order the hooks arrive in", async () => {
+    it("ends with a newer turn that arrives before the older failure", async () => {
       report({ hook_event_name: "UserPromptSubmit" }, identity, "2025-01-01T11:59:59.000Z");
       report({ hook_event_name: "StopFailure", error: "authentication_failed" }, identity, "2025-01-01T11:59:58.000Z");
       expect(await displayActivity()).toMatchObject({ state: "running", rawEvent: "UserPromptSubmit" });

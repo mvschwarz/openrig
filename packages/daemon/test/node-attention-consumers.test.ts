@@ -165,10 +165,15 @@ describe("a Claude provider failure across the rig and the CLI", () => {
     const structuralActivity = { getStructuralActivity: () => draft
       ? { state: "attention", reason: "prompt_draft", evidence: "❯ half a sentence", observedAt: later }
       : { state: "agent_idle", reason: "idle_prompt", evidence: "❯", observedAt: now } };
-    const activityStore = { getLatestForNode: () => ({
-      state: "unknown", reason, evidenceSource: "runtime_hook", sampledAt: now, eventAt: now, evidence: error,
-      rawEvent: "StopFailure", rawSubtype: error, runtime: "claude-code", fallback: false, stale: false,
-    }) } as unknown as AgentActivityStore;
+    const failure = { state: "unknown", reason, evidenceSource: "runtime_hook", sampledAt: now, eventAt: now, evidence: error,
+      rawEvent: "StopFailure", rawSubtype: error, runtime: "claude-code", fallback: false, stale: false };
+    // The newest hook is Claude's idle notification after the failure.
+    const activityStore = {
+      getLatestForNode: () => ({ state: "idle", reason: "idle_prompt", evidenceSource: "runtime_hook", sampledAt: now, eventAt: later,
+        evidence: "idle_prompt", rawEvent: "Notification", rawSubtype: "idle_prompt", runtime: "claude-code", fallback: false, stale: false }),
+      // A double that retains even a generic error: the routes themselves must refuse it.
+      latestUnsupersededProviderFailure: () => failure,
+    } as unknown as AgentActivityStore;
     const ps = new PsProjectionService({ db, seatActivity, agentActivity: activityStore, structuralActivity });
     const tmux = { getPaneCommand: vi.fn(async () => "node"), capturePaneContent: vi.fn(async () => null) };
     const app = new Hono();
@@ -186,7 +191,7 @@ describe("a Claude provider failure across the rig and the CLI", () => {
     expect(detail).toMatchObject({ needsAttention: expected });
     expect(ps.getEntries()[0]!.attentionCount).toBe(expected ? 1 : 0);
     if (!expected) {
-      expect(nodes[0].agentActivity).toMatchObject({ state: "idle", evidenceSource: "pane_heuristic" });
+      expect(nodes[0].agentActivity).toMatchObject({ state: "idle" });
       return;
     }
     expect(nodes[0].agentActivity).toMatchObject({ state: "unknown", reason, rawEvent: "StopFailure", rawSubtype: error });
