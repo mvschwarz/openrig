@@ -75,6 +75,24 @@ function aliasWarningsOf(ignored: IgnoredAlias[], id: string): string[] {
     return `aliases: '${i.alias}' is ignored: ${others.join(", ")} also declare${others.length === 1 ? "s" : ""} it, so rows tagged project:${i.alias} belong to no project`;
   });
 }
+/** Healthy catalogued projects' missions roots, for readers that resolve scopes through the project catalog (terminal mission/slice views, #3553). A project whose identity or missions root cannot be read is skipped, like a missing optional index root; a missing or unreadable catalog yields no roots. */
+export function catalogMissionsRoots(catalogPath: string): string[] {
+  let entries: Array<{ id: string; root: string }> | null;
+  try {
+    entries = readProjectCatalog(catalogPath);
+  } catch {
+    return [];
+  }
+  if (!entries) return [];
+  const report = readCatalogAliasReport(catalogPath);
+  const roots: string[] = [];
+  for (const entry of entries) {
+    const project = projectEntry(entry.id, path.resolve(path.dirname(catalogPath), entry.root),
+      aliasesOf(report.aliases, entry.id), aliasWarningsOf(report.ignored, entry.id));
+    if (!project.error) roots.push(project.missionsRoot);
+  }
+  return roots;
+}
 export function listProjects(c: Pick<ReadContext, "get">): { catalogPath: string; projects: ProjectRead[] } {
   const { workspace, catalog } = projectCatalogPaths(c);
   const entries = readProjectCatalog(catalog);
