@@ -257,9 +257,11 @@ What reads these declarations:
   says `1`, raise `limit` to read them all. A negative `limit` doesn't bound the read, and the response has neither
   header. With `attention=1`, when the read reaches its limit but the attention check leaves `limit` rows or fewer,
   the response has neither header either; read again with a larger `limit` to know. `rig queue list` prints a line on
-  stderr when the page was cut, and the `rig_queue_list` MCP tool adds `limit` and `truncated` beside `items`.
-  Each item's own history is `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so read it
-  occasionally rather than polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
+  stderr when the page was cut, and the `rig_queue_list` MCP tool adds `limit` and `truncated` beside `items`. Both
+  rely on these headers: from an older daemon that doesn't send them, the CLI prints no line and the MCP result has
+  no `limit` or `truncated`. Each item's own history is
+  `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so read it occasionally rather than
+  polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
   `queue/list?rig=` again. Not every event names both seats (`queue.claimed` and `queue.unclaimed` carry only the
   destination), and not every state change is on that stream, so the events alone don't track a rig's items.
 - **A rig's messages:** `GET /api/queue/outbox/list?rig=<rig>` returns the messages sent from or to the rig's
