@@ -128,7 +128,9 @@ composition:
 # Optional team and SDLC sections are added here.
 `;
 
-const SLICE_MANIFEST = `schema: openrig.slice/v0alpha1
+/** Readiness and eligibility read only `execution.depends_on` (sdlc-conventions EC-1), so `--depends-on` edges are
+ *  recorded here too; with none given, no list is written (absence stays "not recorded", not "none"). */
+const sliceManifest = (dependsOn: string[]) => `schema: openrig.slice/v0alpha1
 kind: slice
 composition:
   mission: ../../mission.yaml
@@ -136,7 +138,7 @@ composition:
     spec: SPEC.md
     progress: PROGRESS.md
     proof: PROOF.md
-# Optional assignment, SDLC, and evidence sections are added here.
+${dependsOn.length > 0 ? `execution:\n  depends_on: ${JSON.stringify(dependsOn)}\n` : ""}# Optional assignment, SDLC, and evidence sections are added here.
 `;
 
 function emit(out: Stdout, payload: unknown, json: boolean, lines?: string[]): void {
@@ -341,7 +343,7 @@ function buildSliceCreateCommand(): Command {
     .option("--template <kind>", `Template: ${SLICE_TEMPLATE_KINDS.join(" | ")}`, "placeholder")
     .option("--title <text>", "Display title (defaults to titlecased slug)")
     .option("--intent <text>", "Authored intent stored in SPEC.md frontmatter (defaults to title)")
-    .option("--depends-on <dot-id...>", "Advisory build-order dependencies on sibling slice dot-IDs")
+    .option("--depends-on <dot-id...>", "Build-order dependencies on sibling slice dot-IDs (slice.yaml execution.depends_on, mirrored in SPEC.md)")
     .option("--readme-only", "Write progress_rail: readme-only in README frontmatter instead of scaffolding PROGRESS.md")
     .option("--json", "Machine-readable output")
     .action(async (missionName: string, rawSlug: string, opts, command) => {
@@ -445,7 +447,7 @@ function buildSliceCreateCommand(): Command {
             const progressPath = path.join(sliceAbs, "PROGRESS.md");
             fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
           }
-          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
+          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), sliceManifest(dependsOn), "utf8");
           // Publish the completion sentinel only after its entire contents exist.
           const proofTemporary = `${proofPath}.openrig-${process.pid}.tmp`;
           fs.writeFileSync(proofTemporary, proofBody, { encoding: "utf8", flag: "wx" });

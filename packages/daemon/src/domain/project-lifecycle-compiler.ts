@@ -192,7 +192,8 @@ export function compileProjectLifecycle(input: {
     }
     if (!member.active) return;
     const execution = asMapping(slice.execution, `${slicePath}: execution`, true);
-    if (!execution) {
+    // Without an actor_role, execution carries only readiness data (depends_on, wave), not a step contract.
+    if (!execution || execution.actor_role === undefined) {
       unknowns.push(`${normalizedRef}: execution contract missing`);
       return;
     }

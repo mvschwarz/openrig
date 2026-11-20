@@ -2155,6 +2155,25 @@ describe("scope create dependency identity", () => {
     const fm = readFrontmatter(path.join(missionsRoot, "release-0.3.2", "slices", "02-next", "SPEC.md"));
     expect(fm.depends_on).toEqual(["OPR.0.3.2.1"]);
   });
+
+  // #3615: readiness and eligibility read only slice.yaml's execution.depends_on; the frontmatter copy stays advisory.
+  it("writes a slice's dependencies to slice.yaml execution.depends_on, and none without --depends-on", async () => {
+    const slices = path.join(missionsRoot, "release-0.3.2", "slices");
+    writeFile(path.join(missionsRoot, "release-0.3.2", "mission.yaml"),
+      "schema: openrig.mission/v0alpha1\nkind: mission\ncomposition:\n  slices: []\n");
+    const result = await run(["slice", "create", "release-0.3.2", "next", "--depends-on", "OPR.0.3.2.1"], missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const manifest = YAML.parse(fs.readFileSync(path.join(slices, "02-next", "slice.yaml"), "utf8"));
+    expect(manifest.execution).toEqual({ depends_on: ["OPR.0.3.2.1"] });
+    expect(manifest.composition.mission).toBe("../../mission.yaml");
+    const readiness = readMissionReadiness(path.join(missionsRoot, "release-0.3.2"));
+    expect(readiness.slices.find((slice) => slice.scope === "02-next")).toMatchObject({
+      dependsOn: ["OPR.0.3.2.1"], dependsOnBasis: "slice.yaml",
+    });
+    const bare = await run(["slice", "create", "release-0.3.2", "free"], missionsRoot);
+    expect(bare.exitCode).toBe(0);
+    expect(YAML.parse(fs.readFileSync(path.join(slices, "03-free", "slice.yaml"), "utf8"))).not.toHaveProperty("execution");
+  });
 });
 
 // A project nested in another workspace (its own project.yaml and missions) mints ids with its project.yaml's optional
