@@ -520,14 +520,14 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       // Same occupant-generation gate as Pi below, before any file eligibility.
       const generation = stringOrNull(body.generation);
       let reason: string | null = null;
-      let retained = false;
+      let adoptedGeneration: string | undefined;
       try {
         const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
-        retained = !!current && current.generationUuid !== generation;
+        if (current && current.generationUuid !== generation) adoptedGeneration = current.generationUuid;
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (retained && (runtime !== "omp-tui" || !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation))) reason = "generation_mismatch";
+        } else if (adoptedGeneration && (runtime !== "omp-tui" || !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation))) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
@@ -546,16 +546,35 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
       type FileRead = { ok: true; sessionFile: string } | { ok: false; reason: string };
       const omp = adapters?.[runtime!] as { readSessionFile?: (session: string, generation?: string) => FileRead;
-        readLiveSessionFile?: (session: string, generation?: string) => Promise<FileRead> } | undefined;
-      const ownFile = retained ? await omp?.readLiveSessionFile?.(resolved.sessionName, generation!)
-        : omp?.readSessionFile?.(resolved.sessionName, runtime === "omp-tui" ? generation! : undefined);
-      if (retained && (!generation || !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation))) {
-        return c.json({ ok: false, code: "generation_mismatch", tokenPersisted: false }, 409);
+        readLiveSessionFile?: (session: string, generation?: string, targetPane?: string) => Promise<FileRead> } | undefined;
+      const persist = (ownFile: FileRead | undefined): boolean =>
+        validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
+        && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
+      let tokenPersisted: boolean | null;
+      if (adoptedGeneration) {
+        const binding = sessionRegistry.getBindingForNode(resolved.nodeId);
+        if (binding?.attachmentType === "external_cli" || binding?.tmuxSession !== sessionName) {
+          return c.json({ ok: false, code: "binding_mismatch", tokenPersisted: false }, 409);
+        }
+        const ownFile = await omp?.readLiveSessionFile?.(resolved.sessionName, generation!, binding.tmuxPane ?? undefined);
+        // Another no-launch adoption can retain this writer while replacing the row that owns its token.
+        // Let the writer retry against that destination with fresh pane evidence.
+        tokenPersisted = store.db.transaction(() => {
+          const current = store.resolveSession({ sessionName, nodeId, runtime });
+          const currentBinding = sessionRegistry.getBindingForNode(resolved.nodeId);
+          if (current?.sessionId !== resolved.sessionId || current.runtime !== runtime || current.sessionName !== sessionName
+            || sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid !== adoptedGeneration
+            || currentBinding?.id !== binding.id || currentBinding.attachmentType !== binding.attachmentType
+            || currentBinding.tmuxSession !== binding.tmuxSession || currentBinding.tmuxPane !== binding.tmuxPane) return null;
+          return persist(ownFile);
+        }).immediate();
+        if (tokenPersisted === null) {
+          return c.json({ ok: false, code: "identity_destination_changed", tokenPersisted: false }, 409);
+        }
+      } else {
+        tokenPersisted = persist(omp?.readSessionFile?.(resolved.sessionName, runtime === "omp-tui" ? generation! : undefined));
       }
-      const tokenPersisted = validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
-        ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
-          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
-        : false;
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,

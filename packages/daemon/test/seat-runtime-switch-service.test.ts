@@ -165,8 +165,11 @@ describe("live seat runtime switch", () => {
         seatLocation: session => ompSeatLocation(db, session), contextSidecarPath: session => path.join(home, `${session}.context.json`),
       });
       const launcher = makeLauncher();
-      const target = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles, launcher, sleep: async () => {},
-        listProcesses: async () => [{ pid: 902, ppid: 901, command: "omp", startedAt: "2020-01-01T00:00:00Z" }] });
+      let writerPid = 902;
+      let writerStart = "2020-01-01T00:00:00Z";
+      const processes = vi.fn(async () => [{ pid: writerPid, ppid: 901, command: "omp", startedAt: writerStart }]);
+      const target = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles, launcher,
+        sleep: async () => {}, listProcesses: processes });
       const originalPaths = launcher.paths(SEAT);
       fs.mkdirSync(originalPaths.agentDir, { recursive: true });
       fs.writeFileSync(path.join(originalPaths.agentDir, "auth.json"), "original seat credentials");
@@ -184,7 +187,7 @@ describe("live seat runtime switch", () => {
           expect(command).toContain(`${SEAT}.context.json`);
           const pending = JSON.parse(fs.readFileSync(files.statePath, "utf8"));
           const sessionFile = path.join(files.sessionsDir, "conversation.jsonl"); fs.writeFileSync(sessionFile, "{}");
-          fs.writeFileSync(files.statePath, JSON.stringify({ ...pending, ready: true, pid: 902, sessionFile,
+          fs.writeFileSync(files.statePath, JSON.stringify({ ...pending, ready: true, pid: 902, nodeId, generation: openSwitch()!.successor_generation, sessionFile,
             sessionId: "omp-conversation", auth: "ok", inputProtocol: 1 }));
           started = true;
           return { ok: true };
@@ -238,7 +241,7 @@ describe("live seat runtime switch", () => {
       // Reconstruct the launcher as after a daemon restart: no in-memory aliases may be needed.
       const restartedLauncher = makeLauncher();
       const restarted = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles,
-        launcher: restartedLauncher, sleep: async () => {} });
+        launcher: restartedLauncher, sleep: async () => {}, listProcesses: processes });
       expect(restartedLauncher.paths(SEAT)).toEqual(launcher.paths(staging));
       expect(restarted.readSessionFile(SEAT)).toMatchObject({ ok: true, sessionFile: expect.stringContaining(staging) });
       if (scenario === "success") {
@@ -247,7 +250,31 @@ describe("live seat runtime switch", () => {
         await received();
         await fakeTmux.sendKeys();
         sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
-        expect(ompSeatLocation(db, SEAT).storageSession).toBe(staging);
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        processes.mockImplementationOnce(async () => {
+          // A second adoption while the daemon is checking the first cannot inherit its proof.
+          sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
+          return [{ pid: writerPid, ppid: 901, command: "omp", startedAt: writerStart }];
+        });
+        expect(await restarted.readLiveSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        const binding = sessionRegistry.getBindingForNode(nodeId)!;
+        expect(await restarted.checkReady({ ...binding, cwd: project })).toMatchObject({ ready: true });
+        expect(makeLauncher().paths(SEAT)).toEqual(launcher.paths(staging));
+        // Reusing the address and pane with a replacement process cannot expose the previous writer's files.
+        writerPid = 903;
+        sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
+        expect(await restarted.readLiveSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        expect(restarted.readSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(() => restarted.prepareInput(SEAT, "operator message")).toThrow();
+        // A reused PID beneath the right pane is still a different process if it started after cutover.
+        writerPid = 902;
+        writerStart = new Date(clock + 10_000).toISOString();
+        const sidecar = launcher.paths(staging).statePath;
+        fs.writeFileSync(sidecar, JSON.stringify({ ...JSON.parse(fs.readFileSync(sidecar, "utf8")), updatedAt: writerStart }));
+        expect(await restarted.readLiveSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
         sessionRegistry.registerSession(nodeId, SEAT);
         expect(ompSeatLocation(db, SEAT).storageSession).toBe(SEAT);
       }

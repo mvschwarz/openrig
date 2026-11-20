@@ -1613,6 +1613,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,
+    verifyOmpAdoptedStorage: session => ompTuiAdapter.verifyAdoptedStorage(session),
     tmuxServer: tmuxSelection,
     claudeContextProvisioner: claudeAdapter,
     // OPR.0.4.3.28 B3 — echo the resolved activity url+token into the self-attach

@@ -8,6 +8,7 @@ import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activit
 import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
 import { coreAppAccessSchema } from "./migrations/175_core_app_access.js";
 import { ompTuiRuntimeSwitchesSchema } from "./migrations/175_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "./migrations/179_omp_switch_adoption.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -365,4 +366,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeStatuslineThrottleSchema,
   workflowBoundPodSchema,
   seatPoolSchema,
+  ompSwitchAdoptionSchema,
 ];

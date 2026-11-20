@@ -79,22 +79,35 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
   }
 
   /** A retained file can outlive its process. Adoption and readiness need the current pane's writer. */
-  private async liveState(session: string, target = session): Promise<OmpSeatState | null> {
+  private async liveState(session: string, target = session, switchCommittedAt?: string): Promise<OmpSeatState | null> {
     const initial = this.launcher.readState(session);
     if (!initial?.ready || initial.exited) return null;
     try {
       const panePid = await this.tmux.getPanePid(target);
       if (!panePid) return null;
       const writer = ompProcessInPane(await this.listProcesses(), panePid, initial);
-      if (!writer || !(Date.parse(writer.startedAt ?? "") <= Date.parse(initial.updatedAt))) return null;
+      const startedAt = Date.parse(writer?.startedAt ?? "");
+      if (!writer || !(startedAt <= Date.parse(initial.updatedAt))) return null;
+      // Even a newer sidecar with the same PID cannot make a process born after cutover the original writer.
+      if (switchCommittedAt && !(startedAt <= Date.parse(switchCommittedAt))) return null;
       if (await this.tmux.getPanePid(target) !== panePid) return null;
+      if (switchCommittedAt && ompProcessInPane(await this.listProcesses(), panePid, initial)?.startedAt !== writer.startedAt) return null;
       const latest = this.launcher.readState(session);
       return latest?.ready && !latest.exited && latest.launchId === initial.launchId && latest.pid === initial.pid ? latest : null;
     } catch { return null; }
   }
 
-  async readLiveSessionFile(session: string, expectedGeneration?: string): Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> {
-    const state = await this.liveState(session);
+  /** Claim/reconcile, self-attach and the next readiness poll can recover an already running switched writer.
+   * Only this read-only probe looks at the previous occupant's storage before verification. */
+  async verifyAdoptedStorage(session: string, boundPane?: string): Promise<OmpSeatState | null> {
+    const pending = this.launcher.location(session).pendingAdoption;
+    if (!pending || (boundPane && boundPane !== pending.pane)) return null;
+    const state = await this.liveState(pending.storageSession, pending.pane, pending.committedAt);
+    return state?.nodeId === pending.nodeId && state.generation === pending.writerGeneration && pending.confirm() ? state : null;
+  }
+
+  async readLiveSessionFile(session: string, expectedGeneration?: string, boundPane?: string): Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> {
+    const state = await this.verifyAdoptedStorage(session, boundPane) ?? await this.liveState(session, boundPane ?? session);
     return state?.sessionFile && (!expectedGeneration || state.generation === expectedGeneration) && this.fs.exists(state.sessionFile)
       ? { ok: true, sessionFile: state.sessionFile } : { ok: false, reason: "process_unreadable" };
   }
@@ -424,7 +437,8 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     // The sidecar outlives the process that wrote it, so a ready record counts only while the pane's foreground is
     // not back at a shell: an OMP that was killed leaves the pane there, with its last sidecar still saying ready.
     const atShell = paneAtShell(await this.tmux.getPaneCommand(binding.tmuxSession));
-    const state = this.launcher.readState(binding.tmuxSession);
+    const recovered = atShell ? null : await this.verifyAdoptedStorage(binding.tmuxSession, binding.tmuxPane ?? undefined);
+    const state = recovered ?? this.launcher.readState(binding.tmuxSession);
     if (state?.exited) {
       return { ready: false, reason: `omp exited (code ${state.exited.code ?? "unknown"})`, code: "runner_exited" };
     }
@@ -436,7 +450,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     if (atShell) {
       return { ready: false, reason: "the seat sidecar says ready but the pane is back at a shell (the omp process is gone)", code: "runner_exited" };
     }
-    const current = await this.liveState(binding.tmuxSession, binding.tmuxPane ?? binding.tmuxSession);
+    const current = recovered ?? await this.liveState(binding.tmuxSession, binding.tmuxPane ?? binding.tmuxSession);
     if (!current) return { ready: false, code: "awaiting_runtime", reason: "the native OMP writer could not be verified in the bound pane" };
     if (current.auth === "missing") {
       // OMP is at its prompt, but it has no credentials for its model and would fail the first message.

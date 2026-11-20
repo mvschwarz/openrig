@@ -82,10 +82,10 @@ function seat(runtime: TestRuntime, adapters = {}) {
   // What the seat's own harness has in its environment, and so what any process it starts inherits.
   const seatEnv: Env = { OPENRIG_SESSION_NAME: name, OPENRIG_NODE_ID: node.id, OPENRIG_RUNTIME: runtime,
     OPENRIG_OCCUPANT_GENERATION: sessions.currentOccupantTenure(node.id)!.generationUuid };
-  const post = async (payload: Payload) => {
+  const post = async (payload: Payload, expectedStatus = 200) => {
     const res = await app.request("/api/activity/hooks", { method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer fixture" }, body: JSON.stringify(payload) });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(expectedStatus);
     return await res.json() as Payload;
   };
   /** One run of the shipped relay, as its main() posts: the activity report, then on a SessionStart the identity
@@ -110,10 +110,14 @@ function seat(runtime: TestRuntime, adapters = {}) {
   };
   return {
     hook, post, seatEnv, now, stageSwitch, app,
-    adopt: () => sessions.registerClaimedSession(node.id, name, "adopt"),
+    adopt: () => {
+      sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+      return sessions.registerClaimedSession(node.id, name, "adopt");
+    },
+    rebind: () => sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%2" }),
     successor: () => db.prepare("SELECT successor_resume_type, successor_resume_token FROM seat_runtime_switches").get(),
     activity: () => oracle.getSeatState(node.id)?.activity,
-    token: () => db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(session.id),
+    token: (id = session.id) => db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(id),
     successorToken: () => (db.prepare("SELECT successor_resume_token AS t FROM seat_runtime_switches WHERE id = 'sw1'").get() as { t: string | null }).t,
     identityEvents: () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.session_identity'").get() as { n: number }).n,
   };
@@ -249,10 +253,34 @@ describe("OMP session identity through the activity endpoint", () => {
       sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
     expect(await s.post(body)).toMatchObject({ tokenPersisted: true });
     expect(s.token()).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
-    s.adopt();
+    const adopted = s.adopt();
     expect(await s.post({ ...body, sessionFile: next })).toMatchObject({ tokenPersisted: false });
     live = true;
     expect(await s.post({ ...body, sessionFile: next })).toMatchObject({ tokenPersisted: true });
+    expect(s.token(adopted.id)).toEqual({ resume_type: "omp_tui_session_file", resume_token: next });
+    expect(s.token()).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
+  });
+
+  it.each(["adoption", "rebind"])("retries native identity when %s changes the destination during the file read", async change => {
+    const file = history(); fs.writeFileSync(file, "new conversation");
+    let duringRead: (() => void) | undefined;
+    const s = seat("omp-tui", { "omp-tui": { readLiveSessionFile: async () => {
+      duringRead?.(); duringRead = undefined;
+      return { ok: true, sessionFile: file };
+    } } });
+    const first = s.adopt();
+    let destination = first;
+    duringRead = () => { if (change === "adoption") destination = s.adopt(); else s.rebind(); };
+    const env = s.seatEnv;
+    const body = { runtime: "omp-tui", eventFamily: "session_identity", hookEvent: "SessionStart", sessionId: "native-id",
+      sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
+    expect(await s.post(body, 409)).toMatchObject({ code: "identity_destination_changed", tokenPersisted: false });
+    expect(s.token(first.id)).toEqual({ resume_type: null, resume_token: null });
+    expect(s.token(destination.id)).toEqual({ resume_type: null, resume_token: null });
+    expect(s.identityEvents()).toBe(0);
+    expect(await s.post(body)).toMatchObject({ tokenPersisted: true });
+    expect(s.token(destination.id)).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
+    if (change === "adoption") expect(s.token(first.id)).toEqual({ resume_type: null, resume_token: null });
   });
 });
 

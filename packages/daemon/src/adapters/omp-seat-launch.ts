@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import nodePath from "node:path";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
+import type { OmpSeatLocation } from "../domain/omp-seat-location.js";
 import { observeOmpApprovalMode, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import {
   OMP_LAUNCH_CONFIG, buildOmpLaunchCommand, buildPendingOmpSeatState, ompSeatPaths,
@@ -35,7 +36,7 @@ export interface OmpSeatLauncherDeps {
   fsOps: OmpLaunchFsOps;
   /** Root under which every OMP seat gets its own home. Typically <OPENRIG_HOME>/state/omp. */
   stateRoot: string;
-  seatLocation?: (sessionName: string) => { storageSession: string; canonicalSession: string };
+  seatLocation?: (sessionName: string) => OmpSeatLocation;
   seatSkillsRootForSession?: (sessionName: string) => string | undefined;
   /** Absolute path to the seat extension the daemon ships (assets/omp/openrig-seat.js). */
   seatExtensionPath: string;
@@ -89,8 +90,12 @@ export class OmpSeatLauncher {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
+  location(sessionName: string): OmpSeatLocation {
+    return this.deps.seatLocation?.(sessionName) ?? { storageSession: sessionName, canonicalSession: sessionName };
+  }
+
   paths(sessionName: string): OmpSeatPaths {
-    return ompSeatPaths(this.stateRoot, this.deps.seatLocation?.(sessionName).storageSession ?? sessionName);
+    return ompSeatPaths(this.stateRoot, this.location(sessionName).storageSession);
   }
 
   /** The seat's sidecar; null when absent or unparseable. */
@@ -161,7 +166,7 @@ export class OmpSeatLauncher {
       approvalMode,
       sessionFile: request.sessionFile,
       forkRef: request.forkRef,
-      contextSidecarPath: this.deps.contextSidecarPath?.(this.deps.seatLocation?.(sessionName).canonicalSession ?? sessionName),
+      contextSidecarPath: this.deps.contextSidecarPath?.(this.location(sessionName).canonicalSession),
       nodeExecutable: this.deps.nodeExecutable,
     });
     // The seat launch environment puts the seat's identity and the paired `rig` in front; without it the pane's own
