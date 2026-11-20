@@ -97,6 +97,7 @@ export function createSeatReporter(options) {
   let turnOpen = false;
   /** Held from an approval request or a failed turn until the agent moves again: no idle report is sent while set. */
   let attention = null;
+  const pendingApprovals = new Set();
   let session = { file: null, id: null };
   let auth = "unknown";
   let model = null;
@@ -228,16 +229,16 @@ export function createSeatReporter(options) {
     }
   };
 
-  const writeContextUsage = (ctx) => {
+  const writeContextUsage = (ctx, invalidateMissing = false) => {
     if (!seat.contextSidecarPath) return;
     let usage;
-    try { usage = ctx?.getContextUsage?.(); } catch { return; }
-    if (!usage || typeof usage.percent !== "number" || !Number.isFinite(usage.percent)) return;
-    const used = Math.min(100, Math.max(0, usage.percent));
+    try { usage = ctx?.getContextUsage?.(); } catch { /* Usage can be unavailable just after /clear. */ }
+    const used = Number.isFinite(usage?.percent) ? Math.min(100, Math.max(0, usage.percent)) : null;
+    if (used === null && !invalidateMissing) return;
     try {
       writeFile(seat.contextSidecarPath, JSON.stringify({
         source: "omp_extension",
-        context_window: {
+        context_window: used === null ? undefined : {
           context_window_size: typeof usage.contextWindow === "number" ? usage.contextWindow : undefined,
           used_percentage: Math.round(used * 10) / 10,
           remaining_percentage: Math.round((100 - used) * 10) / 10,
@@ -253,8 +254,6 @@ export function createSeatReporter(options) {
       // Context usage is advisory; a missed sample reads unknown.
     }
   };
-
-  const clearAttention = () => { attention = null; };
 
   return {
     inputAvailable() { inputAvailable = true; },
@@ -290,7 +289,8 @@ export function createSeatReporter(options) {
       observeModel(ctx);
       if (sessionVersion !== previousVersion) {
         turnOpen = false;
-        clearAttention();
+        pendingApprovals.clear();
+        attention = null;
         workTimer = stopTimer(workTimer);
         startIdleBeats();
         void activity("Stop", "idle_heartbeat", { livenessSeconds: IDLE_LIVENESS_SECONDS });
@@ -300,12 +300,19 @@ export function createSeatReporter(options) {
       postIdentity();
     },
 
+    sessionCleared(ctx) {
+      // OMP retains the session identity across /clear. Publish even an unknown sample to replace the old one.
+      writeContextUsage(ctx, true);
+    },
+
     agentStart(ctx) {
       turn++;
       turnOpen = true;
-      clearAttention();
       observeModel(ctx);
-      void activity("UserPromptSubmit", "accepted", { turnId: String(turn) });
+      if (pendingApprovals.size === 0) {
+        attention = null;
+        void activity("UserPromptSubmit", "accepted", { turnId: String(turn) });
+      }
       startWorkBeats();
     },
 
@@ -329,14 +336,17 @@ export function createSeatReporter(options) {
     },
 
     /** OMP is showing its approval prompt in the pane and waits there for a person. */
-    approvalRequested() {
+    approvalRequested(toolCallId, sessionId) {
+      if ((sessionId && sessionId !== session.id) || pendingApprovals.has(toolCallId)) return;
+      pendingApprovals.add(toolCallId);
       attention = "permission_prompt";
       void activity("Notification", "permission_prompt", turnOpen ? { turnId: String(turn) } : {});
     },
 
-    approvalResolved() {
-      if (attention !== "permission_prompt") return;
-      clearAttention();
+    approvalResolved(toolCallId, sessionId) {
+      if (sessionId && sessionId !== session.id) return;
+      if (!pendingApprovals.delete(toolCallId) || pendingApprovals.size || attention !== "permission_prompt") return;
+      attention = null;
       if (turnOpen) void activity("active", "permission_resolved", { turnId: String(turn) });
     },
 
@@ -483,12 +493,13 @@ export default function openrigSeat(pi) {
   pi.on("session_before_branch", main((_event, ctx) => registerInput(ctx)));
   pi.on("session_switch", main((_event, ctx) => { registerInput(ctx); reporter.sessionChanged(ctx); }));
   pi.on("session_branch", main((_event, ctx) => { registerInput(ctx); reporter.sessionChanged(ctx); }));
+  pi.on("session_clear", main((_event, ctx) => reporter.sessionCleared(ctx)));
   pi.on("agent_start", main((_event, ctx) => reporter.agentStart(ctx)));
   pi.on("turn_start", main(() => reporter.turnStart()));
   pi.on("turn_end", main((_event, ctx) => reporter.turnEnd(ctx)));
   pi.on("tool_execution_start", main((event) => reporter.toolStart(event)));
-  pi.on("tool_approval_requested", main(() => reporter.approvalRequested()));
-  pi.on("tool_approval_resolved", main(() => reporter.approvalResolved()));
+  pi.on("tool_approval_requested", main((event) => reporter.approvalRequested(event.toolCallId, event.sessionId)));
+  pi.on("tool_approval_resolved", main((event) => reporter.approvalResolved(event.toolCallId, event.sessionId)));
   pi.on("auto_compaction_start", main(() => reporter.compactionStart()));
   pi.on("auto_compaction_end", main((_event, ctx) => reporter.compactionEnd(ctx)));
   pi.on("session_compact", main((_event, ctx) => reporter.compactionEnd(ctx)));

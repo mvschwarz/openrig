@@ -126,12 +126,12 @@ describe("OMP seat extension: what the daemon reads from a seat", () => {
     const { reporter, activity, tick } = harness();
     reporter.sessionStart(ompContext());
     reporter.agentStart(ompContext());
-    reporter.approvalRequested();
+    reporter.approvalRequested("call-one");
     // While a person is asked, nothing may read as work or as idle: no beats, no turn or tool posts.
     tick(10_000);
     tick(IDLE_LIVENESS_SECONDS * 1000);
     reporter.turnStart();
-    reporter.approvalResolved();
+    reporter.approvalResolved("call-one");
     reporter.agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] }, ompContext());
     await reporter.settled();
     expect(activity()).toEqual(["Stop/idle_heartbeat", "UserPromptSubmit/accepted", "Notification/permission_prompt", "active/permission_resolved", "Stop/end_turn"]);
@@ -247,6 +247,60 @@ describe("OMP seat extension: wired into OMP", () => {
 
   it("does nothing in an OMP that OpenRig didn't launch as a seat", () => {
     expect(load({ OPENRIG_SESSION_NAME: "", OPENRIG_OMP_SEAT_STATE: "" }).size).toBe(0);
+  });
+
+  it("holds permission attention until every pending OMP tool call resolves", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-approvals-"));
+    const bodies: Body[] = [];
+    vi.stubGlobal("fetch", async (_url: URL, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response("{}");
+    });
+    const ctx = ompContext();
+    const handlers = load({ OPENRIG_SESSION_NAME: "test", OPENRIG_OMP_SEAT_STATE: path.join(root, "state.json"),
+      OPENRIG_URL: "http://127.0.0.1:1", OPENRIG_ACTIVITY_HOOK_TOKEN: "test" });
+    const emit = (name: string, toolCallId: string, sessionId = "s1") => handlers.get(name)!({ toolCallId, sessionId }, ctx);
+    try {
+      handlers.get("session_start")!({}, ctx);
+      handlers.get("agent_start")!({}, ctx);
+      emit("tool_approval_requested", "first");
+      emit("tool_approval_requested", "second");
+      emit("tool_approval_resolved", "unknown");
+      emit("tool_approval_resolved", "first");
+      handlers.get("tool_execution_start")!({ toolName: "while-pending" }, ctx);
+      emit("tool_approval_resolved", "first");
+      emit("tool_approval_resolved", "second", "previous-session");
+      handlers.get("tool_execution_start")!({ toolName: "before-current-resolution" }, ctx);
+      emit("tool_approval_resolved", "second");
+      emit("tool_approval_resolved", "second");
+      handlers.get("tool_execution_start")!({ toolName: "after-resolution" }, ctx);
+    } finally {
+      await handlers.get("session_shutdown")!({}, ctx);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    expect(bodies.map(body => body.subtype)).toEqual(["idle_heartbeat", "accepted", "permission_prompt", "permission_prompt",
+      "permission_resolved", "after-resolution", "omp-tui_exited"]);
+  });
+
+  it("refreshes usage immediately after /clear and invalidates a sample when the cleared context has no usage", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-context-clear-"));
+    const contextPath = path.join(root, "context.json");
+    const handlers = load({ OPENRIG_SESSION_NAME: "test", OPENRIG_OMP_SEAT_STATE: path.join(root, "state.json"),
+      OPENRIG_OMP_CONTEXT_SIDECAR: contextPath, OPENRIG_URL: "invalid", OPENRIG_ACTIVITY_HOOK_TOKEN: "test" });
+    const sample = () => JSON.parse(fs.readFileSync(contextPath, "utf8"));
+    const ctx = ompContext({ percent: 75 });
+    try {
+      handlers.get("session_start")!({}, ctx);
+      expect(sample().context_window.used_percentage).toBe(75);
+      handlers.get("session_clear")!({}, ompContext({ percent: 0 }));
+      expect(sample()).toMatchObject({ session_id: "s1", context_window: { used_percentage: 0 } });
+      handlers.get("session_clear")!({}, { ...ctx, getContextUsage() { throw new Error("usage unavailable"); } });
+      expect(sample()).toMatchObject({ session_id: "s1", session_name: "test" });
+      expect(sample()).not.toHaveProperty("context_window");
+    } finally {
+      await handlers.get("session_shutdown")!({}, ctx);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("acknowledges only complete managed input dispatched to the composer, including after cancelled switches", async () => {
