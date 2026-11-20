@@ -361,6 +361,18 @@ describe("queue routes", () => {
     expect(queueRepo.list()).toHaveLength(0);
   });
 
+  it("rejects empty or whitespace blockedOn at the raw create boundary", async () => {
+    for (const blockedOn of ["", " \t\n"]) {
+      const response = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+        body: JSON.stringify({ destinationSession: "worker@rig", body: "Invalid blocker", blockedOn }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "invalid_blocked_on", field: "blockedOn" });
+      expect(queueRepo.list()).toHaveLength(0);
+    }
+  });
+
   it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
     queueRepo = new QueueRepository(db, bus, {
       destinationAdvisory: () => { throw Object.assign(new Error("membership unavailable"), { code: "SQLITE_BUSY" }); },

@@ -102,6 +102,29 @@ describe("queue create --return-route", () => {
       + "(not choice dialogs) come there as tasks; read them with OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress."]);
   });
 
+  it("prints a host-qualified return route for a parked create", async () => {
+    const d: QueueDeps = {
+      lifecycleDeps: { readFile: () => null, exists: () => false, fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        post: async (_url: string, body: Record<string, unknown>) => {
+          posted.push(body);
+          return { status: 201, data: {
+            qitemId: String(body.qitemId), sourceSession: "front@kernel@host-a", destinationSession: body.destinationSession,
+            state: "blocked", blockedOn: "external:deploy", body: body.body, parkWarning: null,
+            returnRoute: "front@kernel@host-a", returnRouteBasis: "caller",
+          } };
+        },
+      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+    };
+    process.env.OPENRIG_SESSION_NAME = "front@kernel";
+    await create(d, ["--return-route", "front@kernel@host-a", "--blocked-on", "external:deploy", "--host", "host-b"]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ returnRoute: "front@kernel@host-a", blockedOn: "external:deploy", nudge: false });
+    expect(stderr.filter(line => line.startsWith("Return route: "))).toEqual(["Return route: front@kernel@host-a is recorded with this work. It names a "
+      + "conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' "
+      + "prompts follow their usual path."]);
+  });
+
   it("a local create whose named route is a registered person's prints the daemon's reason and no route line", async () => {
     const message = "The return route sam@kernel wasn't kept: it's a registered person's address, and a person is reached through the gateway, not a return route.";
     const d: QueueDeps = {

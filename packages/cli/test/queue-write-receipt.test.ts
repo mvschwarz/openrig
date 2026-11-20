@@ -320,15 +320,20 @@ describe("queue write receipt (output.compact)", () => {
       }
     });
 
-    it("an indeterminate cross-host create prints whole, warns on stderr and exits 2", async () => {
+    it("an indeterminate cross-host create prints the INDETERMINATE receipt with its ID", async () => {
       const data = { error: "remote_queue_write_failed", hostId: "far", failureClass: "unreachable", outcome: "indeterminate", detail: "socket hang up" };
       const out = await run(["create", "--destination", "worker@r", "--host", "far", "--body", "b", "--summary", "s", "--id", "qitem-fixed", "--json"],
         { "POST /api/queue/create": { status: 502, data } });
       const printed = JSON.parse(out) as Row;
-      expect(printed).toMatchObject({ ...data, qitemId: "qitem-fixed" });
+      expect(printed).toMatchObject({
+        error: "queue_create_outcome_unknown",
+        outcome: "unknown",
+        createOutcome: "unknown",
+        qitemId: "qitem-fixed",
+      });
       expect(printed.recovery).toEqual(expect.stringContaining("--id 'qitem-fixed'"));
-      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE");
-      expect(process.exitCode).toBe(2);
+      expect(errors.join("\n")).toContain("could not establish the queue for requested host");
+      expect(process.exitCode).toBe(1);
     });
 
     it("a missing row prints whole with the host hint", async () => {
@@ -371,15 +376,14 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).toMatchObject({ qitemId: id, persisted: true });
       expect(json).not.toHaveProperty("parkReceipt");
       expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
-      expect(json.parkWarning.message).toContain(message);
-      expect(json.parkWarning.message).toMatch(/owner or scheduler can start work early/i);
+      expect(json.parkWarning.message).toBe(message);
       expect(json.wake).toMatchObject({
         evidence: "suppressed",
         detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
       });
     });
 
-    it("compact UNKNOWN create output contains only receipt fields and a body summary", async () => {
+    it("unknown create output keeps the standard receipt and existing park warning", async () => {
       const id = "qitem-20261010180000-aaaa";
       const rawBody = "RAW-RECEIVED-BODY-MUST-NOT-PRINT";
       const rawRowMarker = "RAW-ROW-FIELD-MUST-NOT-PRINT";
@@ -393,22 +397,12 @@ describe("queue write receipt (output.compact)", () => {
 
       const out = await create(["--id", id, "--wake-after", "15m", "--json"], data);
       const result = JSON.parse(out) as Row;
-      expect(Object.keys(result)).toEqual(["qitemId", "createOutcome", "createWarning", "parkWarning", "recovery"]);
-      expect(result).toMatchObject({ qitemId: id, createOutcome: "unknown" });
+      expect(Object.keys(result)).toEqual(["error", "outcome", "createOutcome", "qitemId", "parkWarning", "recovery"]);
+      expect(result).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: id, createOutcome: "unknown" });
       expect(result).not.toHaveProperty("parkReceipt");
       expect(result.recovery).toContain(id);
-      expect(Object.keys(result.parkWarning as Row)).toEqual(["code", "message", "fields", "observed"]);
-
-      const createWarning = result.createWarning as Row;
-      expect(Object.keys(createWarning)).toEqual(["code", "message", "fields", "observed"]);
-      expect(createWarning.fields).toEqual(expect.arrayContaining(["qitemId", "body"]));
-      const observed = createWarning.observed as Row;
-      expect(Object.keys(observed).every((key) => ["qitemId", "sourceSession", "destinationSession", "state", "body"].includes(key))).toBe(true);
-      expect(observed.body).toMatchObject({
-        byteLength: Buffer.byteLength(rawBody),
-        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-      });
-      expect(Object.keys(observed.body as Row)).toEqual(["byteLength", "sha256"]);
+      expect(result.parkWarning).toEqual({ code: "raw-warning", message: "raw park warning" });
+      expect(result).not.toHaveProperty("createWarning");
       expect(out).not.toContain(rawBody);
       expect(out).not.toContain(rawRowMarker);
       expect(out).not.toContain(BODY);

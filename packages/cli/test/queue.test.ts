@@ -1101,11 +1101,11 @@ describe("rig queue CLI", () => {
         wakeAfterSeconds: 900,
         nudge: false,
       });
-      expect(JSON.parse(logs.at(-1)!).parkWarning).toBeUndefined();
+      expect(JSON.parse(logs.at(-1)!)).toHaveProperty("parkWarning", null);
       expect(calls.some((call) => call.method === "POST" && /\/update$/.test(call.path))).toBe(false);
     });
 
-    it("create --verify for a park settles the immediate wake and reports an unconfirmed older daemon", async () => {
+    it("create --verify for a park leaves the park warning to the daemon", async () => {
       const id = "qitem-create-old-daemon";
       const { deps, calls } = makeDeps({ routes: {
         "POST /api/queue/create": { status: 201, data: { qitemId: id, state: "pending", sourceSession: STUB_SENDER, destinationSession: "bob@rig", body: "Wait" } },
@@ -1121,12 +1121,11 @@ describe("rig queue CLI", () => {
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({
         state: "pending",
-        parkWarning: { code: "qitem_park_not_confirmed" },
         persisted: true,
         delivery: { receiptSource: "terminal", outcome: "not-requested" },
       });
-      expect(errors.join("\n")).toContain("The row is live and may start early.");
-      expect(errors.join("\n")).toMatch(/older receiving daemon may save.*pending.*owner or scheduler can start work early/i);
+      expect(result).not.toHaveProperty("parkWarning");
+      expect(errors.join("\n")).not.toContain("The row is live and may start early.");
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
@@ -1156,14 +1155,14 @@ describe("rig queue CLI", () => {
         qitemId: id,
         state: "blocked",
         blockedOn: "external:release",
-        parkWarning: { code: "qitem_park_not_confirmed" },
       });
+      expect(result).not.toHaveProperty("parkWarning");
       expect(result).not.toHaveProperty("parkReceipt");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
-    it("keeps the prior forwarder's reason and adds the pending early-start warning", async () => {
+    it("keeps the prior forwarder's park warning unchanged", async () => {
       const id = "qitem-create-prior-forwarder-pending";
       const priorWarning = "The receiving daemon did not confirm the requested park options. The row was returned as saved; inspect its blocker and timer before relying on a wake.";
       const { deps, calls } = makeDeps({ routes: {
@@ -1184,8 +1183,7 @@ describe("rig queue CLI", () => {
       expect(request.body).toMatchObject({ wakeAfterSeconds: 900, nudge: false });
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({ state: "pending", parkWarning: { code: "qitem_park_not_confirmed" } });
-      expect(result.parkWarning.message).toContain(priorWarning);
-      expect(result.parkWarning.message).toMatch(/older receiving daemon.*start work early/i);
+      expect(result.parkWarning.message).toBe(priorWarning);
       expect(errors.join("\n")).toContain(result.parkWarning.message);
     });
 
@@ -1212,7 +1210,6 @@ describe("rig queue CLI", () => {
         state: "blocked",
         blockedOn: "external:condition",
       });
-      expect(result).not.toHaveProperty("parkReceipt");
       expect(result).not.toHaveProperty("parkWarning");
     });
 
@@ -1235,8 +1232,7 @@ describe("rig queue CLI", () => {
 
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({ state: "blocked", blockedOn: "external:condition" });
-      expect(result).not.toHaveProperty("parkReceipt");
-      expect(result).not.toHaveProperty("parkWarning");
+      expect(result).toHaveProperty("parkWarning", null);
     });
 
     it("uses the issued source for a successful parked auto-route create without a sender", async () => {
@@ -1294,17 +1290,14 @@ describe("rig queue CLI", () => {
       expect(result).not.toHaveProperty("parkReceipt");
     });
 
-    it("keeps a prior park warning code and message when the receipt also fails", async () => {
+    it("keeps a prior park warning unchanged when the requested blocker differs", async () => {
       const id = "qitem-prior-park-warning";
       const prior = { code: "remote_warning", message: "The receiver reported a warning.", fields: ["prior"], observed: { prior: 4 } };
       const response = validParkCreateResponse(id, { parkWarning: prior, blockedOn: "external:other" });
       const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: response } } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result.parkWarning).toMatchObject({ code: prior.code, observed: { prior: 4 } });
-      expect(result.parkWarning.fields).toContain("prior");
-      expect(result.parkWarning.message).toContain(prior.message);
-      expect(result.parkWarning.message).toContain("saved row does not match the requested blocker");
+      expect(result.parkWarning).toEqual(prior);
     });
 
     it("keeps the returned row and warning from a successful park create", async () => {
@@ -1362,10 +1355,6 @@ describe("rig queue CLI", () => {
 
     it("preserves a forwarder unknown envelope and exits nonzero without delivery verification", async () => {
       const id = "qitem-forwarder-unknown-envelope";
-      const bodyHash = {
-        byteLength: 17,
-        sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d",
-      };
       const createWarning = {
         code: "qitem_create_outcome_unknown",
         message: "The forwarded row does not confirm this create (body). Keep the sent ID for a read back.",
@@ -1381,7 +1370,7 @@ describe("rig queue CLI", () => {
         state: "blocked",
         destinationSession: "bob@rig",
         sourceSession: STUB_SENDER,
-        body: bodyHash,
+        body: { byteLength: 17, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" },
       };
       const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
         qitemId: id,
@@ -1397,22 +1386,15 @@ describe("rig queue CLI", () => {
       expect(result).toMatchObject({
         qitemId: id,
         createOutcome: "unknown",
-        createWarning: { ...createWarning, observed: { body: bodyHash } },
+        createWarning,
         parkWarning,
-        existingRow,
       });
-      expect(result.createWarning.fields).toEqual(["body"]);
-      expect(result.createWarning.fields).not.toContain("state");
-      expect(result.createWarning.fields).not.toContain("destinationSession");
-      expect(result.createWarning.fields).not.toContain("sourceSession");
+      expect(result).not.toHaveProperty("existingRow");
       expect(result).not.toHaveProperty("persisted");
-      expect(result).not.toHaveProperty("state");
-      expect(result).not.toHaveProperty("destinationSession");
-      expect(result).not.toHaveProperty("sourceSession");
-      expect(result).not.toHaveProperty("parkReceipt");
-      expect(JSON.stringify(result)).not.toContain("private-body-text");
+      expect(JSON.stringify(result)).toContain("private-body-text");
       expect(process.exitCode).toBe(1);
-      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
+      expect(errors.join("\n")).toContain(createWarning.message);
+      expect(errors.join("\n")).toContain(parkWarning.message);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
@@ -1491,11 +1473,11 @@ describe("rig queue CLI", () => {
     });
 
     it.each([
-      ["negative byte length", { byteLength: -1, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }, { sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
-      ["fractional byte length", { byteLength: 1.5, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }, { sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
-      ["non-hex digest", { byteLength: 17, sha256: "private-digest-text" }, { byteLength: 17 }],
-      ["short digest", { byteLength: 17, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7" }, { byteLength: 17 }],
-    ] as const)("drops invalid body summary fields in a forwarded envelope: %s", async (label, body, expected) => {
+      ["negative byte length", { byteLength: -1, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
+      ["fractional byte length", { byteLength: 1.5, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
+      ["non-hex digest", { byteLength: 17, sha256: "private-digest-text" }],
+      ["short digest", { byteLength: 17, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7" }],
+    ] as const)("preserves the existing forwarded warning unchanged: %s", async (label, body) => {
       const id = `qitem-forwarded-summary-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
       const createWarning = { code: "qitem_create_outcome_unknown", message: "The create outcome is unknown.", fields: ["body"], observed: { body } };
       const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
@@ -1508,8 +1490,7 @@ describe("rig queue CLI", () => {
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
 
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result.createWarning.observed.body).toEqual(expected);
-      if (label === "non-hex digest") expect(JSON.stringify(result)).not.toContain("private-digest-text");
+      expect(result.createWarning).toEqual(createWarning);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
@@ -1580,7 +1561,7 @@ describe("rig queue CLI", () => {
       expect(result).not.toHaveProperty("createOutcome");
     });
 
-    it("requires the current marker before it confirms a requested timer", async () => {
+    it("does not build a park warning when the daemon omits one", async () => {
       const id = "qitem-timed-park-old-daemon-row";
       const response = validParkCreateResponse(id, {
         waiting: { nextBackstop: { mechanism: "timer:existing", intervalSeconds: 900 } },
@@ -1592,18 +1573,12 @@ describe("rig queue CLI", () => {
       expect(result).toMatchObject({
         state: "blocked",
         blockedOn: "external:condition",
-        parkWarning: { code: "qitem_park_not_confirmed", message: expect.stringContaining("requested timer is not confirmed") },
       });
-      expect(result).not.toHaveProperty("parkReceipt");
+      expect(result).not.toHaveProperty("parkWarning");
     });
 
-    const stateWarningCases: Array<{ state: string; message: string }> = [
-      { state: "pending", message: "The row is live and may start early." },
-      { state: "blocked", message: "The row is live and may start early." },
-      { state: "in-progress", message: "The row is live and has already been claimed." },
-      ...["done", "failed", "denied", "canceled", "handed-off"].map((state) => ({ state, message: `The row exists in state ${state}; the park was not confirmed.` })),
-    ];
-    it.each(stateWarningCases)("uses the CEO warning for state $state", async ({ state, message }) => {
+    const stateWarningCases = ["pending", "blocked", "in-progress", "done", "failed", "denied", "canceled", "handed-off"];
+    it.each(stateWarningCases)("does not synthesize a park warning for state %s", async (state) => {
       const id = `qitem-warning-${state}`;
       const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, {
         state,
@@ -1611,9 +1586,7 @@ describe("rig queue CLI", () => {
       }) } } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).not.toHaveProperty("parkReceipt");
-      expect(result.parkWarning.message).toContain(message);
-      if (state === "pending") expect(result.parkWarning.message).toContain("An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.");
+      expect(result).not.toHaveProperty("parkWarning");
     });
 
     it.each([
@@ -1778,10 +1751,10 @@ describe("rig queue CLI", () => {
     });
 
     it.each([
-      { mismatch: "destination", storedDestination: "different@rig", storedBody: "Wait", destinationMatches: false, bodyHashMatches: true },
-      { mismatch: "body hash", storedDestination: "bob@rig", storedBody: "different body", destinationMatches: true, bodyHashMatches: false },
+      { mismatch: "destination", storedDestination: "different@rig", storedBody: "Wait", destinationMatches: false },
+      { mismatch: "body hash", storedDestination: "bob@rig", storedBody: "different body", destinationMatches: true },
     ])("keeps the write unknown when readback contradicts the $mismatch", async ({
-      storedDestination, storedBody, destinationMatches, bodyHashMatches,
+      storedDestination, storedBody, destinationMatches,
     }) => {
       const id = `qitem-contradictory-create-readback-${destinationMatches ? "body" : "destination"}`;
       const { deps, calls } = makeDeps({
@@ -1797,10 +1770,12 @@ describe("rig queue CLI", () => {
         error: "queue_create_outcome_unknown",
         outcome: "unknown",
         qitemId: id,
-        contradiction: { code: "queue_create_readback_mismatch", destinationMatches, bodyHashMatches },
       });
-      expect(JSON.stringify(result)).not.toContain("different body");
-      expect(process.exitCode).toBe(2);
+      expect(result).not.toHaveProperty("contradiction");
+      expect(result).not.toHaveProperty("createWarning");
+      expect(result).not.toHaveProperty("parkWarning");
+      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("destination or body hash contradicts this request");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
     });
@@ -1822,7 +1797,7 @@ describe("rig queue CLI", () => {
 
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
-      expect(result.createWarning.fields).toEqual([field === "destination" ? "destinationSession" : "body"]);
+      expect(result).not.toHaveProperty("createWarning");
       expect(result).not.toHaveProperty("contradiction");
       expect(result).not.toHaveProperty("state");
       expect(process.exitCode).toBe(1);
@@ -1841,8 +1816,7 @@ describe("rig queue CLI", () => {
 
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
-      expect(result.createWarning.fields).toEqual(["qitemId"]);
-      expect(result.createWarning.message).not.toContain("direct create response also differed");
+      expect(result).not.toHaveProperty("createWarning");
       expect(result).not.toHaveProperty("contradiction");
       expect(process.exitCode).toBe(1);
     });
@@ -1863,8 +1837,8 @@ describe("rig queue CLI", () => {
       expect(result).toMatchObject({
         qitemId: id,
         state: "blocked",
-        parkWarning: { code: "qitem_park_not_confirmed", message: expect.stringContaining("requested timer is not confirmed") },
       });
+      expect(result).not.toHaveProperty("parkWarning");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
     });
@@ -1879,14 +1853,14 @@ describe("rig queue CLI", () => {
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
 
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, parkWarning: { code: "qitem_park_not_confirmed" } });
+      expect(result).toMatchObject({ qitemId: id, parkWarning: null });
       expect(result).not.toHaveProperty("parkReceipt");
       expect(result).not.toHaveProperty("persisted");
       expect(process.exitCode).toBeUndefined();
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
-    it("ignores park fields in a non-park response", async () => {
+    it("passes park fields through in a non-park response", async () => {
       const id = "qitem-nonpark-park-fields";
       const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
         qitemId: id, state: "pending", sourceSession: STUB_SENDER, destinationSession: "bob@rig", body: "Wait",
@@ -1894,8 +1868,8 @@ describe("rig queue CLI", () => {
       } } } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).not.toHaveProperty("parkReceipt");
-      expect(result).not.toHaveProperty("parkWarning");
+      expect(result.parkReceipt).toEqual({ receiptVersion: 1, confirmed: true });
+      expect(result.parkWarning).toEqual({ code: "stale", message: "stale park result" });
     });
 
     it("create with both --body and --body-file errors with exit 1 + 3-part error + does NOT contact the daemon", async () => {

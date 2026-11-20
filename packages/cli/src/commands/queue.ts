@@ -13,7 +13,6 @@ import { shellQuote } from "../cross-host-executor.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
-import { issuedReturnAddress } from "@openrig/daemon/issued-return-address";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
@@ -96,29 +95,8 @@ export interface DeliveryVerifyTarget {
 }
 
 type QueueRow = Record<string, unknown>;
-type CreateReadbackContradiction = { destinationMatches?: boolean; bodyHashMatches?: boolean };
 
-const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 const QUEUE_STATES = new Set(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
-const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
-const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
-const IDENTITY_SESSION_PART_PATTERN = /^[A-Za-z0-9._-]+$/;
-/** Diagnostic summaries keep only a plain member@rig address, not malformed text. */
-function validIdentitySession(value: unknown): value is string {
-  if (typeof value !== "string" || value !== value.trim()) return false;
-  const parts = value.split("@");
-  return parts.length === 2
-    && parts.every((part) => IDENTITY_SESSION_PART_PATTERN.test(part))
-    && parseSessionName(value).kind === "canonical"
-    && !isHumanSeatSessionRef(value);
-}
-
-function safeIdentitySessionValue(value: unknown): unknown {
-  if (validIdentitySession(value)) return value;
-  return typeof value === "string"
-    ? "invalid"
-    : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
-}
 
 function isQueueRow(value: unknown): value is QueueRow {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -126,154 +104,6 @@ function isQueueRow(value: unknown): value is QueueRow {
 
 function isQueueState(value: unknown): value is string {
   return typeof value === "string" && QUEUE_STATES.has(value);
-}
-
-function bodySummary(value: unknown): QueueRow {
-  if (typeof value === "string") {
-    return { byteLength: Buffer.byteLength(value, "utf8"), sha256: createHash("sha256").update(value, "utf8").digest("hex") };
-  }
-  return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
-}
-
-/** Sanitize a body summary received from a warning or a forwarding envelope. Raw row bodies use bodySummary directly. */
-function safeBodySummary(value: unknown): QueueRow | undefined {
-  if (!isQueueRow(value)) return bodySummary(value);
-  if (Object.keys(value).length === 1 && typeof value.type === "string" && BODY_SUMMARY_TYPES.has(value.type)) {
-    return { type: value.type };
-  }
-  const summary: QueueRow = {};
-  if (Object.prototype.hasOwnProperty.call(value, "byteLength")
-    && Number.isInteger(value.byteLength) && (value.byteLength as number) >= 0) {
-    summary.byteLength = value.byteLength;
-  }
-  if (Object.prototype.hasOwnProperty.call(value, "sha256")
-    && typeof value.sha256 === "string" && SHA256_PATTERN.test(value.sha256)) {
-    summary.sha256 = value.sha256;
-  }
-  if (Object.keys(summary).length > 0) return summary;
-  if (Object.prototype.hasOwnProperty.call(value, "byteLength") || Object.prototype.hasOwnProperty.call(value, "sha256")) return undefined;
-  return bodySummary(value);
-}
-
-function observedValue(field: string, value: unknown): unknown {
-  if (value === undefined) return undefined;
-  if (field === "body") return bodySummary(value);
-  if (field === "sourceSession" || field === "destinationSession") {
-    return safeIdentitySessionValue(value);
-  }
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-  if (isQueueRow(value)) {
-    const safe: QueueRow = {};
-    for (const [key, received] of Object.entries(value)) {
-      const summary = observedValue(key, received);
-      if (summary !== undefined) safe[key] = summary;
-    }
-    return safe;
-  }
-  return { type: Array.isArray(value) ? "array" : typeof value };
-}
-
-function safeRemoteEnvelopeValue(field: string, value: unknown, inObserved = false): unknown {
-  if (field === "body") return inObserved ? safeBodySummary(value) : bodySummary(value);
-  if (field === "sourceSession" || field === "destinationSession") {
-    return safeIdentitySessionValue(value);
-  }
-  if (Array.isArray(value)) return value.map((item) => safeRemoteEnvelopeValue("", item, inObserved));
-  if (isQueueRow(value)) {
-    const safe: QueueRow = {};
-    for (const [key, received] of Object.entries(value)) {
-      if (received !== undefined) {
-        const summary = safeRemoteEnvelopeValue(key, received, inObserved || key === "observed");
-        if (summary !== undefined) safe[key] = summary;
-      }
-    }
-    return safe;
-  }
-  return value;
-}
-
-function safeCreateWarning(value: unknown): QueueRow | undefined {
-  const safe = safeRemoteEnvelopeValue("createWarning", value);
-  return isQueueRow(safe) ? safe : undefined;
-}
-
-function stateWarningMessages(state: unknown): string[] {
-  if (state === "pending") return [
-    "The row is live and may start early.",
-    EARLY_START_PARK_WARNING,
-    "This request suppresses only the direct nudge.",
-  ];
-  if (state === "blocked") return ["The row is live and may start early."];
-  if (state === "in-progress") return ["The row is live and has already been claimed."];
-  if (typeof state === "string" && ["done", "failed", "denied", "canceled", "handed-off"].includes(state)) {
-    return [`The row exists in state ${state}; the park was not confirmed.`];
-  }
-  return [];
-}
-
-function mergeWarning(
-  value: unknown,
-  fallbackCode: string,
-  explanation: string,
-  fields: string[] = [],
-  observed: QueueRow = {},
-): QueueRow {
-  const existing = isQueueRow(value) ? value : {};
-  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
-  const messages = [originalMessage, explanation].filter(Boolean);
-  const oldFields = Array.isArray(existing.fields) ? existing.fields.filter((field): field is string => typeof field === "string") : [];
-  const oldObserved = isQueueRow(existing.observed) ? existing.observed : {};
-  const mergedObserved: QueueRow = {};
-  for (const [field, received] of Object.entries(oldObserved)) {
-    const safe = field === "body" ? safeBodySummary(received) : observedValue(field, received);
-    if (safe !== undefined) mergedObserved[field] = safe;
-  }
-  for (const [field, received] of Object.entries(observed)) {
-    const safe = field === "body" ? safeBodySummary(received) : observedValue(field, received);
-    if (safe !== undefined) mergedObserved[field] = safe;
-  }
-  return {
-    ...existing,
-    code: typeof existing.code === "string" ? existing.code : fallbackCode,
-    message: [...new Set(messages)].join(" "),
-    fields: [...new Set([...oldFields, ...fields])],
-    observed: mergedObserved,
-  };
-}
-
-function unconfirmedParkWarning(
-  row: QueueRow,
-  blockedOn: string | undefined,
-  wakeAfterSeconds: number | undefined,
-  directCreateResponse = false,
-): QueueRow | undefined {
-  const existing = isQueueRow(row.parkWarning) ? row.parkWarning : undefined;
-  const blockerMatches = row.state === "blocked" && (row.blockedOn ?? null) === (blockedOn ?? null);
-  const hasParkWarning = Object.prototype.hasOwnProperty.call(row, "parkWarning");
-  const hasCurrentParkSignal = hasParkWarning && row.parkWarning === null;
-  const malformedParkWarning = hasParkWarning && row.parkWarning !== null && !isQueueRow(row.parkWarning);
-  const bodyNotSaved = isQueueRow(row.createWarning) && row.createWarning.code === "qitem_body_not_saved";
-  const timerMatches = wakeAfterSeconds === undefined || hasCurrentParkSignal;
-  if (directCreateResponse && !bodyNotSaved && blockerMatches && timerMatches && existing === undefined && !malformedParkWarning) return undefined;
-
-  const existingMessage = typeof existing?.message === "string" ? existing.message : "";
-  const messages = existing ? [] : stateWarningMessages(row.state);
-  if (row.state === "pending" && existing && !existingMessage.includes(EARLY_START_PARK_WARNING)) {
-    messages.push(EARLY_START_PARK_WARNING);
-  }
-  if (bodyNotSaved && !existingMessage.toLowerCase().includes("not confirmed")) {
-    messages.push("The supplied body was not saved. The requested park is not confirmed.");
-  }
-  if (row.state === "blocked" && !blockerMatches) {
-    messages.push("The saved row does not match the requested blocker. The park is not confirmed.");
-  }
-  if (row.state === "blocked" && blockerMatches && !timerMatches) {
-    messages.push("The requested timer is not confirmed by the saved row. Check its current backstop before relying on the schedule.");
-  }
-  if (malformedParkWarning) messages.push("The saved park warning is not valid, so the park is not confirmed.");
-  if (existing && messages.length === 0) return existing;
-  if (messages.length === 0) messages.push("The saved row does not confirm the requested blocker and timer.");
-  return mergeWarning(existing, "qitem_park_not_confirmed", messages.join(" "));
 }
 
 function printCreateReturnRoute(row: QueueRow): void {
@@ -289,10 +119,6 @@ function printCreateReturnRoute(row: QueueRow): void {
   console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with `
     + `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress`
     + (row.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
-}
-
-function createOutcomeWarning(value: unknown, fields: string[], observed: QueueRow, reason: string): QueueRow {
-  return mergeWarning(value, "qitem_create_outcome_unknown", reason, fields, observed);
 }
 
 function stringField(row: QueueRow, key: string): string | null {
@@ -635,7 +461,6 @@ async function withClient<T>(
   }
 }
 
-const UNKNOWN_PARK_CREATE_NOTE = "The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.";
 
 function printResult(json: boolean, body: unknown, status: number): void {
   if (isIndeterminateRemoteWrite(status, body)) {
@@ -800,19 +625,6 @@ function sameQueueEndpoint(left: string, right: string): boolean {
   return left.replace(/\/+$/, "") === right.replace(/\/+$/, "");
 }
 
-const QUEUE_TARGET_FINGERPRINT_HEADER = "X-OpenRig-Queue-Target-Sha256";
-
-function queueTargetFingerprint(url: string): string {
-  return createHash("sha256").update(url.replace(/\/+$/, ""), "utf8").digest("hex");
-}
-
-function responseQueueTargetFingerprint(response: unknown): string | undefined {
-  if (typeof response !== "object" || response === null) return undefined;
-  const headers = (response as { headers?: Headers }).headers;
-  const value = headers?.get(QUEUE_TARGET_FINGERPRINT_HEADER)?.toLowerCase();
-  return value && /^[0-9a-f]{64}$/.test(value) ? value : undefined;
-}
-
 /** Resolve create receipt labels from the selected endpoint and local registry. No daemon identity request is needed. */
 function createReceiptHostContext(client: DaemonClient, receipt: ReceiptContext | null, hostId: string | undefined): ReceiptContext | null {
   if (!receipt) return null;
@@ -868,7 +680,6 @@ const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 interface SentCreate {
   destinationSession: string;
   body: string;
-  targetFingerprint?: string;
 }
 
 /** The daemon's host id: null when it reports none, undefined when it can't be read. */
@@ -882,93 +693,35 @@ async function daemonSelfHostId(client: DaemonClient): Promise<string | null | u
   }
 }
 
-interface ParkCreateIdentityCheck {
-  row: QueueRow | null;
-  fields: string[];
-  observed: QueueRow;
-  reason: string;
-  existingRow?: QueueRow;
-}
-
-function mergeDirectCreateObservation(
-  failure: ParkCreateIdentityCheck,
-  response: unknown,
-  qitemId: string,
-  sent: SentCreate,
-): ParkCreateIdentityCheck {
-  if (!isQueueRow(response)) return failure;
-  const fields = new Set(failure.fields);
-  const observed: QueueRow = { ...failure.observed };
-  for (const field of ["qitemId", "destinationSession", "state", "body"]) {
-    if (!Object.prototype.hasOwnProperty.call(response, field)) continue;
-    if (field === "qitemId" && (typeof response.qitemId !== "string" || response.qitemId.length === 0)) continue;
-    const value = observedValue(field, response[field]);
-    if (value !== undefined) observed[field] = value;
-  }
-  const mismatches: string[] = [];
-  if (typeof response.qitemId === "string" && response.qitemId.length > 0 && response.qitemId !== qitemId) {
-    fields.add("qitemId");
-    mismatches.push("qitemId");
-  }
-  if (typeof response.destinationSession === "string" && response.destinationSession !== sent.destinationSession) {
-    fields.add("destinationSession");
-    mismatches.push("destinationSession");
-  }
-  const bodyIsKnown = typeof response.body === "string";
-  const bodyMatches = bodyIsKnown
-    && createHash("sha256").update(response.body as string, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
-  if (bodyIsKnown && !bodyMatches) {
-    fields.add("body");
-    mismatches.push("body");
-  }
-  return {
-    ...failure,
-    fields: [...fields],
-    observed,
-    reason: mismatches.length
-      ? `${failure.reason} The direct create response also differed in ${mismatches.join(", ")}.`
-      : failure.reason,
-  };
-}
-
-function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = false): QueueRow {
-  const summary: QueueRow = {};
-  if (row.qitemId === expectedId) summary.qitemId = expectedId;
-  if (typeof row.state === "string" && QUEUE_STATES.has(row.state)) summary.state = row.state;
-  if (typeof row.destinationSession === "string") summary.destinationSession = safeIdentitySessionValue(row.destinationSession);
-  if (typeof row.sourceSession === "string") summary.sourceSession = safeIdentitySessionValue(row.sourceSession);
-  if (row.body !== undefined) {
-    const body = bodyIsSummary ? safeBodySummary(row.body) : bodySummary(row.body);
-    if (body !== undefined) summary.body = body;
-  }
-  return summary;
-}
-
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
   const remote = remoteHostOf(hostId);
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (!remote) return { reader: client, options, remote: undefined, targetEstablished: true };
   const registry = loadHostRegistry();
-  if (!registry.ok) return { reader: client, options, remote: undefined, targetEstablished: false };
-  const learned = loadHostBindings();
-  const match = resolveHost(registry.registry, remote, eligibleQueueBindings(registry.registry, learned));
-  if (!match?.ok) {
-    // The selected endpoint can read its own row, but without an eligible host mapping it cannot
-    // establish that this is the requested destination queue.
-    return { reader: client, options, remote: undefined, targetEstablished: false };
+  if (registry.ok) {
+    const learned = loadHostBindings();
+    const match = resolveHost(registry.registry, remote, eligibleQueueBindings(registry.registry, learned));
+    if (match.ok) {
+      if (match.host.transport !== "http") {
+        const why = "its entry in this CLI's host registry is SSH, not a daemon URL";
+        return { error: `from host '${remote}' (${why})` };
+      }
+      if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
+        return { reader: client, options, remote: undefined, targetEstablished: true };
+      }
+      const bearer = resolveRemoteBearer(match.host);
+      if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
+      if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
+      return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote, targetEstablished: true };
+    }
   }
-  if (match.host.transport !== "http") {
-    const why = "its entry in this CLI's host registry is SSH, not a daemon URL";
-    return { error: `from host '${remote}' (${why})` };
+  // An unregistered --host can still name this daemon itself. Use its own
+  // reported ID only when no eligible registry entry identifies the target.
+  if (await daemonSelfHostId(client) === remote) {
+    return { reader: client, options, remote: undefined, targetEstablished: true };
   }
-  if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
-    return { reader: client, options, remote: undefined, targetEstablished: true, targetFingerprint: queueTargetFingerprint(match.host.url) };
-  }
-  const bearer = resolveRemoteBearer(match.host);
-  if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
-  if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
-  return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote, targetEstablished: true, targetFingerprint: queueTargetFingerprint(match.host.url) };
+  return { reader: client, options, remote: undefined, targetEstablished: false };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -1019,9 +772,6 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
       const selected = await (target ??= queueReadTarget(deps, client, hostId));
       if ("error" in selected) throw new Error(`receipt could not be read ${selected.error}`);
       if (!selected.targetEstablished) throw new Error("the requested host is not established by this CLI's host registry");
-      if (hostWasRequested && (!sent.targetFingerprint || sent.targetFingerprint !== selected.targetFingerprint)) {
-        throw new Error("the receipt target does not match the queue endpoint used for this write");
-      }
       const response = await selected.reader.get<T>(path, selected.options);
       const row = response.data as Record<string, unknown> | undefined;
       const bodyMatches = typeof row?.body === "string"
@@ -1041,8 +791,6 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   row: Record<string, unknown> | null;
   note: string;
   remote?: boolean;
-  identityFailure?: ParkCreateIdentityCheck;
-  contradiction?: CreateReadbackContradiction;
 }> {
   const expectedBodyHash = createHash("sha256").update(sent.body, "utf8").digest("hex");
   const target = await queueReadTarget(deps, client, hostId);
@@ -1056,50 +804,16 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
       note: `The CLI could not establish the queue for requested host '${requestedHost}'. The write outcome is still unknown. Keep this ID for recovery.`,
     };
   }
-  if (remoteHostOf(hostId) && (!sent.targetFingerprint || sent.targetFingerprint !== target.targetFingerprint)) {
-    const requestedHost = remoteHostOf(hostId);
-    return {
-      row: null,
-      note: `The CLI could not bind the recovery read to the queue used for requested host '${requestedHost}'. The write outcome is still unknown. Keep this ID for recovery.`,
-    };
-  }
   const remote = target.remote;
   const where = remote ? ` on host '${remote}'` : "";
   try {
     const res = await target.reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
     if (res.status === 200 && isQueueRow(res.data)) {
       if (typeof res.data.qitemId !== "string" || res.data.qitemId.length === 0) {
-        return {
-          row: null,
-          note: `Row ${qitemId}${where} exists, but the read back did not include a valid ID. The outcome is still unknown. Keep this ID for recovery.`,
-          identityFailure: {
-            row: null,
-            fields: ["qitemId"],
-            observed: {},
-            reason: "The read back row has missing or invalid qitemId evidence. The create outcome is unknown. Keep the sent ID for a read back.",
-          },
-        };
+        return { row: null, note: `Row ${qitemId}${where} exists but the read did not include a valid ID, so the outcome is still unknown. Keep this ID for recovery.` };
       }
       if (res.data.qitemId !== qitemId) {
-        const observed: QueueRow = {};
-        const safeId = observedValue("qitemId", res.data.qitemId);
-        if (safeId !== undefined) observed.qitemId = safeId;
-        return {
-          row: null,
-          note: `Row ${qitemId}${where} exists but the read returned a different ID, so the outcome is still unknown. Don't reuse this ID for other work.`,
-          identityFailure: {
-            row: null,
-            fields: ["qitemId"],
-            observed,
-            reason: "The read back returned a different ID. The create outcome is unknown. Keep the sent ID for a read back.",
-          },
-        };
-      }
-      const observed: QueueRow = {};
-      for (const field of ["qitemId", "state", "destinationSession", "body"]) {
-        if (!Object.prototype.hasOwnProperty.call(res.data, field)) continue;
-        const value = observedValue(field, res.data[field]);
-        if (value !== undefined) observed[field] = value;
+        return { row: null, note: `Row ${qitemId}${where} exists but the read returned a different ID, so the outcome is still unknown. Keep this ID for recovery.` };
       }
       const unreadableFields: string[] = [];
       if (!isQueueState(res.data.state)) unreadableFields.push("state");
@@ -1111,36 +825,14 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
         : undefined;
       if (destinationMatches === undefined) unreadableFields.push("destinationSession");
       if (bodyHashMatches === undefined) unreadableFields.push("body");
-      const contradiction: CreateReadbackContradiction | undefined =
-        destinationMatches === false || bodyHashMatches === false
-          ? {
-              ...(destinationMatches === undefined ? {} : { destinationMatches }),
-              ...(bodyHashMatches === undefined ? {} : { bodyHashMatches }),
-            }
-          : undefined;
-      const identityFailure: ParkCreateIdentityCheck | undefined = unreadableFields.length > 0
-        ? {
-            row: null,
-            fields: unreadableFields,
-            observed,
-            reason: `The read back row has missing or invalid ${unreadableFields.join(", ")} evidence. The create outcome is unknown. Keep the sent ID for a read back.`,
-            ...(isQueueState(res.data.state) ? { existingRow: existingRowSummary(res.data, qitemId) } : {}),
-          }
-        : undefined;
-      if (contradiction || identityFailure) {
-        return {
-          row: null,
-          note: contradiction
-            ? `The row ID ${qitemId}${where} exists, but its destination or body hash contradicts this request. The write outcome stays unknown. Keep this ID for recovery.`
-            : `Row ${qitemId}${where} exists, but the read back lacks valid state, destination, or body evidence. The outcome stays unknown.`,
-          ...(contradiction ? { contradiction } : {}),
-          ...(identityFailure ? { identityFailure } : {}),
-        };
+      if (destinationMatches === false || bodyHashMatches === false) {
+        return { row: null, note: `The row ID ${qitemId}${where} exists, but its destination or body hash contradicts this request. The write outcome stays unknown. Keep this ID for recovery.` };
       }
-      const recoveredRow = { ...res.data };
-      delete recoveredRow.parkReceipt;
+      if (unreadableFields.length > 0) {
+        return { row: null, note: `Row ${qitemId}${where} exists, but the read back lacks valid ${unreadableFields.join(", ")} evidence. The outcome stays unknown. Keep this ID for recovery.` };
+      }
       return {
-        row: recoveredRow,
+        row: res.data,
         note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
         remote: target.remote !== undefined,
       };
@@ -1977,7 +1669,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
-        sent.targetFingerprint = responseQueueTargetFingerprint(res);
         const emitScopeAdvisories = (created: Record<string, unknown>) => {
           const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
           for (const value of advisories) {
@@ -2027,7 +1718,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           created: Record<string, unknown>,
           status: number,
           recovered?: "neutral" | "remote",
-          knownIdentityFailure?: ParkCreateIdentityCheck,
         ) => {
           const resultReceipt = receipt && recovered !== undefined
             ? (() => {
@@ -2044,47 +1734,18 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               })()
             : receipt;
           if (status < 400 && parkRequested) {
-            if (created.createOutcome === "unknown" || knownIdentityFailure) {
-              const createWarning = knownIdentityFailure
-                ? createOutcomeWarning(created.createWarning, knownIdentityFailure.fields, knownIdentityFailure.observed, knownIdentityFailure.reason)
-                : safeCreateWarning(created.createWarning)
-                  ?? createOutcomeWarning(undefined, [], {}, "The forwarder returned an unknown create outcome. Reconcile by ID before any retry.");
-              const forwardedParkWarning = safeRemoteEnvelopeValue("parkWarning", created.parkWarning);
-              const parkWarning = isQueueRow(forwardedParkWarning)
-                ? forwardedParkWarning
-                : unconfirmedParkWarning({}, opts.blockedOn, opts.wakeAfter, false)
-                  ?? { code: "qitem_park_not_confirmed", message: "The create identity is unknown, so this response cannot confirm its park." };
-              const existingRow = knownIdentityFailure?.existingRow
-                ? existingRowSummary(knownIdentityFailure.existingRow, qitemId, true)
-                : isQueueRow(created.existingRow) ? existingRowSummary(created.existingRow, qitemId, true) : undefined;
-              console.error(`Warning: ${createWarning.message}`);
-              console.error(`Warning: ${parkWarning.message}`);
-              console.error(UNKNOWN_PARK_CREATE_NOTE);
-              printResult(opts.json ?? false, {
-                qitemId,
-                createOutcome: "unknown",
-                createWarning,
-                parkWarning,
-                ...(isQueueRow(existingRow) ? { existingRow } : {}),
-                recovery,
-              }, status);
-              process.exitCode = 1;
+            if (created.createOutcome === "unknown") {
+              unknownCreate(created);
               return;
             }
             const outputCreated: QueueRow = { ...created };
-            delete outputCreated.parkReceipt;
-            const warning = unconfirmedParkWarning(created, opts.blockedOn, opts.wakeAfter, recovered === undefined);
-            if (warning) {
-              outputCreated.parkWarning = warning;
-              if (typeof warning.message === "string") console.error("Warning: " + warning.message);
-            } else {
-              delete outputCreated.parkWarning;
-            }
 
             if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
             else emitScopeAdvisories(created);
             const createWarning = created.createWarning as { message?: unknown } | undefined;
             if (typeof createWarning?.message === "string") console.error(`Warning: ${createWarning.message}`);
+            const parkWarning = created.parkWarning as { message?: unknown } | undefined;
+            if (typeof parkWarning?.message === "string") console.error(`Warning: ${parkWarning.message}`);
             printCreateReturnRoute(created);
             const advisories = Array.isArray(created.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
             for (const advisory of advisories) {
@@ -2116,9 +1777,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
           const createWarning = created.createWarning as { message?: unknown } | undefined;
           if (status < 400 && typeof createWarning?.message === "string") console.error(`Warning: ${createWarning.message}`);
+          const parkWarning = created.parkWarning as { message?: unknown } | undefined;
+          if (status < 400 && typeof parkWarning?.message === "string") console.error(`Warning: ${parkWarning.message}`);
           const outputCreated: QueueRow = { ...created };
-          delete outputCreated.parkReceipt;
-          if (status < 400) delete outputCreated.parkWarning;
           if (status < 400) printCreateReturnRoute(created);
           if (opts.verify && status < 400 && isAbsorbedCreateRetry(outputCreated)) {
             const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested, hostResolved.hostId);
@@ -2146,71 +1807,38 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         };
         const usableCreateRow = (value: unknown): value is Record<string, unknown> =>
           isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state) && value.createOutcome !== "unknown";
-        const unknownCreate = (envelope?: unknown, contradiction?: CreateReadbackContradiction, identityFailure?: ParkCreateIdentityCheck) => {
+        const unknownCreate = (envelope?: unknown) => {
           const received = isQueueRow(envelope) ? envelope : {};
-          const createWarning = identityFailure
-            ? createOutcomeWarning(received.createWarning, identityFailure.fields, identityFailure.observed, identityFailure.reason)
-            : safeCreateWarning(received.createWarning);
-          const remoteParkWarning = safeRemoteEnvelopeValue("parkWarning", received.parkWarning);
-          const parkWarning = isQueueRow(remoteParkWarning)
-            ? remoteParkWarning
-            : parkRequested ? {
-                code: "qitem_park_not_confirmed",
-                message: contradiction
-                  ? "The saved row contradicts this create, so the write outcome stays unknown and the requested park is not confirmed."
-                  : "The saved row could not be read back, so the requested park is not confirmed.",
-              } : undefined;
-          const existingRow = isQueueRow(received.existingRow)
-            ? existingRowSummary(received.existingRow, qitemId, true)
-            : undefined;
-          if (typeof createWarning?.message === "string") console.error(`Warning: ${createWarning.message}`);
-          if (typeof parkWarning?.message === "string") console.error(`Warning: ${parkWarning.message}`);
-          console.error(parkRequested ? UNKNOWN_PARK_CREATE_NOTE : "The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
+          for (const key of ["createWarning", "parkWarning"] as const) {
+            const warning = received[key];
+            if (isQueueRow(warning) && typeof warning.message === "string") console.error(`Warning: ${warning.message}`);
+          }
           printResult(opts.json ?? false, {
             error: "queue_create_outcome_unknown",
             outcome: "unknown",
             createOutcome: "unknown",
             qitemId,
-            ...(createWarning ? { createWarning } : {}),
-            ...(parkWarning ? { parkWarning } : {}),
-            ...(isQueueRow(existingRow) ? { existingRow } : {}),
-            ...(contradiction ? {
-              contradiction: {
-                code: "queue_create_readback_mismatch",
-                destinationMatches: contradiction.destinationMatches,
-                bodyHashMatches: contradiction.bodyHashMatches,
-                message: "The row exists, but its destination or body hash contradicts this request. The write outcome stays unknown.",
-              },
-            } : {}),
+            ...(Object.prototype.hasOwnProperty.call(received, "createWarning") ? { createWarning: received.createWarning } : {}),
+            ...(Object.prototype.hasOwnProperty.call(received, "parkWarning") ? { parkWarning: received.parkWarning } : {}),
             recovery,
           }, 502);
-          process.exitCode = contradiction ? 2 : 1;
+          process.exitCode = 1;
         };
         if (res instanceof Error) {
-          // A pre-header disconnect can follow a committed create. Preserve the
-          // typed error, but do not let the shared renderer assert nondelivery.
-          if (res instanceof DaemonConnectionError) res.writeOutcome = "unknown";
           // No answer in time, a lost connection, or a response lost or unreadable after its headers: the create may have
           // committed, so read it back once by its ID.
           if (res instanceof DaemonTimeoutError || res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
-            if (late.contradiction) {
-              unknownCreate(undefined, late.contradiction, late.identityFailure);
-              return;
-            }
             if (late.row) {
               await finish(late.row, 200, late.remote ? "remote" : "neutral");
               return;
             }
-            if (parkRequested && late.identityFailure) {
-              await finish({}, 200, undefined, late.identityFailure);
-              return;
-            }
+            unknownCreate();
+            return;
           }
           if (res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
-            // Keep the shared typed error/exit path, including --json, while
-            // supplying the identity missing from an unreadable/late response.
+            // Keep the sent ID available when the shared typed error renderer reports this failure.
             res.message += ` ${recovery}`;
           }
           throw res;
@@ -2220,36 +1848,18 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // than throw: read the row back once from the destination before reporting it.
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
-          if (late.contradiction) {
-            unknownCreate(res.data, late.contradiction, late.identityFailure);
-            return;
-          }
           if (late.row) {
             await finish(late.row, 200, late.remote ? "remote" : "neutral");
             return;
           }
-          if (parkRequested && late.identityFailure) {
-            await finish({}, 200, undefined, late.identityFailure);
-            return;
-          }
-          printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
+          unknownCreate(res.data);
           return;
         }
         if (res.status < 400 && !usableCreateRow(res.data)) {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
-          if (late.contradiction) {
-            unknownCreate(res.data, late.contradiction, late.identityFailure);
-            return;
-          }
           if (late.row) {
             await finish(late.row, 200, late.remote ? "remote" : "neutral");
-            return;
-          }
-          if (late.identityFailure) {
-            const identityFailure = mergeDirectCreateObservation(late.identityFailure, res.data, qitemId, sent);
-            if (parkRequested) await finish({}, 200, undefined, identityFailure);
-            else unknownCreate(res.data, undefined, identityFailure);
             return;
           }
           unknownCreate(res.data);
