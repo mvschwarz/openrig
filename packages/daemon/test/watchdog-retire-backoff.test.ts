@@ -90,6 +90,41 @@ it("backs off a delivered wake whose retirement keeps failing, reports it once, 
   expect(f.send).toHaveBeenCalledTimes(1);
 });
 
+it("backs off the same way when the pass's own history row can't be written after a delivered wake", async () => {
+  const f = await parkedRowWithTimer();
+  const full = Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+  const record = vi.spyOn(f.history, "record").mockImplementation(() => { throw full; });
+
+  later(30); await f.scheduler.runTickNow();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  expect(f.errors).toHaveLength(1);
+  expect((f.errors[0] as Error).cause).toBe(full);
+  expect(f.jobs.getByIdOrThrow(f.jobId).state).toBe("active");
+
+  // The pass's row and the report's row at the first failure, the pass's row at the next tick, then nothing in the interval.
+  for (let i = 0; i < 120; i++) { later(1); await f.scheduler.runTickNow(); }
+  expect(record).toHaveBeenCalledTimes(3);
+  expect(f.errors).toHaveLength(1);
+  expect(f.send).toHaveBeenCalledTimes(1);
+
+  record.mockRestore();
+  later(300); await f.scheduler.runTickNow();
+  expect(f.jobs.getByIdOrThrow(f.jobId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once" });
+  expect(f.send).toHaveBeenCalledTimes(1);
+  expect(f.errors).toHaveLength(1);
+});
+
+it("rethrows an accounting error on a wake that wasn't delivered, unwrapped and unreported", async () => {
+  const f = await parkedRowWithTimer();
+  f.send.mockResolvedValue({ ok: false, sessionName: f.owner, sent: false, inputPhase: "not_reached",
+    reason: "tmux_unavailable", error: "The terminal service is not listening yet." });
+  const broken = new Error("disk I/O error");
+  vi.spyOn(f.repo, "recordWatchdogWakeAttempt").mockImplementation(() => { throw broken; });
+  later(30); await f.scheduler.runTickNow();
+  expect(f.errors).toEqual([broken]);
+  expect(f.history.listForJob(f.jobId).some(h => h.evaluationNotes?.["wakeAccountingFailed"] === true)).toBe(false);
+});
+
 it("keeps a failure before any wake was delivered on its existing path", async () => {
   const f = await parkedRowWithTimer();
   f.send.mockResolvedValue({ ok: false, sessionName: f.owner, sent: false, inputPhase: "not_reached",

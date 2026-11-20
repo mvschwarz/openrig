@@ -887,24 +887,7 @@ export class WatchdogPolicyEngine {
       ? { ...(deliveryNotes ?? {}), ...(delivery.retryAt ? { retryAt: delivery.retryAt } : {}),
         ...(delivery.nextAction ? { nextAction: delivery.nextAction } : {}),
         ...(delivery.occurrenceTracked ? { outboxIds: delivery.outboxIds ?? [] } : {}) } : deliveryNotes;
-    const history = this.historyLog.record({
-      jobId: job.jobId,
-      evaluatedAt,
-      outcome: delivery.reconciled ? "skipped" : delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
-        : isRefusedInteractive(delivery.error) ? "refused" : "failed",
-      skipReason: delivery.reconciled ? "delivery_receipt_reconciled" : delivery.status === "retained" ? "typing_guard_retained" : null,
-      deliveryTargetSession: outcome.target.session,
-      // `sent` with a queue-only status (watchdog-history-log.ts) means it reached the seat's queue, not typed.
-      deliveryStatus: deliveryStatusLabel(delivery),
-      deliveryMessage: digest?.line ?? delivery.sentMessage ?? sentMessage ?? outcome.message,
-      // OPR.0.5.6.24 — the delivery error/reason string survives into the
-      // durable record so a policy can distinguish an interactive-prompt
-      // refusal from a generic failure (status alone discards that identity).
-      evaluationNotes:
-        delivery.error !== undefined
-          ? { ...receiptNotes, deliveryReason: delivery.error }
-          : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
-    });
+    let history: WatchdogHistoryEntry | null = null;
     const retryPending = delivery.occurrenceTracked && delivery.status === "failed" && !delivery.occurrenceComplete;
     const accountWake = () => {
       const current = this.jobsRepo.getByIdOrThrow(job.jobId);
@@ -928,13 +911,31 @@ export class WatchdogPolicyEngine {
       if (delivery.occurrenceTracked) accountWake();
     };
     try {
+      history = this.historyLog.record({
+        jobId: job.jobId,
+        evaluatedAt,
+        outcome: delivery.reconciled ? "skipped" : delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
+          : isRefusedInteractive(delivery.error) ? "refused" : "failed",
+        skipReason: delivery.reconciled ? "delivery_receipt_reconciled" : delivery.status === "retained" ? "typing_guard_retained" : null,
+        deliveryTargetSession: outcome.target.session,
+        // `sent` with a queue-only status (watchdog-history-log.ts) means it reached the seat's queue, not typed.
+        deliveryStatus: deliveryStatusLabel(delivery),
+        deliveryMessage: digest?.line ?? delivery.sentMessage ?? sentMessage ?? outcome.message,
+        // OPR.0.5.6.24 — the delivery error/reason string survives into the
+        // durable record so a policy can distinguish an interactive-prompt
+        // refusal from a generic failure (status alone discards that identity).
+        evaluationNotes:
+          delivery.error !== undefined
+            ? { ...receiptNotes, deliveryReason: delivery.error }
+            : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
+      });
       if (delivery.occurrenceTracked) this.eventBus.withNotifyEnvelope(account);
       else account();
     } catch (err) {
       // #3479: this wake's receipt is already durable, so its next pass reconciles without typing it again. One failure
-      // is retried at the next tick, as before. When its recording keeps failing (a one-shot retirement SQLite can't
-      // journal), wait the wake retry interval between tries and report it once per failing run, instead of a pass, a
-      // history row and a stack trace every tick.
+      // is retried at the next tick, as before. When its recording keeps failing (the pass's history row, or a one-shot
+      // retirement SQLite can't journal), wait the wake retry interval between tries and report it once per failing run,
+      // instead of a pass, a history row and a stack trace every tick.
       if (!(delivery.occurrenceTracked && delivery.status === "ok")) throw err;
       const report = this.backOffAccounting(job, outcome, evaluatedAt, delivery, err);
       if (report) throw report;
