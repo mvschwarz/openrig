@@ -483,6 +483,23 @@ profiles:
     expect(result.warnings).toContain(`dev.impl: agent spec advisory (impl, ${RIG_ROOT}/agents/impl): profiles.default.uses.skils: unknown key ignored; known keys are skills, guidance, subagents, plugins, runtime_resources`);
   });
 
+  it("Load paths (preflight, import, bootstrap plan and apply) return the pool advisory in `warnings` exactly once.", async () => {
+    // #3395 C6: rigPreflight is the one load front import and bootstrap plan/apply go through; it adds the advisory
+    const files: Record<string, string> = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") };
+    const rigYaml = [
+      'version: "0.2"', "name: test-rig", "pods:", "  - id: dev", "    label: Dev", "    members:",
+      "      - id: impl", "        agent_ref: local:agents/impl", "        profile: default", "        runtime: claude-code",
+      "        cwd: .", "        pool:", "          max: 2", "          min: 4", "    edges: []", "edges: []", "",
+    ].join("\n");
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(result.ready).toBe(true);
+    expect(result.warnings.filter((w) => w.startsWith("dev.impl pool."))).toEqual([
+      "dev.impl pool.max: must be at least min (4); pool not used",
+    ]);
+    const valid = await rigPreflight({ rigSpecYaml: rigYaml.replace("          min: 4\n", ""), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(valid.warnings.filter((w) => w.includes(" pool."))).toEqual([]);
+  });
+
   it("shows an agent spec's advisories, its own and its imports', as launch warnings, and stays ready", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nimports:\n  - ref: local:../shared\ndefaults:\n  effort: 3\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`,

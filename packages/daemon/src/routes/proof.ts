@@ -93,7 +93,7 @@ export function proofRoutes(): Hono {
           const selected = selectRigProject(projectCatalogPaths(c).catalog, rig);
           if (selected) { id = selected.id; selectedBy = "rig"; }
         } catch (e) {
-          warnings.push(`Rig project selection failed: ${e instanceof Error ? e.message : String(e)}; using configured workspace. Fix the catalog or select with --project, --workspace, or a project: prefix.`);
+          warnings.push(`Rig project selection failed: ${e instanceof Error ? e.message : String(e)}; using configured workspace. Fix the catalog or select with --project or a project: prefix.`);
         }
       }
     }
@@ -102,7 +102,7 @@ export function proofRoutes(): Hono {
       try { selectedProject = projectById(c, id); }
       catch (e) {
         if (selectedBy !== "rig" && !(expectedProject !== undefined && expectedMissionsRoot !== undefined)) throw catalogError(e);
-        warnings.push(`Rig project '${id}' is unavailable: ${e instanceof Error ? e.message : String(e)}; using configured workspace. Fix the project or select with --project, --workspace, or a project: prefix.`);
+        warnings.push(`Rig project '${id}' is unavailable: ${e instanceof Error ? e.message : String(e)}; using configured workspace. Fix the project or select with --project or a project: prefix.`);
         id = undefined;
       }
     }
@@ -119,7 +119,7 @@ export function proofRoutes(): Hono {
         if (!verified) {
           throw new JudgmentError("project_changed", "Prepared root receipt is invalid or no longer matches; read the proof again", 409);
         }
-        warnings.push(`Project selection changed since preparation; judging against the prepared root ${preparedMissions}. Select explicitly with --project, --workspace, or a project: prefix.`);
+        warnings.push(`Project selection changed since preparation; judging against the prepared root ${preparedMissions}. Select explicitly with --project or a project: prefix.`);
         return { root: verified.missions, evidenceRoot: verified.root, scope, owner: null,
           project: expectedProject === null ? null : { id: expectedProject as string, root: verified.root, selectedBy: "prepared" }, warnings };
       }
