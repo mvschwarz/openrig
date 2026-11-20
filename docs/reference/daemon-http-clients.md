@@ -255,11 +255,11 @@ What reads these declarations:
   carry `X-OpenRig-Limit` (the limit applied) and `X-OpenRig-Truncated`, `1` when more rows matched than were
   returned and `0` when they all fit, so a full page that holds every match isn't mistaken for a cut one. When it
   says `1`, raise `limit` to read them all. A negative `limit` doesn't bound the read, and the response has neither
-  header. With `attention=1`, a full read that the route's attention check thins to `limit` rows or fewer has neither
-  header either, because rows past the read may still match. `rig queue list` prints a line on stderr when the page
-  was cut, and the `rig_queue_list` MCP tool adds
-  `limit` and `truncated` beside `items`. Each item's own history is `GET /api/queue/<qitemId>/transitions`. This
-  read scans the queue table, so read it occasionally rather than polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
+  header. With `attention=1`, when the read reaches its limit but the attention check leaves `limit` rows or fewer,
+  the response has neither header either; read again with a larger `limit` to know. `rig queue list` prints a line on
+  stderr when the page was cut, and the `rig_queue_list` MCP tool adds `limit` and `truncated` beside `items`.
+  Each item's own history is `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so read it
+  occasionally rather than polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
   `queue/list?rig=` again. Not every event names both seats (`queue.claimed` and `queue.unclaimed` carry only the
   destination), and not every state change is on that stream, so the events alone don't track a rig's items.
 - **A rig's messages:** `GET /api/queue/outbox/list?rig=<rig>` returns the messages sent from or to the rig's
