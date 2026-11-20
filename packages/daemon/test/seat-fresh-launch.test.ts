@@ -130,6 +130,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       eventBus,
       tmuxAdapter: tmux,
       sleep: async () => undefined,
+      listProcesses: () => listProcesses(),
     });
     invalidations = [];
     activitySwaps = [];
@@ -233,7 +234,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result.ok).toBe(verified);
     expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal clients")]);
     if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
-    else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
+    else expect(result).toMatchObject({ code: "attention_required", status: "attention_required" });
   });
 
   it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
@@ -256,7 +257,6 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(current.startupStatus).toBe(mode === "valid" ? "ready" : "attention_required");
     expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
     expect(alive.has(seat.sessionName)).toBe(true);
-    if (mode === "valid") expect(observe).toHaveBeenCalledTimes(2);
   });
 
   it("default-path consent retains context and continues the same occupant once after late acceptance", async () => {

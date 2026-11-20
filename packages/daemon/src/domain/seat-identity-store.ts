@@ -48,7 +48,8 @@ function rowToVerdict(row: VerdictRow): SeatIdentityVerdict {
 export class SeatIdentityStore {
   constructor(private readonly db: Database.Database) {}
 
-  /** Upsert one node's verdict (last-writer-wins per node). The current verdict is always replaced, pids included. The
+  /** Upsert one node's verdict by observation time, so an older sweep finishing late cannot replace a new launch's
+   *  completion observation. The current verdict is replaced, pids included. The
    *  last observed process (`evidence_*`, with its own time) is refreshed only by a verdict that carries a pid; one
    *  without a pid keeps it for the same session and clears it for another. */
   upsert(v: SeatIdentityVerdict): void {
@@ -76,6 +77,7 @@ export class SeatIdentityStore {
           WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_pane_pid END,
         evidence_at = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_at
           WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_at END
+      WHERE excluded.observed_at >= seat_identity_verdicts.observed_at
     `).run({
       node_id: v.nodeId,
       verdict: v.verdict,

@@ -153,10 +153,18 @@ export async function rebindAndVerifyPaneIdentity(input: {
 }): Promise<PaneIdentityReconcileResult> {
   const observedAt = (input.now ?? (() => new Date()))().toISOString();
   const identityStore = new SeatIdentityStore(input.db);
+  const unavailable = () => {
+    if (input.assertCurrent && !input.assertCurrent()) return;
+    identityStore.upsert({ nodeId: input.nodeId, verdict: "tmux_unavailable", evidenceSource: "tmux_session",
+      reason: "tmux_unavailable", sessionName: input.sessionName, observedAt,
+      evidence: { registeredPane: input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null,
+        observedPid: null, observedCommand: null, matchedLayer: null } });
+  };
   let panes: Awaited<ReturnType<PaneIdentityTmux["listPanes"]>>;
   try {
     panes = await input.tmux.listPanes(input.sessionName);
   } catch (error) {
+    unavailable();
     return { ok: false, detail: `tmux pane lookup failed: ${(error as Error).message}` };
   }
   if (panes.length !== 1) {
@@ -186,6 +194,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     pid = await input.tmux.getPanePid(pane.id);
     command = await input.tmux.getPaneCommand(pane.id);
   } catch (error) {
+    unavailable();
     return { ok: false, detail: `tmux pane identity lookup failed: ${(error as Error).message}` };
   }
   let runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);

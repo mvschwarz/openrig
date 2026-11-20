@@ -49,7 +49,9 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242),
+    getPaneCommand: vi.fn(async () => "claude"),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
     ...overrides,
@@ -135,6 +137,12 @@ describe("StartupOrchestrator", () => {
         resolveOne: () => ({ value: 30, source: "default", defaultValue: 30 }),
       } as unknown as Pick<SettingsStore, "resolveOne">),
       sleep: async () => {},
+      listProcesses: async () => {
+        const latest = sessionRegistry.getSessionsForRig(rigRepo.listRigs()[0]?.id ?? "").at(-1);
+        const argv = latest?.resumeToken ? ["codex", "resume", latest.resumeToken] : ["codex"];
+        return [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242, executableName: "codex",
+          command: argv.join(" "), argv, startedAt: "Sat Jan  1 12:00:00 2000" }];
+      },
     });
   }
 
