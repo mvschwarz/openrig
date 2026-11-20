@@ -20,7 +20,7 @@ import { sliceWhole, wrapDetailLines, detailPage, listItem, sectionRule, type Co
 import { scopeContractLines, scopeIdentityLines, proofProvenanceLines, type ReadinessSnap, type MissionScopesSnap, type SliceScopeSnap } from "../scopes/scopes-model.js";
 
 export interface ExecutionViewSnap {
-  readiness?: { historicalStatus?: string | null; revision: string; state: string; slices: Array<{ scope: string; readiness: import("../scopes/scopes-model.js").ReadinessSnap }> };
+  readiness?: { historicalStatus?: string | null; revision: string; state: string; activeSlices?: number; slices: Array<{ scope: string; readiness: import("../scopes/scopes-model.js").ReadinessSnap }> };
   view: "execution";
   mission: string;
   derived_at?: string;
@@ -519,6 +519,10 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   lines.push(fact("NEXT", nextValue, next ? "accentBright" : "dim"));
   lines.push(fact("PROGRESS", progress, "bright"));
   lines.push(fact("LIFECYCLE", `${execution.readiness?.historicalStatus ?? "unknown"} · separate from outcomes`, "dim"));
+  // #3614: a mission with no active member reads not-ready; say there is nothing to judge rather than leave it looking blocked.
+  if (execution.readiness?.state === "not-ready" && execution.readiness.activeSlices === 0) {
+    lines.push(fact("ACTIVE", "no active slice in mission.yaml · nothing is being judged", "dim"));
+  }
   const unmatched = execution.uncatalogued_project_tags;
   if (unmatched?.rows) {
     lines.push(fact("UNMATCHED", `${unmatched.rows} row${unmatched.rows === 1 ? "" : "s"} not shown`, "warn"));

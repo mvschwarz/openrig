@@ -48,6 +48,9 @@ export interface MissionReadiness {
    *  edges. */
   slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; dependsOnBasis: DependsOnBasis; eligible: boolean | null }>;
   historicalStatus: string | null;
+  /** How many composition members are active. `not-ready` with 0 means the mission has no active work (#3614), not work
+   *  that isn't ready; `unknown` and `legacy` keep their own readings. */
+  activeSlices: number;
 }
 export class JudgmentError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -335,13 +338,14 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   const issues: string[] = [], slices: MissionReadiness["slices"] = [];
   // #1280: each member's directory, for reading its declared node identity only when a dependency needs it.
   const dirs = new Map<MissionReadiness["slices"][number], string>();
-  let historicalStatus: string | null = null;
+  let historicalStatus: string | null = null, activeSlices = 0;
   try {
     const doc = manifest(io, path.join(missionDir, "mission.yaml"));
-    if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus };
+    if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus, activeSlices };
     const metadata = doc.metadata != null ? mapping(doc.metadata, "mission metadata") : {};
     historicalStatus = typeof metadata.status === "string" ? metadata.status : null;
     const members = validateMissionComposition(doc, path.join(missionDir, "mission.yaml")).filter(m => m.active);
+    activeSlices = members.length;
     for (const member of members) {
       const dir = path.dirname(member.path), data = manifest(io, member.path);
       const execution = data?.execution as { depends_on?: unknown } | undefined;
@@ -385,7 +389,7 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
     for (const s of slices) s.eligible = visit(s);
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); for (const s of slices) s.eligible = null; }
   const state = issues.length || slices.some(s => ["unknown", "legacy"].includes(s.readiness.state)) ? "unknown" : slices.length && slices.every(s => s.readiness.state === "ready") ? "ready" : "not-ready";
-  return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
+  return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus, activeSlices };
 }
 
 /** How a work node's authored file lists `depends_on:`: as EC-1's inline JSON array (`[]` included), in another form (a
@@ -437,5 +441,8 @@ export async function readProjectReadinessAsync(missionsRoot: string, readPolicy
 
 function projectReadiness(missions: Array<MissionReadiness & { name: string }>) {
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
-  return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
+  // `activeSlices` derives from `slices`, so the revision hashes each mission without it, as before (#3614).
+  const revision = hash(active.map(({ activeSlices, ...mission }) => mission));
+  // `not-ready` with `activeMissions: 0` means no mission is active or a release candidate, not work that isn't ready.
+  return { revision, state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, activeMissions: active.length, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

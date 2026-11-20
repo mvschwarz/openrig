@@ -277,7 +277,7 @@ describe("POST /api/missions/:missionId/complete", () => {
 type SidecarBody = { missions: Record<string, { authoredStatus: string | null; readiness: unknown }> };
 
 const legacyReadiness = {
-  name: "relx", state: "legacy", historicalStatus: null, slices: [], issues: [],
+  name: "relx", state: "legacy", historicalStatus: null, slices: [], issues: [], activeSlices: 0,
   revision: expect.stringMatching(/^[a-f0-9]{64}$/),
 };
 
