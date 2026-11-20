@@ -739,18 +739,6 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 
 const isClaudeTrustHeading = (row: string) => row.trim().startsWith("Accessing workspace:");
 
-/** Claude's workspace trust dialog on its current screen, from the first frame it draws: the "Accessing workspace:"
- *  heading, or a mark of the gated-grants backstop (whose heading a long list can scroll out). Enter there answers the
- *  dialog, and the plain prompt's focus opens on "No, exit" (2.1.310, 2.1.322), so a send would exit Claude. Returns the
- *  row it was read from, or null. */
-export function currentClaudeTrustDialog(paneContent: string): string | null {
-  const current = claudeCurrentRows(paneContent);
-  const heading = current.find(isClaudeTrustHeading);
-  if (heading) return heading.trim();
-  if (!hasClaudeGatedGrantsMark(current)) return null;
-  return current.find(row => CLAUDE_GATED_GRANTS_MARK_ROW.test(row))?.trim() ?? "This folder pre-approves tool permissions";
-}
-
 /** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and none of
  *  the prompt's options is drawn below it yet. */
 export function claudeTrustPromptDrawing(paneContent: string): boolean {
