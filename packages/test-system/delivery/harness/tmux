@@ -1,0 +1,111 @@
+#!/usr/bin/python3 -I
+"""The delivery suite's logging tmux: record each call exactly, then become the real tmux.
+
+It sits first on the private daemon's PATH, so every tmux call OpenRig makes for a case is in the log, in order, with
+its time. It records the argv only, never the environment, and adds no tmux command of its own. Ported from the S02
+harness's prepared/tmux (same record, same append-and-fsync under an exclusive lock, same exec).
+
+Needs, all absolute where they're paths:
+  DELIVERY_REAL_TMUX  the tmux binary to run
+  DELIVERY_TMUX_LOG   the JSONL log (created 0600; must be a regular file)
+  DELIVERY_ARM        the run's label, copied into each record
+Optional:
+  DELIVERY_INJECT_DIR a directory for one injected keystroke burst (see inject below)
+"""
+import fcntl
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def inject(directory, real, args):
+    """A person typing into the seat's pane at one exact point of OpenRig's write, on purpose.
+
+    A case arms it by writing <directory>/arm.json: {"pane": "%0", "text": "...", "bufferPrefix": "openrig_",
+    "at": "pre-paste" | "pre-enter"}. The next paste-buffer aimed at exactly that pane, from a buffer with that prefix,
+    claims the arm (an atomic rename, so it fires once).
+    - "pre-paste" (the default; issue #3076's gap): types the text, waits until a capture shows it, and only then lets
+      the paste run.
+    - "pre-enter" (#3176's gap): lets the paste run and finish first, then types the text and waits until it shows,
+      before OpenRig's own read of the input that precedes its Enter.
+    What happened is written to <directory>/fired.json. Any other tmux call passes untouched. Returns the exit code to
+    leave with when this call already ran the paste itself, else None."""
+    target = args[args.index("-t") + 1] if "-t" in args[:-1] else None
+    buffer = args[args.index("-b") + 1] if "-b" in args[:-1] else None
+    arm = os.path.join(directory, "arm.json")
+    claimed = os.path.join(directory, "claimed-%d.json" % os.getpid())
+    try:
+        os.rename(arm, claimed)
+    except FileNotFoundError:
+        return
+    with open(claimed, encoding="utf-8") as f:
+        spec = json.load(f)
+    if target != spec["pane"] or not (buffer or "").startswith(spec.get("bufferPrefix", "openrig_")):
+        os.rename(claimed, arm)  # not the armed write: leave the arm for it
+        return
+    at = spec.get("at", "pre-paste")
+    record = {"at": at, "target": target, "buffer": buffer, "text": spec["text"], "pid": os.getpid(), "claimedNs": time.time_ns()}
+    paste_rc = None
+    if at == "pre-enter":
+        paste_rc = subprocess.run([real, *args], check=False).returncode
+        record.update({"pasteRc": paste_rc, "pasteDoneNs": time.time_ns(),
+                       "screenAfterPaste": subprocess.run([real, "capture-pane", "-p", "-t", target], capture_output=True, text=True).stdout})
+    before = subprocess.run([real, "capture-pane", "-p", "-t", target], capture_output=True, text=True).stdout
+    record["screenBeforeTyping"] = before
+    subprocess.run([real, "send-keys", "-t", target, "-l", spec["text"]], check=False)
+    record["typedNs"] = time.time_ns()
+    visible = False
+    screen = ""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        screen = subprocess.run([real, "capture-pane", "-p", "-t", target], capture_output=True, text=True).stdout
+        if spec["text"] in screen:
+            visible = True
+            break
+        time.sleep(0.05)
+    record.update({"visible": visible, "visibleNs": time.time_ns(), "screenAfterTyping" if at == "pre-enter" else "screenBeforePaste": screen})
+    # Readers see either no receipt or the complete JSON; the claimed arm still fires only once.
+    fd, pending = tempfile.mkstemp(prefix=".fired-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False)
+        os.replace(pending, os.path.join(directory, "fired.json"))
+    finally:
+        if os.path.exists(pending):
+            os.unlink(pending)
+    return paste_rc
+
+real = os.environ["DELIVERY_REAL_TMUX"]
+log = os.environ["DELIVERY_TMUX_LOG"]
+if not (os.path.isabs(real) and os.path.isabs(log)):
+    sys.exit("delivery tmux: DELIVERY_REAL_TMUX and DELIVERY_TMUX_LOG must be absolute")
+if os.path.realpath(real) == os.path.realpath(__file__):
+    sys.exit("delivery tmux: DELIVERY_REAL_TMUX points at this wrapper")
+record = {
+    "timeNs": time.time_ns(),
+    "monotonicNs": time.monotonic_ns(),
+    "pid": os.getpid(),
+    "arm": os.environ["DELIVERY_ARM"],
+    "cwd": os.getcwd(),
+    "argv": [real, *sys.argv[1:]],
+}
+fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.exit("delivery tmux: DELIVERY_TMUX_LOG isn't a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with os.fdopen(fd, "a", encoding="utf-8", closefd=False) as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(fd)
+finally:
+    os.close(fd)
+if os.environ.get("DELIVERY_INJECT_DIR") and sys.argv[1:2] == ["paste-buffer"]:
+    pasted = inject(os.environ["DELIVERY_INJECT_DIR"], real, sys.argv[1:])
+    if pasted is not None:
+        sys.exit(pasted)  # the pre-enter injection ran the paste itself
+os.execv(real, [real, *sys.argv[1:]])

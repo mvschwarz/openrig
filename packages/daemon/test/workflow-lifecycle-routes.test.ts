@@ -119,6 +119,21 @@ describe("S06 lifecycle HTTP surface", () => {
     expect(recoveryRows()).toEqual(before);
   });
 
+  it.each(["", "  "])("an empty named owner (%j) redrives to the resolved owner and says why", async ownerSession => {
+    const failed = await failedBranches();
+    const roleSeat = (db.prepare(`SELECT destination_session FROM queue_items WHERE qitem_id = ?`)
+      .get(failed.occurrences[0]) as { destination_session: string }).destination_session;
+    const response = await app.request(`/api/workflow/${failed.instanceId}/resume`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ actorSession: "orch@rig", ownerSession }),
+    });
+    expect(response.status).toBe(200);
+    const resumed = await response.json() as { newPacketId: string };
+    expect(resumed).toMatchObject({ ownerSession: roleSeat, ownerSource: "resolved", ownerNote: "--owner was empty; the owner was resolved" });
+    expect(db.prepare(`SELECT destination_session FROM queue_items WHERE qitem_id = ?`).get(resumed.newPacketId))
+      .toEqual({ destination_session: roleSeat });
+  });
+
   it("still selects the sole omitted occurrence and absorbs its explicit replay", async () => {
     const failed = await failedBranches();
     const response = await app.request(`/api/workflow/${failed.instanceId}/resume`, {

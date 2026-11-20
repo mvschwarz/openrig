@@ -3,7 +3,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { readProcessTable, type ProcessTableRow } from "./process-table.js";
+import { readProcessTable, type ProcessTableCensus, type ProcessTableRow } from "./process-table.js";
 import { lstartToMinTs } from "./codex-thread-id.js";
 
 export interface ReconcileResult {
@@ -92,7 +92,7 @@ export class Reconciler {
         // A session this server doesn't show isn't gone while its seat's recorded process still runs: the daemon is
         // looking at a different tmux server. Detaching it would have the kernel relaunch duplicates and supersede the
         // live seats. Without that evidence (after a reboot nothing recorded is running), it detaches as before.
-        const elsewhere = await this.recordedProcessStillRunning(session, processes);
+        const elsewhere = await recordedProcessStillRunning(this.db, session, processes);
         if (elsewhere) {
           unseen.push({ sessionId: session.id, sessionName: session.sessionName, ...elsewhere });
           continue;
@@ -123,31 +123,71 @@ export class Reconciler {
 
     return { checked, detached, detachedSessionIds, unseen, errors };
   }
+}
 
-  /** The seat's last observed process, as a conservative hint that it still runs, not proof of identity: the last pid
-   *  evidence recorded for this very session (kept with its own time, so a later poll that couldn't see the seat doesn't
-   *  erase it), and a process with that pid whose start isn't observably later than that observation. Start times are
-   *  whole seconds, so a pid reused within the observation's second still passes. An unreadable table or record is no
-   *  evidence. */
-  private async recordedProcessStillRunning(
-    session: { nodeId: string; sessionName: string },
-    processes: () => Promise<ProcessTableRow[] | null>,
-  ): Promise<{ pid: number; parent: { pid: number; command: string } | null } | null> {
-    const evidence = new SeatIdentityStore(this.db).getProcessEvidence(session.nodeId);
-    if (!evidence || evidence.sessionName !== session.sessionName) return null;
-    const observedAt = Date.parse(evidence.observedAt) / 1000;
-    const pids = [evidence.panePid, evidence.pid]
-      .filter((pid): pid is number => typeof pid === "number" && pid > 0);
-    if (!pids.length || Number.isNaN(observedAt)) return null;
-    const rows = await processes();
-    if (!rows) return null;
-    for (const pid of pids) {
-      const row = rows.find((r) => r.pid === pid);
-      const started = row ? lstartToMinTs(row.startedAt) : undefined;
-      if (!row || started === undefined || started > observedAt) continue;
-      const parent = rows.find((r) => r.pid === row.ppid);
-      return { pid, parent: parent ? { pid: parent.pid, command: parent.command } : null };
-    }
-    return null;
+/** The seat's last observed process, as a conservative hint that it still runs, not proof of identity: the last pid
+ *  evidence recorded for this very session (kept with its own time, so a later poll that couldn't see the seat doesn't
+ *  erase it), and a process with that pid whose start isn't observably later than that observation. Start times are
+ *  whole seconds, so a pid reused within the observation's second still passes. An unreadable table or record is no
+ *  evidence. */
+export async function recordedProcessStillRunning(
+  db: Database.Database,
+  session: { nodeId: string; sessionName: string },
+  processes: () => Promise<Array<Pick<ProcessTableRow, "pid" | "ppid" | "command" | "startedAt">> | null>,
+): Promise<{ pid: number; parent: { pid: number; command: string } | null } | null> {
+  const evidence = new SeatIdentityStore(db).getProcessEvidence(session.nodeId);
+  if (!evidence || evidence.sessionName !== session.sessionName) return null;
+  const observedAt = Date.parse(evidence.observedAt) / 1000;
+  const pids = [evidence.panePid, evidence.pid]
+    .filter((pid): pid is number => typeof pid === "number" && pid > 0);
+  if (!pids.length || Number.isNaN(observedAt)) return null;
+  const rows = await processes();
+  if (!rows) return null;
+  for (const pid of pids) {
+    const row = rows.find((r) => r.pid === pid);
+    const started = row ? lstartToMinTs(row.startedAt) : undefined;
+    if (!row || started === undefined || started > observedAt) continue;
+    const parent = rows.find((r) => r.pid === row.ppid);
+    return { pid, parent: parent ? { pid: parent.pid, command: parent.command } : null };
   }
+  return null;
+}
+
+/** Positive evidence that the seat's last observed process has ended, for reopening a tmux server under a session the
+ *  boot reconcile detached. True only when: the evidence recorded for this very session names at least one pid with a
+ *  readable observation time; that observation is at or after the detached session's own creation (`createdAt`,
+ *  SQLite's UTC `YYYY-MM-DD HH:MM:SS`), so an earlier occupant's evidence, kept when a later verdict had no pid,
+ *  can't authorize it; the census reads; the evidence is the same after the census as before it; no recorded pid is
+ *  hidden from it (EPERM/EACCES: a live process this daemon can't read is not an ended one); and no recorded pid is a
+ *  process that started at or before the observation. `census` must begin its census when called, after the evidence
+ *  is read: a process recorded before then is listed if it still runs, while one recorded during the census may have
+ *  started after it began, so it can't be listed. Anything else is not evidence of an end (false), unlike
+ *  recordedProcessStillRunning's null, which also covers "can't tell". Limit: the proof covers only the LAST recorded
+ *  process; a replacement no poll had recorded by the second read, followed by a lost socket, is outside it. */
+export async function recordedProcessEnded(
+  db: Database.Database,
+  session: { nodeId: string; sessionName: string; createdAt: string | null | undefined },
+  census: () => Promise<ProcessTableCensus | null>,
+): Promise<boolean> {
+  const store = new SeatIdentityStore(db);
+  const evidence = store.getProcessEvidence(session.nodeId);
+  if (!evidence || evidence.sessionName !== session.sessionName) return false;
+  const observedAt = Date.parse(evidence.observedAt) / 1000;
+  const createdAt = typeof session.createdAt === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(session.createdAt)
+    ? Date.parse(session.createdAt.replace(" ", "T") + "Z") / 1000 : Number.NaN;
+  const pids = [evidence.panePid, evidence.pid]
+    .filter((pid): pid is number => typeof pid === "number" && pid > 0);
+  if (!pids.length || Number.isNaN(observedAt) || Number.isNaN(createdAt) || observedAt < createdAt) return false;
+  const table = await census();
+  if (!table) return false;
+  const after = store.getProcessEvidence(session.nodeId);
+  if (after?.observedAt !== evidence.observedAt || after.sessionName !== evidence.sessionName
+    || after.pid !== evidence.pid || after.panePid !== evidence.panePid) return false;
+  if (pids.some((pid) => table.permissionHiddenPids.includes(pid))) return false;
+  return pids.every((pid) => {
+    const row = table.rows.find((r) => r.pid === pid);
+    if (!row) return true;
+    const started = lstartToMinTs(row.startedAt);
+    return started !== undefined && started > observedAt;
+  });
 }

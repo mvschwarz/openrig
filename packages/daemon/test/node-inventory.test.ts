@@ -98,6 +98,23 @@ describe("Node Inventory Projection", () => {
     db.close();
   });
 
+  it("projects only a configured Claude account label, preserving unknowns", () => {
+    seedPodAwareRig(db);
+    const read = () => getNodeInventory(db, "rig-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("login");
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run("/private/account-home", "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBeNull();
+    expect(JSON.stringify(read())).not.toContain("/private/account-home");
+    expect(read().find((n) => n.nodeId === "node-2")?.configuredAccount).toBeNull();
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
+      .run(JSON.stringify({ label: "team-1", tokenFile: "/private/token" }), "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("team-1");
+    expect(JSON.stringify(read())).not.toContain("/private/token");
+    expect(getNodeDetail(db, "rig-1", "dev.impl")?.configuredAccount).toBe("team-1");
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?").run("invalid", "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBeNull();
+  });
+
   // Test 1: Inventory includes all nodes for a pod-aware rig
   it("includes all nodes for a pod-aware rig", () => {
     seedPodAwareRig(db);
@@ -231,9 +248,14 @@ describe("Node Inventory Projection", () => {
     expect(entry?.resumeCommand).toBeNull();
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
-    expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
-    expect(detail?.recoveryGuidance?.summary).toContain("explicit -s workspace-write floor flag");
-    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
+    expect(detail?.recoveryGuidance?.summary).toContain(
+      "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last"
+    );
+    expect(detail?.recoveryGuidance?.commands).toEqual([
+      "cd /workspace/app",
+      "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last",
+    ]);
+    expect(detail?.recoveryGuidance?.notes).toContain("flags from current settings");
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });
@@ -252,11 +274,13 @@ describe("Node Inventory Projection", () => {
     const entry = getNodeInventory(db, "rig-2").find((e) => e.logicalId === "platform.mac-admin");
 
     expect(entry?.codexConfigProfile).toBe("sysadmin");
-    expect(entry?.resumeCommand).toBe("codex -p 'sysadmin' resume 'sess-456'");
+    expect(entry?.resumeCommand).toBe("codex -p 'sysadmin' '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
+    expect(entry?.resumeCommandLabel).toBe("flags from current settings");
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "platform.mac-admin");
     expect(detail?.codexConfigProfile).toBe("sysadmin");
-    expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' resume 'sess-456'");
+    expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
+    expect(detail?.recoveryGuidance?.notes).toContain("flags from current settings");
     expect(detail?.recoveryGuidance?.notes).toContain("Preserve Codex config profile: sysadmin");
   });
 
@@ -989,6 +1013,42 @@ describe("Node Inventory Projection", () => {
       clearWithoutAttempt("attention_required");
 
       expect(agent()).toMatchObject({ restoreOutcome: "operator_recovered" });
+    });
+
+    // A completed handover, a discovered successor included, puts a new occupant in the seat: an earlier restore's resumed
+    // conversation isn't this occupant's, though the restore keeps its outcome.
+    function handOver() {
+      seedEvent(db, "rig-1", "node-1", "seat.handover_completed", {
+        rigId: "rig-1", nodeId: "node-1", logicalId: "dev.impl", previousOccupant: "dev-impl@test-rig",
+        currentOccupant: "dev-impl@test-rig", source: "discovered:disc-1",
+      });
+    }
+
+    it("a resumed restore is the current occupant's conversation", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "resumed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "resumed", continuityOutcome: "resumed" });
+    });
+
+    it("a discovered successor after a resumed restore doesn't inherit its conversation", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "resumed");
+      handOver();
+      const before = eventCount();
+
+      expect(agent()).toMatchObject({ restoreOutcome: "resumed", continuityOutcome: null });
+      expect(getNodeInventoryForAllRigs(db).get("rig-1")?.find((e) => e.logicalId === "dev.impl"))
+        .toMatchObject({ continuityOutcome: null });
+      expect(eventCount()).toBe(before);
+    });
+
+    it("a restore that resumes the successor after its handover is its conversation", () => {
+      handOver();
+      startRestore("snap-2");
+      completeRestore("snap-2", "resumed");
+
+      expect(agent()).toMatchObject({ continuityOutcome: "resumed" });
     });
   });
 });

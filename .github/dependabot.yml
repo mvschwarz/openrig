@@ -1,0 +1,17 @@
+# Move pinned GitHub Actions forward on purpose, one reviewed update at a time.
+#
+# Both workflows pin third-party actions to a commit SHA with the release named in a trailing comment,
+# because a tag is mutable and a moving target in a job that runs on every pull request (including one
+# from a fork). That pinning only stays current if something proposes the updates, which is what this
+# file is for: without it a pinned action quietly ages.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "area: install-setup"

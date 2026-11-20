@@ -9,7 +9,8 @@
 //
 // With --grant-service, grants come from an external grant service instead and the token file is never read: each
 // request's key is checked with that service (openrig.grant/v1) for this daemon's instance, every answer but active is
-// refused, and an external caller reaches only what its grant names (externalScope in mcp-server.ts).
+// refused, and an external caller reaches only what its grant names (externalScope in mcp-server.ts). An active answer's
+// fair-use throttle holds back only that caller's new work (rig_queue_create), never the request.
 //
 // The endpoint serves both protocol revisions: 2026-07-28 per request, and 2025's initialize and exchanges statelessly.
 import http from "node:http";
@@ -130,6 +131,19 @@ export function revokeGrant(file: string, name: string): Promise<boolean> {
   });
 }
 
+/** Issues a new token for an existing grant, keeping its scope; the previous token stops
+ *  matching the moment this publishes. The token is shown once and never stored. */
+export function rotateGrant(file: string, name: string): Promise<string> {
+  return withGrantsLock(file, () => {
+    const grants = readGrants(file);
+    const existing = grants?.find((grant) => grant.name === name);
+    if (!grants || !existing) throw new Error(`No grant named ${name}.`);
+    const token = `orm_${randomBytes(32).toString("base64url")}`;
+    writeGrants(file, grants.map((grant) => (grant.name === name ? { ...grant, tokenSha256: sha256(token) } : grant)));
+    return token;
+  });
+}
+
 /** The grant a bearer token matches, compared in constant time. */
 export function grantFor(grants: readonly McpGrant[], token: string): McpGrant | null {
   const digest = Buffer.from(sha256(token), "hex");
@@ -231,6 +245,18 @@ const unavailable = (log: string): Refusal => ({
 
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string" && item !== "");
 
+/** An active answer's optional fair-use limit on new work (`throttle`): the seconds until new work is accepted again,
+ *  rounded up and kept within 1..600, undefined when there is none, or "unusable" when it can't be read. */
+function fairUseThrottle(value: unknown): number | undefined | "unusable" {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) return "unusable";
+  const { new_work: newWork, retry_after_seconds: seconds } = value as Record<string, unknown>;
+  if (typeof newWork !== "boolean") return "unusable";
+  if (!newWork) return undefined;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "unusable";
+  return Math.min(600, Math.max(1, Math.ceil(seconds)));
+}
+
 /** One request's caller from the grant service's answer for its key. A refusal never falls back to the token file or
  *  the env's seat. */
 async function grantServiceCaller(service: GrantServiceOptions, url: URL, key: string, instance: string): Promise<{ seat: string; access: McpAccess; principal: McpPrincipal } | Refusal> {
@@ -274,11 +300,16 @@ async function grantServiceCaller(service: GrantServiceOptions, url: URL, key: s
   if (person !== undefined && person !== null && !personId) {
     console.error(`rig mcp serve --http: grant ${grant.id} names an unusable person.entity_id, so this connection isn't offered the person tools (rig_question_*)`);
   }
+  // The service's fair-use limit, when it sets one, holds back only new work (rig_queue_create). One that can't be read is
+  // ignored: it never refuses the request or reads as a credential problem.
+  const throttle = fairUseThrottle(body.throttle);
+  if (throttle === "unusable") console.error(`rig mcp serve --http: grant ${grant.id} answered an unusable throttle, so it's ignored`);
   // The principal the daemon records beside this caller's rows. A version that isn't a finite number is left out (a v1
   // answer sends a number).
   const version = Number.isFinite(grant.version) ? { version: grant.version as number } : {};
   return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false,
-      external: { objects, grant: { id: grant.id, ...version }, ...(personId ? { person: personId } : {}) } },
+      external: { objects, grant: { id: grant.id, ...version }, ...(personId ? { person: personId } : {}),
+        ...(typeof throttle === "number" ? { throttle: { retryAfterSeconds: throttle } } : {}) } },
     principal: { source: "grant-service", id: principal.id, grant: grant.id, ...version } };
 }
 

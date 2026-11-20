@@ -76,12 +76,20 @@ describe("collectClaudeStatuslineSignals — reader → provider_statusline / ex
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
   });
 
-  it("malformed cache JSON → unknown(empty_reading), never throws", () => {
+  it("malformed cache JSON → unknown(unreadable_cache), never throws", () => {
     const sigs = collectClaudeStatuslineSignals(readerDeps({
       listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
       readCacheRaw: () => "{ not json",
     }));
     expect(sigs[0]!.sourceClass).toBe("unknown");
+    expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
+  });
+
+  it("a valid cache with no windows keeps empty_reading (distinct from an unreadable cache)", () => {
+    const sigs = collectClaudeStatuslineSignals(readerDeps({
+      listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
+      readCacheRaw: () => JSON.stringify({ seatSession: "dev-impl@rig", asOf: CACHE_ASOF }),
+    }));
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
   });
 });
@@ -111,14 +119,33 @@ describe("0.5.8 provider-usage compatibility bridge", () => {
     const malformedCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
     expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
     expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
-      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+      .toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
 
     fs.rmSync(path.join(canonical, "legacy@rig.json"));
     fs.mkdirSync(path.join(canonical, "legacy@rig.json"));
     const wrongTypeCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
     expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
     expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
-      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+      .toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
     fs.rmSync(home, { recursive: true, force: true });
+  });
+});
+
+describe("collectClaudeSignalsFromProviderUsageDirectory — a malformed-only cache stays visible", () => {
+  it("reports unreadable_cache for a seat known only from a malformed file's name", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "provider-unreadable-"));
+    const directory = path.join(home, "state", "provider-usage");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "broken@rig.json"), "{ not json");
+    try {
+      const signals = collectClaudeSignalsFromProviderUsageDirectory(directory, () => ASOF);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.seatSession).toBe("broken@rig");
+      expect(signals[0]!.sourceClass).toBe("unknown");
+      expect(signals[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.unreadable_cache);
+      expect(signals[0]!.usedPercent).toBeUndefined();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

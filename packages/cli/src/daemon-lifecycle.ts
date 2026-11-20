@@ -5,7 +5,7 @@ import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemo
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
-import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
+import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 // Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
@@ -22,7 +22,14 @@ export interface DaemonState {
   host?: string;
   db: string;
   startedAt: string;
+  /** The pid namespace (Linux `/proc/self/ns/pid`) of the shell that started the daemon. A shell
+   *  in another namespace cannot tell a missing pid from an invisible one, nor map the number.
+   *  Absent on older records. */
+  pidNamespace?: string;
 }
+
+/** Linux' initial pid namespace: where an older record, which names no namespace, is read. */
+const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 
 /**
  * OPR.0.4.3.21 — event-loop wedge evidence read from the enriched `/healthz`
@@ -36,6 +43,20 @@ export interface DaemonEventLoopEvidence {
   utilization: number;
   lastTickAgeMs: number;
   healthy: boolean;
+}
+
+/** #3315 — whether the daemon reaches its tmux server(s), from the healthz `terminals` field. A separate axis from
+ *  `healthy`: the daemon can be up while its terminals cannot be reached. */
+export interface DaemonTerminalServerEvidence {
+  socket: string;
+  /** `unknown`: the daemon's last reading of it couldn't be made; delivery is not held then. */
+  state: "reachable" | "unreachable" | "unknown";
+  since: string;
+  cause?: string;
+}
+export interface DaemonTerminalsEvidence {
+  state: "ok" | "degraded" | "unknown";
+  servers: DaemonTerminalServerEvidence[];
 }
 
 export interface DaemonStatus {
@@ -62,8 +83,15 @@ export interface DaemonStatus {
   reason?: "unresponsive" | "event-loop-starved";
   /** OPR.0.4.3.21 — event-loop evidence when healthz answered with a monitor. */
   eventLoop?: DaemonEventLoopEvidence;
+  /** #3315 — the daemon's terminal servers as healthz reported them; never part of `healthy`. Absent when the daemon
+   *  predates the field or healthz did not answer. */
+  terminals?: DaemonTerminalsEvidence;
   /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
   probeErrorCode?: string;
+  /** The recorded pid looks missing and the connection was refused, but this shell is not in the
+   *  daemon's pid namespace and no clean-shutdown receipt matches: nothing here shows the daemon is
+   *  down (#2860). */
+  pidUnseen?: true;
   /** T2 — a refused listener under a live start reservation (daemon-start.lock): a launch is in
    *  progress and not listening yet. `pid` is the live launcher (else child) PID; `since` its start. */
   startPending?: { pid: number; since?: string };
@@ -152,6 +180,15 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
       ...causeCode,
     };
   }
+  // #2860: a refused probe and a missing pid, seen from outside the daemon's pid namespace.
+  if (status.pidUnseen) {
+    return {
+      fact: "Couldn't connect to the daemon from this shell; it may still be running.",
+      consequence: "This shell can't see the daemon's process (a sandbox or another namespace) and no clean shutdown was recorded, so a refused connection here doesn't show it is down.",
+      action: "Don't start another daemon from here. Check from a normal terminal with 'rig daemon status'.",
+      ...causeCode,
+    };
+  }
   // unverified, or running-but-unhealthy: we do NOT know it is down.
   return {
     fact: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
@@ -228,7 +265,7 @@ export interface LifecycleDeps {
   // OPR.0.4.3.21 — optional `json` lets getDaemonStatus read the enriched
   // /healthz body (event-loop evidence). Optional so existing mocks that
   // return `{ ok }` are unchanged; production (realDeps) supplies it.
-  fetch: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
   /** Exclusive bind check used only after a no-state health probe times out. */
   isPortOccupied?: (host: string, port: number) => Promise<boolean>;
   kill: (pid: number, signal: string) => boolean;
@@ -248,6 +285,17 @@ export interface LifecycleDeps {
   /** #275 — three-state liveness for status reads (production: realDeps). Optional so existing
    *  mocks keep the boolean rule; absent = derived from isProcessAlive. */
   processLiveness?: (pid: number) => ProcessLiveness;
+  /** This shell's pid namespace ("host" where the OS has none, undefined when unreadable).
+   *  Production: realDeps. Absent = no namespace evidence, a missing pid counts as dead. */
+  pidNamespace?: () => string | undefined;
+  /** #3315 — this boot's ID (production: currentBootId). Absent = stop never acts on a start reservation. */
+  bootId?: () => string | undefined;
+  /** #3315 — a token naming one live process (production: processStartToken); a later process with its PID matches
+   *  only within the OS start-time resolution. */
+  processStartToken?: (pid: number) => string | undefined;
+  /** #3315 — release a spent start reservation still holding exactly `raw` (production: archiveSpentReservation);
+   *  returns where it went, or undefined when it was left in place. Absent = stop never releases one. */
+  releaseStartReservation?: (file: string, raw: string) => string | undefined;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -274,7 +322,7 @@ const DEFAULT_DB = "openrig.sqlite";
 // bounded, but do not kill a healthy daemon during first-boot slack.
 // #1786: one elapsed deadline, started when the readiness loop begins (after the
 // child is spawned and its handlers are attached), covers every primary probe,
-// listener check and backoff (the 20s the old 80 x 250ms delays gave). Each probe
+// listener check and backoff in one 180-second owned-child wait. Each probe
 // may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
 // in a second is accepted, but no probe timer outlives the deadline (a 2s startup
 // ceiling, not a universal header wait). The deadline only stops new probes and
@@ -282,9 +330,12 @@ const DEFAULT_DB = "openrig.sqlite";
 // answer already in hand when the clock passes it is still used, with the usual
 // liveness and publication rechecks. A failed start may add up to
 // DAEMON_STOP_WAIT_MS of owned-child cleanup.
-const STARTUP_READINESS_DEADLINE_MS = 20_000;
-const STARTUP_PROBE_TIMEOUT_MS = 2_000;
+const STARTUP_PROGRESS_INTERVAL_MS = 20_000;
 const HEALTHZ_DELAY_MS = 250;
+/** How long a listener other than the one this start probes first may stay uncertain, while that one answers with the
+ *  child's own PID, before the start goes ahead with #1743's warning. A Mac's connection to its own Tailscale address times
+ *  out instead of being refused, so waiting longer gets no answer; the readiness budget is for a slow first listener. */
+const STARTUP_SECONDARY_GRACE_MS = 5_000;
 // OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
 // CLI request window (~5s, matching DaemonClient's timeoutMs) — immediate connection
 // errors may retry INSIDE this deadline, but it is NEVER re-allocated per retry. So a
@@ -317,6 +368,7 @@ function lifecycleInitializationFs(deps: LifecycleDeps): InitializationFsOps {
     }),
     mkdirp: deps.mkdirp,
     writeFile: deps.writeFile,
+    readFile: (candidate) => deps.readFile(candidate),
   };
 }
 
@@ -831,12 +883,16 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
 
   try {
     assertChild();
-    lock.recordChild(pid!);
+    lock.recordChild(pid!, { startToken: deps.processStartToken?.(pid!), pidNamespace: deps.pidNamespace?.(), host: probeHost, port });
     let healthy = false;
     let databaseWarnings: string[] = [];
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
-    deadline = Date.now() + STARTUP_READINESS_DEADLINE_MS;
+    const readinessStartedAt = Date.now();
+    deadline = readinessStartedAt + STARTUP_READINESS_DEADLINE_MS;
+    let nextProgressAt = readinessStartedAt + STARTUP_PROGRESS_INTERVAL_MS;
+    // Since when only listeners other than the probed one have been uncertain, round after round.
+    let secondaryOnlySince: number | null = null;
     while (remaining() > 0) {
       unverified = null;
       try {
@@ -868,6 +924,13 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
         if (error instanceof StartupIdentityError) throw error;
         lastProbe = error instanceof Error ? error.message : String(error);
       }
+      // A clear answer may still come in the next few rounds; past the grace, start and say which is unverified.
+      if (unverified === null || unverified.some((host) => formatDaemonHostForUrl(host) === formatDaemonHostForUrl(probeHost))) secondaryOnlySince = null;
+      else if (Date.now() - (secondaryOnlySince ??= Date.now()) >= STARTUP_SECONDARY_GRACE_MS) break;
+      if (remaining() > 0 && Date.now() >= nextProgressAt) {
+        console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${STARTUP_READINESS_DEADLINE_MS / 1000}s limit). This start has not published readiness.`);
+        nextProgressAt = Date.now() + STARTUP_PROGRESS_INTERVAL_MS;
+      }
       await Promise.race([new Promise((resolve) => setTimeout(resolve, Math.min(HEALTHZ_DELAY_MS, remaining()))), failed]);
     }
     // In the last round the child's own endpoint named its PID, and only another listener's check stayed
@@ -883,13 +946,14 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       assertChild();
       if (deps.isProcessAlive(pid!)) {
         assertChild();
-        throw new StartupChildPendingError(`Daemon startup is pending after the readiness deadline (child PID ${pid}). Readiness is not confirmed; child left running and startup reservation retained. Last probe: ${lastProbe}. Launch endpoint: ${healthzUrl}. Inspect that URL and ${LOG_FILE}; this check does not publish readiness, adopt the child or release the reservation. To restart manually, stop child PID ${pid} and wait for exit; inspect ${path.join(OPENRIG_DIR, "daemon-start.lock")}, and only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'. 'rig daemon stop' cannot target this unpublished child, and another start remains blocked by the reservation.`);
+        throw new StartupChildPendingError(`Daemon startup is pending after the readiness deadline (child PID ${pid}). Readiness is not confirmed; child left running and startup reservation retained. Last probe: ${lastProbe}. Launch endpoint: ${healthzUrl}. Inspect that URL and ${LOG_FILE}; this check does not publish readiness, adopt the child or release the reservation. To restart manually, stop child PID ${pid} and wait for exit; inspect ${path.join(OPENRIG_DIR, "daemon-start.lock")}, and only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'. Once this launcher has exited, 'rig daemon stop' can check this child against this reservation (when its start token and pid namespace were recorded) and, if it is confirmed, stop it and release the reservation; until then another start remains blocked by it.`);
       }
       throw new Error(`${summarizeDaemonStartFailure(healthzUrl, deps.readFile(resolveLifecycleFile(deps, "daemon.log")))}. Last probe: ${lastProbe}`);
     }
     assertChild();
     if (!deps.isProcessAlive(pid!)) throw new Error(`Daemon child ${pid} liveness could not be confirmed; state not published`);
-    const state: DaemonState = { pid: pid!, port, host: probeHost, db, startedAt: new Date().toISOString() };
+    const namespace = deps.pidNamespace?.();
+    const state: DaemonState = { pid: pid!, port, host: probeHost, db, startedAt: new Date().toISOString(), ...(namespace && namespace !== "host" ? { pidNamespace: namespace } : {}) };
     try {
       deps.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
       assertChild();
@@ -950,11 +1014,171 @@ function isCleanShutdown(receipt: DaemonShutdownReceipt | undefined): boolean {
   return receipt?.outcome === "clean" && receipt.phase === "complete" && receipt.failures.length === 0;
 }
 
+/** Whether the recorded pid number means the same process in this shell. A recorded namespace must
+ *  be this shell's own: another namespace (even the host's) numbers processes differently, so its
+ *  missing number says nothing. Only an older record, which names none, is read as the host's. */
+function sharesPidNamespace(state: DaemonState, deps: LifecycleDeps): boolean {
+  if (!deps.pidNamespace) return true;
+  const own = deps.pidNamespace();
+  if (own === undefined) return false;
+  if (state.pidNamespace) return own === state.pidNamespace;
+  return own === "host" || own === INITIAL_PID_NAMESPACE;
+}
+
 function removeMatchingState(deps: LifecycleDeps, stateFile: string, state: DaemonState): void {
   // A concurrent start/rebind must not have its state removed by an old stop/status.
   const current = readState(deps);
   if (current?.pid === state.pid && current.startedAt === state.startedAt && current.port === state.port
     && current.host === state.host && current.db === state.db) deps.removeFile(stateFile);
+}
+
+interface StartReservation {
+  raw: string; launcherPid: number; bootId?: string; childPid: number;
+  startToken?: string; pidNamespace?: string; endpoint?: string;
+}
+
+/** #3315 — the strict read stop acts on: exactly the launcher record and the one child record startDaemon writes. */
+function readStartReservation(deps: LifecycleDeps, file: string): StartReservation | "absent" | "malformed" {
+  const raw = deps.exists(file) ? deps.readFile(file) : null;
+  if (raw === null) return "absent";
+  const lines = raw.split("\n").filter((line) => line.trim());
+  if (lines.length !== 2) return "malformed";
+  let head: Record<string, unknown>;
+  let child: Record<string, unknown>;
+  try {
+    head = JSON.parse(lines[0]!) ?? {};
+    child = JSON.parse(lines[1]!) ?? {};
+  } catch {
+    return "malformed";
+  }
+  const isPid = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
+  const text = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+  if (!isPid(head.launcherPid) || typeof head.startedAt !== "string" || !Number.isFinite(Date.parse(head.startedAt))
+    || "childPid" in head || !isPid(child.childPid) || "launcherPid" in child) return "malformed";
+  const host = text(child.host);
+  const port = Number.isSafeInteger(child.port) && (child.port as number) > 0 && (child.port as number) <= 65535
+    ? child.port as number : undefined;
+  let endpoint: string | undefined;
+  try {
+    endpoint = host && port ? new URL(`http://${formatDaemonHostForUrl(host)}:${port}`).origin : undefined;
+  } catch {
+    return "malformed";
+  }
+  return {
+    raw, launcherPid: head.launcherPid, bootId: text(head.bootId), childPid: child.childPid,
+    startToken: text(child.startToken), pidNamespace: text(child.pidNamespace), endpoint,
+  };
+}
+
+/** #3315 — with no recorded state, a start that ended pending (StartupChildPendingError) leaves its child running and
+ *  its reservation naming it. Stop acts on that child only after confirming the reservation still names it: the same
+ *  boot, the child's pid namespace, the launcher gone (startup can no longer publish), the endpoint stop checks being
+ *  the child's own, the child's start token unchanged (a reused PID matches only within the OS start-time resolution)
+ *  and a listener that either answers with the child's PID or does not answer in time (the wedge); liveness and the
+ *  token are read again right before the signal. These are userspace checks, not atomic with kill(2). Then the normal stop: one SIGTERM, the bounded wait, a
+ *  refused listener and a matching clean receipt. Returns undefined without a reservation, a refusal (no signal sent)
+ *  or "stopped"; failures after the signal throw. */
+async function stopReservedChild(deps: LifecycleDeps, ctx: {
+  target: string; check: string; listener: () => Promise<"responding" | "refused" | "unavailable">;
+}): Promise<"stopped" | { refusal: string } | undefined> {
+  const home = deps.homeDir ?? OPENRIG_DIR;
+  const file = path.join(home, "daemon-start.lock");
+  const r = readStartReservation(deps, file);
+  if (r === "absent") return undefined;
+  const refuse = (why: string) => ({ refusal: `Start reservation ${file} not used: ${why}; no signal sent.` });
+  if (r === "malformed") return refuse("it is not a launcher record followed by one child record");
+  if (deps.exists(resolveLifecycleFile(deps, "daemon.json"))) {
+    return refuse("a daemon.json is present but unreadable, and nothing ties it to the reserved child");
+  }
+  if (!r.startToken || !r.endpoint) {
+    return refuse("it records no child identity (an older CLI's reservation, or one whose start could not identify the child)");
+  }
+  if (new URL(ctx.target).origin !== r.endpoint) {
+    return refuse(`its child was launched to listen at ${r.endpoint}, not at the checked ${ctx.check} (set OPENRIG_URL=${r.endpoint} to check it)`);
+  }
+  const ownBoot = deps.bootId?.();
+  if (!r.bootId || !ownBoot || r.bootId !== ownBoot) return refuse("its boot ID is not this boot's");
+  // An unknown namespace is no evidence of the host's: the record must name one, and this shell must read the same.
+  if (!r.pidNamespace) return refuse("it records no pid namespace for its child");
+  const ownNamespace = deps.pidNamespace?.();
+  if (!ownNamespace) return refuse("this shell's pid namespace is unknown");
+  if (ownNamespace !== r.pidNamespace) return refuse("its PIDs are numbered in another pid namespace than this shell's");
+  const liveness = (pid: number): ProcessLiveness => deps.processLiveness
+    ? deps.processLiveness(pid)
+    : deps.isProcessAlive(pid) ? "alive" : "dead";
+  const launcher = liveness(r.launcherPid);
+  if (launcher !== "dead") {
+    return refuse(`launcher PID ${r.launcherPid} is ${launcher === "alive" ? "alive; startup may still be in progress" : "of unknown liveness"}`);
+  }
+  const childIdentity = (when: string): string | undefined => {
+    const child = liveness(r.childPid);
+    if (child !== "alive") return `child PID ${r.childPid} is ${child === "dead" ? "absent" : "of unknown liveness"}${when}`;
+    const token = deps.processStartToken?.(r.childPid);
+    if (token === r.startToken) return undefined;
+    return token === undefined
+      ? `child PID ${r.childPid} start identity is unavailable${when}`
+      : `PID ${r.childPid} is now another process than the reserved child (start ${token}, reserved ${r.startToken})${when}`;
+  };
+  const before = childIdentity("");
+  if (before) return refuse(before);
+  // The whole identity read is bounded, the body included: an answer with no readable PID in time is no identity.
+  // At the deadline this check's own request and body are aborted, so nothing it opened outlives the decision.
+  const probe = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const pid = await Promise.race([
+      (async () => {
+        const res = await deps.fetch(ctx.check, { signal: probe.signal });
+        try { return ((await res.json?.()) as { pid?: unknown } | undefined)?.pid; } catch { return undefined; }
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          probe.abort(new HealthProbeTimeoutError(ctx.check));
+          reject(new HealthProbeTimeoutError(ctx.check));
+        }, HEALTHZ_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+    if (pid !== r.childPid) {
+      return refuse(`the listener at ${ctx.check} names ${typeof pid === "number" ? `PID ${pid}` : "no PID"}, not child PID ${r.childPid}`);
+    }
+  } catch (error) {
+    if (!(error instanceof HealthProbeTimeoutError)) {
+      return refuse(`the listener at ${ctx.check} ${isRefusedError(error) ? "now refuses" : `failed (${error instanceof Error ? error.message : String(error)})`}`);
+    }
+    // No answer in time: the wedge. The child's identity rests on the checks above and the re-check below.
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!probe.signal.aborted) probe.abort();
+  }
+  // The listener read may have waited: read liveness and the token again right before the signal.
+  const after = childIdentity(" after the listener check");
+  if (after) return refuse(after);
+
+  const notBefore = Date.now();
+  deps.kill(r.childPid, "SIGTERM");
+  const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
+  while (deps.isProcessAlive(r.childPid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const present = deps.isProcessAlive(r.childPid);
+  const effect = await ctx.listener();
+  const observation = `targeted ${ctx.target}; checked ${ctx.check}; start-reservation child PID ${r.childPid} ${present ? "present" : "absent"}; listener ${effect}; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
+  if (present) {
+    throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
+      (effect === "responding" ? " (still listening)" : "") + "; start reservation retained.");
+  }
+  if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; start reservation retained.`);
+  const { receipt, receiptPath } = readShutdownReceipt(deps, path.join(home, "daemon.json"));
+  if (!(receipt?.pid === r.childPid && Date.parse(receipt.startedAt) >= notBefore)) {
+    throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); start reservation retained. Inspect ${path.join(home, "daemon.log")}.`);
+  }
+  if (!isCleanShutdown(receipt)) {
+    throw new Error(`Daemon stopped with incomplete shutdown: ${receipt.outcome}; phase=${receipt.phase}; ${observation}. Pending effects are unverified; start reservation retained; inspect ${receiptPath}.`);
+  }
+  // Both PIDs it names are gone: release the reservation, unless it changed meanwhile.
+  const released = liveness(r.launcherPid) === "dead" ? deps.releaseStartReservation?.(file, r.raw) : undefined;
+  if (!released) console.warn(`Start reservation ${file} was not released; inspect it before 'rig daemon start'.`);
+  return "stopped";
 }
 
 export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-target"> {
@@ -979,8 +1203,11 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
     const effect = await listener();
     const sibling = findSiblingHome(deps);
     if (effect !== "refused" || sibling) {
+      const reserved = sibling ? undefined : await stopReservedChild(deps, { target, check, listener });
+      if (reserved === "stopped") return reserved;
       throw new Error(`Daemon state is missing — cannot stop safely. Checked ${check}; listener ${effect}.` +
-        (sibling ? ` Resolved home ${sibling.resolvedHome}; live sibling ${sibling.siblingHome}.` : ""));
+        (sibling ? ` Resolved home ${sibling.resolvedHome}; live sibling ${sibling.siblingHome}.` : "") +
+        (reserved ? ` ${reserved.refusal}` : ""));
     }
     const stateFile = resolveLifecycleFile(deps, "daemon.json");
     if (deps.exists(stateFile)) {
@@ -1150,10 +1377,26 @@ export async function getDaemonStatus(
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
       const ev = await readHealthEvidence(res);
       const url = new URL(openrigUrl);
-      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
+      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
+      if (!isRefusedError(err)) return { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
+      // #2860: a loopback URL that is this home's recorded daemon is judged like the record: a refusal
+      // alone proves nothing from a shell that can't see the pid. No record for it keeps the plain rule.
+      const recorded = "explicitRemote" in endpoint ? null : readState(deps);
+      if (!recorded || recorded.port !== ("port" in endpoint ? endpoint.port : undefined)) return { state: "stopped" };
+      const recordedHost = recorded.host ?? DEFAULT_HOST;
+      const recordedLiveness: ProcessLiveness = deps.processLiveness
+        ? deps.processLiveness(recorded.pid)
+        : deps.isProcessAlive(recorded.pid) ? "alive" : "dead";
+      const { receipt } = readShutdownReceipt(deps, resolveLifecycleFile(deps, "daemon.json"));
+      if ((receiptMatchesState(receipt, recorded) && isCleanShutdown(receipt))
+        || (recordedLiveness === "dead" && sharesPidNamespace(recorded, deps))) return { state: "stopped" };
+      const startPending = liveStartReservation(deps);
+      return {
+        state: "unverified", pid: recorded.pid, port: recorded.port, host: recordedHost, ...(startPending ? { startPending } : {}),
+        ...(recordedLiveness !== "alive" && !startPending ? { pidUnseen: true as const } : {}), ...probeErrorCodeOf(err),
+      };
     }
   }
 
@@ -1170,7 +1413,7 @@ export async function getDaemonStatus(
         healthy: ev.healthy,
         reason: ev.reason,
         eventLoop: ev.eventLoop,
-        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}),
+        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}),
       };
     } catch (err) {
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
@@ -1187,17 +1430,21 @@ export async function getDaemonStatus(
     }
   }
 
-  const liveness: ProcessLiveness = deps.processLiveness
+  let liveness: ProcessLiveness = deps.processLiveness
     ? deps.processLiveness(state.pid)
     : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  // #2860: down needs positive evidence: the daemon's clean-shutdown receipt, or a missing pid seen
+  // from the daemon's own pid namespace. Elsewhere a missing pid may just be invisible.
+  const stateFile = resolveLifecycleFile(deps, "daemon.json");
+  const { receipt } = readShutdownReceipt(deps, stateFile);
+  const cleanShutdown = receiptMatchesState(receipt, state) && isCleanShutdown(receipt);
   if (liveness === "dead") {
-    // A status read must not erase the identity needed to judge a failed stop.
-    const stateFile = resolveLifecycleFile(deps, "daemon.json");
-    const { receipt } = readShutdownReceipt(deps, stateFile);
-    if (options.cleanupStaleState !== false && receiptMatchesState(receipt, state) && isCleanShutdown(receipt)) {
+    if (cleanShutdown && options.cleanupStaleState !== false) {
+      // A status read must not erase the identity needed to judge a failed stop.
       removeMatchingState(deps, stateFile, state);
     }
-    return { state: "stale" };
+    if (cleanShutdown || sharesPidNamespace(state, deps)) return { state: "stale" };
+    liveness = "unknown";
   }
 
   const host = state.host ?? DEFAULT_HOST;
@@ -1207,13 +1454,15 @@ export async function getDaemonStatus(
     try {
       const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
       const ev = await readHealthEvidence(res);
-      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
+      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       // T2: unless a live start reservation says a launch is in progress.
       if (isRefusedError(err)) {
         const startPending = liveStartReservation(deps);
-        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) } : { state: "stopped" };
+        if (startPending) return { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) };
+        // #2860: a refusal from a shell that can't see the pid proves nothing without a clean shutdown.
+        return cleanShutdown ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, pidUnseen: true, ...probeErrorCodeOf(err) };
       }
       return { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
@@ -1224,6 +1473,7 @@ export async function getDaemonStatus(
   let reason: DaemonStatus["reason"];
   let eventLoop: DaemonEventLoopEvidence | undefined;
   let databaseWarnings: string[] | undefined;
+  let terminals: DaemonTerminalsEvidence | undefined;
   let probeFailure: Pick<DaemonStatus, "probeErrorCode"> = {};
   try {
     const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
@@ -1232,6 +1482,7 @@ export async function getDaemonStatus(
     reason = ev.reason;
     eventLoop = ev.eventLoop;
     databaseWarnings = ev.databaseWarnings;
+    terminals = ev.terminals;
   } catch (err) {
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
@@ -1241,7 +1492,8 @@ export async function getDaemonStatus(
   }
 
   // pid alive = running (state file preserved either way)
-  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...(databaseWarnings ? { databaseWarnings } : {}), ...probeFailure };
+  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...(databaseWarnings ? { databaseWarnings } : {}),
+    ...(terminals ? { terminals } : {}), ...probeFailure };
 }
 
 /** #275 — keep the OS code of a failed health probe (absent for a timeout). */
@@ -1282,13 +1534,16 @@ function readDatabaseWarnings(value: unknown): string[] {
  */
 async function readHealthEvidence(
   res: { ok: boolean; json?: () => Promise<unknown> },
-): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence; databaseWarnings?: string[] }> {
+): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence; databaseWarnings?: string[];
+  terminals?: DaemonTerminalsEvidence }> {
   if (!res.ok) return { healthy: false };
   if (!res.json) return { healthy: true };
   try {
-    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown } | null;
+    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown; terminals?: unknown } | null;
     const warnings = readDatabaseWarnings(body?.databaseWarnings);
-    const context = warnings.length ? { databaseWarnings: warnings } : {};
+    const terminals = readTerminalsEvidence(body?.terminals);
+    // #3315: the terminals ride along and never change `healthy`: the daemon up and its terminals reachable are two facts.
+    const context = { ...(warnings.length ? { databaseWarnings: warnings } : {}), ...(terminals ? { terminals } : {}) };
     const el = body?.eventLoop;
     if (el && typeof el.healthy === "boolean" && typeof el.lagMeanMs === "number") {
       const eventLoop: DaemonEventLoopEvidence = {
@@ -1307,6 +1562,31 @@ async function readHealthEvidence(
     // Body absent / not JSON — treat as plain healthy (res.ok already true).
   }
   return { healthy: true };
+}
+
+/** #3315 — the healthz `terminals` field, kept only when its shape is the one the daemon writes. */
+export function readTerminalsEvidence(value: unknown): DaemonTerminalsEvidence | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { state, servers } = value as { state?: unknown; servers?: unknown };
+  if (state !== "ok" && state !== "degraded" && state !== "unknown") return undefined;
+  if (!Array.isArray(servers)) return undefined;
+  const read: DaemonTerminalServerEvidence[] = [];
+  for (const server of servers) {
+    if (!server || typeof server !== "object") continue;
+    const s = server as Record<string, unknown>;
+    if (typeof s.socket !== "string" || (s.state !== "reachable" && s.state !== "unreachable" && s.state !== "unknown") || typeof s.since !== "string") continue;
+    read.push({ socket: s.socket, state: s.state, since: s.since, ...(typeof s.cause === "string" ? { cause: s.cause } : {}) });
+  }
+  return { state, servers: read };
+}
+
+/** #3315 — the one line `rig status` and `rig ps` print when the daemon cannot reach a terminal server. */
+export function terminalsDegradedLine(terminals: DaemonTerminalsEvidence | undefined): string | null {
+  const gone = terminals?.servers.filter(server => server.state === "unreachable") ?? [];
+  if (!gone.length) return null;
+  return gone.map(server => `Terminals: the tmux server on ${server.socket} has not answered since ${server.since}`
+    + `${server.cause ? ` (${server.cause})` : ""}. The daemon is up; automatic delivery through this tmux server is currently `
+    + "held, and the daemon does not restart it.").join("\n");
 }
 
 async function fetchDaemonProbe(deps: LifecycleDeps, url: string, timeoutMs: number): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {

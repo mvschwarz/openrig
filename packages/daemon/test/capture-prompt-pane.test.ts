@@ -267,7 +267,9 @@ describe("rig capture --readable reads a small seat, then gives its window back"
 
   it.each([
     ["already big enough", { panes: [{ width: 130, height: 45 }] }, "the pane is already 130x45"],
-    ["pinned, as while the web terminal shows it", { own: "manual" }, "the window's size is pinned (its window-size is manual)"],
+    // No OpenRig reader holds it (a deliberate fixed size, or one something else left): the reason names the command that
+    // drops it, for the window by its id on the daemon's server, and the window itself is left as it is.
+    ["pinned with no OpenRig holder", { own: "manual" }, "the window's size is pinned (its own window-size is manual); to drop that setting so the window follows its inherited window-size again, run tmux set-window-option -t @2 -u window-size on the daemon's host"],
     ["pinned by a live holder in another daemon", { own: "manual", recorded: `inherit ${process.ppid}.1` }, "the window's size is pinned (its window-size is manual)"],
     ["sizing unreadable", { own: undefined }, "the window's sizing couldn't be read, so it couldn't be given back"],
     ["several panes", { panes: [{ width: 9, height: 12 }, { width: 9, height: 12 }] }, "the window has several panes"],

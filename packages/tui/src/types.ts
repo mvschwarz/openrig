@@ -12,6 +12,7 @@ export interface AgentRow {
   nodeId?: string;
   name: string;
   runtime: string;
+  configuredAccount?: string | null;
   /** effective served model; separate from runtime, null when not served */
   model?: string | null;
   /** Configured launch effort: the seat's explicit choice, else the authored value.
@@ -97,6 +98,18 @@ export interface HostNode {
   /** true/false only when a probe answered; null keeps missing or unknown distinct. */
   reachable: boolean | null;
   rigs: RigNode[];
+  /** Roster members outside any terminal (assistants reaching the team over MCP) and their check-in, read from this
+   *  daemon only. Absent when not read, or when the read failed. */
+  connectedAssistants?: ConnectedAssistant[];
+  /** Why the connected assistants couldn't be read (an older daemon, a failed read, an unusable answer); absent when
+   *  they were read or not asked for. */
+  connectedAssistantsUnavailable?: string;
+}
+
+/** A connected assistant's check-in as this daemon reports it. */
+export interface ConnectedAssistant {
+  seat: string;
+  checkIn: Pick<import("@openrig/daemon/connection-contract").MemberCheckIn, "status" | "lastCheckInAt" | "expectedMinutes" | "onRequest" | "reason">;
 }
 
 export type SpecKind = "rig" | "agent" | "workflow";
@@ -426,6 +439,8 @@ export interface FleetSnapshot {
   usage?: import("./usage/usage-model.js").UsageRead;
   /** Slice 01 — System → Usage across hosts: the served view across registered hosts. Absent until read. */
   usageHosts?: import("./usage/usage-hosts-model.js").UsageHostsRead;
+  fleetScopes?: import("./scopes/fleet-scopes-model.js").FleetScopesRead;
+  fleetSliceDetail?: import("./scopes/fleet-scopes-model.js").FleetSliceDetailRead | null;
   /** Slice 02 — System → Cost: the served cost view (`rig usage cost`). Absent until read. */
   cost?: import("./cost/cost-read.js").CostRead;
   /** Canonical daemon health records. Absent on old/demo snapshots. */
@@ -447,6 +462,8 @@ export interface FleetSnapshot {
   /** Compatibility coordinate for S11 fixtures; new code prefers recentTransitionsScope. */
   recentTransitionsRig?: string | null;
   hosts: HostNode[];
+  /** ui.topology_remote_seats: an open remote rig page reads that rig's seats through this daemon. */
+  topologyRemoteSeats?: boolean;
   specs: SpecEntry[];
   /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
   needs: NeedsItem[];
@@ -566,6 +583,8 @@ export type Action =
   | { type: "project-source" }
   | { type: "scopes-mission-open"; mission: string }
   | { type: "scopes-open"; mission: string; slice: string }
+  | { type: "fleet-slice-open"; hostId: string; mission: string; slice: string }
+  | { type: "fleet-close" }
   | { type: "scopes-reqs" }
   | { type: "scopes-narrative" }
   /** EXECUTION view: open one derived row's detail page (key = slice:/lane:/park:/basis:/sources); close returns to the overview. */
@@ -633,6 +652,8 @@ export interface ViewState {
   /** SCOPES view flags: mini-reqs collapsed · narrative panel open. */
   scopesCollapseReqs: boolean;
   scopesNarrative: boolean;
+  /** The fleet Projects pane's open slice: composite identity (origin host + native mission/slice). */
+  fleetSelected: { hostId: string; mission: string; slice: string } | null;
   /** EXECUTION drill: the opened row key (null = the four-group overview). */
   executionOpen: string | null;
   /** REGISTRY I3 — open command palette (null = closed). */
@@ -663,7 +684,7 @@ export interface ViewState {
   lastError: string | null;
 }
 
-export type NavigationFrame = Pick<ViewState, "attentionCategory" | "attentionOpen" | "project" | "terminalView" | "terminalPage" | "file" | "externalUrl" | "section" | "drill" | "filter" | "selection" | "runningOf" | "viewTab" | "contentOffset" | "contentMaxOffset" | "contentTargetCount" | "contentSelection" | "focusedPane" | "scopesMission" | "scopesSelected" | "scopesCollapseReqs" | "scopesNarrative" | "executionOpen" | "expanded" | "timeZoneHelp" | "recentOpen" | "configCategory" | "configKey" | "configFocus">;
+export type NavigationFrame = Pick<ViewState, "attentionCategory" | "attentionOpen" | "project" | "terminalView" | "terminalPage" | "file" | "externalUrl" | "section" | "drill" | "filter" | "selection" | "runningOf" | "viewTab" | "contentOffset" | "contentMaxOffset" | "contentTargetCount" | "contentSelection" | "focusedPane" | "scopesMission" | "scopesSelected" | "scopesCollapseReqs" | "scopesNarrative" | "fleetSelected" | "executionOpen" | "expanded" | "timeZoneHelp" | "recentOpen" | "configCategory" | "configKey" | "configFocus">;
 
 export interface ViewStateStore {
   instanceId: string;

@@ -258,6 +258,12 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     for (const derived of ["successors", "successorsTruncated", "successorNote"]) expect(handedOn.structured.item).not.toHaveProperty(derived);
     expect(handedOn.text).not.toContain(next);
     expect(handedOn.text).not.toContain("qitem-more-");
+    const handedOnList = await asCarol("rig_queue_list", { all: true, destination: "impl@team" });
+    for (const row of handedOnList.structured.items) {
+      for (const derived of ["successors", "successorsTruncated", "successorNote"]) expect(row).not.toHaveProperty(derived);
+    }
+    expect(handedOnList.text).not.toContain(next);
+    expect(handedOnList.text).not.toContain("qitem-more-");
 
     // Artifacts: a root outside the grant is out of reach, directly or through an item.
     fs.writeFileSync(path.join(shared, "report.md"), "ARTIFACT body");
@@ -267,6 +273,22 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const viaItem = await asCarol("rig_artifact_read", { qitemId: withRef.qitemId });
     expect(viaItem.structured).toMatchObject({ available: false, roots: [] });
     expect(viaItem.text).not.toContain("ARTIFACT body");
+  });
+
+  it("an owner lists a handed-off origin with its successor's current state", async () => {
+    const owner = await grant("owner", { owner: true });
+    const served = await listen();
+    const asOwner = await connect(served.url, owner);
+    const source = await repo.create({ sourceSession: "lead@team", destinationSession: "impl@team", body: "request", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "impl@team", toSession: "qa@other", nudge: false });
+    repo.claim({ qitemId: created.qitemId, destinationSession: "qa@other" });
+
+    const listed = await asOwner("rig_queue_list", { all: true, destination: "impl@team" });
+
+    expect(listed.isError).toBe(false);
+    expect(listed.structured.items).toEqual([expect.objectContaining({ qitemId: source.qitemId, state: "handed-off",
+      successors: [{ qitemId: created.qitemId, destinationSession: "qa@other", state: "in-progress", via: "handedOffFrom" }],
+    })]);
   });
 
   it("a scoped grant's root_unknown names only the shared roots it may read, and an unscoped caller still sees them all", async () => {
@@ -338,7 +360,11 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect(team.structured.hostedMembers).toEqual([{ session: "grok@team", roster: "team", capabilities: ["web research"],
         useWhen: "A question needs current web sources", caveat: "No terminal or files: answers in text only", pane: null, activity: "unknown",
         // Its last call is recorded; no ring was rung (nudge: false), so its last wake is unknown, never idle.
-        presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows" } }]);
+        presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows",
+          // Its own inbox reads over this server were recorded as check-ins on the daemon. Its entry states no cadence,
+          // so it reads unknown with that check-in, never on request.
+          checkIn: { status: "unknown", lastCheckInAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), expectedMinutes: null, onRequest: false,
+            reason: "no check-in cadence declared" } } }]);
       expect(JSON.parse(fs.readFileSync(presenceFile, "utf8")).seats["grok@team"]).toMatchObject({ grant: "grok" });
       expect(fs.statSync(presenceFile).mode & 0o777).toBe(0o600);
       expect(fs.readFileSync(tokenFile, "utf8")).not.toContain("lastCallAt");

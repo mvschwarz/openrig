@@ -1,0 +1,65 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-11, follow-up to #2889, family advisor). Seat-authored note prose is replaced; daemon-generated notes are verbatim; every member carries a neutral mission tag; seat-written tags the detector does not read are neutral.",
+  "family": "advisor",
+  "lineageId": "qitem-20261107000014-e8f727a826181429",
+  "now": "2026-11-07T13:27:18.232Z",
+  "observationWindowSeconds": 86400,
+  "members": [
+    {
+      "qitemId": "qitem-20261107000014-e8f727a826181429",
+      "handedOffFrom": null,
+      "sourceSession": "plataforma-supervisor@comando",
+      "destinationSession": "advisor-lead@kernel",
+      "tags": [
+        "mission:family-advisor"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 72302,
+      "qitemId": "qitem-20261107000014-e8f727a826181429",
+      "ts": "2026-11-07T00:00:14.182Z",
+      "state": "pending",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": "created",
+      "identityProvenance": "claimed:v1"
+    },
+    {
+      "transitionId": 72324,
+      "qitemId": "qitem-20261107000014-e8f727a826181429",
+      "ts": "2026-11-07T00:01:13.328Z",
+      "state": "pending",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake reserved: advisor-lead@kernel|6f59a0364b1c615d#429edbed-be21-4065-b316-4b96f9f725be; generation 72e33513-b98d-4034-9126-7e6a9a096bc0; retention-state WyIwMU02OEcwNUtCOVlZS0I5QkZHTk02REI0RCIsImxlZ2FjeS1vZmYiLCJsZWdhY3ktb2ZmIix7ImNvdW50IjowLCJieXRlcyI6MH1d; obligations qitem-20261107000014-e8f727a826181429",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 72349,
+      "qitemId": "qitem-20261107000014-e8f727a826181429",
+      "ts": "2026-11-07T00:03:13.852Z",
+      "state": "pending",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner wake delivery refused: advisor-lead@kernel|6f59a0364b1c615d#429edbed-be21-4065-b316-4b96f9f725be; Refused: 'advisor-lead@kernel' is at an interactive prompt (selection_prompt). A message must not select or approve it. To deliberately drive the prompt: rig send advisor-lead@kernel \"<text>\" --dangerously-interact --reason \"<why>\". No text was sent.",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 73058,
+      "qitemId": "qitem-20261107000014-e8f727a826181429",
+      "ts": "2026-11-07T01:03:31.446Z",
+      "state": "pending",
+      "actorSession": "watchdog@system",
+      "transitionNote": "parked-owner episode closed: advisor-lead@kernel|6f59a0364b1c615d#429edbed-be21-4065-b316-4b96f9f725be (no longer observed parked)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 85090,
+      "qitemId": "qitem-20261107000014-e8f727a826181429",
+      "ts": "2026-11-07T13:27:18.232Z",
+      "state": "done",
+      "actorSession": "advisor-lead@kernel",
+      "transitionNote": "owner note (redacted)",
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

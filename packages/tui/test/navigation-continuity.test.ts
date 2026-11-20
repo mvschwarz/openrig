@@ -66,7 +66,9 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   ]);
   // The rig Table reads health once without fetching other rigs' node inventories.
   expect(calls.filter(c => c.startsWith("/api/health"))).toEqual(["/api/health?limit=200"]);
-  expect(calls).toHaveLength(10);
+  // One read of this daemon's connected assistants, which the rig Table lists after its seats.
+  expect(calls.filter(c => c === "/api/queue/hosted-members")).toHaveLength(1);
+  expect(calls).toHaveLength(11);
   expect(snap.health).toMatchObject({ availability: "loaded", total: 0, records: [] });
   expect(renderScreen(view.get(), snap, { cols: 220, rows: 60 }).lines.join("\n")).toContain("no findings served; not a healthy verdict");
 });

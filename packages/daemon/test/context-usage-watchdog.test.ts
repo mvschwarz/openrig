@@ -21,9 +21,11 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { createContinuityCutoverBaton } from "../src/domain/continuity-policy-materializer.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
-import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogPolicyEngine, parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 import { watchdogRoutes } from "../src/routes/watchdog.js";
+import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 
 describe("context-usage-threshold watchdog", () => {
   let db: Database.Database;
@@ -478,6 +480,100 @@ describe("context-usage-threshold watchdog", () => {
     expect(repo.getByIdOrThrow(cutover.jobId).lastFiredGeneration).toBe("gen-1");
   });
 
+  // A file the person named with --watched-file (written into the spec's context as watched_file) is the file watched,
+  // whoever occupies the target seat; a watch with no named file follows the target's new occupant to its transcript.
+  function registerNamed(watchedFile: string) {
+    return repo.register({
+      policy: "context-usage-threshold",
+      specYaml:
+        `policy: context-usage-threshold\n` +
+        `target:\n  session: target@rig\n` +
+        `message: Context threshold crossed; prepare continuity now.\n` +
+        `context:\n  threshold_bytes: 8\n  watched_file: ${JSON.stringify(watchedFile)}\n`,
+      targetSession: "target@rig",
+      intervalSeconds: 60,
+      registeredBySession: "watcher@rig",
+      watchedFilePath: watchedFile,
+      thresholdBytes: 8,
+    });
+  }
+
+  function targetChangesOccupant(successorTranscript: string) {
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successorTranscript);
+    generation = "gen-2";
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
+  }
+
+  for (const named of [true, false]) {
+    it(`${named ? "keeps a named watched file" : "follows the new occupant's transcript when no file was named"} across the target's generation change`, async () => {
+      const watched = join(tmp, "another-seat.jsonl");
+      writeFileSync(watched, "1");
+      const successorTranscript = join(tmp, "successor.jsonl");
+      writeFileSync(successorTranscript, "1");
+      const job = named ? registerNamed(watched) : register({ watchedFilePath: watched });
+      await engine().evaluate(job);
+      targetChangesOccupant(successorTranscript);
+
+      await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+      expect(repo.getByIdOrThrow(job.jobId).watchedFilePath).toBe(named ? watched : successorTranscript);
+      expect(history.listForJob(job.jobId).some((entry) => entry.skipReason === "watched_file_bound")).toBe(!named);
+
+      // The watched seat grows past the threshold: a named file fires on it, a followed one doesn't.
+      writeFileSync(watched, "1234567890");
+      const grown = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+      expect(grown.outcome.action).toBe(named ? "send" : "skip");
+      expect(deliveries).toHaveLength(named ? 1 : 0);
+    });
+  }
+
+  // A watch registered before this rule, which an earlier rebind moved onto the target's transcript, goes back to the
+  // file its spec names, visibly, and fires on that file's growth.
+  it("a named watch an earlier rebind moved onto the target's transcript goes back to its named file", async () => {
+    const watched = join(tmp, "another-seat.jsonl");
+    writeFileSync(watched, "1");
+    const successorTranscript = join(tmp, "successor.jsonl");
+    writeFileSync(successorTranscript, "1");
+    const job = registerNamed(watched);
+    repo.recordWatchedFileBinding(job.jobId, transcript, "gen-1");
+    targetChangesOccupant(successorTranscript);
+
+    await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ watchedFilePath: watched, watchedFileGeneration: "gen-2" });
+    expect(history.listForJob(job.jobId).find((entry) => entry.skipReason === "watched_file_bound")?.evaluationNotes)
+      .toMatchObject({ occupantGeneration: "gen-2", watchedFilePath: watched });
+
+    writeFileSync(watched, "1234567890");
+    const grown = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(grown.outcome.action).toBe("send");
+    expect(deliveries).toHaveLength(1);
+  });
+
+  it("a named watched file removed after the target's generation change is reported unresolved, never swapped", async () => {
+    const watched = join(tmp, "another-seat.jsonl");
+    writeFileSync(watched, "1");
+    const successorTranscript = join(tmp, "successor.jsonl");
+    writeFileSync(successorTranscript, "1234567890");
+    const job = registerNamed(watched);
+    await engine().evaluate(job);
+    targetChangesOccupant(successorTranscript);
+    rmSync(watched);
+
+    const result = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(result.outcome).toMatchObject({ action: "terminal", reason: "watched_file_unresolved" });
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ watchedFilePath: watched, terminalReason: "watched_file_unresolved" });
+    expect(deliveries).toHaveLength(0);
+  });
+
   it("a missing watched file is terminal and loud in status history", async () => {
     const missing = join(tmp, "missing.jsonl");
     const job = register({ watchedFilePath: missing });
@@ -613,6 +709,101 @@ describe("context-usage-threshold registration", () => {
     expect(await response.json()).toMatchObject({ watchedFilePath: explicit });
   });
 
+  // --spec naming one file plus --watched-file naming another (the CLI posts both as given, as can any API caller): the
+  // file named for this registration wins at registration, and the engine keeps watching it afterwards.
+  it("a watched file named at registration wins over the spec's, and stays bound across evaluations and an occupant change", async () => {
+    const specFile = join(tmp, "spec-named.jsonl");
+    const named = join(tmp, "registration-named.jsonl");
+    const successor = join(tmp, "successor.jsonl");
+    for (const file of [specFile, named, successor]) writeFileSync(file, "1");
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
+
+    const response = await app().request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body({
+        specYaml: `policy: context-usage-threshold\ncontext:\n  threshold_bytes: 8\n  watched_file: ${JSON.stringify(specFile)}\n`,
+        watchedFilePath: named,
+      })),
+    });
+    expect(response.status).toBe(201);
+    const { jobId } = await response.json() as { jobId: string };
+
+    let generation = "gen-1";
+    const repo = () => new WatchdogJobsRepository(db, undefined, () => generation);
+    const evaluate = () => new WatchdogPolicyEngine({ jobsRepo: repo(), historyLog: new WatchdogHistoryLog(db), eventBus: new EventBus(db),
+      deliver: async () => ({ status: "ok" as const }), resolveTargetGeneration: () => generation }).evaluate(repo().getByIdOrThrow(jobId));
+    await evaluate();
+    expect(repo().getByIdOrThrow(jobId).watchedFilePath).toBe(named);
+
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successor);
+    generation = "gen-2";
+    await evaluate();
+    expect(repo().getByIdOrThrow(jobId).watchedFilePath).toBe(named);
+  });
+
+  // A spec whose `context:` is empty or `~` (the threshold on a flag) is valid; naming a file at registration gives it a
+  // context holding that file, rather than failing the registration.
+  it.each([["empty", "context:\n"], ["~", "context: ~\n"]])("a spec whose context is %s still registers a named watched file, and keeps it", async (_shape, contextLine) => {
+    const named = join(tmp, "registration-named.jsonl");
+    const successor = join(tmp, "successor.jsonl");
+    for (const file of [named, successor]) writeFileSync(file, "1");
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
+
+    const response = await app().request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body({ specYaml: `policy: context-usage-threshold\n${contextLine}`, watchedFilePath: named })),
+    });
+    expect(response.status).toBe(201);
+    const job = await response.json() as { jobId: string; specYaml: string; watchedFilePath: string };
+    expect(job.watchedFilePath).toBe(named);
+    expect(parseWatchdogSpec(job.specYaml).context.watched_file).toBe(named);
+
+    let generation = "gen-1";
+    const repo = () => new WatchdogJobsRepository(db, undefined, () => generation);
+    const evaluate = () => new WatchdogPolicyEngine({ jobsRepo: repo(), historyLog: new WatchdogHistoryLog(db), eventBus: new EventBus(db),
+      deliver: async () => ({ status: "ok" as const }), resolveTargetGeneration: () => generation }).evaluate(repo().getByIdOrThrow(job.jobId));
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successor);
+    generation = "gen-2";
+    await evaluate();
+    expect(repo().getByIdOrThrow(job.jobId).watchedFilePath).toBe(named);
+  });
+
   it("fails registration loudly when neither resolution path exists", async () => {
     const response = await app().request("/api/watchdog/register", {
       method: "POST",
@@ -621,5 +812,100 @@ describe("context-usage-threshold registration", () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "watched_file_unresolved" });
+  });
+});
+
+describe("context-usage-threshold watchdog on a name two seat generations share", () => {
+  let db: Database.Database;
+  let tmp: string;
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    tmp = join(tmpdir(), `context-watchdog-ambiguous-${Date.now()}-${Math.random()}`);
+    mkdirSync(tmp, { recursive: true });
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const seat = (rig: string, node: string, generation: string, transcript: string) => {
+        db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'seat-rig')").run(rig);
+        db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, 'dev.impl')").run(node, rig);
+        db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, ?, 'dev-impl@seat-rig', 'detached')").run(`session-${node}`, node);
+        db.prepare(`INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+          VALUES (?, ?, 1, ?, 'initial', '2026-08-28T09:00:00.000Z')`).run(`tenure-${node}`, node, generation);
+        writeFileSync(transcript, "1234567890");
+        db.prepare(`INSERT INTO context_usage (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+          VALUES (?, ?, 'dev-impl@seat-rig', 'known', ?, '2026-08-28T09:00:01.000Z')`).run(node, `native-${node}`, transcript);
+  };
+  // As startup wires it.
+  const watch = () => {
+    const repo = new WatchdogJobsRepository(db);
+    const history = new WatchdogHistoryLog(db);
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const sessions = new SessionRegistry(db);
+    const engine = new WatchdogPolicyEngine({ jobsRepo: repo, historyLog: history, eventBus: new EventBus(db),
+      deliver: async (request) => { deliveries.push(request); return { status: "ok" as const }; },
+      resolveTargetGeneration: (s) => resolveGuardTarget(db, s)?.occupant ?? null,
+      targetNameCarried: (s) => sessions.carriesSessionName(s) });
+    const job = repo.register({ policy: "context-usage-threshold",
+      specYaml: "policy: context-usage-threshold\ngenerated_by: continuity-policy-materializer\ncontinuity_mode: managed-compaction\n"
+        + "target:\n  session: dev-impl@seat-rig\nmessage: Context threshold crossed.\n",
+      targetSession: "dev-impl@seat-rig", intervalSeconds: 60, registeredBySession: "daemon@kernel", watchedFilePath: null, thresholdBytes: 8 });
+    return { repo, history, deliveries, engine, job };
+  };
+
+  it("skips while the name names no single seat, stays active, then fires on its own seat's numbers", async () => {
+    // Two unarchived generations of seat dev-impl@seat-rig (the old rig unarchived for its restore), both stopped.
+    const oldTranscript = join(tmp, "old.jsonl"), currentTranscript = join(tmp, "current.jsonl");
+    seat("rig-old", "node-old", "gen-old", oldTranscript);
+    seat("rig-current", "node-current", "gen-current", currentTranscript);
+    const { repo, history, deliveries, engine, job } = watch();
+
+    expect(resolveGuardTarget(db, "dev-impl@seat-rig")).toBeNull();
+    const ambiguous = await engine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(ambiguous.outcome).toMatchObject({ action: "skip", reason: "occupant_generation_unresolved" });
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ state: "active", watchedFilePath: null });
+    expect(history.listForJob(job.jobId)[0]).toMatchObject({ outcome: "skipped", skipReason: "occupant_generation_unresolved" });
+    expect(deliveries).toEqual([]);
+
+    db.prepare("UPDATE rigs SET archived_at = datetime('now') WHERE id = 'rig-old'").run();
+    const resolved = await engine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(resolved.outcome.action).toBe("send");
+    expect(deliveries).toEqual([{ targetSession: "dev-impl@seat-rig", message: "Context threshold crossed." }]);
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ watchedFilePath: currentTranscript, watchedFileGeneration: "gen-current",
+      lastFiredGeneration: "gen-current" });
+  });
+
+  it.each(["session", "tmux binding", "external binding"])("keeps a watch with missing tenure while a %s carries its name", async (carrier) => {
+    seat("rig-current", "node-current", "gen-current", join(tmp, "current.jsonl"));
+    db.prepare("DELETE FROM occupant_tenures WHERE node_id = 'node-current'").run();
+    if (carrier !== "session") {
+      new SessionRegistry(db).updateBinding("node-current", carrier === "tmux binding"
+        ? { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%1" }
+        : { attachmentType: "external_cli", externalSessionName: "dev-impl@seat-rig" });
+      db.prepare("DELETE FROM sessions WHERE node_id = 'node-current'").run();
+    }
+    const { repo, history, deliveries, engine, job } = watch();
+    expect(new SessionRegistry(db).currentOccupantGenerationForSession("dev-impl@seat-rig")).toBeNull();
+
+    const unresolved = await engine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(unresolved.outcome).toMatchObject({ action: "skip", reason: "occupant_generation_unresolved" });
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ state: "active", watchedFilePath: null });
+    expect(history.listForJob(job.jobId)[0]).toMatchObject({ outcome: "skipped", skipReason: "occupant_generation_unresolved" });
+    expect(deliveries).toEqual([]);
+  });
+
+  it("ends the watch of a seat that's gone: its rig removed, nothing carries the name", async () => {
+    seat("rig-current", "node-current", "gen-current", join(tmp, "current.jsonl"));
+    const { repo, deliveries, engine, job } = watch();
+
+    db.prepare("DELETE FROM rigs WHERE id = 'rig-current'").run();
+    expect(new SessionRegistry(db).currentOccupantGenerationForSession("dev-impl@seat-rig")).toBeNull();
+    const gone = await engine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(gone.outcome).toMatchObject({ action: "terminal", reason: "occupant_generation_unresolved" });
+    expect(repo.getByIdOrThrow(job.jobId).state).toBe("terminal");
+    expect(deliveries).toEqual([]);
   });
 });

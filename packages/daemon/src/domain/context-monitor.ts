@@ -11,6 +11,7 @@ import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-sampl
 import type { ContextUsage } from "./types.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, readPendingStartupContext } from "./startup-orchestrator.js";
 import { claudeResumeRotation, SessionRegistry } from "./session-registry.js";
+import { ObservationPass } from "./process-observation-pass.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -19,6 +20,7 @@ interface EligibleSession {
   node_id: string;
   session_id: string;
   session_name: string;
+  created_at: string;
   runtime: string | null;
   resume_token: string | null;
   resume_provenance: string | null;
@@ -104,6 +106,8 @@ export class ContextMonitor {
   private async runPoll(): Promise<void> {
     this.compactionEnforcer?.reconcilePreparations?.();
     const sessions = this.getEligibleSessions();
+    // One pass per poll: the seats re-checked this poll share their process listings; the next poll starts fresh.
+    const pass = new ObservationPass();
     for (const session of sessions) {
       if (!this.isCurrentSession(session, true)) continue;
       let observed: ContextUsage | null = null;
@@ -143,7 +147,7 @@ export class ContextMonitor {
         }
       }
 
-      await this.normalizeStartupStatus(session);
+      if (session.runtime !== "pi") await this.normalizeStartupStatus(session, pass);
       await this.maybeAutoCompact(session, observed);
     }
     this.drainProviderWindowSamples();
@@ -185,6 +189,7 @@ export class ContextMonitor {
           cwd: session.cwd,
           runtime: session.runtime,
           usedPercentage: usage.usedPercentage,
+          sampledAt: usage.sampledAt,
           transcriptPath: usage.transcriptPath,
           sessionId: usage.sessionId,
           isObservationCurrent: () => this.isCurrentSession(session),
@@ -251,6 +256,7 @@ export class ContextMonitor {
         n.id as node_id,
         s.id as session_id,
         s.session_name,
+        s.created_at,
         n.runtime,
         s.resume_token,
         s.resume_provenance,
@@ -277,6 +283,7 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
+          OR (n.runtime = 'pi' AND s.status = 'running')
           OR (n.runtime = 'stub' AND s.status = 'running')
           OR (
             n.runtime = 'codex'
@@ -294,6 +301,12 @@ export class ContextMonitor {
   }
 
   private readContextUsage(session: EligibleSession) {
+    // A Pi seat's usage arrives as persisted entries its runner posts (no sidecar to poll), so the same tick
+    // reads the store the runner already wrote — one sampler, not a second one.
+    if (session.runtime === "pi") {
+      return this.store.readPiUsageAndNormalize({ nodeId: session.node_id, seatSession: session.session_name, sessionStartedAt: session.created_at });
+    }
+
     if (session.runtime === "codex") {
       return this.store.readCodexAndNormalize({
         threadId: session.resume_token,
@@ -314,7 +327,7 @@ export class ContextMonitor {
     return this.store.readAndNormalize(session.session_name);
   }
 
-  private async normalizeStartupStatus(session: EligibleSession): Promise<void> {
+  private async normalizeStartupStatus(session: EligibleSession, pass: ObservationPass): Promise<void> {
     const checker = session.runtime ? this.readinessCheckers[session.runtime] : undefined;
     if (!checker?.checkReady) return;
     if (session.startup_status !== "failed" && session.startup_status !== "attention_required") return;
@@ -340,7 +353,8 @@ export class ContextMonitor {
         updatedAt: "",
         cwd: session.cwd ?? "",
         ...(claude && session.generation_uuid ? { launchGeneration: session.generation_uuid } : {}),
-      }, ...(claude && session.resume_token ? [{ resumeToken: session.resume_token, ...(rotation ? { resumeRotation: rotation } : {}) }] : []));
+      }, ...(claude ? [{ observationPass: pass, ...(session.resume_token ? { resumeToken: session.resume_token } : {}), ...(rotation ? { resumeRotation: rotation } : {}) }]
+        : session.runtime === "codex" ? [{ observationPass: pass }] : []));
       // Hold no database lock while observing the runtime. Revalidation and
       // the write share an immediate transaction, reserving the writer before the
       // snapshot read so WAL contention cannot fail a later read-to-write upgrade.

@@ -1,3 +1,4 @@
+import { claudeAutoModeStatus, type ClaudeAutoModeStatus } from "./claude-auto-mode.js";
 import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-compaction-enforcer.js";
 import path from "node:path";
 import { TerminalPolicyStore } from "./terminal-policy.js";
@@ -20,6 +21,7 @@ import { readNodeStartupSnapshot, seatGuidanceFile } from "./restore-guidance.js
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
+  inputRoute?: "typed" | "native";
   /** Latest bounded observation across actors, not aggregate pending state or proof a guard ran.
    * Completion applies only to the displayed actor; other actors' pending state is unknown. */
   permission_stop?: PermissionStopStatus;
@@ -41,7 +43,12 @@ export interface SeatStatus {
   /** Whether the seat's newest session was launched as a community runner, the kind that submits permission requests. */
   runner: boolean;
   current_occupant: string | null;
+  /** The session record's own status. A pane OpenRig can't confirm as the seat's runtime (a bare shell) keeps it
+   *  `running`; `lifecycle_state` says how the seat reads. */
   session_status: string | null;
+  /** The seat's state as `rig ps --nodes` shows it (node-inventory's lifecycleState): `attention_required`, never
+   *  `running`, while startup needs attention or the pane's process identity down-ranks it. */
+  lifecycle_state: NodeInventoryEntry["lifecycleState"];
   session_reason: SeatIdentityVerdict["reason"];
   startup_status: NodeInventoryEntry["startupStatus"];
   occupant_lifecycle: NodeInventoryEntry["occupantLifecycle"];
@@ -74,6 +81,8 @@ export interface SeatStatus {
     effective?: ResolvedSeatPermission;
     /** The planned account for the next fresh managed launch (permission-account.ts); absent when it can't be read. */
     account?: PermissionAccount;
+    /** A Claude seat's autoMode block, saved against the last launch's; absent when neither has one. */
+    claudeAutoMode?: ClaudeAutoModeStatus;
   };
 }
 
@@ -168,6 +177,7 @@ export class SeatStatusService {
       ...this.compactionStatus(entry),
       ...this.refocusStatus(entry),
       seat_ref: seatRef,
+      inputRoute: this.rigRepo.getNodeInputRoute(entry.nodeId),
       rig_id: entry.rigId,
       rig_name: entry.rigName,
       logical_id: entry.logicalId,
@@ -179,6 +189,7 @@ export class SeatStatusService {
       runner: this.launchedAsRunner(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
+      lifecycle_state: entry.lifecycleState,
       session_reason: entry.identityVerdict?.reason ?? null,
       startup_status: entry.startupStatus,
       occupant_lifecycle: entry.occupantLifecycle,
@@ -275,14 +286,24 @@ export class SeatStatusService {
 
   private permissionStatus(nodeId: string, runtime: string | null | undefined, seat: string): SeatStatus["permissions"] {
     const lastLaunchArguments = new AppliedLaunchObservationStore(this.rigRepo.db).readCurrent(nodeId);
-    try {
-      const store = new NativePermissionStore(this.rigRepo.db);
-      const desired = store.read(nodeId);
-      const effective = runtime ? store.resolve(nodeId, runtime) : undefined;
-      const account = planPermissionAccount(this.rigRepo.db, nodeId, seat, runtime ?? null);
-      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified", ...(effective ? { effective } : {}), account };
-    } catch (error) {
-      return { selectionState: "unknown", desired: null, lastLaunchArguments, nativeEffect: "unverified", error: (error as Error).message };
-    }
+    // Without a plan, whether the next launch is in auto mode is unknown, not false.
+    const autoModeStatus = (account?: PermissionAccount) => {
+      const status = runtime === "claude-code" ? claudeAutoModeStatus(this.rigRepo.db, nodeId, lastLaunchArguments?.claudeAutoMode,
+        account ? /--permission-mode auto\b/.test(account.nativeArgument ?? "") : undefined) : undefined;
+      return status ? { claudeAutoMode: status } : {};
+    };
+    // Each fact is read on its own, so one that can't be read doesn't hide the others.
+    const store = new NativePermissionStore(this.rigRepo.db);
+    let desired: ReturnType<NativePermissionStore["read"]> | undefined;
+    let effective: ReturnType<NativePermissionStore["resolve"]> | undefined;
+    let account: PermissionAccount | undefined;
+    const errors: string[] = [];
+    try { desired = store.read(nodeId); } catch (error) { errors.push((error as Error).message); }
+    try { if (runtime) effective = store.resolve(nodeId, runtime); } catch (error) { errors.push((error as Error).message); }
+    try { account = planPermissionAccount(this.rigRepo.db, nodeId, seat, runtime ?? null); } catch (error) { errors.push((error as Error).message); }
+    return { selectionState: desired === undefined ? "unknown" : desired ? "explicit" : "inherit", desired: desired ?? null, lastLaunchArguments,
+      nativeEffect: "unverified", ...(effective ? { effective } : {}), ...(account ? { account } : {}),
+      ...(errors.length ? { error: errors.join("; ") } : {}), ...autoModeStatus(account) };
   }
+
 }

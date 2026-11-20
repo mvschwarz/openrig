@@ -1,4 +1,8 @@
+import { reportNativeContinuation } from "../domain/native-continuation-notice.js";
+import type { RunnerReceipt } from "../domain/outbox-handler.js";
+import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
+import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
@@ -146,10 +150,85 @@ function nextHookSeq(key: string): number {
 
 export const activityRoutes = new Hono();
 
+function channelService(c: Context): RunnerChannel {
+  const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+  if (!channel) throw new RunnerChannelError("runner_channel_unavailable", "Runner channel unavailable.", 503);
+  return channel;
+}
+function channelToken(c: Context): string | undefined {
+  const auth = c.req.header("Authorization");
+  return auth?.startsWith("Bearer ") ? auth.slice(7) : c.req.header("x-openrig-activity-token");
+}
+function channelFailure(c: Context, error: unknown): Response {
+  return error instanceof RunnerChannelError ? c.json({ error: error.message, code: error.code,
+    ...(error.retryable || error.code === "runner_grant_unverified" ? { retryable: true } : {}) }, error.status)
+    : c.json({ error: "Runner channel unavailable.", code: "runner_channel_unavailable" }, 503);
+}
+activityRoutes.post("/runner-channel", async c => {
+  try {
+    const channel = channelService(c), token = channelToken(c);
+    channel.authenticate(token);
+    const body = await c.req.json().catch(() => null);
+    if (body && typeof body === "object" && (body as Record<string, unknown>).type === "cancel-prepare") {
+      const ctx = permissionContext(c, false);
+      if ("refused" in ctx) return ctx.refused;
+      return c.json(channel.prepareCancellation(token, body as Record<string, unknown>, (grant, target) => ctx.permissions.withdrawTurn(
+        { nodeId: grant.nodeId, sessionName: ctx.store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? "", generation: grant.generation }, target)));
+    }
+    const result = channel.post(token, body);
+    const receipt = result.receipt as RunnerReceipt | undefined;
+    const continuation = receipt?.kind === "cancel" && (body as Record<string, unknown>)?.type === "result"
+      ? await reportNativeContinuation(channel.outbox, c.get("queueRepo" as never) as QueueRepository | undefined, receipt) : undefined;
+    return c.json({ ...result, ...(continuation ? { continuation } : {}) });
+  } catch (error) { return channelFailure(c, error); }
+});
+activityRoutes.get("/runner-channel", c => {
+  try {
+    const channel = channelService(c), token = channelToken(c);
+    channel.authenticate(token);
+    const raw = c.req.header("Last-Event-ID");
+    if (raw !== undefined && !/^(0|[1-9][0-9]*)$/.test(raw)) throw new RunnerChannelError("invalid_runner_cursor", "Invalid run-local cursor.", 400);
+    const cursor = raw === undefined ? 0 : Number(raw);
+    channel.frames(token, cursor); // Validate before sending HTTP headers; offered custody is retained if writing fails.
+    return streamSSE(c, async stream => {
+      const disconnect = channel.connect(token);
+      const written = new Set<number>();
+      let finish!: () => void, closed = false, draining = false, again = false;
+      const ended = new Promise<void>(resolve => { finish = resolve; });
+      const close = () => { if (!closed) { closed = true; finish(); } };
+      const drain = async () => {
+        if (draining) { again = true; return; }
+        draining = true;
+        try {
+          do {
+            again = false;
+            for (const frame of channel.frames(token, cursor)) {
+              if (written.has(frame.sequence)) continue;
+              const data = JSON.stringify(frame);
+              channel.authenticate(token); // Recheck immediately before each run-local write.
+              await stream.write(`: runner-frame-chars=${data.length}\n`);
+              channel.authenticate(token); // The comment write yielded; recheck before exposing the receipt.
+              await stream.writeSSE({ id: String(frame.sequence), event: "request", data });
+              written.add(frame.sequence);
+            }
+          } while (again && !closed);
+        } catch { close(); }
+        finally { draining = false; }
+      };
+      // Subscribe before the retained read. Notifications are hints; the outbox is authority.
+      const unsubscribe = channel.subscribe(() => { void drain(); });
+      const timer = setInterval(() => { void drain(); }, 250);
+      stream.onAbort(close);
+      try { await drain(); await ended; }
+      finally { clearInterval(timer); unsubscribe(); disconnect(); await stream.close(); }
+    });
+  } catch (error) { return channelFailure(c, error); }
+});
+
 /** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
  *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
  *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
-function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
+export function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
   { body: Record<string, unknown> } | { refused: Response } {
   const refuse = (status: 401 | 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
   // Read the grant again: it may have been revoked or reissued while the body arrived. Nothing is awaited from here to the
@@ -157,6 +236,14 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   const revoked = new ActivityGrantStore(store.db).get(grant.grantId)?.revokedAt !== null;
   if (revoked && !permissionRoute) {
     return refuse(401, "activity_grant_revoked", "This activity grant was revoked; nothing was recorded.");
+  }
+  if (grant.runId && body.runId !== undefined && body.runId !== grant.runId) {
+    return refuse(409, "activity_grant_stale", "This post names another run; nothing was recorded.");
+  }
+  const claimedRuntime = stringOrNull(body.runtime);
+  if (grant.binding && ((claimedRuntime && claimedRuntime !== grant.binding.runtime)
+    || (body.eventFamily === "session_identity" && !claimedRuntime))) {
+    return refuse(403, "activity_grant_runtime_mismatch", "This runner grant speaks only for its bound runtime; nothing was recorded.");
   }
   const claimedNode = stringOrNull(body.nodeId);
   const claimedSession = stringOrNull(body.sessionName);
@@ -178,6 +265,16 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
  *  hasn't registered yet (pending). A `revoked` grant whose occupant wasn't replaced reads revoked: it was reissued for
  *  the same launch. `outcome` says what the refusal left undone. */
 function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
+  if (grant.runId) {
+    let standing: ReturnType<ActivityGrantStore["standing"]> = "unverified";
+    try { standing = new ActivityGrantStore(store.db).standing(grant.grantId); } catch { /* Unreadable authority is not a revoked run. */ }
+    if (standing === "current") return null;
+    if (standing === "unverified") {
+      return c.json({ ok: false, code: "activity_grant_unverified", retryable: true,
+        error: `This runner grant couldn't be verified now; retry verification; ${outcome}` }, 409);
+    }
+    return c.json({ ok: false, code: `activity_grant_${standing}`, error: `This runner grant is ${standing}; ${outcome}` }, standing === "revoked" ? 401 : 409);
+  }
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   let standing: ReturnType<typeof grantGeneration>;
   try {
@@ -211,7 +308,10 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
-  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+  const headerToken = c.req.header("x-openrig-activity-token") ?? null;
+  const grantStore = new ActivityGrantStore(sessionRegistry.db);
+  const grant = grantStore.authenticate(bearerToken) ?? grantStore.authenticate(headerToken);
+  if (!constantTimeEqual(bearerToken ?? "", expectedToken) && !constantTimeEqual(headerToken ?? "", expectedToken) && !grant?.runId) {
     return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
   }
   let body: Record<string, unknown>;
@@ -222,6 +322,12 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require a JSON object` }, 400) };
+  }
+  if (grant?.runId) {
+    const bound = bindToGrant(c, store, grant, body);
+    if ("refused" in bound) return { error: bound.refused };
+    if (grant.binding?.runtime !== "pi") return { error: c.json({ ok: false, code: "activity_grant_wrong_seat", error: "Pi usage requires a Pi run." }, 403) };
+    body = bound.body;
   }
   const sessionName = stringOrNull(body.sessionName);
   const piSessionId = stringOrNull(body.piSessionId);
@@ -276,11 +382,11 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
 /** Who is posting, before anything the request claims is read. The install-wide token speaks for every seat (`grant`
  *  null); a seat activity grant speaks only for its own seat and launch generation, which bindToGrant checks once the
  *  body has arrived. Without `expectedToken` (the guest router), only a grant is accepted. */
-function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
+export function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
-  if (expectedToken && (bearerToken === expectedToken || headerToken === expectedToken)) return { grant: null };
+  if (expectedToken && (constantTimeEqual(bearerToken ?? "", expectedToken) || constantTimeEqual(headerToken ?? "", expectedToken))) return { grant: null };
   const grants = new ActivityGrantStore(store.db);
   const grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
   if (!grant) {
@@ -326,11 +432,22 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
   }
 
+  if (Object.hasOwn(body, "runId") && !grant?.runId) {
+    return c.json({ ok: false, code: "run_grant_required", error: "Actual-run reports require their run-bound credential." }, 403);
+  }
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
   if (grant) {
     const bound = bindToGrant(c, store, grant, body);
     if ("refused" in bound) return bound.refused;
     body = bound.body;
+  }
+
+  if (Object.hasOwn(body, "observations")) {
+    if (!grant?.runId) return c.json({ ok: false, code: "run_grant_required", error: "Observation reports require their run-bound credential." }, 403);
+    const result = store.recordRunnerObservation(grant, body);
+    if (!result.ok) return c.json(result, result.code === "runner_observation_conflict" ? 409
+      : result.code === "runner_observation_unavailable" || result.code === "runner_observation_unverified" ? 409 : 400);
+    return c.json(result);
   }
 
   const permissionDiagnostic = ["permissionStopDescriptor", "permissionRuleSuggestions", "permission_suggestions"]
@@ -466,7 +583,7 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+        } else if (current.generationUuid !== generation && !(grant?.runId && grant.generation === generation)) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
@@ -918,17 +1035,35 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   }
   const parsed = parseRunnerPermissionRequest(body);
   if (!parsed.ok) return c.json({ ok: false, code: "invalid_permission_request", error: parsed.message }, 400);
+  let correlationUnverified = false;
+  if (parsed.request.runId) {
+    let current: ReturnType<RunnerChannel["currentTurn"]> = null;
+    if (ctx.grant?.runId && ctx.grant.runId === parsed.request.runId) {
+      const refused = grantStandingRefusal(c, ctx.store, ctx.grant, "nothing was asked.");
+      if (refused) return refused;
+      try { current = (c.get("runnerChannel" as never) as RunnerChannel | undefined)?.currentTurn(seat.nodeId, true) ?? null; }
+      catch (error) {
+        if (!(error instanceof RunnerChannelError) || error.code !== "runner_unavailable") return channelFailure(c, error);
+      }
+    }
+    if (!ctx.grant?.runId || ctx.grant.runId !== parsed.request.runId)
+      return c.json({ ok: false, code: "runner_turn_unbound", error: "Permission metadata names another run." }, 409);
+    correlationUnverified = current?.runId !== parsed.request.runId || current.nativeTurnId !== parsed.request.nativeTurnId
+      || !current.acceptedTurnIds.includes(parsed.request.turnId);
+  }
+  // Claimed tags remain deny-only withdrawal hints, never positive native-turn authority.
+  const correlation = correlationUnverified ? { correlation: "unverified", warning: "Native turn correlation is unavailable; this ask is uncorrelated." } : {};
   const result = await ctx.permissions.submit(seat, parsed.request);
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, PERMISSION_REFUSAL_STATUS[result.code] ?? 409);
   // No one to ask: permitted at once with the agent's own allow. Nothing waits on a person, so nothing reads needs input.
-  if ("state" in result) return c.json(result);
+  if ("state" in result) return c.json({ ...result, ...correlation });
   // The seat now waits on a person, as when a runner refuses and holds attention. A grant revoked meanwhile records nothing more.
   if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body, true)))) {
     recordHookActivity(c, ctx.store, { runtime: ctx.store.resolveSession({ nodeId: seat.nodeId })?.runtime ?? stringOrNull(body.runtime),
       sessionName: seat.sessionName, nodeId: seat.nodeId, generation: seat.generation, hookEvent: "Notification",
       subtype: "permission_prompt", turnId: parsed.request.turnId, occurredAt: stringOrNull(body.occurredAt) ?? new Date().toISOString() });
   }
-  return c.json({ ok: true, askId: result.askId, created: result.created });
+  return c.json({ ok: true, askId: result.askId, created: result.created, ...correlation });
 }
 
 /** Read the one answer for this seat's own request, waiting up to 25 seconds for it to change. A grant reads only its
@@ -1034,8 +1169,9 @@ activityRoutes.get("/parked", (c) => {
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
     getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
-    // The obligation face only: the same rows, order and limit as a full list() of this destination's open states,
-    // without the per-row projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
+    // The obligation face only: the same order and limit as a full list() of this destination's open states, and the same
+    // rows less an unheld wake escalation about the seat's own prompt (listOpenObligations), without the per-row
+    // projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
     listOpenObligations: (destination: string, limit: number) => ({
       rows: queueRepo.listOpenObligations(destination, limit),
       limit,

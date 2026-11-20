@@ -305,6 +305,55 @@ describe.each([false, true])("post-compact drain readiness (guarded=%s)", (guard
     expect(tmux.sendText).toHaveBeenCalledTimes(3);
   });
 
+  // Unknown readiness from an attempt without #2818's bounded fallback waits for that fallback, not an undeliverable
+  // stage: no person is told it failed before the fallback attempt (still subject to the ordinary guards) has run.
+  const failureNotices = () => restoreNotice.mock.calls.filter(([failure]) => !failure.lastDelivery.ok);
+
+  it("two unknown polls and then the fallback delivering file no undeliverable notice", async () => {
+    await compact();
+    hook("Stop", 30_000);
+    rmSync(sidecar(), { force: true });
+    pane = "";
+    await monitor.pollOnce();
+    await monitor.pollOnce();
+    await Promise.resolve();
+    expect(enforcer.getOwedRestore(sessionName)?.lastDelivery).toMatchObject({ reason: "target_activity_unknown", failures: 2 });
+    expect(failureNotices()).toEqual([]);
+    await monitor.pollOnce();
+    await Promise.resolve();
+    expect(boundaryWrites()).toHaveLength(1);
+    expect(failureNotices()).toEqual([]);
+  });
+
+  it("unknown polls and then a failed fallback attempt file one undeliverable notice", async () => {
+    await compact();
+    hook("Stop", 30_000);
+    rmSync(sidecar(), { force: true });
+    pane = "";
+    tmux.sendText.mockResolvedValue({ ok: false, code: "send_failed", message: "the paste was refused" });
+    await monitor.pollOnce();
+    await monitor.pollOnce();
+    await monitor.pollOnce();
+    await Promise.resolve();
+    expect(failureNotices()).toHaveLength(1);
+    expect(failureNotices()[0]![0].lastDelivery).toMatchObject({ unknownAllowed: true, failures: 3 });
+  });
+
+  it("an ordinary refusal twice still files one undeliverable notice, as before", async () => {
+    await compact();
+    rmSync(sidecar(), { force: true });
+    pane = COMPACTED_PANE;
+    hook("Notification", 1_000, "permission_prompt");
+    await monitor.pollOnce();
+    await Promise.resolve();
+    expect(failureNotices()).toEqual([]);
+    await monitor.pollOnce();
+    await Promise.resolve();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(failureNotices()).toHaveLength(1);
+    expect(failureNotices()[0]![0].lastDelivery.reason).not.toBe("target_activity_unknown");
+  });
+
   it("an unreadable pane observation that exceeds the wait still gets bounded restore delivery", async () => {
     await compact();
     hook("Stop", 30_000);

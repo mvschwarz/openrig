@@ -1,3 +1,4 @@
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -499,7 +500,7 @@ describe("ContextMonitor", () => {
     await monitor.pollOnce();
     const row = db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(session.id);
     expect(row).toEqual({ startup_status: timing === "other occupant" ? "ready" : timing === "delivering" ? "pending" : "attention_required" });
-    expect(checkReadySpy).toHaveBeenCalledWith(expect.objectContaining({ tmuxSession: sessionName }));
+    expect(checkReadySpy).toHaveBeenCalledWith(expect.objectContaining({ tmuxSession: sessionName }), { observationPass: expect.any(ObservationPass) });
   });
 
   it("pollOnce normalizes stale Claude startup failures back to ready when the runtime is live", async () => {
@@ -521,7 +522,7 @@ describe("ContextMonitor", () => {
       nodeId: session.nodeId,
       tmuxSession: sessionName,
       cwd: "/project",
-    }));
+    }), { observationPass: expect.any(ObservationPass) });
   });
 
   it("pollOnce normalizes stale Claude startup failures to attention_required when the runtime is blocked on trust", async () => {
@@ -594,7 +595,7 @@ describe("ContextMonitor", () => {
       nodeId: session.nodeId,
       tmuxSession: "dev-qa-trust@test",
       cwd: "/project",
-    }));
+    }), { observationPass: expect.any(ObservationPass) });
   });
 
   it.each([false, true])("keeps a ready Codex fork in attention while its role is owed (token available: %s)", async tokenAvailable => {

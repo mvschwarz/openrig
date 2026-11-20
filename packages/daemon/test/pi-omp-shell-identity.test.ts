@@ -28,7 +28,8 @@ function seat(runtime: string, pane: Pane) {
   registry.updateBinding(node.id, { tmuxSession: name, tmuxPane: paneId });
   const tmux = {
     listSessions: vi.fn(async () => [{ name }] as never),
-    listPanes: vi.fn(async () => [{ id: paneId }] as never),
+    // A live session still has another pane after the registered pane is gone.
+    listPanes: vi.fn(async () => [{ id: pane.pid === null ? "%8" : paneId }] as never),
     getPanePid: vi.fn(async () => pane.pid),
     getPaneCommand: vi.fn(async () => pane.command),
   };

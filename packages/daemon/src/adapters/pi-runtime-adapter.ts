@@ -1,3 +1,4 @@
+import type { RunnerGrantLaunch, RunnerGrantIssuer } from "../domain/runner-grant-launch.js";
 import { piAccountSwitchStateRoot } from "../domain/pi-account-state.js";
 // OPR.0.4.6.PI1 — the Pi runtime adapter (RPC-first, runner-in-a-pane).
 //
@@ -27,6 +28,7 @@ import { isPerSeatRoleGuidance, perSeatRoleSkipWarning } from "../domain/managed
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
+import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
@@ -45,10 +47,14 @@ export interface PiAdapterFsOps {
   chmod?(path: string, mode: number): void;
   /** Whether a path is a symlink and its hard-link count, or null when it doesn't exist (an lstat). */
   linkInfo?(path: string): { link: boolean; nlink: number } | null;
+  /** Whether a folder is there (cwd-resolution's folderPresent), to leave a missing seat folder uncreated. Optional: a
+   *  folder reads as present if absent. */
+  folderPresent?(path: string): boolean;
 }
 
 export interface PiRuntimeAdapterDeps {
   tmux: TmuxAdapter;
+  runnerGrants?: RunnerGrantIssuer;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   fsOps: PiAdapterFsOps;
   /** Root under which every Pi seat gets its isolated state dir (FR-7).
@@ -77,6 +83,7 @@ export interface PiRuntimeAdapterDeps {
 export class PiRuntimeAdapter implements RuntimeAdapter {
   readonly runtime: string = "pi";
   protected tmux: TmuxAdapter;
+  protected runnerGrants?: RunnerGrantIssuer;
   protected seatLaunchEnvironment?: SeatLaunchEnvironment;
   protected fs: PiAdapterFsOps;
   protected stateRoot: string;
@@ -94,6 +101,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.usageFactsEnabled = deps.usageFactsEnabled ?? (() => false);
     this.openRouterChargeEnabled = deps.openRouterChargeEnabled ?? (() => false);
     this.tmux = deps.tmux;
+    this.runnerGrants = deps.runnerGrants;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.stateRoot = deps.stateRoot;
@@ -107,6 +115,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   getCommunityDeps(): PiRuntimeAdapterDeps {
     return {
       tmux: this.tmux,
+      runnerGrants: this.runnerGrants,
       seatLaunchEnvironment: this.seatLaunchEnvironment,
       fsOps: this.fs,
       stateRoot: this.stateRoot,
@@ -241,8 +250,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
             // ADDITIVE context-file merge (Omnigent best-practice: never
             // replace Pi's default system prompt). Pi reads AGENTS.md from its
             // agent folder and from the managed cwd as context files.
-            const targetPath = this.guidanceTarget(binding, warnings);
-            if (!targetPath) continue; // not written through a link: not counted as delivered
+            const targetPath = this.guidanceTarget(binding, warnings, file.path);
+            if (!targetPath) continue; // not written (a link, or a missing seat folder): not counted as delivered
             const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
@@ -280,7 +289,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
     const wrapped = binding.launchWrapper?.length ? binding.launchWrapper : undefined;
     if (wrapped && (this.runtime !== "pi" || !this.seatLaunchEnvironment)) {
@@ -341,90 +350,122 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // The prior record is read FIRST so the durable catch-up cursor
     // (lastEntryId, FR-5) survives the reset.
     const launchId = this.newLaunchId();
-    const prior = this.readRunnerState(location.sessionName, location.stateRoot);
-    this.fs.writeFile(
-      paths.runnerStatePath,
-      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
-    );
+    let authority: RunnerGrantLaunch | undefined;
+    let authorityUnavailable = false;
+    let dispatchedWithoutAuthority = false;
+    try { authority = await this.runnerGrants?.(binding, this.runtime, launchId, this.runtime === "pi" || this.runtime === "omp" ? 0 : 2); }
+    catch { authorityUnavailable = true; }
+    let authorizedLaunchSucceeded = false;
+    try {
+      const prior = this.readRunnerState(location.sessionName, location.stateRoot);
+      this.fs.writeFile(
+        paths.runnerStatePath,
+        JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
+      );
 
-    const trust = this.runtime === "omp"
-      ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
-      : piTrust(this.trustPosture, process.env, binding.launchPosture);
-    const appliedLaunch = this.runtime === "omp"
-      ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
-      : observePiResourceTrust(trust);
-    // An account home is Pi's own, as on main: OMP and a pi-rpc fork take none, and the runner refuses --account-home
-    // for any runtime but pi.
-    const accountHome = this.runtime !== "pi" ? undefined
-      : binding.accountHome !== undefined ? binding.accountHome
-      : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
-    const preparedHome = accountHome === null && binding.nodeId
-      ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime, true) : accountHome;
-    const cmd = buildPiRunnerCommand({
-      accountHome: preparedHome ?? undefined,
-      runtime: this.runtime,
-      command: this.commandName,
-      runnerEntryPath: this.runnerEntryPath,
-      sessionName: location.sessionName,
-      stateRoot: location.stateRoot,
-      cwd: binding.cwd,
-      model: binding.model,
-      // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
-      thinking: this.runtime === "omp" ? undefined : binding.effort,
-      // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
-      // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
-      trust,
-      sessionFile: opts.resumeToken,
-      forkRef,
-      launchId,
-      usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
-      openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
-      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
-    });
+      const trust = this.runtime === "omp"
+        ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
+        : piTrust(this.trustPosture, process.env, binding.launchPosture);
+      const appliedLaunch = this.runtime === "omp"
+        ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
+        : observePiResourceTrust(trust);
+      // An account home is Pi's own, as on main: OMP and a pi-rpc fork take none, and the runner refuses --account-home
+      // for any runtime but pi.
+      const accountHome = this.runtime !== "pi" ? undefined
+        : binding.accountHome !== undefined ? binding.accountHome
+        : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
+      const preparedHome = accountHome === null && binding.nodeId
+        ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime, true) : accountHome;
+      const cmd = buildPiRunnerCommand({
+        accountHome: preparedHome ?? undefined,
+        runtime: this.runtime,
+        command: this.commandName,
+        runnerEntryPath: this.runnerEntryPath,
+        sessionName: location.sessionName,
+        stateRoot: location.stateRoot,
+        cwd: binding.cwd,
+        model: binding.model,
+        // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
+        thinking: this.runtime === "omp" ? undefined : binding.effort,
+        // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
+        // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
+        trust,
+        sessionFile: opts.resumeToken,
+        forkRef,
+        launchId,
+        usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
+        openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
+        ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
+      });
 
-    const fallback = cmd;
-    // Every Pi-protocol runtime (Pi and its pi-rpc forks) takes the seat launch environment; OMP unchanged.
-    const command = this.runtime !== "omp" && this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, accountHome })
-      : fallback;
-    // Stage long commands without leaving a shell above the live runner.
-    let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== fallback && accountHome === undefined) {
-      textResult = await this.tmux.sendShellCommand(sessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
-    }
-    if (!textResult.ok) {
-      return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
-    }
+      const fallback = cmd;
+      // Every Pi-protocol runtime (Pi and its pi-rpc forks) takes the seat launch environment; OMP unchanged.
+      let command = this.runtime !== "omp" && this.seatLaunchEnvironment
+        ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: authority?.generation ?? binding.launchGeneration, runtime: this.runtime, accountHome })
+        : fallback;
+      const originalCommand = command;
+      if (authority) command = authority.wrap(command);
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
+      // Stage long commands without leaving a shell above the live runner.
+      let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && authority && command !== originalCommand) {
+        try { await authority.finish(false); } catch { /* optional authority cleanup cannot prevent the original launch */ }
+        authority = undefined; authorityUnavailable = true;
+        if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
+        textResult = await this.tmux.sendShellCommand(sessionName, originalCommand, undefined, { stageIfLong: true, execInScript: true });
+      }
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && originalCommand !== fallback && accountHome === undefined) {
+        if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
+        textResult = await this.tmux.sendShellCommand(sessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
+      }
+      if (!textResult.ok) {
+        return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
+      }
 
-    // The runner writes the sidecar after its first successful get_state;
-    // that sidecar (not pane content) is the token source of truth (FR-5).
-    const state = await this.waitForRunnerReady(location.sessionName, launchId, location.stateRoot);
-    if (!state.ok) return state.failure;
+      try { authority?.dispatched(); }
+      catch {
+        try { await authority?.finish(false); } catch { /* dispatch already happened; never retry native input */ }
+        authority = undefined; authorityUnavailable = true; dispatchedWithoutAuthority = true;
+      }
 
-    const sessionFile = state.value.sessionFile;
-    if (!sessionFile) {
-      return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
-    }
-    if (opts.resumeToken && sessionFile !== opts.resumeToken) {
-      // An exact resume must continue the requested history; a runner
-      // that came up on any other file started a different session. Same
-      // contract as the separate resume adapter's verifyResume.
-      return { ok: false, error: `${this.runtime} resume: the runner is ready but does not report the requested session file` };
-    }
-    if (forkRef && sessionFile === forkRef) {
-      // The adapter contract requires the NEW post-fork token, never the
-      // parent's (runtime-adapter.ts fork rule).
-      return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };
-    }
-    const validation = this.validateToken(sessionFile);
-    if (!validation.ok) {
-      return { ok: false, error: `${this.runtime} launch: the runner reported a malformed session file (${validation.error})` };
-    }
+      // The runner writes the sidecar after its first successful get_state;
+      // that sidecar (not pane content) is the token source of truth (FR-5).
+      const state = await this.waitForRunnerReady(location.sessionName, launchId, location.stateRoot);
+      if (!state.ok) return state.failure;
 
-    // OMP lazily creates its JSONL on the first persisted turn. Readiness
-    // is real, but until then there is no history to resume after a reboot.
-    if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
-    return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch };
+      const sessionFile = state.value.sessionFile;
+      if (!sessionFile) {
+        return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
+      }
+      if (opts.resumeToken && sessionFile !== opts.resumeToken) {
+        // An exact resume must continue the requested history; a runner
+        // that came up on any other file started a different session. Same
+        // contract as the separate resume adapter's verifyResume.
+        return { ok: false, error: `${this.runtime} resume: the runner is ready but does not report the requested session file` };
+      }
+      if (forkRef && sessionFile === forkRef) {
+        // The adapter contract requires the NEW post-fork token, never the
+        // parent's (runtime-adapter.ts fork rule).
+        return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };
+      }
+      const validation = this.validateToken(sessionFile);
+      if (!validation.ok) {
+        return { ok: false, error: `${this.runtime} launch: the runner reported a malformed session file (${validation.error})` };
+      }
+
+      // OMP lazily creates its JSONL on the first persisted turn. Readiness
+      // is real, but until then there is no history to resume after a reboot.
+      authorizedLaunchSucceeded = true;
+      const warnings = authorityUnavailable ? [dispatchedWithoutAuthority
+        ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
+        : "Run-bound reporting unavailable; using existing unbound install-token reporting."] : undefined;
+      if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch,
+        ...(authority ? { activityGrantId: authority.grantId } : {}), ...(warnings ? { warnings } : {}) };
+      return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch,
+        ...(authority ? { activityGrantId: authority.grantId } : {}), ...(warnings ? { warnings } : {}) };
+    } finally {
+      try { await authority?.finish(authorizedLaunchSucceeded); } catch { /* optional reporting cannot change the native launch outcome */ }
+    }
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
@@ -535,11 +576,22 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return linked ? { file: null, note: `${this.runtime}: ${linked} is a link, so this seat's managed guidance stays in its repository AGENTS.md` } : { file };
   }
 
+  /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
+  private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
+
   /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved choice),
    *  else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link (#2432): nothing is
-   *  written through it, and nothing falls back to the repository file. */
-  private guidanceTarget(binding: NodeBinding, warnings: string[]): string | null {
-    if (!binding.guidanceFile) return nodePath.join(binding.cwd, "AGENTS.md");
+   *  written through it, and nothing falls back to the repository file. Null too when the file lies in a seat folder this
+   *  machine doesn't have, which isn't recreated to hold it (insideMissingFolder). */
+  private guidanceTarget(binding: NodeBinding, warnings: string[], blockId: string): string | null {
+    const target = binding.guidanceFile ?? nodePath.join(binding.cwd, "AGENTS.md");
+    // A seat folder this machine doesn't have isn't recreated to hold it (insideMissingFolder); an agent folder's own
+    // AGENTS.md outside it still goes.
+    if (insideMissingFolder(target, binding.cwd, this.folderPresent)) {
+      warnings.push(`${blockId}: not written, because ${binding.cwd} doesn't exist on this machine`);
+      return null;
+    }
+    if (!binding.guidanceFile) return target;
     const linked = guidanceFileSharedByLink(binding.guidanceFile, (path) => this.fs.linkInfo?.(path) ?? null);
     if (!linked) return binding.guidanceFile;
     warnings.push(`${this.runtime}: ${linked} is now a link, so this seat's managed guidance wasn't written to ${binding.guidanceFile}, which other sessions could read`);
@@ -548,7 +600,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = this.guidanceTarget(binding, warnings);
+      const targetPath = this.guidanceTarget(binding, warnings, entry.effectiveId);
       if (!targetPath) return false;
       const content = this.fs.readFile(entry.absolutePath);
       return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);

@@ -58,7 +58,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     const filed = findingsTo("root@front");
     expect(filed).toHaveLength(1);
     const notice = filed[0]!;
-    expect(notice).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (3 rows)" });
+    expect(notice).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 3 items nobody has picked up" });
     expect(notice.tags).toContain("stuck-sweep:unclaimed-backlog:root@front");
     // What the seat reads: each row, how to list them, and how to send these findings to a seat that watches it.
     for (const row of rows) expect(notice.body).toContain(row.qitemId);
@@ -73,7 +73,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     await sweep();
     const after = findingsTo("root@front");
     expect(after).toHaveLength(1);
-    expect(after[0]).toMatchObject({ qitemId: notice.qitemId, state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (4 rows)" });
+    expect(after[0]).toMatchObject({ qitemId: notice.qitemId, state: "pending", summary: "Checked on root@front's work: 4 items nobody has picked up" });
     expect(after[0]!.body).toContain(fourth.qitemId);
   });
 
@@ -84,7 +84,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     queue.claim({ qitemId: claimed.qitemId, destinationSession: "root@front" });
     await sweep();
     const [notice] = findingsTo("root@front");
-    expect(notice).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (1 row)" });
+    expect(notice).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 1 item nobody has picked up" });
     expect(notice!.body).toContain(waiting.qitemId);
     expect(notice!.body).not.toContain(claimed.qitemId);
     queue.claim({ qitemId: waiting.qitemId, destinationSession: "root@front" });
@@ -106,9 +106,32 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     await sweep();
     const reopened = findingsTo("root@front").filter(isOpen);
     expect(reopened).toHaveLength(1);
-    expect(reopened[0]!.summary).toBe("Stuck sweep: unclaimed-backlog on root@front (2 rows)");
+    expect(reopened[0]!.summary).toBe("Checked on root@front's work: 2 items nobody has picked up");
     expect(reopened[0]!.body).toContain(old.qitemId);
     expect(reopened[0]!.body).toContain(newer.qitemId);
+  });
+
+  it("files no finding for a queue-only seat's cold watchdog reminder: held and readable at the seat, not stuck (#3076)", async () => {
+    const door = seat("front", "door.root", "root@front");
+    seat("ops", "watch.desk", "desk@ops");
+    rigs.addEdge(door.rig.id, door.node.id, "desk@ops", "escalates_to");
+    const reminder = async (tags: string[]) => {
+      const row = await queue.create({ qitemId: `qitem-watchdog-${tags.length}`, sourceSession: "watchdog@system", destinationSession: "root@front",
+        body: "[OpenRig watchdog scheduler · policy: periodic-reminder · job: j]\nCheck the deploy", summary: "Watchdog (periodic-reminder): Check the deploy",
+        tags, nudge: false, wakeTrigger: "openrig" });
+      const at = new Date(Date.now() - 90 * 60_000).toISOString();
+      db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(at, row.qitemId);
+      db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(at, row.qitemId);
+      return row;
+    };
+    const cold = await reminder(["watchdog", "queue-only", "watchdog-job:j", "policy:periodic-reminder"]);
+    // The same row without the queue-only mark is an ordinary obligation, and still gets its finding.
+    const ordinary = await reminder(["watchdog"]);
+    await sweep();
+    const tags = findingsTo("desk@ops").flatMap((f) => f.tags ?? []);
+    expect(tags).not.toContain(`stuck-sweep:unclaimed-obligation:${cold.qitemId}`);
+    expect(tags).toContain(`stuck-sweep:unclaimed-obligation:${ordinary.qitemId}`);
+    expect(queue.getById(cold.qitemId)).toMatchObject({ state: "pending", claimedAt: null });
   });
 
   it("keeps the notice open while the wake ladder is still waking its row", async () => {
@@ -119,6 +142,34 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     queue.update({ qitemId: row.qitemId, actorSession: "wake-ladder@system", transitionNote: "wake-attempt: 1 of 3" });
     await sweep();
     expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
+  });
+
+  it.each([false, true])("a per-row finding keeps its open or dismissed disposition across a typing hold (dismissed: %s)", async (dismissed) => {
+    const door = seat("front", "door.root", "root@front");
+    seat("ops", "watch.desk", "desk@ops");
+    rigs.addEdge(door.rig.id, door.node.id, "desk@ops", "escalates_to");
+    let sends = 0;
+    queue.attachTransport({ send: async () => { sends++; return { ok: true, verified: false }; } });
+    const row = await work("root@front");
+    await sweep();
+    const [finding] = findingsTo("desk@ops");
+    expect(finding!.tags).toContain(`stuck-sweep:unclaimed-obligation:${row.qitemId}`);
+    if (dismissed) await queue.update({ qitemId: finding!.qitemId, actorSession: "desk@ops", state: "done",
+      closureReason: "no-follow-on", transitionNote: "seen" });
+    const expected = dismissed ? "done" : "pending";
+    const before = queue.getById(row.qitemId)!;
+    const sent = sends;
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'retained:typing_guard' WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    expect(queue.getById(finding!.qitemId)?.state).toBe(expected);
+    db.prepare("UPDATE queue_items SET last_nudge_result = NULL WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    await sweep();
+    expect(findingsTo("desk@ops").map((f) => ({ id: f.qitemId, state: f.state })))
+      .toEqual([{ id: finding!.qitemId, state: expected }]);
+    expect(sends).toBe(sent);
+    expect(queue.getById(row.qitemId)).toMatchObject({ state: "pending", claimedAt: null,
+      tsUpdated: before.tsUpdated, lastNudgeAttempt: before.lastNudgeAttempt });
   });
 
   it("with an escalates_to route, each unclaimed row's finding goes to that seat, never to the seat itself", async () => {
@@ -133,14 +184,16 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     for (const row of rows) expect(routed.some((f) => f.tags?.includes(`stuck-sweep:unclaimed-obligation:${row.qitemId}`))).toBe(true);
   });
 
-  it("with a delegation parent, each unclaimed row's finding goes to the parent", async () => {
+  it("with a delegation parent, the unclaimed rows go to the parent in its one notice for this seat (#2988)", async () => {
     const lead = seat("lane", "work.lead", "lead@lane");
     const parent = seat("lane", "coord.owner", "owner@lane");
     rigs.addEdge(lead.rig.id, parent.node.id, lead.node.id, "delegates_to");
     const row = await work("lead@lane");
     await sweep();
     expect(findingsTo("lead@lane")).toHaveLength(0);
-    expect(findingsTo("owner@lane").map((f) => f.tags)).toEqual([expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`])]);
+    const filed = findingsTo("owner@lane");
+    expect(filed.map((f) => f.tags)).toEqual([expect.arrayContaining(["stuck-sweep:unclaimed-backlog:lead@lane=>owner@lane"])]);
+    expect(filed[0]!.body).toContain(row.qitemId);
   });
 
   it("an address that isn't an agent seat here keeps a finding per row", async () => {
@@ -205,7 +258,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     queue.update({ qitemId: laddered.qitemId, actorSession: "wake-ladder@system", transitionNote: "wake-attempt: 1 of 3" });
     await sweep();
     const after = queue.getById(notice!.qitemId)!;
-    expect(after).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (2 rows)" });
+    expect(after).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 2 items nobody has picked up" });
     expect(after.body).toContain(laddered.qitemId);
     expect(after.body).toContain(other.qitemId);
   });
@@ -288,7 +341,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     for (const r of rows) if (r.qitemId !== counted.qitemId) queue.claim({ qitemId: r.qitemId, destinationSession: "root@front" });
     await sweep(120);
     const after = queue.getById(notice!.qitemId)!;
-    expect(after).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (1 row)" });
+    expect(after).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 1 item nobody has picked up" });
     expect(after.body).toContain(`- ${counted.qitemId}`);
   });
 });

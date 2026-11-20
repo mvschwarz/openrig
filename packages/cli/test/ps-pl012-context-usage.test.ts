@@ -124,6 +124,10 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
       } else if (req.url && new URL(req.url, "http://127.0.0.1").pathname === "/api/ps" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(rigs));
+      } else if (req.url === "/api/queue/hosted-members" && req.method === "GET") {
+        // A current daemon with no connected assistants.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ hostId: "host-a", members: [] }));
       } else {
         res.writeHead(404);
         res.end();
@@ -147,6 +151,14 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     prog.addCommand(psCommand(runningDeps(port)));
     return prog;
   }
+
+  it("labels a runner context percentage with its reporting source", async () => {
+    nodesByRig["rig-1"] = [{ ...nodeAt("runner", 75), contextUsage: { ...nodeAt("runner", 75).contextUsage, source: "runner_reported" } }];
+    const result = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]); });
+    expect(result.exitCode).toBeUndefined();
+    expect(result.errLogs).toEqual([]);
+    expect(result.logs.join("\n")).toContain("75% (runner-reported)");
+  });
 
   it("--filter contextUsage.percent>=80 narrows to critical seats", async () => {
     nodesByRig["rig-1"] = [
@@ -253,7 +265,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--filter", filter]);
     });
     expect(result.exitCode).toBeUndefined();
-    expect(result.logs).toEqual([`No rigs match --filter ${key}=${value}`]);
+    expect(result.logs).toEqual([`No rigs match --filter ${key}=${value} · daemon http://127.0.0.1:${port}`]);
     expect(result.errLogs).toHaveLength(1);
     expect(result.errLogs[0]).toContain(key);
     expect(result.errLogs[0]).toContain("was not applied");

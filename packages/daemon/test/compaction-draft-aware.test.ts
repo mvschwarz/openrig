@@ -3,6 +3,9 @@
 // per poll, filling the seat's held quota. Real SessionTransport, real draft-aware delivery and outbox on an
 // in-memory database; the tmux adapter records commands instead of running them.
 import Database from "better-sqlite3";
+import { Hono } from "hono";
+import { inputReadDiagnostic } from "../src/domain/input-read-diagnostic.js";
+import { compactionRoutes } from "../src/routes/compaction.js";
 import stringWidth from "string-width";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +30,7 @@ function frame(body: string): ComposerSnapshot {
     cursor: { x: 2 + stringWidth(body), y: 2, width: 100000, height: 60 }, inMode: false };
 }
 
-async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware"; footer?: boolean; refuseDraft?: boolean; suggestion?: "faint" | "plain" } = { pane: "%1" }) {
+async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware" | "queue-only" | "urgent-only" | "hold"; footer?: boolean; refuseDraft?: boolean; suggestion?: "faint" | "plain" } = { pane: "%1" }) {
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
@@ -83,7 +86,11 @@ async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware"
   const effects = () => ({ compactPastes: writes.filter((w) => w.startsWith("paste:/compact")).length, prepPastes: writes.filter((w) => w.startsWith("paste:") && !w.startsWith("paste:/compact")).length, enters: writes.filter((w) => w === "enter").length });
   const compactRows = (state?: string) => (db.prepare("SELECT outbox_id AS id, delivery_state AS state FROM outbox_entries WHERE body LIKE '/compact%'").all() as Array<{ id: string; state: string }>)
     .filter((r) => !state || r.state === state);
-  return { db, e, transport, tmux, writes, compactRows, rows, effects, stageMap, body: () => body,
+  return { db, e, transport, tmux, writes, compactRows, rows, effects, stageMap, recover: () => {
+    const next = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport,
+      { openrigHome: home, now: () => clock, resolveOccupantGeneration: () => "g1" });
+    next.recoverSeat(input); return next;
+  }, body: () => body,
     onStage: (fn: () => void) => { onStage = fn; }, activity: (s: string) => { activity = s; }, draft: (text: string) => { body = text; } };
 }
 
@@ -98,6 +105,79 @@ it.each([
   expect(outcome).toMatchObject(skipMap ? { triggered: true } : { preparation: { delivery: "delivered", compact: "not_sent" } });
   expect(f.body()).toBe("");
   expect(f.effects()).toEqual({ compactPastes: skipMap ? 1 : 0, prepPastes: 1, enters: skipMap ? 2 : 1 });
+});
+
+// #3076: queue-only is about how OpenRig's notices reach a seat a person types in, not lifecycle work. Managed compaction
+// and its restore go ahead there, under the same lifecycle lease and draft checks as at off; urgent-only and an explicit
+// hold still refuse them.
+it.each([["queue-only", true], ["urgent-only", false], ["hold", false]] as const)("at %s, managed compaction and its restore go ahead: %s", async (mode, goes) => {
+  const f = await fixture({ pane: "%1", mode });
+  const outcomes = [await f.e.maybeAutoCompact(input)];
+  if (f.e.getPreparationState(seat)) f.stageMap();
+  let compacted = false;
+  for (let i = 0; i < 8; i++) {
+    outcomes.push(await f.e.maybeAutoCompact(input));
+    compacted ||= f.effects().compactPastes > 0;
+    if (compacted && f.e.getOwedRestore(seat) === null) break;
+  }
+  if (goes) {
+    expect(compacted).toBe(true);
+    expect(f.e.getOwedRestore(seat)).toBeNull();
+    expect(f.effects().compactPastes).toBe(1);
+  } else {
+    expect(new Set(outcomes.map(o => JSON.stringify(o)))).toEqual(new Set([JSON.stringify({ triggered: false, reason: "typing_guard_enabled" })]));
+    expect(f.writes).toEqual([]);
+  }
+});
+
+// #3076: at queue-only, managed compaction never types over a person's draft. Each write waits while the input holds a
+// draft, without the refusal draft-aware gives lifecycle work, and compaction and its restore go ahead once it is empty.
+it("at queue-only, managed compaction and its restore wait for a draft to go, then go ahead", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  f.draft("an unsent message");
+  const held = await f.e.maybeAutoCompact(input);
+  expect(held).not.toMatchObject({ reason: "typing_guard_enabled" });
+  expect(f.body()).toBe("an unsent message");
+  expect(f.writes).toEqual([]);
+  f.draft("");
+  let compacted = false;
+  for (let i = 0; i < 8 && !compacted; i++) {
+    await f.e.maybeAutoCompact(input);
+    if (f.e.getPreparationState(seat) && f.effects().prepPastes > 0) f.stageMap();
+    compacted = f.effects().compactPastes > 0;
+  }
+  expect(compacted).toBe(true);
+  expect(f.e.getOwedRestore(seat)).not.toBeNull();
+  f.draft("typed before the restore");
+  const before = f.writes.length;
+  await f.e.maybeAutoCompact(input);
+  expect(f.body()).toBe("typed before the restore");
+  expect(f.writes.length).toBe(before);
+  f.draft("");
+  for (let i = 0; i < 8 && f.e.getOwedRestore(seat) !== null; i++) await f.e.maybeAutoCompact(input);
+  expect(f.e.getOwedRestore(seat)).toBeNull();
+  expect(f.effects().compactPastes).toBe(1);
+});
+
+// #3418 follow-up: a manual rig compact at queue-only sends its preparation under the same lifecycle lease as managed
+// compaction, so it's lifecycle work there, not a notice held for the person; with a draft, it still never types over it.
+it("at queue-only, a manual compaction's preparation goes out under the lifecycle lease, never held", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true });
+  f.e.cancelPreparation(seat);
+  expect(outcome).toMatchObject({ preparation: { delivery: "delivered", compact: "not_sent" } });
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 1, enters: 1 });
+  expect(f.rows().filter(r => r.kind === "prep" && r.state === "held")).toEqual([]);
+});
+
+it("at queue-only, a manual compaction's preparation does not type over a draft", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  f.draft("an unsent message");
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true });
+  f.e.cancelPreparation(seat);
+  expect(outcome).toMatchObject({ triggered: false });
+  expect(f.body()).toBe("an unsent message");
+  expect(f.writes).toEqual([]);
 });
 
 it("checks the composer after buffer setup, immediately before the preparation paste", async () => {
@@ -245,8 +325,8 @@ it("manual, someone is drafting in the input box (existing-behaviour control, gr
 // indeterminate prep row, one retained /compact row per busy poll, and an indeterminate /compact row.)
 // ---------------------------------------------------------------------------------------------------------
 
-it("pane-less draft-aware seat, automatic, busy x4 then idle: refused before any preparation or /compact, no outbox row at all", async () => {
-  const f = await fixture({ pane: null });
+it.each(["draft-aware", "queue-only"] as const)("pane-less %s seat, automatic, busy x4 then idle: refused before any preparation or /compact, no outbox row at all", async mode => {
+  const f = await fixture({ pane: null, mode });
   const outcomes = [await f.e.maybeAutoCompact(input)];
   f.activity("running");
   for (let i = 0; i < 4; i++) outcomes.push(await f.e.maybeAutoCompact(input));
@@ -360,4 +440,96 @@ it("the managed idle wait treats only a recognized draft according to the ordina
   (f.transport as any).classifySendReadiness = async () => ({ state: "needs_input", reason: "prompt_draft", evidenceSource: "pane_heuristic" });
   expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true })).toMatchObject({ triggered: true });
   expect(f.effects()).toMatchObject({ prepPastes: 1, compactPastes: 1, enters: 2 });
+});
+
+
+it.each(["preparation", "compact"] as const)("records the %s refusal through the existing transport without content or input", async stage => {
+  const f = await fixture({ pane: "%1", mode: stage === "preparation" ? "draft-aware" : "off" });
+  const send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport, "send").mockImplementation(async (s, text, opts) => {
+    if (stage === "preparation") {
+      vi.mocked(f.tmux.captureComposerSnapshot).mockResolvedValue({ ...frame("PRIVATE_INPUT https://private.invalid/gateway"), inMode: true });
+    } else if (text.startsWith("/compact")) {
+      vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null,
+        evidence: ["input box reads timed out"], input: { text: "PRIVATE_INPUT" }, hint: "https://private.invalid/gateway" });
+      return send(s, text, { ...opts, preserveInput: true });
+    }
+    return send(s, text, opts);
+  });
+  await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  const state = f.e.getPreparationState(seat)!;
+  const expected = stage === "preparation"
+    ? { stage, check: "draft-aware", status: "unknown", confidence: null, reason: "pane_in_mode", timedOut: null,
+      cursor: { present: true, valid: true, atEnd: false } }
+    : { stage, check: "composer", status: "unknown", confidence: "unknown", reason: "read_timeout", timedOut: true,
+      cursor: { present: false, valid: null, atEnd: null } };
+  expect(state).toMatchObject({ inputReadFailure: expected, compact: "not_sent" });
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: stage === "preparation" ? 0 : 1, enters: stage === "preparation" ? 0 : 1 });
+  const record = readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8");
+  expect(JSON.parse(record)).toMatchObject({ inputReadFailure: expected });
+  const app = new Hono();
+  app.use("*", async (c, next) => { c.set("compactionEnforcer" as never, f.e as never); c.set("db" as never, f.db as never); await next(); });
+  app.route("/api/compaction", compactionRoutes());
+  const response = await app.request(`/api/compaction/state?session=${seat}`);
+  const body = await response.text();
+  expect(response.status).toBe(200);
+  expect(JSON.parse(body)).toMatchObject({ preparation: { inputReadFailure: expected } });
+  expect(record + body).not.toMatch(/PRIVATE_INPUT|private\.invalid/);
+});
+
+it("distinguishes an opted-in composer timeout from the separate draft-aware check", async () => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  const send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null,
+    evidence: ["input box reads timed out"], input: { text: "PRIVATE_INPUT" }, suggestion: { text: "PRIVATE_SUGGESTION" }, hint: "https://private.invalid/gateway" });
+  vi.spyOn(f.transport, "send").mockImplementation((s, text, opts) => send(s, text, { ...opts, preserveInput: true }));
+  await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({ delivery: "not_sent", inputReadFailure: { stage: "preparation", check: "composer", reason: "read_timeout", timedOut: true,
+    status: "unknown", confidence: "unknown", cursor: { present: false, valid: null, atEnd: null } } });
+  const record = readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8");
+  expect(record).not.toMatch(/PRIVATE_INPUT|PRIVATE_SUGGESTION|private\.invalid/);
+  expect(f.writes).toEqual([]);
+});
+
+
+it("retains a held completed map's compact diagnostic across record recovery", async () => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  await f.e.maybeAutoCompact(input); f.stageMap();
+  const send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null, evidence: ["cursor unavailable"] });
+  vi.spyOn(f.transport, "send").mockImplementation((s, text, opts) => send(s, text, { ...opts, preserveInput: true }));
+  expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false, reason: "prepared_awaiting_window" });
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({ prepared: true, compact: "not_sent", inputReadFailure: { stage: "compact", check: "composer", reason: "cursor_unavailable", timedOut: null } });
+  const recordPath = join(dirname(state.mapPath), COMPACTION_RECORD_FILE);
+  const record = JSON.parse(readFileSync(recordPath, "utf8"));
+  // A new enforcer in this process deliberately ignores this process's live record; model a predecessor daemon.
+  writeFileSync(recordPath, JSON.stringify({ ...record, daemon: "previous-daemon" }));
+  expect(f.recover().getPreparationState(seat)?.inputReadFailure).toEqual(state.inputReadFailure);
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 1, enters: 1 });
+});
+
+it("records the same diagnostic on an owed restore step without advancing it", async () => {
+  const f = await fixture({ pane: "%1", mode: "off" });
+  await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+  await f.e.maybeAutoCompact(input);
+  expect(f.e.getOwedRestore(seat)?.stage).toBe("restore_prompt");
+  const before = f.effects(), send = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport as any, "captureInputBox").mockResolvedValue({ status: "unknown", confidence: "unknown", cursor: null, evidence: ["cursor unavailable"] });
+  vi.spyOn(f.transport, "send").mockImplementation((s, text, opts) => send(s, text, { ...opts, preserveInput: true }));
+  await f.e.maybeAutoCompact(input);
+  expect(f.e.getOwedRestore(seat)).toMatchObject({ stage: "restore_prompt", lastDelivery: { stage: "restore_prompt", reason: "draft_input_unknown",
+    inputReadFailure: { check: "composer", reason: "cursor_unavailable", timedOut: null } } });
+  expect(f.effects()).toEqual(before);
+});
+
+it.each([
+  { state: "unknown", unknownReason: "invalid_cursor", cursor: { x: -1, y: 0, width: 80, height: 24 }, reason: "invalid_cursor", valid: false },
+  { state: "unknown", unknownReason: "ambiguous_composer", reason: "ambiguous_composer", valid: null },
+  { state: "unknown", unknownReason: "PRIVATE_INPUT https://private.invalid/gateway", reason: "capture_unavailable", valid: null },
+])("diagnostic vocabulary excludes content and reports existing cursor validity ($reason)", ({ reason, valid, ...reading }) => {
+  const safe = inputReadDiagnostic("draft-aware", { ...reading, rows: ["PRIVATE_INPUT"], suggestionRows: ["PRIVATE_SUGGESTION"], frame: "https://private.invalid/gateway" } as any);
+  expect(safe).toMatchObject({ reason, cursor: { valid } });
+  expect(JSON.stringify(safe)).not.toMatch(/PRIVATE_INPUT|PRIVATE_SUGGESTION|private\.invalid|rows|frame/);
 });

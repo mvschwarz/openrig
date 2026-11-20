@@ -235,6 +235,10 @@ initial record is explicitly reported as unverified delivery.`)
               text: piece.content,
               deliveryId: randomUUID(),
             }, { headers: terminalAuthHeaders() });
+            if (res.data?.["outcome"] === "recorded") {
+              failPiece(i, piece.label, `recorded in your outbox, not delivered (${JSON.stringify(res.data["outboxIds"])}); no further pieces sent.`);
+              return;
+            }
             if (res.data?.["outcome"] === "retained") {
               failPiece(i, piece.label, `retained, not delivered (${JSON.stringify(res.data["outboxIds"])}); no further pieces sent. Inspect with rig seat held-messages ${seat}.`);
               return;

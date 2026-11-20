@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { packEntry } from "./npm-pack-json.mjs";
 
 const script = fs.readFileSync(new URL("./build-package.sh", import.meta.url), "utf8");
 const assetsBranch = script.match(/^if \[ -d "\$DAEMON_DIR\/assets" \]; then\n[\s\S]*?^fi$/m)?.[0];
@@ -129,7 +130,7 @@ test("offline npm pack carries staged asset bytes and executability, with npm's 
     assertStaged(f);
     const staged = snapshot(f.staged);
     fs.writeFileSync(join(f.cli, "package.json"), JSON.stringify({ name: "openrig-assets-fixture", version: "1.0.0", private: true, files: ["daemon"] }));
-    const packed = JSON.parse(execFileSync("bash", ["-c", 'umask 0022; exec npm pack --offline --ignore-scripts --json --pack-destination "$1"', "asset-pack", f.root], { cwd: f.cli, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }))[0];
+    const packed = packEntry(execFileSync("bash", ["-c", 'umask 0022; exec npm pack --offline --ignore-scripts --json --pack-destination "$1"', "asset-pack", f.root], { cwd: f.cli, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }));
     const files = new Map(packed.files.map(file => [file.path, file]));
     for (const [name, bytes] of Object.entries(contents)) {
       const entry = `daemon/assets/${name}`;

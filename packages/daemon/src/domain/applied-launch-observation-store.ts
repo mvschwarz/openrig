@@ -1,5 +1,16 @@
 import type Database from "better-sqlite3";
-import type { AppliedLaunchAxis, AppliedLaunchObservation, AppliedLaunchState } from "./permission-drift.js";
+import type {
+  AppliedLaunchAxis,
+  AppliedLaunchObservation,
+  AppliedLaunchState,
+  CodexObservedApprovalPolicy,
+} from "./permission-drift.js";
+import type { AppliedClaudeAutoMode } from "./claude-auto-mode.js";
+
+/** "null" records a launch that sent no block; anything unreadable reads as unknown. */
+function parseAppliedAutoMode(json: string): AppliedClaudeAutoMode | undefined {
+  try { return JSON.parse(json) as AppliedClaudeAutoMode; } catch { return undefined; }
+}
 
 export interface StoredAppliedLaunchObservation extends AppliedLaunchObservation {
   generationUuid: string;
@@ -13,9 +24,25 @@ interface ObservationRow {
   observation_state: string;
   value: string | null;
   reason: string | null;
-  approval_policy: "never" | null;
+  approval_policy: CodexObservedApprovalPolicy | null;
   daemon_opt_out?: number | null;
+  claude_auto_mode_json?: string | null;
   observed_at: string;
+}
+
+function rowToStoredObservation(row: ObservationRow): StoredAppliedLaunchObservation {
+  return {
+    generationUuid: row.generation_uuid,
+    runtime: row.runtime,
+    axis: row.axis as AppliedLaunchAxis,
+    state: row.observation_state as AppliedLaunchState,
+    value: row.value,
+    ...(row.reason ? { reason: row.reason } : {}),
+    ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
+    ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
+    ...(row.claude_auto_mode_json != null ? { claudeAutoMode: parseAppliedAutoMode(row.claude_auto_mode_json) } : {}),
+    observedAt: row.observed_at,
+  };
 }
 
 /**
@@ -29,40 +56,66 @@ export class AppliedLaunchObservationStore {
 
   recordGeneration(generationUuid: string, observation: AppliedLaunchObservation): boolean {
     try {
-      const result = this.db.prepare(`
-        INSERT INTO applied_launch_observations (
-          generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, daemon_opt_out, observed_at
-        )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
-         WHERE NOT EXISTS (
-           SELECT 1
-             FROM applied_launch_observation_invalidations
-            WHERE generation_uuid = ?
-         )
-        ON CONFLICT(generation_uuid) DO UPDATE SET
-          runtime = excluded.runtime,
-          axis = excluded.axis,
-          observation_state = excluded.observation_state,
-          value = excluded.value,
-          reason = excluded.reason,
-          approval_policy = excluded.approval_policy,
-          daemon_opt_out = excluded.daemon_opt_out,
-          observed_at = excluded.observed_at
-      `).run(
-        generationUuid,
-        observation.runtime,
-        observation.axis,
-        observation.state,
-        observation.value,
-        observation.reason ?? null,
-        observation.approvalPolicy ?? null,
-        observation.daemonOptOut === undefined ? null : observation.daemonOptOut ? 1 : 0,
-        generationUuid,
-      );
-      return result.changes > 0;
+      const autoModeColumn = this.hasAutoModeColumn();
+      const block = observation.claudeAutoMode;
+      if (!autoModeColumn || block === undefined) return this.upsert(generationUuid, observation, autoModeColumn);
+      try {
+        return this.db.transaction(() => {
+          if (!this.upsert(generationUuid, observation, true)) return false;
+          this.db.prepare("UPDATE applied_launch_observations SET claude_auto_mode_json = ? WHERE generation_uuid = ?")
+            .run(JSON.stringify(block), generationUuid);
+          return true;
+        })();
+      } catch {
+        // A failed block write re-records the block as unknown. If that fallback also fails, the previous observation stays.
+        return this.upsert(generationUuid, observation, true);
+      }
     } catch {
       return false;
     }
+  }
+
+  /** Writes the permission observation. Where the column exists it resets the auto mode block to unknown (NULL). */
+  private upsert(generationUuid: string, observation: AppliedLaunchObservation, autoModeColumn: boolean): boolean {
+    return this.db.prepare(`
+      INSERT INTO applied_launch_observations (
+        generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, daemon_opt_out, observed_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
+       WHERE NOT EXISTS (
+         SELECT 1
+           FROM applied_launch_observation_invalidations
+          WHERE generation_uuid = ?
+       )
+      ON CONFLICT(generation_uuid) DO UPDATE SET
+        runtime = excluded.runtime,
+        axis = excluded.axis,
+        observation_state = excluded.observation_state,
+        value = excluded.value,
+        reason = excluded.reason,
+        approval_policy = excluded.approval_policy,
+        daemon_opt_out = excluded.daemon_opt_out,${autoModeColumn ? "\n        claude_auto_mode_json = NULL," : ""}
+        observed_at = excluded.observed_at
+    `).run(
+      generationUuid,
+      observation.runtime,
+      observation.axis,
+      observation.state,
+      observation.value,
+      observation.reason ?? null,
+      observation.approvalPolicy ?? null,
+      observation.daemonOptOut === undefined ? null : observation.daemonOptOut ? 1 : 0,
+      generationUuid,
+    ).changes > 0;
+  }
+
+  private autoModeColumn: boolean | undefined;
+
+  /** Databases without migration 171 have no auto mode column; they still record the permission observation. */
+  private hasAutoModeColumn(): boolean {
+    this.autoModeColumn ??= (this.db.prepare("PRAGMA table_info(applied_launch_observations)").all() as { name: string }[])
+      .some(column => column.name === "claude_auto_mode_json");
+    return this.autoModeColumn;
   }
 
   invalidateGeneration(generationUuid: string): boolean {
@@ -102,41 +155,39 @@ export class AppliedLaunchObservationStore {
          WHERE invalidated.generation_uuid IS NULL
       `).get(nodeId) as ObservationRow | undefined;
       if (!row) return null;
-      return {
-        generationUuid: row.generation_uuid,
-        runtime: row.runtime,
-        axis: row.axis as AppliedLaunchAxis,
-        state: row.observation_state as AppliedLaunchState,
-        value: row.value,
-        ...(row.reason ? { reason: row.reason } : {}),
-        ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
-        ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
-        observedAt: row.observed_at,
-      };
+      return rowToStoredObservation(row);
     } catch {
       return null;
     }
   }
 
-  /** readCurrent's daemon choice for every node that has one recorded, in one read; unknown nodes are absent. */
-  readCurrentDaemonOptOuts(): Map<string, boolean> {
+  /** readCurrent's observation for every node that has one recorded, in one read; unknown nodes are absent. */
+  readCurrentObservations(): Map<string, StoredAppliedLaunchObservation> {
     try {
       const rows = this.db.prepare(`
-        SELECT t.node_id, o.daemon_opt_out
+        SELECT t.node_id, o.*
           FROM occupant_tenures t
           JOIN applied_launch_observations o
             ON o.generation_uuid = t.generation_uuid
           LEFT JOIN applied_launch_observation_invalidations invalidated
             ON invalidated.generation_uuid = t.generation_uuid
          WHERE invalidated.generation_uuid IS NULL
-           AND o.daemon_opt_out IN (0, 1)
            AND t.generation_ordinal = (
              SELECT MAX(latest.generation_ordinal) FROM occupant_tenures latest WHERE latest.node_id = t.node_id
            )
-      `).all() as Array<{ node_id: string; daemon_opt_out: number }>;
-      return new Map(rows.map((row) => [row.node_id, row.daemon_opt_out === 1]));
+      `).all() as Array<ObservationRow & { node_id: string }>;
+      return new Map(rows.map((row) => [row.node_id, rowToStoredObservation(row)]));
     } catch {
       return new Map();
     }
+  }
+
+  /** readCurrent's daemon choice for every node that has one recorded, in one read; unknown nodes are absent. */
+  readCurrentDaemonOptOuts(): Map<string, boolean> {
+    const out = new Map<string, boolean>();
+    for (const [nodeId, obs] of this.readCurrentObservations()) {
+      if (obs.daemonOptOut !== undefined) out.set(nodeId, obs.daemonOptOut);
+    }
+    return out;
   }
 }

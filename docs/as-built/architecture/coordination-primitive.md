@@ -140,7 +140,11 @@ that gateway side too. For the pane side, read:
 
 - `lastNudgeWireResult`: the wake send's result as stored (for example
   `verified`, `delivered-ack-pending`, `indeterminate:…`, `retained:…`,
-  `failed:…`). A claim never rewrites it; a later wake replaces it.
+  `failed:…`). A claim never rewrites it; a later wake replaces it. Each stored
+  form reads as one delivery fact (`readWakeOutcome`, `connection-contract.ts`).
+  A result no reader recognises reads `unknown`, never delivered: the wake ladder
+  treats it as an unconfirmed wake, which escalates past the window without a
+  re-send.
 - `lastNudgeResult`: the result as presented. It is the stored result, except
   that a claimed row whose stored result is `delivered-ack-pending` or
   `indeterminate:…` reads `claimed` (`presentedNudgeResult`). Unclaiming shows

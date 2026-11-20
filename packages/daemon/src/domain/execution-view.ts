@@ -1,10 +1,12 @@
 import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
-import { belongsToProject } from "./workspace/project-catalog.js";
+import { belongsToProject, projectTagIds } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
-import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
+import { lifecycleObligations } from "./lifecycle-obligations.js";
+import { renderWorkflowProjectCommand } from "./workflow-projector.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -39,7 +41,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
-import { shellQuote } from "../adapters/shell-quote.js";
 import { parseFrontmatter, sliceStatusBucket } from "./slices/slice-indexer.js";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
@@ -54,6 +55,7 @@ import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
 import { validateMissionComposition } from "./lifecycle-manifest.js";
 import { cooperativeReadFile, readRowsCooperatively } from "./execution-candidate-reader.js";
+import { recordSlowDiagnostic } from "./sync-site-wrap.js";
 
 export const INDETERMINATE = "INDETERMINATE" as const;
 export type Indeterminate = typeof INDETERMINATE;
@@ -344,19 +346,29 @@ function hasColumn(db: Database.Database, table: string, column: string): boolea
   return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => (row as { name?: string }).name === column);
 }
 
+/** The packet's own renderer, so the view and the packet's Continuation print one command. */
 function lifecycleProjectAction(input: {
   instanceId: string;
   packetId: string;
+  stepId: string;
   acceptance: Record<string, unknown> | null;
-  receiptRequired?: boolean;
+  binding: Record<string, unknown> | null;
 }): string {
-  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>${input.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
-  if (!input.acceptance) return base;
-  const verdicts = Array.isArray(input.acceptance["verdicts"])
-    ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
-    : [];
-  const verdict = verdicts.length === 1 ? verdicts[0]! : `<${verdicts.join("|")}>`;
-  return `${base} --acceptance-candidate ${shellQuote(String(input.acceptance["candidate"]))} --acceptance-verdict ${shellQuote(verdict)} --acceptance-evidence-ref ${shellQuote(String(input.acceptance["evidence_ref"]))}`;
+  const acceptance = input.acceptance
+    ? {
+        candidate: String(input.acceptance["candidate"]),
+        verdicts: Array.isArray(input.acceptance["verdicts"])
+          ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
+          : [],
+        evidence_ref: String(input.acceptance["evidence_ref"]),
+      }
+    : undefined;
+  return renderWorkflowProjectCommand({
+    instanceId: input.instanceId,
+    packetId: input.packetId,
+    step: { id: input.stepId, acceptance },
+    binding: input.binding,
+  });
 }
 
 /**
@@ -365,7 +377,7 @@ function lifecycleProjectAction(input: {
  * lifecycle_binding_json carries identity/provenance only. Older databases
  * have no migration-079 columns and therefore return an honest empty list.
  */
-function readLifecycleExecutions(db: Database.Database, mission: string, project?: string): Array<Record<string, unknown>> {
+function readLifecycleExecutions(db: Database.Database, mission: string, projectIds?: readonly string[]): Array<Record<string, unknown>> {
   if (!hasColumn(db, "workflow_instances", "lifecycle_binding_json")) return [];
   const rows = db.prepare(
     `SELECT wi.*, ws.spec_json
@@ -382,7 +394,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
   for (const row of rows) {
     const binding = parseJsonRecord(row["lifecycle_binding_json"]);
     const identity = isRecord(binding["identity"]) ? binding["identity"] as Record<string, unknown> : {};
-    if (identity["mission"] !== mission || (project && identity["project"] !== project)) continue;
+    if (identity["mission"] !== mission || (projectIds && !projectIds.includes(String(identity["project"])))) continue;
     const instanceId = String(row["instance_id"]);
     const frontier = parseJsonStringList(row["current_frontier_json"]);
     const specRoot = parseJsonRecord(row["spec_json"]);
@@ -430,7 +442,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
         gate: step && isRecord(step["gate"]) ? step["gate"] : null,
         acceptance,
         targeted_action: matches.length === 1 && packet
-          ? lifecycleProjectAction({ instanceId, packetId, acceptance, receiptRequired: stepId !== null && requiredLifecycleSteps(binding).includes(stepId) })
+          ? lifecycleProjectAction({ instanceId, packetId, stepId: stepId!, acceptance, binding })
           : INDETERMINATE,
       };
     });
@@ -623,16 +635,18 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   }
 }
 
-function readWaveMap(db: Database.Database, missions: string[], project?: string): WaveMapData {
-  const missionWhere = missions.map(() => "tags LIKE ?").join(" OR ");
-  const row = db
-    .prepare(
-      `SELECT qitem_id, body, tags FROM queue_items
-        WHERE tags LIKE '%format:wave-map-v1%' AND (${missionWhere})
-        ORDER BY ts_created DESC`,
-    )
-    .all(...missions.map((mission) => `%mission:${mission}%`)) as Array<{ qitem_id: string; body: string | null; tags: string | null }>;
-  const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!project || belongsToProject(r.tags, project)));
+/** The mission's wave-map row, chosen from the rows the candidate read already returned: those include every row whose
+ *  tags name the mission, so a second scan of the whole queue table isn't needed. Matching is case-insensitive, as LIKE
+ *  is, and the newest row wins. */
+function readWaveMap(candidates: readonly QueueRowLite[], missions: string[], projectIds?: readonly string[]): WaveMapData {
+  const needles = missions.map((mission) => `mission:${mission}`.toLowerCase());
+  const row = candidates
+    .filter((r) => {
+      const tags = r.tags?.toLowerCase() ?? "";
+      return tags.includes("format:wave-map-v1") && needles.some((needle) => tags.includes(needle));
+    })
+    .sort((a, b) => (a.ts_created < b.ts_created ? 1 : a.ts_created > b.ts_created ? -1 : 0));
+  const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!projectIds || belongsToProject(r.tags, projectIds)));
   if (!selectedRow?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = selectedRow.body.match(WAVE_MAP_BLOCK);
   if (!block) return { rowId: INDETERMINATE, waves: [] };
@@ -747,7 +761,19 @@ async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha
   }
 }
 
-export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: string; rig?: string; project?: string }): Promise<Record<string, unknown>> {
+export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
+  mission?: string; rig?: string; project?: string;
+  /** The selected project's current and former ids (#3261); defaults to `project` alone. */
+  projectIds?: readonly string[];
+  /** Every current and former id the catalogued projects claim, so rows none of them claims are counted. */
+  cataloguedProjectIds?: readonly string[];
+  /** The selected project's former ids that can't apply, as the project read reports them. */
+  aliasWarnings?: readonly string[];
+  /** The caller's request: once it's aborted (the client went away), the read stops at its next window. */
+  signal?: AbortSignal;
+}): Promise<Record<string, unknown>> {
+  const projectionStarted = performance.now();
+  const membershipIds = opts?.project ? (opts.projectIds ?? [opts.project]) : undefined;
   const now = deps.now ?? (() => new Date());
   const exec = deps.exec ?? defaultExec;
   const buildInfo = deps.buildInfo ?? BUILD_INFO;
@@ -771,7 +797,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       .prepare(`SELECT tags, body FROM queue_items WHERE state = 'in-progress' ORDER BY ts_updated DESC`)
       .all() as Array<{ tags: string | null; body: string | null }>;
     for (const row of active) {
-      if (opts?.project && !belongsToProject(row.tags, opts.project)) continue;
+      if (membershipIds && !belongsToProject(row.tags, membershipIds)) continue;
       const tag = parseTags(row.tags).find((value) => value.startsWith("mission:"));
       // Canonical tags win; the conventional handoff line keeps older/body-only batons visible.
       const bodyMissions = [...new Set(
@@ -806,27 +832,41 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // post_claim_motion feeds only derivePickup's legacy fallback, which pending and in-progress rows reach: a blocked row
   // returns parked and a closed row terminal before the count is read. Every row and body is still selected here (the
   // ladder, EC-3 and wave-map evidence need historical rows); only their unused history count is skipped.
-  const candidateSql = `SELECT qitem_id, source_session, destination_session, state, tags, body, summary, claimed_at,
+  const candidateSelect = `SELECT qitem_id, source_session, destination_session, state, tags, body, summary, claimed_at,
               last_heartbeat, blocked_on, ts_created, ts_updated,
               CASE WHEN queue_items.state IN ('pending','in-progress') THEN (SELECT COUNT(*) FROM queue_transitions t
                  WHERE t.qitem_id = queue_items.qitem_id
                    AND t.ts > queue_items.claimed_at
                    AND t.transition_note IS NOT 'claimed') ELSE 0 END AS post_claim_motion
-         FROM queue_items
-        WHERE (${missionWhere})`;
+         FROM queue_items`;
   const candidateBinds = missionLikes.flatMap((like) => [like, like]);
-  // On a WAL database file this full scan runs on its own readonly cursor and yields between slices so unrelated
-  // work can run; a native open, prepare or step can still block, since the slice budget is soft. It sees committed
-  // data as of its first step. Inside a transaction, or for a memory or non-WAL database, it stays a synchronous
-  // read on the main handle (no await on that branch).
+  // On a WAL database file this full scan runs on its own readonly connection in rowid windows, yielding between
+  // windows so unrelated work can run even when few rows match; the same filter runs inside each window, so the rows
+  // are the ones the single statement returns. A native open, a large row or a window's matching rows can still
+  // block for a while, since the window bound is soft. It sees committed data as of its first read. Inside a
+  // transaction, or for a memory or non-WAL database, it stays one synchronous read on the main handle (no await on
+  // that branch).
   const cooperativeFile = cooperativeReadFile(deps.db);
-  const candidateRows = cooperativeFile === null
-    ? deps.db.prepare(candidateSql).all(...candidateBinds) as QueueRowLite[]
-    : await readRowsCooperatively<QueueRowLite>(cooperativeFile, candidateSql, candidateBinds);
+  const candidateStarted = performance.now();
+  const candidateRead = cooperativeFile === null
+    ? null
+    : await readRowsCooperatively<QueueRowLite>(cooperativeFile, "queue_items",
+      `${candidateSelect} WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND (${missionWhere})`, candidateBinds,
+      undefined, undefined, { signal: opts?.signal });
+  const candidateRows = candidateRead
+    ? candidateRead.rows
+    : deps.db.prepare(`${candidateSelect} WHERE (${missionWhere})`).all(...candidateBinds) as QueueRowLite[];
+  const candidateMs = performance.now() - candidateStarted;
+  opts?.signal?.throwIfAborted();
 
-  const rows = candidateRows
-    .filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs))
-    .filter(row => !opts?.project || belongsToProject(row.tags, opts.project));
+  const missionRows = candidateRows.filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs));
+  const rows = missionRows.filter(row => !membershipIds || belongsToProject(row.tags, membershipIds));
+  // #3261: a row whose project tag no catalogued project claims (current or former id) is excluded above. It's counted, so
+  // a hidden row never reads as gone.
+  const catalogued = membershipIds && opts?.cataloguedProjectIds ? new Set(opts.cataloguedProjectIds) : null;
+  const uncatalogued = catalogued
+    ? missionRows.map(row => projectTagIds(row.tags)).filter(ids => ids.length > 0 && !ids.some(id => catalogued.has(id)))
+    : [];
 
   const sliceOfRow = (r: QueueRowLite): string | null => {
     for (const t of parseTags(r.tags)) {
@@ -938,7 +978,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // ---- arrangement authority: mission/slice YAML, with legacy EC-2 fallback ----
   const waveMap = mission === INDETERMINATE
     ? { rowId: INDETERMINATE as Indeterminate, waves: [] }
-    : readWaveMap(deps.db, missionReferences(missionsRoot, mission), opts?.project);
+    : readWaveMap(candidateRows, missionReferences(missionsRoot, mission), membershipIds);
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
@@ -951,7 +991,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const targetRef = arrangement?.state === "valid" && arrangement.integrationRef
     ? arrangement.integrationRef
     : "main";
-  const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission, opts?.project);
+  const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission, membershipIds);
   const arrangementSlice = (id: string, dir?: string): ArrangementSlice | null => {
     if (arrangement?.state !== "valid") return null;
     return arrangement.byId.get(id) ?? (dir ? arrangement.byDir.get(dir) : undefined) ?? null;
@@ -1269,9 +1309,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         postClaimMotionCount: Number(r.post_claim_motion ?? 0),
         now: now(),
       });
-      const wake = deps.db
-        .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
-        .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
+      const wake = readWithCurrentParkBoundary(boundary => deps.db
+        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+          WHERE w.qitem_id = ? AND w.phase = 'armed'
+            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+            ${boundary}
+          ORDER BY w.transition_id DESC LIMIT 1`)
+        .get(r.qitem_id)) as { wake_ref: string; phase: string } | undefined;
       // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
       // stalled | indeterminate. Nothing else may leak in (the live artifact
       // once emitted 'working' here), and the enum member is lowercase.
@@ -1345,7 +1390,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const derived = readiness?.slices.find(s => s.scope === sequenced.dir);
     if (!derived?.readiness.configured) continue;
     sequenced.next_up = derived.eligible === null ? INDETERMINATE : derived.eligible && derived.readiness.state !== "ready" && sequenced.work_rows.length === 0;
-    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`;
+    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`
+      + (derived.dependsOnBasis === "not-recorded"
+        ? "; no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges"
+        : derived.dependsOnBasis === "frontmatter-advisory"
+          ? "; only the SPEC frontmatter lists depends_on, which readiness treats as advisory, so eligibility assumed no recorded edges"
+          : derived.dependsOnBasis === "frontmatter-unparsed"
+            ? "; only the SPEC frontmatter lists depends_on, in a form EC-1 doesn't define (not an inline JSON array), so eligibility assumed no recorded edges"
+            : "");
   }
   const q6 = {
     lanes_live: lanes.filter((l) => l.waiting === null).length,
@@ -1357,8 +1409,10 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     df_margin: dfMargin,
   };
 
-  return {
-    ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity; unscoped rows excluded" } : {}),
+  const view = {
+    ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity, for the project's id or a former id its project.yaml declares under aliases; unscoped rows excluded" } : {}),
+    ...(catalogued ? { uncatalogued_project_tags: { rows: uncatalogued.length, ids: [...new Set(uncatalogued.flat())].sort() } } : {}),
+    ...(membershipIds && opts?.aliasWarnings?.length ? { alias_warnings: [...opts.aliasWarnings] } : {}),
     view: "execution",
     readiness,
     project_readiness: missionsRoot ? await readProjectReadinessAsync(missionsRoot, readPolicy) : null,
@@ -1410,4 +1464,19 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     q5_park: q5,
     q6_parallelism: q6,
   };
+  // Measurement only, for a slow projection: its elapsed time, the candidate read's elapsed time, and the candidate
+  // read's longest synchronous stretch, which a whole-view or awaited span cannot show. The main-handle read is one
+  // stretch. Counts and times only; no row content.
+  const projectionMs = performance.now() - projectionStarted;
+  recordSlowDiagnostic(projectionMs, {
+    schema: "openrig.execution-view/v1",
+    utc: new Date().toISOString(),
+    projectionMs,
+    candidateMs,
+    candidateRows: candidateRows.length,
+    candidateRead: candidateRead ? "windowed" : "main-handle",
+    candidateWindows: candidateRead?.windows ?? null,
+    candidateLongestStretchMs: candidateRead?.longestStretchMs ?? candidateMs,
+  });
+  return view;
 }

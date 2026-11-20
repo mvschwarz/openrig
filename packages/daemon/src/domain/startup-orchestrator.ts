@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
@@ -124,6 +125,7 @@ export function getLatestStartupFailedEvent(db: Database.Database, nodeId: strin
   stage?: StartupFailureStage;
   requestedResumeToken?: string | null;
   requestedResumeType?: string | null;
+  readinessCode?: string;
 } | null {
   const row = db.prepare(
     "SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1",
@@ -414,6 +416,7 @@ export class StartupOrchestrator {
           ? "rebuilt"
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
+    let activityGrantId: string | undefined;
     let resumedProcess: { pid: number; startedAt: string } | undefined;
     const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
@@ -435,12 +438,17 @@ export class StartupOrchestrator {
     // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
     // older snapshot), and a continuation carries its launch's choice, so the adapter isn't asked again and an existing
     // seat isn't silently repointed. This runs after the pending mark: a continuation claims its attempt before any await.
-    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
+    // A resume of the seat's own conversation (a restore, `rig up --existing`) whose saved choice is the repository file is
+    // asked too, only whether its launch can carry the guidance: the saved file stays as it is.
+    const resumingConversation = Boolean(input.resumeToken) && !input.forkSource && !input.skipHarnessLaunch;
+    const savedRepositoryResume = resumingConversation && input.binding.guidanceFile === null && !input.binding.guidanceLaunchInstructions;
+    if ((input.binding.guidanceFile === undefined || savedRepositoryResume) && input.adapter.guidanceFileFor) {
       // A continuation launches nothing, so it never chooses guidance that only a launch carries.
-      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch) });
+      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch), resumingConversation });
       const chosen = answer instanceof Promise ? await answer : answer;
       if (chosen.note) warnings.push(chosen.note);
-      const guidance = { guidanceFile: chosen.file, ...(chosen.launchInstructions ? { guidanceLaunchInstructions: true } : {}) };
+      const file = savedRepositoryResume ? null : chosen.file;
+      const guidance = { guidanceFile: file, ...(chosen.launchInstructions && file === null ? { guidanceLaunchInstructions: true } : {}) };
       input = { ...input, binding: { ...input.binding, ...guidance } };
       // A failure recorded from the delivery input keeps the choice for a later continuation too.
       deliveryInput.binding = { ...deliveryInput.binding, ...guidance };
@@ -686,6 +694,7 @@ export class StartupOrchestrator {
             warnings.push(`Model "${launchResult.modelInput.model}": the launch command's send is uncertain, so it isn't recorded as passed.`);
           }
           if (launchResult.ok) {
+            activityGrantId = launchResult.activityGrantId;
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
@@ -815,15 +824,17 @@ export class StartupOrchestrator {
       const readinessTimeoutMs = resolveReadinessTimeoutMs(input.readinessTimeoutMs, this.readinessSettings);
       const readiness = await this.waitForReady(input.adapter, input.binding, readinessTimeoutMs);
       if (!readiness.ready) {
+        if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "readiness_failed");
         const hasPendingReadinessWork = getPendingReadinessWork();
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
-          return this.fail(input, "attention_required", errors, undefined, isFreshLaunch || (forkContext ?? false), undefined, false, "readiness_check", hasPendingReadinessWork);
+          return this.fail(input, "attention_required", errors, undefined, isFreshLaunch || (forkContext ?? false), undefined, false, "readiness_check", hasPendingReadinessWork, undefined, readiness.code);
         }
         errors.push(`Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
-        return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext ?? false, undefined, false, "readiness_check", hasPendingReadinessWork);
+        return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext ?? false, undefined, false, "readiness_check", hasPendingReadinessWork, undefined, readiness.code);
       }
     } catch (err) {
+      if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "readiness_failed");
       errors.push(`Readiness check error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors, undefined, false, undefined, false, "readiness_check", getPendingReadinessWork());
     }
@@ -989,6 +1000,7 @@ export class StartupOrchestrator {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
+          if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "post_delivery_readiness_failed");
           // A fresh Claude start whose last startup turn was refused hasn't read what that turn sent: it's owed too.
           const refusedLast = input.adapter.runtime === "claude-code" && isFreshLaunch && deliveryInput.sendOrder > 0
             ? owed([], readiness) : null;
@@ -1095,7 +1107,8 @@ export class StartupOrchestrator {
 
       const remaining = timeoutMs - (Date.now() - startTime);
       if (remaining <= 0) {
-        return { ready: false, reason: result.reason ?? "readiness timeout" };
+        // The last check's code says what the pane was doing when time ran out (a harness that returned to a shell).
+        return { ready: false, reason: result.reason ?? "readiness timeout", ...(result.code ? { code: result.code } : {}) };
       }
 
       await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
@@ -1118,6 +1131,7 @@ export class StartupOrchestrator {
     stage?: StartupFailureStage,
     hasPendingWork?: boolean,
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
+    readinessCode?: string,
   ): StartupResult {
     if (input.firstInputPassed) {
       pendingContext = false;
@@ -1146,6 +1160,7 @@ export class StartupOrchestrator {
       requestedResumeToken: input.resumeToken ?? null,
       requestedResumeType: input.resumeType ?? null,
       ...(probe ? { probe } : {}),
+      ...(readinessCode ? { readinessCode } : {}),
     });
     return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}),
       ...(probe ? { probe } : {}),

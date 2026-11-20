@@ -2,10 +2,12 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, processStartToken } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { personRegistrationOffer } from "../person-registration-offer.js";
+import { ensureDefaultWorkspace } from "@openrig/daemon/instance-initialization";
 import {
   startDaemon,
   stopDaemon,
@@ -17,6 +19,7 @@ import {
   OPENRIG_DIR,
   STATE_FILE,
   resolveBindIntent,
+  statusGuardMessage,
 } from "../daemon-lifecycle.js";
 
 interface ProcessAliveDeps {
@@ -37,14 +40,16 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 
 export type SignalOutcome = "sent" | "missing" | "not-permitted";
 
-/** kill(pid, 0) as an outcome. POSIX: only ESRCH means no such process; EPERM means the process
- *  EXISTS but this shell may not signal it (another user's process, or a sandbox such as Codex's). */
+/** kill(pid, 0) as an outcome. POSIX: kill(pid, 0) fails only with ESRCH (no such process) or EPERM
+ *  (the process EXISTS but this shell may not signal it: another user's process, or a sandbox such as
+ *  Codex's). Only ESRCH is "missing"; any other error is not evidence of death, so it reads as
+ *  "not-permitted" (uninspectable), never as a dead process. */
 export function signalProbe(pid: number, kill: (pid: number, signal: 0) => unknown = process.kill): SignalOutcome {
   try {
     kill(pid, 0);
     return "sent";
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM" ? "not-permitted" : "missing";
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "missing" : "not-permitted";
   }
 }
 
@@ -100,8 +105,8 @@ export function realDeps(): LifecycleDeps {
       return lock;
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
-    fetch: async (url) => {
-      const res = await fetchWithTimeout(globalThis.fetch, url, {}, {
+    fetch: async (url, init) => {
+      const res = await fetchWithTimeout(globalThis.fetch, url, init?.signal ? { signal: init.signal } : {}, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
       });
@@ -159,6 +164,15 @@ export function realDeps(): LifecycleDeps {
     isProcessAlive,
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
     listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
+    // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
+    pidNamespace: () => {
+      if (process.platform !== "linux") return "host";
+      try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
+    },
+    // #3315: what the start records and stop checks to confirm a start reservation still names its child.
+    bootId: currentBootId,
+    processStartToken,
+    releaseStartReservation: archiveSpentReservation,
   };
 }
 
@@ -263,6 +277,12 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           getDeps(),
         );
         console.log(`Daemon started on port ${state.port} (pid ${state.pid})`);
+        // The daemon leaves a workspace.root that holds a project of its own as it is, and its log says so; so does this
+        // output, from the same read-only check.
+        const workspace = ensureDefaultWorkspace({ root: config.workspace.root, dryRun: true });
+        if (workspace.existingProject) {
+          console.log(`workspace.root holds a project of its own (${workspace.existingProject}); OpenRig left it as it is and reads that project's own id.`);
+        }
 
         // V0.3.1 slice 05 forward-fix #3 architectural — --wait-for-kernel
         // post-bind polling. Kernel boot is fire-and-forget after the
@@ -301,6 +321,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             process.exitCode = 1;
           }
         }
+        if (process.exitCode !== 1) for (const line of await personRegistrationOffer()) console.log(line);
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;
@@ -310,7 +331,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("stop")
     .description("Stop the daemon (10s shutdown budget; 12s process wait; incomplete drain exits nonzero)")
-    .addHelpText("after", "\nSends at most one SIGTERM to a live target and verifies the original PID and listener. Repeated signals join shutdown.\nFor a recorded target, missing/stale receipts and incomplete drains exit nonzero, including retries.\nTarget state is retained until a matching clean receipt; status reads preserve unverified state.\nNo target is a distinct no-op, never clean-drain certification; unbound incomplete evidence stays unverified.\nInspect OPENRIG_HOME/daemon-shutdown.json and daemon.log for the phase and outcome.\nThe bound covers asynchronous shutdown; an event-loop wedge still requires operator recovery.\n")
+    .addHelpText("after", "\nSends at most one SIGTERM to a live target and verifies the original PID and listener. Repeated signals join shutdown.\nFor a recorded target, missing/stale receipts and incomplete drains exit nonzero, including retries.\nTarget state is retained until a matching clean receipt; status reads preserve unverified state.\nNo target is a distinct no-op, never clean-drain certification; unbound incomplete evidence stays unverified.\nInspect OPENRIG_HOME/daemon-shutdown.json and daemon.log for the phase and outcome.\nThe bound covers asynchronous shutdown; an event-loop wedge still requires operator recovery.\nWith no recorded target, the child of a start that ended pending is signalled only when its reservation still names it\n(same boot, launcher gone, same process, its endpoint checked) and its listener names it or does not answer in time.\n")
     .action(async () => {
       try {
         const outcome = await stopDaemon(getDeps());
@@ -369,6 +390,12 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             console.log(`  resolved: ${status.siblingHint.resolvedHome}`);
             console.log(`  sibling:  ${status.siblingHint.siblingHome}`);
             console.log("  Fix: point OPENRIG_HOME at the right home (or check your shell env) — this CLI is likely resolving the wrong home.");
+          } else if (status.pidUnseen) {
+            // #2860: the same words as the command guard.
+            const unseen = statusGuardMessage(status);
+            console.log(unseen.fact);
+            console.log(`  ${unseen.consequence}`);
+            console.log(`  ${unseen.action}`);
           } else if (!status.startPending) {
             // A pending start's probe was refused, not inconclusive; its line above says what is known.
             console.log("Daemon state UNVERIFIED — the probe timed out or was inconclusive (this is NOT evidence the daemon is down).");

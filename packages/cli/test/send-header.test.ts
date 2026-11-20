@@ -11,7 +11,15 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     expect(out).toContain('↩ Reply: rig send driver-3@my-rig "..."');
   });
 
-  it.each(["human@kernel", "human@host", "human-alice@kernel", "human-alice@host"])(
+  // An answer typed at this machine is recorded as human@host, which names nobody: a reply there asks no one, waits on
+  // Steering and in the Feed, and OpenRig reports it as undeliverable, so its reply hint says so and points to the person's registered address.
+  it.each(["human@host", "human@host@host-origin"])("never points %s's reply at the unattributed address", (sender) => {
+    const last = wrapSendBody(sender, "driver@rig", "Answered.").split("\n").at(-1);
+    expect(last).toBe(`↩ ${sender} names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).`);
+    expect(last).not.toContain("rig queue create");
+  });
+
+  it.each(["human@kernel", "human-alice@kernel", "human-alice@host"])(
     "gives %s a queue update reply with the existing human-route fields",
     (sender) => {
       const body = "Please check this.\nKeep the actor unchanged.";
@@ -158,6 +166,15 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     for (const sender of ["alex@external"]) {
       expect(wrapSendBody(sender, "b@r", "hi", { senderReachable: false })).toBe(wrapSendBody(sender, "b@r", "hi"));
     }
+  });
+
+  // #3268: MIRROR of packages/daemon/test/pane-envelope.test.ts against wrapPaneEnvelope (byte-identity contract).
+  it("#3268: senderRegistered false gives an @external sender no reply command; absent or true keeps the hint", () => {
+    expect(wrapSendBody("some-team@external", "b@r", "hi", { replyToQitem: "q-1", senderRegistered: false }))
+      .toBe("From: some-team@external\nTo: b@r\n---\nhi\n---\n↩ No reply route: some-team@external isn't a registered person (rig gateway human list lists who's registered).");
+    expect(wrapSendBody("alex@external", "b@r", "hi", { replyToQitem: "q-1", senderRegistered: true }))
+      .toBe(wrapSendBody("alex@external", "b@r", "hi", { replyToQitem: "q-1" }));
+    expect(wrapSendBody("a@r", "b@r", "hi", { senderRegistered: false })).toBe(wrapSendBody("a@r", "b@r", "hi"));
   });
 
   it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {

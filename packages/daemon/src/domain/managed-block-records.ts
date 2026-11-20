@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
-import { frameManagedBlockBody, managedBlockStanding, mergeManagedBlock, type ManagedBlockMergeFsOps, type ManagedBlockStanding } from "./managed-blocks.js";
+import { damagedManagedBlockNote, frameManagedBlockBody, managedBlockBodyMatches, managedBlockStanding, mergeManagedBlock, pruneManagedBlockCopies,
+  withCanonicalMarkers, type ManagedBlockMergeFsOps, type ManagedBlockStanding } from "./managed-blocks.js";
 
 /** #2456: OpenRig's record of what it last wrote in each managed guidance block, so a later start, exact resume, handover
  *  or runtime switch can tell a block it wrote (refreshed when its source changes) from a block a person edited (kept). */
@@ -92,6 +93,8 @@ export function decideManagedBlock(content: string, blockId: string, source: str
   const standing = managedBlockStanding(content, blockId, source, recorded, managedBlockBodyHash);
   const named = opts.sourcePath ?? "its source";
   if (standing === "absent") return { standing, write: !opts.onlyIfPresent };
+  // A marker without its pair: writing would add a second copy beside the block that can't be read, at every start.
+  if (standing === "damaged") return { standing, write: false, note: damagedManagedBlockNote(targetPath, blockId) };
   if (unreadable && standing === "unrecorded") {
     return { standing: "unknown", write: false,
       note: `guidance_block_record_unreadable: ${targetPath}: ${blockId} wasn't refreshed from ${named} because OpenRig couldn't read its write record` };
@@ -103,10 +106,36 @@ export function decideManagedBlock(content: string, blockId: string, source: str
   return { standing, write: true };
 }
 
+/** A block that isn't rewritten (current, edited or unrecorded) can still carry extra copies, or markers an editor
+ *  rewrapped: take out the copies that repeat a kept one, and OpenRig's own (its source's text, or what it last wrote)
+ *  beside an edited one, so the file keeps one copy of each distinct text, and put the markers in OpenRig's form. Nothing
+ *  a person wrote is removed. Best effort: a file that can't be read or written is named in `notes` and left as it is,
+ *  and the block's own decision stands. Returns whether the file changed. */
+export function pruneKeptManagedBlock(files: ManagedBlockMergeFsOps, targetPath: string, blockId: string, source: string,
+  records: ManagedBlockRecords | undefined, notes?: string[]): boolean {
+  let recorded: string | undefined;
+  try { recorded = records?.get(targetPath, blockId); } catch { /* unreadable: only the source's text counts as OpenRig's */ }
+  try {
+    const existing = files.exists(targetPath) ? files.readFile(targetPath) : "";
+    const pruned = pruneManagedBlockCopies(existing, blockId,
+      (body) => managedBlockBodyMatches(body, source) || (recorded !== undefined && managedBlockBodyHash(body) === recorded));
+    const tidy = withCanonicalMarkers(pruned ?? existing, blockId);
+    if (tidy === existing) return false;
+    files.writeFile(targetPath, tidy);
+    if (pruned !== null) {
+      notes?.push(`guidance_block_copies_removed: ${targetPath}: ${blockId} had repeated copies; the repeats were removed and every edited copy was kept`);
+    }
+    return true;
+  } catch (err) {
+    notes?.push(`guidance_block_copies_not_removed: ${targetPath}: ${blockId}'s repeated copies or markers couldn't be tidied (${(err as Error).message}); the file was left as it is`);
+    return false;
+  }
+}
+
 /** #2456: the one write of a managed guidance block that every adapter's guidance merge goes through. Without `records` it's
- *  the plain merge, as before. With them, `decideManagedBlock` decides; a kept block is named in `warnings` and nothing is
- *  written. A written block is recorded at once, so a later failure in the same start can't lose its record. Returns
- *  whether the block was written. */
+ *  the plain merge, as before. With them, `decideManagedBlock` decides; a kept block is named in `warnings`, and only its
+ *  repeated copies are taken out (`pruneKeptManagedBlock`). A written block is recorded at once, so a later failure in the
+ *  same start can't lose its record. Returns whether the block was written. */
 export function writeManagedGuidanceBlock(files: ManagedBlockMergeFsOps, targetPath: string, blockId: string, content: string, opts: {
   records?: ManagedBlockRecords; unrecorded?: "keep" | "refresh"; onlyIfPresent?: boolean; sourcePath?: string;
   warnings?: string[]; replaceBlockIds?: string[];
@@ -115,15 +144,19 @@ export function writeManagedGuidanceBlock(files: ManagedBlockMergeFsOps, targetP
   // Without records, the plain merge as before; a refresh-only call (`onlyIfPresent`) then writes nothing.
   if (!opts.records) {
     if (opts.onlyIfPresent) return false;
-    merge();
-    return true;
+    return merge();
   }
   const existing = files.exists(targetPath) ? files.readFile(targetPath) : "";
   const decision = decideManagedBlock(existing, blockId, content, opts.records, targetPath,
     { unrecorded: opts.unrecorded ?? "refresh", onlyIfPresent: opts.onlyIfPresent, sourcePath: opts.sourcePath });
   if (decision.note) opts.warnings?.push(decision.note);
-  if (!decision.write) return false;
-  merge();
+  if (!decision.write) {
+    if (decision.standing === "edited" || decision.standing === "unrecorded") {
+      pruneKeptManagedBlock(files, targetPath, blockId, content, opts.records, opts.warnings);
+    }
+    return false;
+  }
+  if (!merge()) return false;
   recordManagedBlockWrite(opts.records, targetPath, blockId, content, opts.warnings);
   return true;
 }

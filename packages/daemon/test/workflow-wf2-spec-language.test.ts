@@ -13,6 +13,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
@@ -188,7 +189,7 @@ describe("OPR.0.4.6.WF2 — spec language", () => {
     migrate(db, [
       outboxEntriesSchema,
       coreSchema,
-      bindingsSessionsSchema,
+      bindingsSessionsSchema, rigArchiveSchema,
       eventsSchema,
       queueItemsSchema,
       queueTransitionsSchema,
@@ -574,6 +575,23 @@ describe("OPR.0.4.6.WF2 — spec language", () => {
           entryOwnerSession: "claude-seat@rig",
         }),
       ).rejects.toMatchObject({ code: "harness_pin_unsatisfied" });
+    });
+
+    it("validate warns that a harness pin is unchecked instead of reporting a clean result (#3087)", () => {
+      const spec = parseWorkflowSpec(HARNESS_SPEC, "harness.yaml");
+      const result = new WorkflowValidator().validate(spec);
+      expect(result.ok).toBe(true);
+      const unchecked = result.issues.filter((i) => i.code === "harness_pin_unchecked");
+      expect(unchecked).toHaveLength(1);
+      expect(unchecked[0]).toMatchObject({ severity: "warning", field: "workflow.steps[0].harness" });
+      expect(unchecked[0]!.message).toContain('"codex"');
+      expect(unchecked[0]!.message).toContain("no rig is bound");
+    });
+
+    it("validate adds no pin warning to a spec without harness pins", () => {
+      const spec = parseWorkflowSpec(LINEAR_SPEC, "linear.yaml");
+      const result = new WorkflowValidator().validate(spec);
+      expect(result.issues.some((i) => i.code === "harness_pin_unchecked")).toBe(false);
     });
 
     it("steps with no pin resolve preferred_targets[0] unchanged (zero regression)", async () => {

@@ -27,6 +27,10 @@ STATUS, both node views show a LIFECYCLE of `running`, `detached`, `recoverable`
 recorded session status, with two observed corrections: a running session whose pane is verified
 to have exited (identity reason `pane_exited`) reads `exited`, with `startupStatus:
 "attention_required"`, and a running session confirmed missing reads `detached`.
+`rig seat status` serves the same LIFECYCLE as `lifecycle_state` beside `session_status`. When the session
+record is running but the LIFECYCLE is `attention_required` (for example, the seat's startup or restore needs
+attention, or OpenRig can't confirm the pane's process as the seat's runtime, such as a bare shell), its human
+output reads `Session: needs attention`, as `rig ps` reads `att`.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle
@@ -202,7 +206,8 @@ LIFECYCLE); see the
   its startup context is still pending for `rig seat continue`.
 - **Oriented:** `verified`, `missing`, `rejected`, `n-a`, from the startup proof.
 - **Attention codes:** `trust_gate`, `hook_trust_gate`, `update_gate`, `login_required`,
-  `mcp_gate`, `bypass_consent_gate`, `codex_auth_refusal`, `codex_client_incompatible`.
+  `mcp_gate`, `bypass_consent_gate`, `claude_resume_selection_prompt`,
+  `claude_gated_grants_gate`, `codex_auth_refusal`, `codex_client_incompatible`.
 - **Restore outcome:** `resumed`, `fresh-primed`, `awaiting-decision`, `attention_required`,
   `failed` (plus `rebuilt`, `operator_recovered` and the legacy `fresh`). A seat joined with
   `rig attach` as an external CLI reads `left_attached`: restore leaves it as it is.
