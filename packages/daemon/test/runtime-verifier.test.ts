@@ -104,6 +104,29 @@ describe("RuntimeVerifier", () => {
       .toEqual([{ runtime: "omp" }, { runtime: "omp-tui" }]);
   });
 
+  it.each([
+    [Object.assign(new Error("permission denied"), { code: "EACCES" }), "error"],
+    [new Error("invalid configuration"), "error"],
+    [Object.assign(new Error("inner tool missing"), { code: 127, stderr: "sh: 1: helper: not found" }), "error"],
+    [Object.assign(new Error("spawn omp ENOENT"), { code: "ENOENT" }), "not_found"],
+    [Object.assign(new Error("exit 127"), { code: 127, stderr: "/bin/sh: 1: omp: not found\n" }), "not_found"],
+  ] as const)("classifies OMP probe failure %s as %s", async (failure, status) => {
+    const exec = vi.fn(async () => { throw failure; });
+    const verifier = new RuntimeVerifier({ exec, db });
+    for (const runtime of ["omp", "omp-tui"] as const) {
+      expect(await verifier.verifyOmp(runtime)).toMatchObject({ runtime, status,
+        error: status === "error" ? expect.stringContaining(failure.message) : "omp not found" });
+    }
+    expect(exec.mock.calls).toEqual([["omp --version"], ["omp --help"], ["omp --version"], ["omp --help"]]);
+  });
+
+  it("accepts a working omp --help after a failed version probe", async () => {
+    const exec = vi.fn().mockRejectedValueOnce(new Error("unsupported option")).mockResolvedValueOnce("Usage: omp");
+    expect(await new RuntimeVerifier({ exec, db }).verifyOmp("omp-tui")).toMatchObject({
+      runtime: "omp-tui", status: "verified", error: null,
+    });
+  });
+
   // T6: codex --version succeeds -> verified
   it("codex --version succeeds -> verified", async () => {
     const exec = createMockExec({ "codex --version": "codex 0.5.1" });

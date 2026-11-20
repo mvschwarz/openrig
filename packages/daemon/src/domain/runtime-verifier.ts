@@ -23,6 +23,13 @@ export function probeTimeoutOutcome(
   return { status: "error", error: timeout.message };
 }
 
+/** A shell can also return 127 when an installed OMP fails to find one of its own dependencies. */
+function ompExecutableMissing(error: unknown): boolean {
+  const failure = error as { code?: unknown; stderr?: unknown } | null;
+  return failure?.code === "ENOENT" || (failure?.code === 127 && typeof failure.stderr === "string"
+    && /(?:^|[\s:])omp: (?:command )?not found\s*$|command not found: omp\s*$/m.test(failure.stderr));
+}
+
 // OPR.0.4.6.PI1 — Pi's documented Node engine floor (package.json engines).
 export const PI_NODE_ENGINE_FLOOR = "22.19.0";
 
@@ -185,6 +192,11 @@ export class RuntimeVerifier {
         if (helpErr instanceof ProbeTimeoutError) {
           const outcome = probeTimeoutOutcome(binary, "help", helpErr);
           if (!("fallBackToHelp" in outcome)) return this.buildVerification(canonicalName, outcome.status, null, null, outcome.error);
+        }
+        if (binary === "omp" && !(ompExecutableMissing(err) && ompExecutableMissing(helpErr))) {
+          const message = (failure: unknown) => failure instanceof Error ? failure.message : String(failure);
+          return this.buildVerification(canonicalName, "error", null, null,
+            `omp --version failed: ${message(err)}; omp --help failed: ${message(helpErr)}`);
         }
         return this.buildVerification(canonicalName, "not_found", null, null, `${binary} not found`);
       }
