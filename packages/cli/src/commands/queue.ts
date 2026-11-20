@@ -1757,7 +1757,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             await finish(late.row, 200, late.remote ? "remote" : "neutral");
             return;
           }
-          const received = isQueueRow(res.data) ? res.data : {};
+          const received: QueueRow = isQueueRow(res.data) ? res.data : {};
           for (const key of ["createWarning", "parkWarning"] as const) {
             const warning = received[key];
             if (isQueueRow(warning) && typeof warning.message === "string") console.error(`Warning: ${warning.message}`);
