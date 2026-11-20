@@ -39,9 +39,8 @@ import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
 
 /** Minimum time between cold-start attempts for one seat. */
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
-/** Failure cap within the quiet window; observed liveness or expiry clears it. */
+/** Consecutive-failure cap; cleared only by observed liveness or a successful launch, never by time (R6). */
 export const COLD_START_MAX_CONSECUTIVE_FAILURES = 3;
-export const COLD_START_FAILURE_WINDOW_MS = 15 * 60_000;
 export const COLD_START_EVALUATION_TTL_MS = 1_000;
 
 /**
@@ -372,12 +371,9 @@ export class SeatColdStarter {
   ledgerRefuses(nodeId: string, now: Date): "interval" | "failures" | null {
     const row = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     if (!row) return null;
-    // Queue wakes may miss an operator's successful run entirely. A bounded quiet
-    // window prevents that unobserved repair from leaving a permanent failure cap.
-    if (Date.parse(row.last_attempt_at) + COLD_START_FAILURE_WINDOW_MS <= now.getTime()) {
-      this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0 WHERE node_id=?").run(nodeId);
-      return null;
-    }
+    // R6: a failed or awaiting-decision attempt is never retried on a timer. The cap clears
+    // only when the seat is observed running (eligible()'s observed_running reset, which a
+    // person's manual launch also produces) or a launch succeeds — not by quiet-window expiry.
     if (row.consecutive_failures >= COLD_START_MAX_CONSECUTIVE_FAILURES) return "failures";
     if (Date.parse(row.last_attempt_at) + COLD_START_MIN_INTERVAL_MS > now.getTime()) return "interval";
     return null;

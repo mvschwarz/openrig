@@ -464,12 +464,14 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
-  it("expires a failure cap even if the operator's successful life was not observed", async () => {
+  it("does not expire a failure cap by time; only observed liveness clears it", async () => {
     const f = fixture();
     f.db.prepare("INSERT INTO seat_cold_starts (node_id,last_attempt_at,last_outcome,consecutive_failures) VALUES ('n1',?,'failed:test',3)")
       .run(new Date(Date.now() - 60 * 60_000).toISOString());
     f.starter.notify("dev.impl@fleet");
-    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    expect(f.logs.some(line => line.includes("too many consecutive failed attempts"))).toBe(true);
     f.db.close();
   });
 
