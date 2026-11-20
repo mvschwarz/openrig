@@ -1129,6 +1129,99 @@ describe("supported seat and queue integration", () => {
     expect(f.repo.getById(item.qitemId)!.state).toBe("pending"); expect(f.writes).toEqual([]);
   });
 
+  // #48: the seat's idle report retries a draft-held wake through the same guarded delivery, within the wake retry cap.
+  it("delivers a draft-held queue wake on the seat's next idle report once the draft has cleared", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    f.bodies.a = "";
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
+    expect(f.submissions.some(s => s.includes(item.qitemId))).toBe(true);
+    expect(f.repo.getById(item.qitemId)!.lastNudgeResult).not.toMatch(/^retained:/);
+  });
+
+  it("keeps a draft-held wake held while the draft stays, one bounded attempt per idle report, never typing over it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    for (let i = 0; i < 5; i++) await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("retained");
+    expect(f.writes).toEqual([]);
+    const attempts = f.repo.listTransitions(item.qitemId).filter(t => t.transitionNote?.startsWith("wake-attempt:"));
+    expect(attempts.map(t => t.transitionNote)).toEqual([1, 2, 3].map(n => `wake-attempt: ${n}/3 outcome=retained:draft_aware trigger=seat-idle`));
+  });
+
+  it("never retries a hold-mode wake, and a running report retries nothing", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    const held = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(held.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    expect(f.outbox.getById("wake-intent-" + held.qitemId)!.deliveryState).toBe("retained");
+
+    const g = fixture(undefined, { runtime: "claude-code" }); await g.enable(); g.bodies.a = "draft";
+    const drafted = await g.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(g.repo.getById(drafted.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    g.bodies.a = "";
+    await g.repo.retryDraftHeldWakesOnIdle("worker@test", "running");
+    expect(g.outbox.getById("wake-intent-" + drafted.qitemId)!.deliveryState).toBe("retained");
+    expect([...f.writes, ...g.writes]).toEqual([]);
+  });
+
+  // #48: past the bound (draft-aware) or the window (hold), the owner's escalation and the sender's notice go out once
+  // per held episode, and nothing is typed into the held seat.
+  const heldLadder = async (f: ReturnType<typeof fixture>, window: number) => {
+    const { runWakeLadderTick } = await import("../src/domain/queue-wake-ladder.js");
+    return async () => {
+      // A zero retry interval: the ladder acts on these rows without waiting out the interval after their last attempt.
+      const result = await runWakeLadderTick({ db: f.db, queueRepo: f.repo, retryCap: 3, retryIntervalSeconds: 0, unconfirmedWindowMinutes: window,
+        resolveOrchestrator: () => "orch@test", attemptWake: async () => "verified" });
+      expect(result).not.toMatchObject({ outcome: "failed" });
+      return result;
+    };
+  };
+  const notes = (f: ReturnType<typeof fixture>, qitemId: string, prefix: string) =>
+    f.repo.listTransitions(qitemId).map(t => t.transitionNote ?? "").filter(n => n.startsWith(prefix));
+  const typedInto = (f: ReturnType<typeof fixture>, node: string) => f.writes.filter(w => w.startsWith(`paste:${node}:`) || w.startsWith(`keys:${node}:`));
+
+  it("tells the owner and the sender once when a draft-held wake is still held at the retry cap, typing nothing into the held seat", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    f.db.prepare("UPDATE nodes SET runtime='claude-code' WHERE id='b'").run();
+    const item = await f.repo.create({ sourceSession: "sibling@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    const tick = await heldLadder(f, 0);
+    await tick();
+    expect(notes(f, item.qitemId, "escalation-rung:")).toEqual([]);
+    for (let i = 0; i < 3; i++) await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    await tick(); await tick();
+    expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
+    expect(notes(f, item.qitemId, "escalation-rung:")[0]).toContain("held by worker@test's draft-aware guard after 3 tries");
+    expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toHaveLength(1);
+    expect(f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId} to worker@test is still held after 3 tries`))).toHaveLength(1);
+    expect(typedInto(f, "a")).toEqual([]);
+    expect(f.repo.getById(item.qitemId)).toMatchObject({ state: "pending", lastNudgeResult: "retained:draft_aware" });
+  });
+
+  it("tells the owner and the sender once about a hold-mode wake past the window, typing nothing into the held seat", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    f.db.prepare("UPDATE nodes SET runtime='claude-code' WHERE id='b'").run();
+    const item = await f.repo.create({ sourceSession: "sibling@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    const tick = await heldLadder(f, 30);
+    await tick();
+    expect(notes(f, item.qitemId, "escalation-rung:")).toEqual([]);
+    f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 45 * 60_000).toISOString(), item.qitemId);
+    await tick(); await tick();
+    expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
+    expect(notes(f, item.qitemId, "escalation-rung:")[0]).toContain("read it with rig seat held-messages worker@test");
+    expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toHaveLength(1);
+    const told = f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId} to worker@test is held, not lost`));
+    expect(told).toHaveLength(1);
+    expect(told[0]).toContain("rig seat held-messages worker@test");
+    expect(typedInto(f, "a")).toEqual([]);
+    expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("retained");
+  });
+
   it("rechecks queue applicability before paste", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });

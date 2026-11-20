@@ -1,5 +1,6 @@
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
-import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop } from "./queue-wake-ladder.js";
+import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
+import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
@@ -77,7 +78,7 @@ import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
-import { lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
+import { lastMeaningfulTransition, lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
 import { isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 export { TYPED_GATE_BLOCKER_PREFIXES, isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -411,7 +412,7 @@ export interface QueueNudgeTransport {
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
-    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean }
+    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean; openrigNotice?: true }
   ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string }>;
 }
 
@@ -2216,6 +2217,46 @@ export class QueueRepository {
       if (intents.length) {
         for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
       } else if (this.unroutableWakeRetryable(row, now)) await this.maybeNudge(qitem_id, row.destinationSession, undefined, row.sourceSession);
+    }
+  }
+
+  /** #48: a queue wake the draft-aware guard held (a draft, or an input it couldn't read) is tried again when its seat
+   *  reports idle, through the same guarded delivery, which re-checks the input and holds it again if it still can't go.
+   *  A hold-mode wake is never retried. Each try is one of the wake ladder's attempts, so the existing wake retry cap
+   *  bounds them together; past it, the ladder's one held notice takes over. */
+  async retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
+    if (state !== "idle" || !this.outbox) return;
+    const addresses = this.resolveSessionAddresses(sessionName);
+    if (!addresses.length || addresses.some(address => this.deliveryDrains.holds(address))) return;
+    // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
+    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
+    const rows = this.db.prepare(`SELECT qitem_id FROM queue_items WHERE state = 'pending' AND claimed_at IS NULL
+      AND destination_session IN (${addresses.map(() => "?").join(",")}) AND last_nudge_result = 'retained:draft_aware'
+      ORDER BY ts_created, qitem_id`).all(...addresses) as Array<{ qitem_id: string }>;
+    const cap = resolveWakeRetryCap();
+    for (const { qitem_id } of rows) {
+      const intent = `${WAKE_INTENT_PREFIX}${qitem_id}`;
+      const after = lastMeaningfulTransition(this.db, qitem_id)?.id ?? 0;
+      const tries = (this.db.prepare(`SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
+        AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'`).get(qitem_id, after) as { n: number }).n;
+      if (tries >= cap || !this.outbox.reopenHeld(intent)) continue;
+      const outcome = await this.deliverWakeIntent(intent);
+      const row = this.getById(qitem_id);
+      if (row) this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
+        transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${row.lastNudgeResult ?? outcome} trigger=seat-idle` });
+    }
+  }
+
+  /** #48: the wake ladder's one notice to a held row's sender, sent as OpenRig through the same guarded transport (the
+   *  sender's own guard applies). Returns the outcome for the ladder's record. */
+  async noticeHeldSender(sender: string, body: string): Promise<string> {
+    if (!this.transport) return "skipped:no transport";
+    try {
+      const res = await this.transport.send(sender, wrapPaneEnvelope(OPENRIG_SENDER, sender, body),
+        { verify: true, actorSession: OPENRIG_SENDER, openrigNotice: true });
+      return res.verified ? "verified" : !res.ok ? `failed:${res.reason ?? res.error ?? "unknown"}` : res.outcome ?? "sent-unverified";
+    } catch (error) {
+      return `failed:${error instanceof Error ? error.message : String(error)}`;
     }
   }
 

@@ -733,6 +733,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // A seat seen running or idle is reachable: re-send wakes recorded unroutable before it was bound (#2789).
     void queueRepoInstance.retryUnroutableWakesOnReachable(sessionName, state)
       .catch(error => console.warn(`Reachable-seat wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+    // An idle seat may have cleared the draft its draft-aware guard held a wake for (#48).
+    void queueRepoInstance.retryDraftHeldWakesOnIdle(sessionName, state)
+      .catch(error => console.warn(`Draft-held wake retry: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
     rexSeatActivity?.(sessionName, { activity, runtime });
   };

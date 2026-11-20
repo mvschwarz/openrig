@@ -662,6 +662,13 @@ export class OutboxHandler {
       .get(nodeId) as { count: number; bytes: number };
   }
 
+  /** #48: a queue wake the draft-aware guard held goes back to pending for one more guarded attempt, which re-checks the
+   *  input and holds it again if it still can't go. Only a held entry moves; any other state is left as it is. */
+  reopenHeld(outboxId: string): boolean {
+    return this.db.prepare("UPDATE outbox_entries SET delivery_state='pending' WHERE outbox_id=? AND delivery_state='retained'")
+      .run(outboxId).changes === 1;
+  }
+
   retire(outboxId: string, actor: string, reason: string): OutboxEntry {
     if (!actor.trim() || !reason.trim()) throw new OutboxHandlerError("retirement_reason_required", "Actor and reason are required.");
     const entry = this.getByIdOrThrow(outboxId);

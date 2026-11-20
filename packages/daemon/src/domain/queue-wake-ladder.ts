@@ -3,7 +3,7 @@ import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 import type { HookReviewObservation } from "./kernel-hook-review.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
-import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
+import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookState, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
@@ -74,6 +74,7 @@ import {
   LADDER_ATTEMPT_PREFIX,
   LADDER_RUNG_PREFIX,
   LADDER_EXHAUSTED_PREFIX,
+  STUCK_SWEEP_FINDING_TAG,
   resolveOperatorSeat,
   resolveSessionNodeId,
 } from "./queue-stuck-sweep.js";
@@ -125,6 +126,8 @@ export function escalationDedupTag(destination: string): string {
 // Suspension markers (attempt/rung/exhausted come from the S02 seam vocabulary).
 export const LADDER_SUSPEND_PREFIX = "ladder-suspend:";
 export const LADDER_RESUME_PREFIX = "ladder-resume:";
+/** #48: the one notice a held row's sender gets per held episode, beside its owner's escalation. */
+export const LADDER_SENDER_NOTICE_PREFIX = "held-sender-notice:";
 
 const LADDER_ACTOR = "wake-ladder@system";
 const UNACCEPTED_CARRIER_REROUTE = "unaccepted wake escalation uses a local carrier; human dispatch still requires readiness";
@@ -267,6 +270,7 @@ interface LadderView {
   exhaustedNote: string | null;
   suspendEpisodeOpen: boolean;
   firstMarkerTs: number | null;
+  senderNoticed: boolean;
 }
 
 function readLadder(db: Database.Database, qitemId: string, after = lastMeaningfulTransition(db, qitemId)?.id ?? 0): LadderView {
@@ -287,6 +291,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
     exhaustedNote: null,
     suspendEpisodeOpen: false,
     firstMarkerTs: null,
+    senderNoticed: false,
   };
   let suspends = 0;
   let resumes = 0;
@@ -340,6 +345,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
     if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) { view.exhausted = true; view.exhaustedNote = note; }
     if (note.startsWith(LADDER_SUSPEND_PREFIX)) suspends += 1;
     if (note.startsWith(LADDER_RESUME_PREFIX)) resumes += 1;
+    if (note.startsWith(LADDER_SENDER_NOTICE_PREFIX)) view.senderNoticed = true;
     if (isAttempt || isRung) {
       const t = Date.parse(r.ts);
       if (!Number.isNaN(t)) {
@@ -372,6 +378,7 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       note.startsWith(LADDER_EXHAUSTED_PREFIX) ||
       note.startsWith(LADDER_SUSPEND_PREFIX) ||
       note.startsWith(LADDER_RESUME_PREFIX) ||
+      note.startsWith(LADDER_SENDER_NOTICE_PREFIX) ||
       // OPR.0.5.6.1: delivery-leg records are ladder machinery, not pickup —
       // a receipt/termination/deferral stamp must not pull the row out of the
       // ladder before the resolution pass reads it.
@@ -441,14 +448,25 @@ function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
  * ladder's claimed-row retry query selects `failed:%` only, so a claimed row whose
  * last result is `retained:` would be owned without ever being retried — the
  * parked-owner watchdog would then skip it. Keep the retained class scoped to the
- * unclaimed baton path the PR is about; every other state keeps the pre-change
+ * unclaimed baton path the PR is about, and to a held created row (#48); every other state keeps the pre-change
  * `null` classification. */
-function unclaimedWakeMode(row: Pick<QueueItem, "state" | "claimedAt" | "handedOffFrom" | "lastNudgeResult">): WakeMode | null {
+function unclaimedWakeMode(row: HeldRowFacts): WakeMode | null {
   const mode = classifyWakeResult(row.lastNudgeResult);
   if (mode === null) return null;
   const retained = readWakeOutcome(row.lastNudgeResult)?.fact === "held";
-  if (retained && !(row.state === "pending" && !row.claimedAt && row.handedOffFrom)) return null;
+  if (retained && !(row.state === "pending" && !row.claimedAt && (row.handedOffFrom || heldCreatedRow(row)))) return null;
   return mode;
+}
+
+type HeldRowFacts = Pick<QueueItem, "state" | "claimedAt" | "handedOffFrom" | "lastNudgeResult" | "sourceSession" | "tags">;
+
+/** #48: a created row (no handoff) whose wake the seat's guard held. The stuck sweep leaves a hold-mode row alone, so
+ *  the ladder gives it the one held escalation batons get, and a draft-aware one once its idle retries reach the cap.
+ *  Rows OpenRig raised itself (escalations, sweep findings, reminders) keep their own paths. */
+function heldCreatedRow(row: HeldRowFacts): boolean {
+  return row.state === "pending" && !row.claimedAt && !row.handedOffFrom && readWakeOutcome(row.lastNudgeResult)?.fact === "held"
+    && !isOpenRigSender(row.sourceSession) && !row.sourceSession.endsWith("@system")
+    && !(row.tags ?? []).some(tag => tag === WAKE_ESCALATION_TAG || tag === PROMPT_ALERT_TAG || tag === STUCK_SWEEP_FINDING_TAG);
 }
 
 /** A producer-retired prompt alert no longer owns wake continuation. Keep this
@@ -545,7 +563,9 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string, a
   });
   if (recovery && !["pending", "in-progress", "blocked"].includes(recovery.state)) return recoveryBackstop();
   if (recovery && disposition && JSON.parse(disposition.tags ?? "[]").includes(PROMPT_ALERT_TAG)) return recoveryBackstop();
-  const mode = unclaimedWakeMode(row);
+  // A held created row (#48) isn't eligible here: until the ladder's one notice it reads as held, and after it the
+  // recovery row it raised is its next step.
+  const mode = unclaimedWakeMode({ ...row, tags: JSON.parse(row.tagsJson ?? "[]") as string[] });
   const eligible = (row.state === "pending" && !row.claimedAt && row.handedOffFrom)
     || (row.state === "in-progress" && row.claimedAt && mode === "failed" && db.prepare(
       "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE 'parked-owner wake delivery failed:%' LIMIT 1",
@@ -604,6 +624,20 @@ function appendMarker(repo: QueueRepository, row: QueueItem, note: string, admit
     // A scheduler receipt does not clear the claim's original gate. State writes do.
     closureTarget: row.state === "in-progress" ? repo.retainedClaimBlocker(row.qitemId) : undefined,
   });
+}
+
+/** #48: a held row's sender is told once per held episode, beside the recovery row to its owner, that the row is held
+ *  and not lost. Nothing is typed into the held seat; a sender that is OpenRig, a person or the destination itself is skipped. */
+async function noticeHeldSender(deps: WakeLadderDeps, m: { row: QueueItem; view: LadderView }, owner: string): Promise<void> {
+  const { row } = m, dest = row.destinationSession, sender = row.sourceSession;
+  const held = readWakeOutcome(row.lastNudgeResult);
+  if (m.view.senderNoticed || held?.fact !== "held" || !sender || sender === dest || isOpenRigSender(sender)
+    || /@(system|external)$/.test(sender)) return;
+  const body = held.heldBy === "typing-guard"
+    ? `Your queue row ${row.qitemId} to ${dest} is held, not lost: ${dest}'s typing guard holds its wakes, so nothing was typed there. It's readable with rig seat held-messages ${dest}, and a recovery row went to ${owner}.`
+    : `Your queue row ${row.qitemId} to ${dest} is still held after ${m.view.attempts} tries: ${dest}'s input had a draft or couldn't be read each time, so nothing was typed there. The row stays pending, not lost, and a recovery row went to ${owner}.`;
+  const outcome = await deps.queueRepo.noticeHeldSender(sender, body);
+  appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${sender} outcome=${outcome}`, true);
 }
 
 function minutesSince(ts: number | string | null | undefined, now: Date): number {
@@ -740,11 +774,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     const blockerByPool = new Map<string, QueueItem>();
 
     // Batons: handed-off rows still pending and unclaimed. Created-with-destination rows
-    // are explicitly NOT here — that hole is S02's net (F5).
+    // are explicitly NOT here — that hole is S02's net (F5) — except one whose wake the seat's guard held (#48;
+    // heldCreatedRow decides which).
     const batonRows = deps.db
       .prepare(
         `SELECT qitem_id FROM queue_items
-          WHERE state = 'pending' AND claimed_at IS NULL AND handed_off_from IS NOT NULL`,
+          WHERE state = 'pending' AND claimed_at IS NULL AND (handed_off_from IS NOT NULL OR last_nudge_result LIKE 'retained:%')`,
       )
       .all() as Array<{ qitem_id: string }>;
 
@@ -834,6 +869,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (disposition && !["pending", "in-progress", "blocked"].includes(disposition.state)) continue;
       const view = readLadder(deps.db, row.qitemId);
       if (view.exhausted) continue; // finite: an exhausted ladder never re-fires
+      // #48: a created row's draft-aware hold is retried on its seat's idle report (retryDraftHeldWakesOnIdle), not on
+      // this timer; the ladder takes it once those tries reach the cap.
+      if (heldCreatedRow(row) && mode === "failed" && view.attempts < cap) continue;
 
       // F1 gates for the unconfirmed class: never re-nudge; enter only past the window
       // with zero pickup evidence.
@@ -848,6 +886,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
       // An ask handed to a person without an alert waits on them on Steering by design; escalating it would alert them.
       if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
+      // #48's held created rows are agents' work: correspondence or a decision for a person keeps its own path, as in the
+      // stuck sweep.
+      if (heldCreatedRow(row) && (deps.queueRepo.isRegisteredHumanUpdate(row) || deps.queueRepo.isLocalHumanDecisionWithoutGateway(row))) continue;
       activeLadders += 1;
 
       // Due-ness: the latest ladder marker (or the original nudge attempt) is older than
@@ -903,11 +944,14 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
       // Escalation phase (past the cap, or the F1 direct path). Grouped per destination
       // regardless of due-ness so the aggregate refresh rides every detection pass.
+      const draftHeld = mode === "failed" && readWakeOutcome(row.lastNudgeResult)?.fact === "held";
       const reason =
-        mode === "failed"
+        draftHeld
+          ? `held by ${row.destinationSession}'s draft-aware guard after ${view.attempts} tries over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min: its input had a draft or couldn't be read, so nothing was typed`
+          : mode === "failed"
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`
           : mode === "held"
-            ? `held by ${row.destinationSession}'s typing guard for ${minutesSince(row.tsCreated, now)} min: nothing was typed, and it isn't retried`
+            ? `held by ${row.destinationSession}'s typing guard for ${minutesSince(row.tsCreated, now)} min: nothing was typed, and it isn't retried; read it with rig seat held-messages ${row.destinationSession}`
             : readWakeOutcome(row.lastNudgeResult)?.route === null
               ? `wake outcome unknown (unrecognised result "${row.lastNudgeResult!.slice(0, 80)}") with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`
               : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
@@ -976,6 +1020,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator self-skip (resolves to ${orch === null ? "no orchestrator" : "destination"}) reason=${m.reason}`,
             );
+            await noticeHeldSender(deps, m, floorDest);
             if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, carrierDeferred)) {
               appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
               exhaustedThisTick += 1;
@@ -996,6 +1041,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               true,
             );
             actions.push({ qitemId: m.row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
+            await noticeHeldSender(deps, m, recoveryOwner);
             if (!outcome.startsWith("failed:")) {
               // Delivered (or durable-unconfirmed — the aggregate row itself is now the
               // orchestrator's durable obligation; S02 nets it if it sits unclaimed).
