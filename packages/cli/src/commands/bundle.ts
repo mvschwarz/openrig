@@ -88,7 +88,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--notes <text>", "Operator notes captured in bundle provenance metadata")
     .option("--min-daemon-version <ver>", "Minimum daemon version required to install this bundle (Item 2 compatibility)")
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
-    .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance. Pool agents are omitted and aren't drift")
+    .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance. Pool agents aren't counted as drift")
     .option("--json", "JSON output")
     .action(async (spec: string, opts: { output: string; name?: string; bundleVersion: string; includePackages?: string[]; includeLoginFiles?: boolean; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
