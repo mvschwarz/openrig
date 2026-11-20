@@ -18,7 +18,7 @@ afterEach(() => cleanup.splice(0).reverse().forEach((f) => f()));
 const PARK = "continuation: resume once the decision is made";
 
 /** Parks through the real writer, fires the real park wake, then writes `ack`; returns the counted ids and the ack's id. */
-async function afterRealWake(ack: Record<string, unknown>, legacyPark = false) {
+async function afterRealWake(ack: Record<string, unknown>, legacyPark = false, firstPark: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "real-park-"));
   cleanup.push(() => rmSync(home, { recursive: true, force: true }));
   const workspace = join(home, "workspace");
@@ -28,7 +28,7 @@ async function afterRealWake(ack: Record<string, unknown>, legacyPark = false) {
   const queue = new QueueRepository(db, new EventBus(db));
   await queue.create({ qitemId: "root", sourceSession: "builder@rig", destinationSession: "owner@rig", body: "Build product", tags: ["mission:fixture"], nudge: false });
   for (let i = 0; i < 18; i++) queue.update({ qitemId: "root", actorSession: "builder@rig", transitionNote: `progress ${i}` });
-  queue.update({ qitemId: "root", actorSession: "owner@rig", state: "blocked", blockedOn: "external:first", transitionNote: PARK, wakeAfterSeconds: 60 });
+  queue.update({ qitemId: "root", actorSession: "owner@rig", state: "blocked", blockedOn: "external:first", transitionNote: PARK, wakeAfterSeconds: 60, ...firstPark });
   // A park written before transitions recorded their blocker has no target.
   if (legacyPark) db.prepare("UPDATE queue_transitions SET closure_target = NULL WHERE qitem_id = 'root' AND state = 'blocked'").run();
   const timer = db.prepare("SELECT wake_ref FROM queue_transition_wakes WHERE qitem_id = 'root' AND phase = 'armed' ORDER BY transition_id DESC LIMIT 1").get() as { wake_ref: string };
@@ -62,6 +62,33 @@ it("a re-park on a different blocker after a real wake counts", async () => {
   const { ids, acknowledged } = await afterRealWake({ state: "blocked", blockedOn: "external:second", wakeAfterSeconds: 60 });
   expect(ids).toHaveLength(21);
   expect(ids).toContain(acknowledged.transitionId);
+});
+
+it("a park-record re-park on a different blocker with a stale closure target counts", async () => {
+  const { ids, acknowledged } = await afterRealWake({
+    state: "blocked", blockedOn: "external:second", closureReason: "blocked_on", closureTarget: "external:first", wakeAfterSeconds: 60,
+  });
+  expect(acknowledged.closureTarget).toBe("external:second");
+  expect(ids).toHaveLength(21);
+  expect(ids).toContain(acknowledged.transitionId);
+});
+
+it("a park-record re-park on the same blocker is excluded", async () => {
+  const { ids, acknowledged } = await afterRealWake({
+    state: "blocked", blockedOn: "external:first", closureReason: "blocked_on", closureTarget: "external:first", wakeAfterSeconds: 60,
+  });
+  expect(ids).toHaveLength(20);
+  expect(ids).not.toContain(acknowledged.transitionId);
+});
+
+it("a park-record whose closure target disagrees with its blocker logs the blocker, so a matching re-park is excluded", async () => {
+  const inconsistent = { closureReason: "blocked_on", closureTarget: "external:stale" };
+  const { ids, acknowledged } = await afterRealWake(
+    { state: "blocked", blockedOn: "external:first", wakeAfterSeconds: 60, ...inconsistent }, false, inconsistent,
+  );
+  expect(acknowledged.closureTarget).toBe("external:first");
+  expect(ids).toHaveLength(20);
+  expect(ids).not.toContain(acknowledged.transitionId);
 });
 
 it("a park without a recorded blocker is never matched as the same blocker", async () => {
