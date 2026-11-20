@@ -307,7 +307,8 @@ Google-supported integration, and it doesn't use `agy acp`.
   from its JSON, reports it, then opens that conversation with `agy --conversation <id>`.
 - **The resume check:** `agy --conversation <unknown id>` doesn't fail; it starts a new conversation without refusing.
   So on a resume the launcher checks that `conversations/<id>.db` exists in the seat's agy home. When it doesn't, the
-  launcher reports `error: "missing"` and starts nothing.
+  launcher reports `error: "missing"` and starts nothing. That check was run on the launcher directly, not through an
+  OpenRig restore.
 - **Setup goes in the preset's `command`.** The seat's pane gets only the daemon's minimal environment. So the preset
   passes the seat's agy home, the agy executable and the folder holding `rig` as the launcher's arguments (`--agy-home`,
   `--agy`, `--rig-path`), and agy must be reachable from the pane.

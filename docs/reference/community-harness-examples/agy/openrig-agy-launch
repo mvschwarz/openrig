@@ -47,8 +47,21 @@ if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
     exit 1
   fi
 else
-  out=$("$AGY_BIN" -p "Reply with exactly: ready" --output-format json </dev/null 2>/dev/null) || out=""
-  id=$(printf '%s' "$out" | sed -n 's/.*"conversation_id":"\([A-Za-z0-9-]*\)".*/\1/p' | head -n 1)
+  # agy keeps a conversation in the project it was created in, and a resume uses that project (its Projects docs).
+  # So the probe that creates it gets the same --project as the interactive agy below.
+  project=""; prev=""
+  for arg in "$@"; do
+    [ "$prev" = --project ] && project="$arg"
+    case "$arg" in --project=*) project="${arg#--project=}" ;; esac
+    prev="$arg"
+  done
+  out=$("$AGY_BIN" ${project:+--project "$project"} -p "Reply with exactly: ready" --output-format json </dev/null 2>/dev/null) || out=""
+  if command -v jq >/dev/null 2>&1; then
+    id=$(printf '%s' "$out" | jq -r '.conversation_id // empty' 2>/dev/null) || id=""
+  else
+    # agy 1.5.13 prints conversation_id as the first key; any other shape yields no id.
+    id=$(printf '%s' "$out" | sed -n 's/^{"conversation_id":"\([A-Za-z0-9-]*\)".*/\1/p' | head -n 1)
+  fi
   # No usable id: report nothing (identity shows unavailable) and start agy on its own conversation.
   plain_id "$id" || exec "$AGY_BIN" "$@"
 fi
