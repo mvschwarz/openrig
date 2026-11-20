@@ -584,20 +584,17 @@ it("a participant's hub address from the account is bound; without one it's <nam
 });
 
 it.each([
-  ["on another rig", (rig: string) => `cus-a1-reviewer@${rig}-other`, "cus-a1-reviewer@"],
-  ["that isn't <member>@<rig>", () => "cus-a1-reviewer", "\"cus-a1-reviewer\""],
-  ["that isn't text", () => 42, "a number value"],
-])("a hub address %s binds nothing and never falls back to <name>@<rig>: the connect names it, and the account drops the name", async (_, sent, shown) => {
+  ["null", () => null],
+  ["on another rig", (rig: string) => `cus-a1-reviewer@${rig}-other`],
+  ["not <member>@<rig>", () => "cus-a1-reviewer"],
+  ["not text", () => 42],
+])("a hub address that's %s binds <name>@<rig> as before, with no error", async (_, sent) => {
   const a = localSeat("a");
   await enroll();
   account.seats.set("reviewer", sent(account.rig));
-  const refused = await connect(a, "reviewer");
-  expect(refused).toMatchObject({ status: 502, data: { error: "account_unexpected" } });
-  expect(refused.data.message).toContain(shown);
-  expect(refused.data.message).toContain("nothing was bound");
-  expect((await status()).bindings).toEqual([]);
-  expect(account.puts.at(-1)).toEqual([]);
-  expect(account.names.get("reviewer")?.state).toBe("revoked");
+  const bound = await connect(a, "reviewer");
+  expect(bound).toMatchObject({ status: 201, data: { hubSeat: `reviewer@${account.rig}`, participantName: "reviewer", state: "active" } });
+  expect(readNetworkCredential(home, bound.data.id)).toBe("bear-reviewer-1");
 });
 
 it("after a lost answer, the hub address is the one in the answer that carries the new bearer", async () => {

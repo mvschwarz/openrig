@@ -65,14 +65,11 @@ class NotSent extends NetworkBindingError {}
  *  is its own address in the hub (`<member>@<rig>`), which can differ from the name listed here. */
 interface Identities { participants: Array<{ name: string; state?: string; bearer?: string; seat?: unknown }>; mcp: string; rig: string }
 
-/** The hub address a participant listed by the account is bound at: the account's own `seat` when it sends one, otherwise
- *  `<name>@<rig>` as before. A seat that isn't a `<member>@<rig>` address on the account's rig binds nothing, and is never
- *  replaced by `<name>@<rig>`: on a hub several accounts share, that address can be another account's participant. */
+/** The hub address a participant listed by the account is bound at: the account's own `seat` when it sends a
+ *  `<member>@<rig>` address on the answer's rig, otherwise `<name>@<rig>` as before (absent, null or anything else). The
+ *  check is the address's form and rig, not who owns it: a well-formed address on that rig is taken as the account's. */
 function accountHubSeat(seat: unknown, name: string, rig: string): string {
-  if (seat === undefined || seat === null) return `${name}@${rig}`;
-  if (isHubSeat(seat) && seat.trim().slice(seat.trim().indexOf("@") + 1) === rig) return seat.trim();
-  const sent = typeof seat === "string" ? JSON.stringify(seat.slice(0, 100)) : `a ${typeof seat} value`;
-  throw new NetworkBindingError("account_unexpected", `The account sent ${sent} as ${name}'s hub address, which isn't a <member>@<rig> address on its rig ${rig}, so nothing was bound. Ask the account to correct it, then connect again.`, 502);
+  return isHubSeat(seat) && seat.trim().slice(seat.trim().indexOf("@") + 1) === rig ? seat.trim() : `${name}@${rig}`;
 }
 
 export type AccountFetch = (url: string, init: { method: string; headers: Record<string, string>; body: string; redirect: "error"; signal: AbortSignal })
