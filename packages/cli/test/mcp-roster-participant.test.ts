@@ -30,14 +30,14 @@ function rosters(members: unknown[]) {
   return folder;
 }
 
-async function connect(folder: string, external: boolean, representative: string | null = null) {
+async function connect(folder: string, external: boolean, representative: string | null = null, nodes?: unknown[]) {
   const get = vi.fn(async (p: string): Promise<DaemonResponse> => {
     if (p === "/healthz") return { status: 200, data: { selfHostId: "host-a" } };
     if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "team" }] };
     if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "team" }, nodes: [{ id: "n1", logicalId: "net.chatgpt" },
       { id: "n2", logicalId: "dev.impl" }], edges: [], representative } };
     // A terminal-attached network seat is an infrastructure node: that's its own kind, which a roster never changes.
-    if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: [
+    if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: nodes ?? [
       { logicalId: "net.chatgpt", canonicalSessionName: "net-chatgpt@team", hostSelfId: "host-a", nodeKind: "infrastructure", agentActivity: { state: "idle" } },
       { logicalId: "dev.impl", canonicalSessionName: "dev-impl@team", hostSelfId: "host-a", nodeKind: "agent", agentActivity: { state: "idle" } },
     ] };
@@ -172,6 +172,33 @@ describe("a roster entry's declared lead_of", () => {
         }
       } finally { await s.close(); }
     }
+  });
+
+  // One declaration per seat and team: a seat in two rosters with two teams is two, and one node under both its names is one.
+  const secondRoster = (folder: string, members: unknown[]) =>
+    fs.writeFileSync(path.join(folder, "ops.json"), JSON.stringify({ ...roster(members), id: "ops" }));
+
+  it("shows no lead when one seat declares a different team in another roster, and the note names both", async () => {
+    const folder = rosters([member(at("net-chatgpt"), { lead_of: "Sam's team" })]);
+    secondRoster(folder, [member(at("net-chatgpt"), { lead_of: "Ops" })]);
+    const s = await connect(folder, false);
+    try {
+      const team = await s.team();
+      expect(team.lead).toBeNull();
+      expect(team.leadNote).toContain(`Several roster entries declare lead_of (${at("net-chatgpt")} for Sam's team, ${at("net-chatgpt")} for Ops), so none is shown as the lead.`);
+    } finally { await s.close(); }
+  });
+
+  it("counts one node named by its session in one roster and its logical address in another, for the same team, once", async () => {
+    const folder = rosters([member(at("chatgpt-seat"), { lead_of: "Sam's team" })]);
+    secondRoster(folder, [member(at("net-chatgpt"), { lead_of: "Sam's team" })]);
+    const s = await connect(folder, false, null, [
+      { logicalId: "net.chatgpt", canonicalSessionName: at("chatgpt-seat"), hostSelfId: "host-a", nodeKind: "infrastructure", agentActivity: { state: "idle" } },
+      { logicalId: "dev.impl", canonicalSessionName: at("dev-impl"), hostSelfId: "host-a", nodeKind: "agent", agentActivity: { state: "idle" } },
+    ]);
+    try {
+      expect((await s.team()).lead).toEqual({ session: at("chatgpt-seat"), logicalId: "net.chatgpt", declared: true, team: "Sam's team" });
+    } finally { await s.close(); }
   });
 
   it("keeps a real delegation root as the lead, undeclared", async () => {
