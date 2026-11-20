@@ -161,12 +161,26 @@ kind: slice
 composition: { mission: ../../mission.yaml }
 execution:
   depends_on: ["OPR.1.0.0.1"]
+  wave: 1
 `);
     const subject = runtime();
     const result = subject.runtime.compileLifecycle(missionDir, "release-op");
     expect(result.eligible).toBe(false);
     expect(result.workflowSpec).toBeNull();
     expect(result.unknowns).toContain("slices/01-build/slice.yaml: execution contract missing");
+    subject.db.close();
+  });
+
+  it("names the missing actor_role of an authored step contract", () => {
+    writeFileSync(join(missionDir, "slices", "01-build", "slice.yaml"), `schema: openrig.slice/v0alpha1
+kind: slice
+composition: { mission: ../../mission.yaml }
+execution:
+  preferred_targets: [builder@rig]
+  depends_on: ["OPR.1.0.0.1"]
+`);
+    const subject = runtime();
+    expect(() => subject.runtime.compileLifecycle(missionDir, "release-op")).toThrow(/execution\.actor_role must be a non-empty string/);
     subject.db.close();
   });
 
