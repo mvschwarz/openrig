@@ -67,6 +67,23 @@ describe("PsProjectionService", () => {
     expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1, attentionCount: 1 });
   });
 
+  it("keeps attention on a held seat whose earlier restore already ended failed", () => {
+    const rigId = seedRig("held-after-failure");
+    seedSession(seedNode(rigId, "worker"), "running");
+    const held = seedNode(rigId, "optional.worker");
+    // An earlier restore named this seat and ended `failed`; it recorded no startup error, so only
+    // the restore outcome carries the fact. A later subset launch leaves the seat out and writes
+    // `node.held` for it without recording any result.
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'restore.completed', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ result: { nodes: [{ nodeId: held, status: "failed" }] } }));
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+
+    const row = () => attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db }).find((n) => n.nodeId === held)!;
+    expect(row()).toMatchObject({ heldReason: "on demand", restoreOutcome: "failed", needsAttention: true, hasAssignedWork: false });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1, attentionCount: 1 });
+  });
+
   it("does not count all held seats as running or hide an unexpected detached seat", () => {
     const rigId = seedRig("held-only");
     const held = seedNode(rigId, "optional.worker");

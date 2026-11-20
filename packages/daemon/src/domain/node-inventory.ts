@@ -1548,7 +1548,8 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     (`hookOrPaneActivity`), which sees a prompt no hook reported. Stale hooks
  *     arrive as `unknown` and contribute nothing — never guessed. The rig total
  *     and the seat row must not disagree about the same seat.
- *   - a held seat, except an unlaunched hold with no assigned work
+ *   - a held seat, except an unlaunched hold with no assigned work and no recorded
+ *     launch or restore result (`isUnlaunchedHeldWithoutWork`)
  *   - a recorded startup error (`latestError` present)
  *   - an occupant a handover started without a required startup file (`startedWithoutRequired`, #2456)
  */
@@ -1567,11 +1568,19 @@ export function seatNeedsAttention(
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
 }
 
-/** An explicit hold on a never-launched seat with no outstanding queue work. */
+/**
+ * An explicit hold on a never-launched seat with no outstanding queue work.
+ *
+ * `restoreOutcome === "n-a"` is the existing fact for "no launch or restore result has ever
+ * named this seat". It keeps a seat that an earlier launch or restore ended `failed` or
+ * `awaiting-decision` out of the exemption: a later subset launch only writes `node.held`
+ * for the seats it did not select and records no result for them, so without this a failure
+ * with no session left and no startup error would silently lose its attention.
+ */
 export function isUnlaunchedHeldWithoutWork(entry: NodeInventoryEntry, assignedWorkCount: number | undefined): boolean {
   return entry.heldReason != null && entry.sessionStatus === null && entry.storedSessionStatus === null
     && entry.attachmentType !== "external_cli" && (entry.canonicalSessionName != null || deriveCanonicalFromEntry(entry) != null)
-    && assignedWorkCount === 0;
+    && entry.restoreOutcome === "n-a" && assignedWorkCount === 0;
 }
 
 /**
