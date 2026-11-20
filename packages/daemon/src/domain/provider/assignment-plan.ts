@@ -112,11 +112,18 @@ function unchanged(seat: PlanSeatFacts, account: AccountRef): boolean {
   return seat.configured?.source === "registry" && seat.configured.profileRef === account.login && seat.codexHome === account.codexHome;
 }
 
+/** A Codex seat switches in place only on Linux, on the home the account's login is saved in, and not when it moves to a
+ *  named account home instead. */
+function codexInPlace(seat: PlanSeatFacts, input: AssignmentPlanInput): boolean {
+  return !input.accountHome && input.platform === "linux" && seat.codexHome === input.account.codexHome;
+}
+
 function continuity(seat: PlanSeatFacts, input: AssignmentPlanInput): string {
   const { account } = input;
   if (account.provider === "claude") {
-    return seat.running === false ? "next launch: the reference is saved now, and the seat's next launch resumes its conversation on it"
-      : "in place: the seat is relaunched in its own pane and keeps its conversation";
+    if (seat.running === null) return "unknown: the daemon can't tell whether the seat is running, so whether it keeps its conversation in place or at its next launch";
+    return seat.running ? "in place: the seat is relaunched in its own pane and keeps its conversation"
+      : "next launch: the reference is saved now, and the seat's next launch resumes its conversation on it";
   }
   if (input.accountHome) return `fresh successor with handover, on ${input.accountHome}`;
   if (seat.codexHome !== account.codexHome) return `unsupported in place: the seat runs on ${seat.codexHome}, and this login is saved in ${account.codexHome}`;
@@ -156,12 +163,12 @@ export async function planAssignment(input: AssignmentPlanInput, precheck: (seat
     });
   }
 
-  // Codex: the switch changes a home's active login, so every seat on that home moves with it. Seats moving to a named
-  // account home don't change a shared home.
+  // Codex: an in-place switch changes a home's active login, so every seat on that home moves with it. Only seats that
+  // switch in place change a home: not on macOS, not a seat on another home, not a move to a named account home.
   const codexHomes: AssignmentPlan["codexHomes"] = [];
-  if (account.provider === "codex" && !input.accountHome) {
+  if (account.provider === "codex") {
     const changing = new Set(rows.filter((r) => r.effect === "change").map((r) => r.seat));
-    const homes = [...new Set(input.seats.filter((s) => s.rigName === input.rig && changing.has(s.session) && s.codexHome).map((s) => s.codexHome!))];
+    const homes = [...new Set(input.seats.filter((s) => s.rigName === input.rig && changing.has(s.session) && codexInPlace(s, input)).map((s) => s.codexHome!))];
     for (const home of homes.sort()) {
       codexHomes.push({ home, seats: input.seats.filter((s) => s.runtime === "codex" && s.codexHome === home).map((s) => ({
         seat: s.session, rig: s.rigName,
