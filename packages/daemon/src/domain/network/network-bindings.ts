@@ -130,8 +130,13 @@ export function validHubUrl(raw: unknown, allowHttp: boolean): string {
   return url.toString();
 }
 
+/** A participant's address in a hub: `<member>@<rig>`. */
+export function isHubSeat(raw: unknown): raw is string {
+  return typeof raw === "string" && /^[^@\s]+@[^@\s]+$/.test(raw.trim());
+}
+
 function validHubSeat(raw: unknown): string {
-  if (typeof raw !== "string" || !/^[^@\s]+@[^@\s]+$/.test(raw.trim())) {
+  if (!isHubSeat(raw)) {
     throw new NetworkBindingError("invalid_hub_seat", "The hub participant is its address in the hub, member@rig.");
   }
   return raw.trim();

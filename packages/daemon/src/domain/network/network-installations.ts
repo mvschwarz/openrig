@@ -10,7 +10,7 @@ import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { NetworkBindingError, readPrivateToken, writePrivateToken, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
+import { isHubSeat, NetworkBindingError, readPrivateToken, writePrivateToken, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 
 export interface NetworkInstallation {
   id: string;
@@ -61,8 +61,19 @@ export function accountRemoval(binding: NetworkBinding, accountInstallationNow: 
 /** The command's time with the account ran out before a call was sent. */
 class NotSent extends NetworkBindingError {}
 
-/** What the account answers for the installation's participant list. */
-interface Identities { participants: Array<{ name: string; state?: string; bearer?: string }>; mcp: string; rig: string }
+/** What the account answers for the installation's participant list. A participant's `seat`, when the account sends one,
+ *  is its own address in the hub (`<member>@<rig>`), which can differ from the name listed here. */
+interface Identities { participants: Array<{ name: string; state?: string; bearer?: string; seat?: unknown }>; mcp: string; rig: string }
+
+/** The hub address a participant listed by the account is bound at: the account's own `seat` when it sends one, otherwise
+ *  `<name>@<rig>` as before. A seat that isn't a `<member>@<rig>` address on the account's rig binds nothing, and is never
+ *  replaced by `<name>@<rig>`: on a hub several accounts share, that address can be another account's participant. */
+function accountHubSeat(seat: unknown, name: string, rig: string): string {
+  if (seat === undefined || seat === null) return `${name}@${rig}`;
+  if (isHubSeat(seat) && seat.trim().slice(seat.trim().indexOf("@") + 1) === rig) return seat.trim();
+  const sent = typeof seat === "string" ? JSON.stringify(seat.slice(0, 100)) : `a ${typeof seat} value`;
+  throw new NetworkBindingError("account_unexpected", `The account sent ${sent} as ${name}'s hub address, which isn't a <member>@<rig> address on its rig ${rig}, so nothing was bound. Ask the account to correct it, then connect again.`, 502);
+}
 
 export type AccountFetch = (url: string, init: { method: string; headers: Record<string, string>; body: string; redirect: "error"; signal: AbortSignal })
   => Promise<{ status: number; json(): Promise<unknown> }>;
@@ -250,15 +261,17 @@ export class NetworkInstallationStore {
       if (this.listedNames(bindings, current).includes(name)) throw new NetworkBindingError("participant_already_connected", `${name} is already connected here.`, 409);
       const others = () => this.listedNames(bindings, current).filter((n) => n !== name);
       let answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
-      let bearer = answer.participants.find((p) => p.name === name)?.bearer;
-      if (!bearer) {
+      let listed = answer.participants.find((p) => p.name === name);
+      if (!listed?.bearer) {
         await this.setParticipants(bindings, current, others, until);
         answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
-        bearer = answer.participants.find((p) => p.name === name)?.bearer;
-        if (!bearer) throw new NetworkBindingError("account_unexpected", `The account listed ${name} without a bearer, twice.`, 502);
+        listed = answer.participants.find((p) => p.name === name);
+        if (!listed?.bearer) throw new NetworkBindingError("account_unexpected", `The account listed ${name} without a bearer, twice.`, 502);
       }
+      // The bearer and the hub address come from the same answer.
+      const { bearer, seat } = listed;
       try {
-        return bindings.create({ session: input.session, hubUrl: answer.mcp, hubSeat: `${name}@${answer.rig}`, token: bearer,
+        return bindings.create({ session: input.session, hubUrl: answer.mcp, hubSeat: accountHubSeat(seat, name, answer.rig), token: bearer,
           allowHttp: current.allowHttp, installation: { id: current.id, name, account: current.installationId } });
       } catch (error) {
         // Best effort: nothing here holds that bearer, so the account is asked to stop listing the name. If that fails,

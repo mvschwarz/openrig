@@ -13,6 +13,7 @@ import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { readNetworkCredential, readPrivateToken } from "../src/domain/network/network-bindings.js";
 import { networkInstallationKeyFile, type AccountFetch } from "../src/domain/network/network-installations.js";
+import { networkLocalItemId } from "../src/domain/network/network-connector.js";
 import { networkRoutes } from "../src/routes/network.js";
 
 /** Makes removing an existing path with this ending fail, the way a busy file does; and moving one, the way a read-only
@@ -56,6 +57,10 @@ class FakeAccount {
   loseNext = false;
   down = false;
   mcp = "https://account.example/mcp";
+  /** The hub rig the account answers with. */
+  readonly rig = "acct";
+  /** A participant's own hub address the account sends with its name, when set. */
+  readonly seats = new Map<string, unknown>();
   /** The next participant lists the account can't apply, because something else changed the installation. */
   dropFails = 0;
   /** How long a participant list waits before it's applied, so concurrent requests overlap. */
@@ -95,14 +100,15 @@ class FakeAccount {
       for (const [name, entry] of this.names) if (!list.includes(name)) entry.state = "revoked";
       const participants = list.map((name) => {
         const entry = this.names.get(name);
-        if (entry?.state === "connected") return { name, state: "connected" };
+        const seat = this.seats.has(name) ? { seat: this.seats.get(name) } : {};
+        if (entry?.state === "connected") return { name, state: "connected", ...seat };
         const gen = (entry?.gen ?? 0) + 1;
         this.names.set(name, { gen, state: "connected" });
-        return { name, state: "connected", bearer: `bear-${name}-${gen}` };
+        return { name, state: "connected", bearer: `bear-${name}-${gen}`, ...seat };
       });
       if (this.downAfterPuts !== null && this.puts.length >= this.downAfterPuts) this.down = true;
       if (this.loseNext) { this.loseNext = false; throw new Error("socket hang up"); }
-      return reply(200, { participants, mcp: this.mcp, rig: "acct" });
+      return reply(200, { participants, mcp: this.mcp, rig: this.rig });
     }
     return reply(404, { error: "not_found" });
   };
@@ -552,4 +558,75 @@ it("a replace whose old key's backup can't be removed after the switch still end
   expect(replaced.data.replaced.problems).toEqual([expect.stringMatching(/backup at .*key\.json\.prev couldn't be removed \(EBUSY/)]);
   expect(readPrivateToken(networkInstallationKeyFile(home, first.data.id), () => "missing")).toBe(account.key);
   expect((await status()).bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "disconnected", accountRemoval: "old-installation" });
+});
+
+/** A local seat on the fixture's rig, named from its member. */
+function localSeat(member: string): string {
+  const session = `${member}@lab`;
+  seat(session);
+  return session;
+}
+
+// An account whose participants share one hub rig gives each its own hub address, separate from the name a person connects as.
+it("a participant's hub address from the account is bound; without one it's <name>@<rig> as before; the account still lists the name", async () => {
+  const a = localSeat("a"), b = localSeat("b");
+  await enroll();
+  const own = `cus-a1-reviewer@${account.rig}`;
+  account.seats.set("reviewer", own);
+  const reviewer = await connect(a, "reviewer");
+  expect(reviewer).toMatchObject({ status: 201, data: { hubSeat: own, participantName: "reviewer", state: "active" } });
+  expect(readNetworkCredential(home, reviewer.data.id)).toBe("bear-reviewer-1");
+  const beta = await connect(b, "beta");
+  expect(beta.data.hubSeat).toBe(`beta@${account.rig}`);
+  expect(account.puts.at(-1)).toEqual(["reviewer", "beta"]);
+  const listed = await (await app.request("/api/network/bindings")).json() as { bindings: Array<{ hubSeat: string }> };
+  expect(listed.bindings.map((b) => b.hubSeat)).toEqual([own, `beta@${account.rig}`]);
+});
+
+it.each([
+  ["on another rig", (rig: string) => `cus-a1-reviewer@${rig}-other`, "cus-a1-reviewer@"],
+  ["that isn't <member>@<rig>", () => "cus-a1-reviewer", "\"cus-a1-reviewer\""],
+  ["that isn't text", () => 42, "a number value"],
+])("a hub address %s binds nothing and never falls back to <name>@<rig>: the connect names it, and the account drops the name", async (_, sent, shown) => {
+  const a = localSeat("a");
+  await enroll();
+  account.seats.set("reviewer", sent(account.rig));
+  const refused = await connect(a, "reviewer");
+  expect(refused).toMatchObject({ status: 502, data: { error: "account_unexpected" } });
+  expect(refused.data.message).toContain(shown);
+  expect(refused.data.message).toContain("nothing was bound");
+  expect((await status()).bindings).toEqual([]);
+  expect(account.puts.at(-1)).toEqual([]);
+  expect(account.names.get("reviewer")?.state).toBe("revoked");
+});
+
+it("after a lost answer, the hub address is the one in the answer that carries the new bearer", async () => {
+  const a = localSeat("a");
+  await enroll();
+  account.seats.set("reviewer", `cus-a1-reviewer@${account.rig}`);
+  account.loseNext = true;
+  expect(await connect(a, "reviewer")).toMatchObject({ status: 503, data: { error: "account_unavailable" } });
+  const moved = `cus-a1-reviewer-2@${account.rig}`;
+  account.seats.set("reviewer", moved);
+  const again = await connect(a, "reviewer");
+  expect(again).toMatchObject({ status: 201, data: { hubSeat: moved } });
+  expect(readNetworkCredential(home, again.data.id)).toBe("bear-reviewer-2");
+});
+
+it("reconnecting at the same hub address lands on the same local items; a new address doesn't claim them, and ended bindings keep theirs", async () => {
+  const a = localSeat("a");
+  await enroll();
+  const own = `cus-a1-reviewer@${account.rig}`;
+  account.seats.set("reviewer", own);
+  const first = (await connect(a, "reviewer")).data;
+  expect((await post(`/bindings/${first.id}/disconnect`, {})).status).toBe(200);
+  const second = (await connect(a, "reviewer")).data;
+  expect(second.hubSeat).toBe(own);
+  expect(networkLocalItemId(second as never, "hub-item-1")).toBe(networkLocalItemId(first as never, "hub-item-1"));
+  expect((await post(`/bindings/${second.id}/disconnect`, {})).status).toBe(200);
+  account.seats.set("reviewer", `cus-a1-reviewer-new@${account.rig}`);
+  const third = (await connect(a, "reviewer")).data;
+  expect(networkLocalItemId(third as never, "hub-item-1")).not.toBe(networkLocalItemId(first as never, "hub-item-1"));
+  const rows = db.prepare("SELECT id, hub_seat FROM network_bindings ORDER BY created_at, id").all() as Array<{ id: string; hub_seat: string }>;
+  expect(rows.filter((r) => r.id !== third.id).map((r) => r.hub_seat)).toEqual([own, own]);
 });
