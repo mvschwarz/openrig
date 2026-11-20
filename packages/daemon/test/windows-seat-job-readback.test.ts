@@ -21,7 +21,7 @@ function fixture() {
     row(30, 20, `"${shell}"`, "2026-01-01T00:00:02.000Z")];
 }
 
-describe("Windows seat Job pane readback", () => {
+describe.runIf(process.platform === "win32")("Windows seat Job pane readback", () => {
   it("requires the scoped descendant and a live Job member, then rechecks birth identity", async () => {
     const rows = fixture(), inspect = vi.fn(async (guardian: number, target?: number) => {
       if (guardian !== 20 || target !== 30) throw new Error("not a member");
@@ -45,7 +45,9 @@ it.skipIf(process.platform !== "win32")("reads a real scoped guardian and Job me
   const dir = mkdtempSync(join(tmpdir(), "openrig-seat-readback-"));
   const marker = join(dir, "marker"), target = join(dir, "target.ps1");
   const file = join(dir, `openrig-tmux-send-${process.pid}-${randomUUID()}.txt`);
-  writeFileSync(marker, "pending"); writeFileSync(target, "Start-Sleep -Seconds 8\n");
+  // The readback takes two process censuses plus a PowerShell exchange; a short-lived target can exit
+  // between them, so the target is held well past the test's own budget.
+  writeFileSync(marker, "pending"); writeFileSync(target, "Start-Sleep -Seconds 25\n");
   const shell = join(process.env.SystemRoot!, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const launch = windowsScopedLaunch(`"${shell}" -NoProfile`, `& ${powershellQuote(target)}`,
     { SystemRoot: process.env.SystemRoot, TEMP: dir, TMP: dir }, file, false, undefined, { memoryMax: 268435456, marker });

@@ -21,7 +21,7 @@ import {
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { observeClaudePaneRuntime, verifyPaneIdleShell, verifyClaudePaneProcess, listNativeProcessesOrThrow, listNativeProcesses, type NativeProcessLister } from "./native-process-lineage.js";
-import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { recognizedWindowsClaudeScript, resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { renderWindowsLaunch } from "../adapters/windows-launch.js";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { validateResumeToken } from "./resume-token-validation.js";
@@ -421,7 +421,11 @@ export class ResumeMetadataRefresher {
       try {
         const selected = resolveWindowsProviderCommand("claude", process.env, resolveProbeCwd(cwd, this.homeDir));
         nativeExecutable = selected.command;
-        nativeScript = selected.prefix[0];
+        // A script prefix is only a launch target when it is the installed entry itself, proven the same way
+        // the managed continuation proves it. Anything else (an npm shim, an unrelated JS file) cannot show a
+        // conversation, so no probe is created for it.
+        nativeScript = selected.prefix[0] ? recognizedWindowsClaudeScript(selected.prefix[0]) ?? undefined : undefined;
+        if (selected.prefix[0] && !nativeScript) return "inconclusive";
         command = renderWindowsLaunch(`${[nativeExecutable, ...selected.prefix].map(shellQuote).join(" ")}${resume.slice("claude".length)}`,
           { CLAUDE_CONFIG_DIR: configDir ?? this.claudeConfigDir });
       } catch { return "inconclusive"; }

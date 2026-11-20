@@ -19,8 +19,11 @@ describe("private metadata probe argv routing", () => {
     vi.spyOn(tmux, "listPanes").mockResolvedValue([]);
     expect(await tmux.createProbeSession(name)).toMatchObject({ ok: false, code: "guard_target_unknown" });
     const cleanup = argv.mock.calls.find(([args]) => args.includes("if-shell"))?.[0];
-    expect(cleanup).toEqual(["tmux", "-t", `=${name}`, "if-shell", "-F", "-t", "$5",
-      `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},123}}`, "kill-session -t '$5'", "display-message -p kept"]);
+    // The entry is selected by its exact physical target, both ids are checked in that same connection, and
+    // the bare `kill-session` kills SELF — the id is never re-resolved as a name.
+    expect(cleanup).toEqual(["tmux", "-t", `=${name}`, "if-shell", "-F",
+      `#{&&:#{&&:#{==:#{session_name},${name}},#{==:#{session_created},123}},#{==:#{session_id},$5}}`,
+      "kill-session", "display-message -p kept"]);
     expect(legacy).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 
-describe("psmux environment command transport", () => {
+describe.runIf(process.platform === "win32")("psmux environment command transport", () => {
   it("creates the named stock session without values in argv and persists its private session environment", async () => {
     const calls: string[][] = [], content: string[] = [];
     const adapter = new TmuxAdapter(async () => { throw new Error("no shell transport"); }, {

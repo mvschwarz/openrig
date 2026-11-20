@@ -58,7 +58,7 @@ function fixture(selection?: "none", ownHome = true) {
   return { tmux, refresh, status, config, root };
 }
 
-describe("native Windows shutdown resume probe", () => {
+describe.runIf(process.platform === "win32")("native Windows shutdown resume probe", () => {
   it.each([undefined, "none"] as const)("uses a native child environment and verifies saved MCP choice %s", async selection => {
     const f = fixture(selection); await f.refresh();
     expect(f.status()).toMatchObject({ resumeToken: "fixture-history", resumeLastProbeStatus: "resumable" });

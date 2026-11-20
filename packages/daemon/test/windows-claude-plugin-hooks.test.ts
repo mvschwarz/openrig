@@ -47,7 +47,12 @@ it("preserves the complete shipped event/group/metadata vocabulary", () => {
       });
     });
   }
-  expect(count).toBe(13);
+  // Derived from the shipped manifest so the assertion tracks it, rather than a count that goes stale
+  // the next time a hook is added.
+  const shipped = Object.values(original.hooks as Record<string, Array<{ hooks: unknown[] }>>)
+    .flatMap((groups) => groups.flatMap((group) => group.hooks)).length;
+  expect(count).toBe(shipped);
+  expect(shipped).toBeGreaterThan(0);
   expect(fs.readFileSync(manifestPath, "utf8")).toBe(source);
 });
 
