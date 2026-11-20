@@ -116,7 +116,22 @@ status output in a transcript or file. Evidence shares the observation's
 five-minute lifetime and existing seat/actor limits, is discarded lazily on the
 next observation/status read after expiry, and is lost on restart. No rule,
 permission/configuration write, hook decision, edited input, prompt submission
-or new attention/delivery behavior is produced.
+or new attention behavior is produced. Its one delivery effect follows.
+
+**Send readiness.** A request from the seat's main session that's newer than its
+latest Stop, running or idle hook, and not yet settled by that session's later
+tool batch, stops that hook from narrowing the current-prompt read for an
+ordinary send or a queue wake. The screen still decides: a dialog that read
+positively recognizes holds the send before any text or Enter, as it does past
+the send window. An ordinary input box, an unreadable pane, a subagent's
+request, a replaced occupant or an expired observation leaves delivery as it
+was. The request isn't evidence that a dialog is open: a hook or host can decide
+a permission request, or answer an MCP elicitation, with nothing displayed.
+Claude's `Elicitation` hook works the same way, settled by `ElicitationResult`
+or a later tool batch. Neither event changes activity or attention, and only
+the actor and time are kept: no server message, form field or response. A
+dialog the current-prompt read doesn't recognize still can't be told apart from
+ordinary input.
 
 Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
 is treated as main, a valid ID identifies a subagent or in-process teammate, and
@@ -125,10 +140,11 @@ no live PermissionRequest capture qualifies that convention on an installed nati
 version. A hook denial without a source-bound guard receipt has unknown origin.
 This diagnostic adds no guard collector, permission decision or attention policy.
 
-The new PermissionRequest diagnostic is optional for activity-hook readiness.
+The PermissionRequest diagnostic and the `Elicitation`/`ElicitationResult` pair
+are optional for activity-hook readiness.
 Every preexisting required event, relay asset and explicit hook-disable check
 still applies. An older installed plugin at the same manifest version retains
-its bytes and may not send this event: plugin-only delivery needs a future normal
+its bytes and may not send these events: plugin-only delivery needs a future normal
 maintainer release refresh, and managed delivery needs normal reprojection. A
 manifest or green readiness check does not prove live hook execution. Raw tool
 arguments and provider reason text are withheld; diagnostic evidence is bounded,
