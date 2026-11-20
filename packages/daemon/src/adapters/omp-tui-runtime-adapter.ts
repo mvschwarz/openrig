@@ -185,6 +185,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     const paths = binding.tmuxSession ? this.launcher.paths(binding.tmuxSession) : null;
     const previousPlugins = new Set(binding.tmuxSession ? this.launcher.pluginRoots(binding.tmuxSession).map(root => nodePath.basename(root)) : []);
     const skills = binding.seatSkillsRoot ?? (paths && nodePath.join(paths.agentDir, "skills"));
+    const pluginIds = new Set(plan.entries.filter(entry => entry.category === "plugin").map(entry => entry.effectiveId));
     const selectedSkills = new Set(plan.entries.filter(entry => entry.category === "skill").map(entry => entry.effectiveId));
     if (paths) {
       this.requireWritable(paths.seatRoot, paths.selectedPluginsPath);
@@ -209,10 +210,10 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
           warnings.push(`omp: kept edited skill ${entry.effectiveId}`);
           continue;
         }
-        if (entry.category === "plugin" && !this.pluginAppliesToOmp(entry)) {
+        if (entry.category === "plugin" && !this.pluginAppliesToOmp(entry, previousPlugins.has(ompPluginDirName(entry.effectiveId)))) {
           const root = nodePath.join(entry.absolutePath, "skills");
           let copied = false;
-          for (const id of this.topLevelEntries(root)) {
+          for (const id of this.topLevelEntries(root, true)) {
             if (!binding.tmuxSession || !this.fs.exists(nodePath.join(root, id, "SKILL.md"))) continue;
             if (plan.entries.some(other => other.category === "skill" && other.effectiveId === id)) continue;
             if (!skills) continue;
@@ -221,8 +222,9 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
             const owner = nodePath.join(target, ".openrig-plugin");
             this.requireWritable(skills, owner);
             const source = nodePath.join(root, id);
-            const receipt = this.fs.exists(owner) ? this.fs.readFile(owner) : "";
-            if (this.fs.exists(target) && !this.matchesSkillReceipt(target, receipt, entry.effectiveId, source)) {
+            const receipt = this.readSkillReceipt(owner);
+            if (this.fs.exists(target) && (!receipt || (receipt.id !== entry.effectiveId && pluginIds.has(receipt.id))
+              || receipt.digest !== this.treeDigest(target))) {
               warnings.push(`omp: kept existing skill ${id}; plugin ${entry.effectiveId} did not overwrite it`);
               continue;
             }
@@ -240,7 +242,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         }
         else skipped.push(entry.effectiveId);
       } catch (err) {
-        if (entry.category === "plugin" && this.pluginAppliesToOmp(entry)) {
+        if (entry.category === "plugin") {
           const dir = ompPluginDirName(entry.effectiveId);
           if (previousPlugins.has(dir)) selectedPlugins.push(dir);
         }
@@ -258,17 +260,10 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         if (selectedSkills.has(id) || !this.fs.exists(owner)) continue;
         try {
           this.requireWritable(skills, owner);
-          const receipt = this.fs.readFile(owner).trim();
-          if (this.matchesSkillReceipt(target, receipt)) this.remove(target);
-          else if (receipt && !receipt.startsWith("{") && !receipt.startsWith("[") && this.fs.exists(nodePath.join(target, "SKILL.md"))) {
-            // ID-only receipts predate content hashes. Retire the directory intact, including possible operator edits.
-            const storage = nodePath.dirname(skills);
-            const recovery = nodePath.join(storage, "retired-plugin-skills", randomUUID(), id);
-            if (!insideSeatStorageFolder(storage, recovery)) throw new Error("linked or invalid recovery directory");
-            this.fs.mkdirp(nodePath.dirname(recovery));
-            this.rename(target, recovery);
-            warnings.push("omp: retired legacy portable skill " + id + "; its files are preserved at " + recovery);
-          } else warnings.push("omp: kept edited or unverified portable skill " + id);
+          const receipt = this.readSkillReceipt(owner);
+          if (receipt && pluginIds.has(receipt.id)) continue;
+          if (receipt && receipt.digest === this.treeDigest(target)) this.remove(target);
+          else warnings.push("omp: kept edited or unverified portable skill " + id);
         } catch (error) {
           warnings.push("omp: could not retire portable skill " + id + ": " + (error as Error).message);
         }
@@ -456,11 +451,13 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private topLevelEntries(dir: string): string[] {
-    if (!this.fs.listFiles || !this.fs.exists(dir)) return [];
+  private topLevelEntries(dir: string, requireInventory = false): string[] {
+    if (!requireInventory && !this.fs.exists(dir)) return [];
     try {
+      if (!this.fs.listFiles) throw new Error("Cannot list files in " + dir);
       return [...new Set(this.fs.listFiles(dir).map((file) => file.split(nodePath.sep)[0]!))].sort();
-    } catch {
+    } catch (error) {
+      if (requireInventory && ((error as NodeJS.ErrnoException).code !== "ENOENT" || this.fs.exists(dir))) throw error;
       return [];
     }
   }
@@ -498,7 +495,6 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     if (entry.category === "plugin") {
       // OMP loads a plugin as an extension package: a directory whose package.json declares its extension entries,
       // with its skills beside them. Foreign plugins' portable skills are handled separately.
-      if (!this.pluginAppliesToOmp(entry)) return false;
       const target = nodePath.join(paths.pluginsDir, ompPluginDirName(entry.effectiveId));
       this.requireWritable(paths.seatRoot, nodePath.join(target, "package.json"));
       this.replaceDirectory(target, stage => this.copyResource(entry.absolutePath, stage));
@@ -511,17 +507,13 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
 
   /** An explicit `plugin_type` names another runtime; `auto` (the default) applies when the plugin's package.json
    *  declares OMP extensions (`omp.extensions`, or Pi's `pi.extensions`, which OMP also loads). */
-  private pluginAppliesToOmp(entry: ProjectionEntry): boolean {
+  private pluginAppliesToOmp(entry: ProjectionEntry, previouslyNative: boolean): boolean {
     if (entry.pluginType && entry.pluginType !== "auto") return false;
     const manifest = nodePath.join(entry.absolutePath, "package.json");
-    if (!this.fs.exists(manifest)) return false;
-    try {
-      const parsed = JSON.parse(this.fs.readFile(manifest)) as { omp?: { extensions?: unknown }; pi?: { extensions?: unknown } };
-      const declared = (parsed.omp ?? parsed.pi)?.extensions;
-      return Array.isArray(declared) && declared.length > 0;
-    } catch {
-      return false;
-    }
+    if (!previouslyNative && !this.fs.exists(manifest)) return false;
+    const parsed = JSON.parse(this.fs.readFile(manifest)) as { omp?: { extensions?: unknown }; pi?: { extensions?: unknown } };
+    const declared = (parsed.omp ?? parsed.pi)?.extensions;
+    return Array.isArray(declared) && declared.length > 0;
   }
 
   private rename(source: string, dest: string): void {
@@ -573,13 +565,13 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     return hash.digest("hex");
   }
 
-  private matchesSkillReceipt(target: string, raw: string, pluginId?: string, source?: string): boolean {
+  private readSkillReceipt(marker: string): { id: string; digest: string } | null {
+    if (!this.fs.exists(marker)) return null;
+    const raw = this.fs.readFile(marker);
     try {
-      // Older installs recorded only the ID. Upgrade their receipt when all installed files still match the source.
-      if (source && raw === pluginId) return this.treeDigest(target) === this.treeDigest(source);
       const owner = JSON.parse(raw);
-      return typeof owner.id === "string" && (!pluginId || pluginId === owner.id) && owner.digest === this.treeDigest(target);
-    } catch { return false; }
+      return typeof owner?.id === "string" && typeof owner.digest === "string" ? owner : null;
+    } catch { return null; }
   }
 
   /** Copy a file or a directory tree into `targetDir`, keeping each file's mode. */

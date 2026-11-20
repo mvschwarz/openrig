@@ -154,8 +154,10 @@ export function createSeatReporter(options) {
         updatedAt: now(),
         ...patch,
       }));
+      return true;
     } catch {
       // The daemon reads a missing or stale sidecar as "not ready yet"; never fail the session over it.
+      return false;
     }
   };
 
@@ -258,9 +260,11 @@ export function createSeatReporter(options) {
     inputAvailable() { inputAvailable = true; },
     /** A managed paste is complete and staged through OMP's public editor API. */
     inputReceived(text, requestId) {
-      if (exited) return;
-      inputReceipt = { sequence: ++inputSequence, requestId, sha256: createHash("sha256").update(text).digest("hex") };
-      writeState();
+      if (exited) return false;
+      const receipt = { sequence: ++inputSequence, requestId, sha256: createHash("sha256").update(text).digest("hex") };
+      if (!writeState({ inputReceipt: receipt })) return false;
+      inputReceipt = receipt;
+      return true;
     },
     sessionStart(ctx) {
       exited = false;
@@ -385,13 +389,13 @@ export function createSeatReporter(options) {
 
 /** Send one body to the daemon's hook ingress. Null on any failure: a post is never retried or awaited by OMP. */
 export function createActivityPoster(endpoint, fetchImpl = globalThis.fetch) {
-  if (!endpoint || typeof fetchImpl !== "function") return async () => null;
-  const url = new URL("/api/activity/hooks", endpoint.baseUrl).toString();
+  const url = endpoint && URL.parse("/api/activity/hooks", endpoint.baseUrl);
+  if (!url || !["http:", "https:"].includes(url.protocol) || typeof fetchImpl !== "function") return async () => null;
   return async (body) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), POST_TIMEOUT_MS);
     try {
-      const response = await fetchImpl(url, {
+      const response = await fetchImpl(url.href, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
         body: JSON.stringify(body),
@@ -443,19 +447,20 @@ export default function openrigSeat(pi) {
         // detached composer while a selector owns Enter, so it cannot prove that this paste reached the editor.
         const marker = `OPENRIG_INPUT_${request.id}`;
         setImmediate(() => {
-          let staged = false;
+          let ownedText = marker;
+          let acknowledged = false;
           try {
             const current = JSON.parse(fs.readFileSync(`${seat.statePath}.input.json`, "utf8"));
             if (current.id !== request.id || current.expiresAt < Date.now() || ctx.ui.getEditorText() !== marker) return;
             // Only a focused editor that received our exact marker is replaced. This bypasses large-paste menus
             // and collapsed attachments for managed input, retaining the exact text the sender provided.
             ctx.ui.setEditorText(text);
-            staged = ctx.ui.getEditorText() === text;
-            if (staged) reporter.inputReceived(text, request.id);
+            ownedText = ctx.ui.getEditorText();
+            acknowledged = ownedText === text && reporter.inputReceived(text, request.id);
           } catch { /* No acknowledgement: the sender withholds Enter. */ }
           finally {
-            // Cancellation or an expired request can leave our focus probe in the live editor.
-            try { if (!staged && ctx.ui.getEditorText() === marker) ctx.ui.setEditorText(""); } catch { /* Editor disposed. */ }
+            // Remove only this request’s marker or staged value, including OMP’s normalized text.
+            try { if (!acknowledged && ctx.ui.getEditorText() === ownedText) ctx.ui.setEditorText(""); } catch { /* Editor disposed. */ }
           }
         });
         return { data: `\x1b[200~${marker}\x1b[201~` };

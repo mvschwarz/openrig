@@ -109,12 +109,12 @@ export const OMP_ENV_OPENRIG_VARS = [
  *  model's declared provider (with its endpoint, for a provider whose key belongs to one). Nothing else crosses. */
 export function ompForwardedEnvNames(model: string | undefined): string[] {
   const provider = providerFromModel(model);
-  const key = provider ? OMP_PROVIDER_ENV_VARS[provider] : undefined;
+  const key = provider && Object.hasOwn(OMP_PROVIDER_ENV_VARS, provider) ? OMP_PROVIDER_ENV_VARS[provider] : undefined;
   return [
     ...OMP_ENV_BASELINE_VARS,
     ...OMP_ENV_OPENRIG_VARS,
     ...(key ? [key] : []),
-    ...(provider ? OMP_PROVIDER_EXTRA_ENV_VARS[provider] ?? [] : []),
+    ...(provider && Object.hasOwn(OMP_PROVIDER_EXTRA_ENV_VARS, provider) ? OMP_PROVIDER_EXTRA_ENV_VARS[provider]! : []),
   ];
 }
 

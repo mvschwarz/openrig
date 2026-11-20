@@ -88,6 +88,13 @@ describe("OMP launches natively", () => {
     expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[3]).toEqual({ execInScript: true });
   });
 
+  it.each(["constructor", "__proto__", "toString"])("launches a provider named %s without forwarding another provider's environment", async provider => {
+    const { adapter, sent } = fakeSeat({});
+    await adapter.launchHarness(binding({ model: provider + "/model" }), { name: seat });
+    expect(sent()).toContain(provider + "/model");
+    expect(sent()).not.toContain("ANTHROPIC_API_KEY");
+  });
+
   it("forwards only named variables, by reference: the declared provider's key crosses, another provider's doesn't", async () => {
     const { adapter, sent } = fakeSeat({});
     await adapter.launchHarness(binding({ model: "anthropic/claude-example" }), { name: seat });
@@ -380,7 +387,7 @@ describe("OMP projection into the seat's own home", () => {
     await adapter.project(plan([entry({ category: "plugin", effectiveId: "portable-plugin", absolutePath: "/src/plugin", pluginType: "claude" })]), binding());
     expect(fs.readFile(`${paths.agentDir}/skills/portable/SKILL.md`)).toBe("updated instructions");
     await adapter.project(plan([entry({ category: "plugin", effectiveId: "competing-plugin", absolutePath: "/src/plugin", pluginType: "claude" })]), binding());
-    expect(JSON.parse(fs.readFile(paths.agentDir + "/skills/portable/.openrig-plugin")).id).toBe("portable-plugin");
+    expect(JSON.parse(fs.readFile(paths.agentDir + "/skills/portable/.openrig-plugin")).id).toBe("competing-plugin");
     await adapter.launchHarness(binding(), { name: seat });
     expect(sent()).not.toContain("portable-plugin");
   });
@@ -472,7 +479,8 @@ it.each(["skill", "plugin"])("preserves binary bytes and executable modes in %s 
     realFs.writeFileSync(nodePath.join(source, "SKILL.md"), "instructions");
     realFs.writeFileSync(nodePath.join(source, "package.json"), JSON.stringify({ omp: { extensions: ["index.js"] } }));
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0, 0x80]);
-    realFs.writeFileSync(nodePath.join(source, "asset"), bytes, { mode: 0o755 });
+    realFs.writeFileSync(nodePath.join(source, "asset"), bytes);
+    realFs.chmodSync(nodePath.join(source, "asset"), 0o755);
     const fsOps = {
       readFile: (p: string) => realFs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => realFs.writeFileSync(p, c),
       copyFile: realFs.copyFileSync, exists: realFs.existsSync, mkdirp: (p: string) => { realFs.mkdirSync(p, { recursive: true }); },

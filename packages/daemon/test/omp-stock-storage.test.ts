@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -94,34 +94,60 @@ describe("OMP managed skill writes on real storage", () => {
     expect(fs.readFileSync(path.join(skills, "extra/notes"), "utf8")).toBe("mine too");
   });
 
-  it("retires legacy ID-only copies on the first deselection, preserving edits and unrelated skills", async () => {
-    const skill = path.join(skills, "research");
-    write(path.join(skill, ".openrig-plugin"), "shared:portable");
-    write(path.join(skill, "SKILL.md"), "instructions");
-    write(path.join(skill, "notes"), "operator notes");
-    write(path.join(skills, "standalone/SKILL.md"), "my own skill");
-    const empty = { entries: [] } as never;
-    const result = await adapter.project(empty, binding());
-    expect(result.failed).toEqual([]);
-    expect(fs.existsSync(skill)).toBe(false);
-    expect(fs.readFileSync(path.join(skills, "standalone/SKILL.md"), "utf8")).toBe("my own skill");
-    const retired = path.join(path.dirname(skills), "retired-plugin-skills");
-    const saved = path.join(retired, fs.readdirSync(retired)[0]!, "research");
-    expect(result.warnings).toEqual([expect.stringContaining(saved)]);
-    expect(fs.readFileSync(path.join(saved, "notes"), "utf8")).toBe("operator notes");
-    expect(fs.readFileSync(path.join(saved, "SKILL.md"), "utf8")).toBe("instructions");
-    expect(await adapter.project(empty, binding())).toMatchObject({ failed: [] });
-    expect(fs.readdirSync(retired)).toHaveLength(1);
+  it("keeps operator edits and the current selected supplier when two plugins provide a skill", async () => {
+    const plan = (...ids: string[]) => ({ entries: ids.map(effectiveId => ({
+      category: "plugin", effectiveId, absolutePath: path.join(root, effectiveId),
+    })) }) as never;
+    for (const id of ["first", "second"]) write(path.join(root, id, "skills/shared/SKILL.md"), id);
+    const target = path.join(skills, "shared/SKILL.md");
+    await adapter.project(plan("first"), binding());
+    await adapter.project(plan("second", "first"), binding());
+    expect(fs.readFileSync(target, "utf8")).toBe("first");
+    await adapter.project(plan("second"), binding());
+    expect(fs.readFileSync(target, "utf8")).toBe("second");
+    write(target, "operator edit");
+    await adapter.project(plan("first"), binding());
+    expect(fs.readFileSync(target, "utf8")).toBe("operator edit");
   });
 
-  it("preserves the legacy copy when the recovery directory is linked", async () => {
-    write(path.join(skills, "research/.openrig-plugin"), "portable");
-    write(path.join(skills, "research/SKILL.md"), "instructions");
-    fs.symlinkSync(outside, path.join(path.dirname(skills), "retired-plugin-skills"));
-    const result = await adapter.project({ entries: [] } as never, binding());
-    expect(result.warnings?.join(" ")).toContain("research");
-    expect(fs.readFileSync(path.join(skills, "research/SKILL.md"), "utf8")).toBe("instructions");
-    expect(fs.readdirSync(outside)).toEqual([]);
+  it("keeps a selected supplier’s skills when its inventory fails and resumes projection after recovery", async () => {
+    const plugin = path.join(root, "portable");
+    const inventory = path.join(plugin, "skills");
+    const entry = { category: "plugin", effectiveId: "supplier", absolutePath: plugin };
+    const plan = { entries: [entry] } as never;
+    write(path.join(inventory, "research/SKILL.md"), "original");
+    expect((await adapter.project(plan, binding())).failed).toEqual([]);
+    const list = ompFiles.listFiles;
+    const spy = vi.spyOn(ompFiles, "listFiles").mockImplementation(dir => {
+      if (dir === inventory) throw new Error("unreadable inventory");
+      return list(dir);
+    });
+    try {
+      expect((await adapter.project(plan, binding())).failed).toEqual([{ effectiveId: "supplier", error: "unreadable inventory" }]);
+      expect(fs.readFileSync(path.join(skills, "research/SKILL.md"), "utf8")).toBe("original");
+    } finally { spy.mockRestore(); }
+    write(path.join(inventory, "research/SKILL.md"), "updated");
+    expect((await adapter.project(plan, binding())).failed).toEqual([]);
+    expect(fs.readFileSync(path.join(skills, "research/SKILL.md"), "utf8")).toBe("updated");
+  });
+
+  it("reports a broken manifest and keeps the last usable native package selected", async () => {
+    const plugin = path.join(root, "native");
+    write(path.join(plugin, "package.json"), JSON.stringify({ omp: { extensions: ["./index.js"] } }));
+    write(path.join(plugin, "index.js"), "version one");
+    const plan = { entries: [{ category: "plugin", effectiveId: "native", absolutePath: plugin }] } as never;
+    expect((await adapter.project(plan, binding())).failed).toEqual([]);
+    const installed = (await adapter.listInstalled(binding())).find(e => e.effectiveId === "native")!;
+    write(path.join(plugin, "package.json"), "{invalid json");
+    expect((await adapter.project(plan, binding())).failed).toEqual([{ effectiveId: "native", error: expect.any(String) }]);
+    expect(await adapter.listInstalled(binding())).toContainEqual(installed);
+    expect(fs.readFileSync(path.join(installed.installedPath, "index.js"), "utf8")).toBe("version one");
+    fs.unlinkSync(path.join(plugin, "package.json"));
+    expect((await adapter.project(plan, binding())).failed).toHaveLength(1);
+    expect(await adapter.listInstalled(binding())).toContainEqual(installed);
+    write(path.join(plugin, "package.json"), "{}");
+    expect((await adapter.project(plan, binding())).failed).toEqual([]);
+    expect(await adapter.listInstalled(binding())).not.toContainEqual(installed);
   });
 
   it("keeps distinct plugin IDs and replaces a selected package's whole tree", async () => {

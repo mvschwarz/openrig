@@ -1,15 +1,23 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { buildOmpLaunchCommand, ompSeatPaths } from "../src/adapters/omp-seat-protocol.js";
 const roots: string[] = [];
+function writeOmpFixture(executable: string, script: string) {
+  const entry = executable + ".cjs";
+  const node = executable + " node";
+  symlinkSync(process.execPath, node);
+  writeFileSync(entry, script);
+  writeFileSync(executable, ["#!/bin/sh", "exec " + shellQuote(node) + " " + shellQuote(entry) + ' "$@"', ""].join("\n"), { mode: 0o700 });
+}
 afterEach(() => { for (const p of roots.splice(0)) rmSync(p, { recursive: true, force: true }); });
 it.skipIf(process.platform === "win32")("executes the native command with literal paths and only the permitted environment", () => {
   const root = mkdtempSync(join(tmpdir(), "omp shell 'fixture-")); roots.push(root);
   const executable = join(root, "omp"), output = join(root, "observed.json");
-  writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(output)}, JSON.stringify({args:process.argv.slice(2),env:process.env}));\n`, { mode: 0o700 });
+  writeOmpFixture(executable, `require('node:fs').writeFileSync(${JSON.stringify(output)}, JSON.stringify({args:process.argv.slice(2),env:process.env}));`);
   const paths = ompSeatPaths(root, "seat"); mkdirSync(paths.seatRoot, { recursive: true });
   const command = buildOmpLaunchCommand({ ompCommand: executable, paths, cwd: root, launchId: "attempt", seatExtensionPath: join(root, "extension.js"),
     model: "anthropic/fixture", approvalMode: "always-ask", thinking: "high", sessionFile: join(root, "old session.jsonl") });
@@ -23,7 +31,7 @@ it.skipIf(process.platform === "win32")("executes the native command with litera
 it.skipIf(!existsSync("/bin/zsh"))("bypasses an interactive omp shell function with the resolved binary", () => {
   const root = mkdtempSync(join(tmpdir(), "omp-function-")); roots.push(root);
   const executable = join(root, "omp"), output = join(root, "started");
-  writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(output)}, 'native');\n`, { mode: 0o700 });
+  writeOmpFixture(executable, `require('node:fs').writeFileSync(${JSON.stringify(output)}, 'native');`);
   const command = buildOmpLaunchCommand({ ompCommand: executable, paths: ompSeatPaths(root, "seat"),
     cwd: root, launchId: "attempt", seatExtensionPath: join(root, "extension.js"), approvalMode: "yolo" });
   execFileSync("/bin/zsh", ["-f", "-c", `omp() { print 'omp -> [w]rap / [n]ormal / [q]uit?'; return 93; }; ${command}`],

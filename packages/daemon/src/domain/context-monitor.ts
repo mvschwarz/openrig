@@ -147,7 +147,8 @@ export class ContextMonitor {
         }
       }
 
-      if (session.runtime !== "pi") await this.normalizeStartupStatus(session, pass);
+      // Usage observation cannot establish that native OMP resumed the requested conversation.
+      if (session.runtime !== "pi" && session.runtime !== "omp-tui") await this.normalizeStartupStatus(session, pass);
       await this.maybeAutoCompact(session, observed);
     }
     this.drainProviderWindowSamples();

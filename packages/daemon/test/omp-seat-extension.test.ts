@@ -257,10 +257,10 @@ describe("OMP seat extension: wired into OMP", () => {
     const ctx = { ...ompContext(), ui: {
       onTerminalInput: (fn: typeof handler) => { handler = fn; return () => { handler = undefined; }; },
       getEditorText: () => editor,
-      setEditorText: (text: string) => { editor = text; },
+      setEditorText: (text: string) => { editor = text.replaceAll("\r\n", "\n").replaceAll("\t", "    "); },
     } };
     const handlers = load({ OPENRIG_SESSION_NAME: "test", OPENRIG_OMP_SEAT_STATE: statePath, OPENRIG_OMP_LAUNCH_ID: "launch",
-      OPENRIG_HOME: root, OPENRIG_URL: "", OPENRIG_ACTIVITY_HOOK_TOKEN: "" });
+      OPENRIG_HOME: root, OPENRIG_URL: "not a URL", OPENRIG_ACTIVITY_HOOK_TOKEN: "test" });
     const state = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
     const arm = (id: string, text: string) => fs.writeFileSync(`${statePath}.input.json`, JSON.stringify({
       id, launchId: "launch", expiresAt: Date.now() + 15_000, sha256: createHash("sha256").update(text).digest("hex"),
@@ -286,6 +286,20 @@ describe("OMP seat extension: wired into OMP", () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(editor).toBe(text);
       expect(state().inputReceipt).toMatchObject({ requestId: "one", sha256: createHash("sha256").update(text).digest("hex") });
+
+      for (const [id, payload] of [["tabs", "a\tb"], ["crlf", "a\r\nb"], ["write-failure", "exact"]]) {
+        editor = "";
+        arm(id, payload);
+        const tempState = statePath + "." + process.pid + ".tmp";
+        if (id === "write-failure") fs.mkdirSync(tempState);
+        dispatch("\x1b[200~" + payload + "\x1b[201~");
+        await new Promise(resolve => setImmediate(resolve));
+        if (id === "write-failure") fs.rmdirSync(tempState);
+        expect(editor).toBe("");
+        expect(state().inputReceipt.requestId).toBe("one");
+      }
+      handlers.get("session_switch")!({}, ctx);
+      expect(state().inputReceipt.requestId).toBe("one");
 
       for (const changedEditor of [false, true]) {
         editor = "";
