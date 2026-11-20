@@ -642,5 +642,45 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toEqual(before);
       expect(queueSnapshot()).toEqual(queueBefore);
     });
+
+    // `rig workflow abort` cancels the frontier packets; one an ordinary queue handoff already closed has nothing left to
+    // cancel, and canceling it would reopen a terminal row (terminal_reopen_requires_ack), leaving the instance waiting.
+    it("abort ends the instance without writing the handed-off packet's queue row again", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview();
+      const queueBefore = queueSnapshot();
+
+      const aborted = await runtime.abort({ instanceId, reason: "work moved elsewhere", actorSession: "orch@rig" });
+
+      expect(aborted).toMatchObject({ status: "aborted", closedPacketIds: [], alreadyClosedPacketIds: [reviewPacket] });
+      const after = runtime.instanceStore.getByIdOrThrow(instanceId);
+      expect(after.status).toBe("aborted");
+      expect(after.currentFrontier).toEqual([]);
+      expect(queueSnapshot()).toEqual(queueBefore);
+      expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("handed-off");
+      expect(queueRepo.getByIdOrThrow(successor).state).toBe("done");
+      // A successor the queue already closed is named, with no command that would hit the same terminal refusal.
+      expect(aborted.advisories).toHaveLength(1);
+      expect(aborted.advisories![0]).toContain(successor);
+      expect(aborted.advisories![0]).not.toContain("rig queue update");
+    });
+
+    it("abort leaves a live handoff successor as the queue left it and names it with the way to stop it", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview(false);
+
+      const res = await app.request(`/api/workflow/${instanceId}/abort`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "work moved elsewhere", actorSession: "orch@rig" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as { status: string; alreadyClosedPacketIds: string[]; advisories: string[] };
+      expect(body).toMatchObject({ status: "aborted", alreadyClosedPacketIds: [reviewPacket] });
+      expect(body.advisories).toHaveLength(1);
+      expect(body.advisories[0]).toContain(successor);
+      expect(body.advisories[0]).toContain(`rig queue update ${successor} --state canceled`);
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).status).toBe("aborted");
+      expect(queueRepo.getByIdOrThrow(successor).state).toBe("pending");
+    });
   });
 });
