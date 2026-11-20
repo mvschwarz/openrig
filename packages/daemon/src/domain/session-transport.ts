@@ -2812,7 +2812,7 @@ export class SessionTransport {
     const limit = opts?.dangerouslyInteract || opts?.submitOnly ? null : this.currentUsageLimit(sessionName);
     const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts, limit);
     const result = limit && reachedInput(sent) ? { ...sent, usageLimit: { ...limit,
-      notice: `${sessionName} was at its usage limit when this send started (OpenRig recorded it at ${limit.asOf}; it resets at ${limit.resetsAt}). The message reached its input, but the agent isn't expected to read it before then.` } } : sent;
+      notice: `${sessionName} was at its usage limit when this send started (OpenRig recorded it at ${limit.asOf}; it resets at ${limit.resetsAt}). The message reached its input, or may have; the agent isn't expected to read it before then.` } } : sent;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";

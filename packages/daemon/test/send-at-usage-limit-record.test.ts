@@ -56,7 +56,7 @@ it("a send to a seat at its usage limit is delivered, and the sender's result sa
   const sender = await f.rigSend({ text: "WORK MESSAGE" });
   expect(sender.status).toBe(200);
   expect(sender.body).toMatchObject({ ok: true, usageLimit: { asOf: limited.limit!.asOf, resetsAt: limited.limit!.resetsAt } });
-  expect((sender.body.usageLimit as { notice: string }).notice).toBe(`${seat} was at its usage limit when this send started (OpenRig recorded it at 2026-11-19T19:40:00.000Z; it resets at 2026-11-19T23:00:00.000Z). The message reached its input, but the agent isn't expected to read it before then.`);
+  expect((sender.body.usageLimit as { notice: string }).notice).toBe(`${seat} was at its usage limit when this send started (OpenRig recorded it at 2026-11-19T19:40:00.000Z; it resets at 2026-11-19T23:00:00.000Z). The message reached its input, or may have; the agent isn't expected to read it before then.`);
   expect(f.writes).toContain("WORK MESSAGE"); // fail open: delivered now, no hold
   expect(f.evidence().map((event) => event.usageLimit)).toEqual([limited.limit]);
 });
