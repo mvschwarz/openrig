@@ -924,7 +924,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   };
 
   const targetDeliverFor = (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload): SubsystemDeliverFn => {
-    if (!isRelayDecision(decision, p)) return (d) => noticeDedup.deliver(p, () => deliver(d));
+    if (!isRelayDecision(decision, p)) {
+      // De-duplicate the payload that is ACTUALLY delivered: later stages (the
+      // quiet-hours path adds `quietUnreadable`) deliver a spread copy, and the
+      // dedup must see that payload — not the pre-flag `p` captured here.
+      return (d) => noticeDedup.deliver((d.payload ?? p) as OutboundPostPayload, () => deliver(d));
+    }
     return (d) => {
       const carry = (d.payload ?? {}) as RelayPayloadCarry;
       const readyDecision = carry.relayConnectorRef && carry.relayEnvelope ? d : prepareDecision(d);
