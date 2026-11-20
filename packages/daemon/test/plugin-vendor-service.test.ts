@@ -261,7 +261,7 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
       ...Object.fromEntries(manifests.map(rel => [target + "/" + rel, JSON.stringify({ name: "openrig-core", version: installed })])),
       ...Object.fromEntries(assets.map(rel => [target + "/" + rel, "previous implementation"])),
     });
-    const svc = new PluginVendorService({ vendoredAssetsDir: "/asset-root", pluginsDir: "/home/test/.openrig/plugins", fs, httpClient: vi.fn() });
+    const svc = new PluginVendorService({ vendoredAssetsDir: "/asset-root", userPluginsDir: "/home/test/.openrig/plugins", fs, httpClient: vi.fn() });
     await svc.ensureVendored("openrig-core");
     const versions = manifests.map(rel => JSON.parse(fs._store[target + "/" + rel]!).version);
     expect(new Set(versions).size).toBe(1);
