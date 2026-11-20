@@ -40,11 +40,13 @@ describe("queue update with an expected state", () => {
   });
   afterEach(() => db.close());
 
+  /** The stored row, through the repository's public read; a missing row fails the test. */
+  const row = (qitemId: string) => { const item = repo.getById(qitemId); if (!item) throw new Error(`row ${qitemId} not found`); return item; };
   const create = async () => (await repo.create({ sourceSession: CLOSER, destinationSession: DESTINATION, body: "work", nudge: false })).qitemId;
   const count = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n;
   /** Everything an update can write or trigger for a row: the row itself, its transitions, events, wakes, jobs and outbox entries. */
   const footprint = (qitemId: string) => ({
-    row: repo.getByIdOrThrow(qitemId),
+    row: row(qitemId),
     transitions: count("SELECT count(*) n FROM queue_transitions WHERE qitem_id = ?", qitemId),
     events: count("SELECT count(*) n FROM events"),
     wakes: count("SELECT count(*) n FROM queue_transition_wakes"),
@@ -63,7 +65,7 @@ describe("queue update with an expected state", () => {
   describe("in the queue repository", () => {
     it("the closer reads pending, the destination claims, and the conditional close writes nothing and leaves the claim in place", async () => {
       const id = await create();
-      const read = repo.getByIdOrThrow(id).state;
+      const read = row(id).state;
       expect(read).toBe("pending");
       repo.claim({ qitemId: id, destinationSession: DESTINATION });
       const before = footprint(id);
@@ -83,7 +85,7 @@ describe("queue update with an expected state", () => {
       const id = await create();
       repo.claim({ qitemId: id, destinationSession: DESTINATION });
       repo.update({ qitemId: id, actorSession: CLOSER, ...close });
-      expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+      expect(row(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     });
 
     it.each([
@@ -132,7 +134,7 @@ describe("queue update with an expected state", () => {
       repo.claim({ qitemId: id, destinationSession: DESTINATION });
       const before = footprint(id);
       repo.update({ qitemId: id, actorSession: CLOSER, expectState: "in-progress", state: "blocked", blockedOn: "external:ci", wakeAfterSeconds: 600, transitionNote: "continuation: check CI" });
-      expect(repo.getByIdOrThrow(id).state).toBe("blocked");
+      expect(row(id).state).toBe("blocked");
       expect(footprint(id).wakes).toBeGreaterThan(before.wakes);
     });
 
@@ -158,7 +160,7 @@ describe("queue update with an expected state", () => {
       const id = await create();
       repo.claim({ qitemId: id, destinationSession: DESTINATION });
       repo.update({ qitemId: id, actorSession: CLOSER, expectState: null, ...close });
-      expect(repo.getByIdOrThrow(id).state).toBe("done");
+      expect(row(id).state).toBe("done");
     });
   });
 
@@ -193,7 +195,7 @@ describe("queue update with an expected state", () => {
       repo.claim({ qitemId: id, destinationSession: DESTINATION });
       const res = await post(id, { state: "done", closureReason: "no-follow-on" });
       expect(res.status).toBe(200);
-      expect(repo.getByIdOrThrow(id).state).toBe("done");
+      expect(row(id).state).toBe("done");
     });
 
     it("an expected state that is not a queue state answers 400 invalid_state", async () => {
@@ -201,7 +203,7 @@ describe("queue update with an expected state", () => {
       const res = await post(id, { expectState: "PENDING", state: "done", closureReason: "no-follow-on" });
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: "invalid_state" });
-      expect(repo.getByIdOrThrow(id).state).toBe("pending");
+      expect(row(id).state).toBe("pending");
     });
   });
 });

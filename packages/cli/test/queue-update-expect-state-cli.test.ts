@@ -85,6 +85,8 @@ async function runCli(args: string[]): Promise<{ out: string; exit: number | und
   return { out: out.join("\n"), exit };
 }
 
+/** The stored row, through the repository's public read; a missing row fails the test. */
+const row = (qitemId: string) => { const item = repo.getById(qitemId); if (!item) throw new Error(`row ${qitemId} not found`); return item; };
 const transitions = (id: string) => (db.prepare("SELECT count(*) n FROM queue_transitions WHERE qitem_id = ?").get(id) as { n: number }).n;
 const events = () => (db.prepare("SELECT count(*) n FROM events").get() as { n: number }).n;
 const closeArgs = ["--state", "done", "--closure-reason", "no-follow-on", "--note", "closing: handled elsewhere"];
@@ -99,9 +101,9 @@ describe("rig queue update --expect-state", () => {
   afterEach(() => { vi.unstubAllEnvs(); });
 
   it.each([false, true])("the closer read pending, the destination claimed, and the conditional close fails with the code and the current state, leaving the claim (json=%s)", async (json) => {
-    expect(repo.getByIdOrThrow(id).state).toBe("pending"); // what the closer read
+    expect(row(id).state).toBe("pending"); // what the closer read
     repo.claim({ qitemId: id, destinationSession: DESTINATION });
-    const before = repo.getByIdOrThrow(id);
+    const before = row(id);
     const beforeTransitions = transitions(id), beforeEvents = events();
 
     const { out, exit } = await runCli(["update", id, "--expect-state", "pending", ...closeArgs, ...(json ? ["--json"] : [])]);
@@ -110,7 +112,7 @@ describe("rig queue update --expect-state", () => {
     expect(out).toContain("qitem_state_changed");
     expect(out).toContain("in-progress");
     if (json) expect(JSON.parse(out)).toMatchObject({ error: "qitem_state_changed", expectedState: "pending", currentState: "in-progress" });
-    expect(repo.getByIdOrThrow(id)).toEqual(before);
+    expect(row(id)).toEqual(before);
     expect(before).toMatchObject({ state: "in-progress", destinationSession: DESTINATION });
     expect(transitions(id)).toBe(beforeTransitions);
     expect(events()).toBe(beforeEvents);
@@ -119,13 +121,13 @@ describe("rig queue update --expect-state", () => {
   it("a matching condition applies the close (exit 0)", async () => {
     const { exit } = await runCli(["update", id, "--expect-state", "pending", ...closeArgs, "--json"]);
     expect(exit).toBeFalsy();
-    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    expect(row(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
   });
 
   it("without the option, the close after a claim applies as today (exit 0)", async () => {
     repo.claim({ qitemId: id, destinationSession: DESTINATION });
     const { exit } = await runCli(["update", id, ...closeArgs, "--json"]);
     expect(exit).toBeFalsy();
-    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    expect(row(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
   });
 });
