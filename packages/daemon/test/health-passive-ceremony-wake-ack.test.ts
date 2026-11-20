@@ -84,3 +84,11 @@ it("a different seat repeating the same continuation after a wake still counts",
   const peer: Step = { ...park(), actor: "peer@rig" };
   expect(await counted(18, [park(), wake, peer])).toHaveLength(20);
 });
+
+it("a different seat's park becomes the parking seat: its own later unchanged acknowledgement is excluded", async () => {
+  const peer: Step = { ...park(), actor: "peer@rig" };
+  // 18 substantive + owner park + peer's park (counts) = 20; the peer's acknowledgement after the next wake adds nothing.
+  expect(await counted(18, [park(), wake, peer, wake, peer])).toHaveLength(20);
+  // The owner's acknowledgement now follows the peer's park, so it counts.
+  expect(await counted(18, [park(), wake, peer, wake, park()])).toHaveLength(21);
+});
