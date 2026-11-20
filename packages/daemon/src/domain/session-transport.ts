@@ -2251,9 +2251,9 @@ export interface SendResult {
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
   /** Context, not a status: when this send started, OpenRig held a current usage-limit reading for the seat with its
-   *  stated reset (#3508's reader), and the send still reached the input. A wall that leaves an ordinary input box takes
-   *  the text, but the agent isn't expected to read it before the reset. The send's own result is unchanged by it. A
-   *  usage-limit menu is a choice prompt, refused before any write, so it never gets this. */
+   *  stated reset (#3508's reader), and the send's text reached the seat's input or may have (submitted, written without
+   *  Enter, or uncertain). The agent isn't expected to read it before the reset. The send's own result, uncertain
+   *  delivery included, is unchanged by it, and a send that wrote nothing gets none. */
   usageLimit?: { asOf: string; resetsAt: string; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
