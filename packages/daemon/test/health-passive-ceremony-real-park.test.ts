@@ -91,6 +91,23 @@ it("a park-record whose closure target disagrees with its blocker logs the block
   expect(ids).not.toContain(acknowledged.transitionId);
 });
 
+const UNKNOWN_FIRST = { blockedOn: undefined, closureReason: "blocked_on", closureTarget: "external:first" };
+
+it("a park whose blocker was unknown, re-parked on a known blocker, counts", async () => {
+  const { ids, acknowledged } = await afterRealWake({ state: "blocked", blockedOn: "external:first", wakeAfterSeconds: 60 }, false, UNKNOWN_FIRST);
+  expect(acknowledged.closureTarget).toBe("external:first");
+  expect(ids).toHaveLength(21);
+  expect(ids).toContain(acknowledged.transitionId);
+});
+
+it("a park whose blocker stays unknown counts", async () => {
+  const { ids, acknowledged } = await afterRealWake(
+    { state: "blocked", blockedOn: undefined, closureReason: "blocked_on", closureTarget: "external:first", wakeAfterSeconds: 60 }, false, UNKNOWN_FIRST,
+  );
+  expect(acknowledged.closureTarget).toBeNull();
+  expect(ids).toHaveLength(21);
+});
+
 it("a park without a recorded blocker is never matched as the same blocker", async () => {
   const { ids, acknowledged } = await afterRealWake({ state: "blocked", blockedOn: "external:first", wakeAfterSeconds: 60 }, true);
   expect(ids).toHaveLength(21);

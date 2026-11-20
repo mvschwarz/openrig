@@ -4131,9 +4131,9 @@ export class QueueRepository {
       actorSession: input.actorSession,
       transitionNote: isReopen ? `reopen acknowledged: ${input.transitionNote}` : input.transitionNote,
       closureReason: validation.closureReason ?? undefined,
-      // A park transition names the blocker it leaves in force, ahead of any closure target the caller passed. Only the
-      // log carries it: queue_items.closure_target above is written from validation alone, so closure readers see no change.
-      closureTarget: input.state === "blocked" ? nextBlockedOn ?? validation.closureTarget ?? undefined : validation.closureTarget ?? undefined,
+      // A park transition logs the blocker it leaves in force, or none when the row has none: a caller's closure target
+      // never stands in for it. Only the log carries this: queue_items.closure_target above is written from validation alone.
+      closureTarget: input.state === "blocked" ? nextBlockedOn ?? undefined : validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       identityPrincipal: input.identityPrincipal ?? null,
       ownerNotificationKind: notification?.kind,
