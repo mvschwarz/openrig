@@ -865,6 +865,8 @@ const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 const NEGOTIATE_ID = "omp-runner-negotiate";
 const MAX_PENDING_CURSOR_REFRESHES = 16;
+/** #1275: completed turns a pending unanchored full read blocks new full reads before being treated as lost. */
+export const MAX_UNANCHORED_REFRESH_HOLD_TURNS = 3;
 const UNKNOWN_SINCE_CODE = "unknown_since";
 const UNKNOWN_ENTRIES_CURSOR_RE = /^unknown entries cursor\b/i;
 const ENTRY_NOT_FOUND_RE = /^entry not found\b/i;
@@ -1114,10 +1116,12 @@ export class RunnerCore {
   private lastCursorAdvanceSeq = 0;
   private refreshSequence = 0;
   private lastSettledRefreshSeq = 0;
+  private completedTurns = 0;
   private readonly pendingRefreshes = new Map<string, {
     id: string;
     seq: number;
     sentSeq: number;
+    dispatchedTurn: number;
     requestSince: string | undefined;
     anchorId?: string;
     isRecovery?: boolean;
@@ -1711,13 +1715,12 @@ export class RunnerCore {
           return;
         }
         this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
-        if (unknown && this.unheldSavedCursor) {
-          this.requestCursorRefresh(true);
-          return;
-        }
         if (!this.catchUpReplayLossReported) {
           this.catchUpReplayLossReported = true;
           this.diag(`[${this.runtime}-runner] Startup restore replay was lost; later cursor refreshes will advance without replaying missed history.`);
+        }
+        if (unknown && this.unheldSavedCursor) {
+          this.requestCursorRefresh(true);
         }
         return;
       }
@@ -1922,6 +1925,7 @@ export class RunnerCore {
       id,
       seq,
       sentSeq,
+      dispatchedTurn: this.completedTurns,
       requestSince: since,
       ...(anchorId ? { anchorId } : {}),
       ...(isRecovery ? { isRecovery: true } : {}),
@@ -1965,11 +1969,16 @@ export class RunnerCore {
   }
 
   private hasInFlightUnanchoredRefresh(): boolean {
-    // Only OMP v2 negotiates frame-drop detection; on non-v2 (Pi and OMP v1),
-    // invalid-JSON or unanswered full reads must not block later turns.
-    if (!this.frameDecoder) return false;
     for (const pending of this.pendingRefreshes.values()) {
-      if (pending.requestSince === undefined && pending.seq > this.lastSettledRefreshSeq && !pending.suspectedOversizedDrop && !pending.mayHaveBeenDropped) return true;
+      if (
+        pending.requestSince === undefined
+        && pending.seq > this.lastSettledRefreshSeq
+        && !pending.suspectedOversizedDrop
+        && !pending.mayHaveBeenDropped
+        && this.completedTurns - pending.dispatchedTurn < MAX_UNANCHORED_REFRESH_HOLD_TURNS
+      ) {
+        return true;
+      }
     }
     return false;
   }
@@ -2373,7 +2382,9 @@ export class RunnerCore {
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
       // completed turn using a bounded read (#1275).
-      this.requestCursorRefresh(false, this.runtime !== "omp" || event.isTerminal !== false);
+      const completedTurn = this.runtime !== "omp" || event.isTerminal !== false;
+      this.requestCursorRefresh(false, completedTurn);
+      if (completedTurn) this.completedTurns += 1;
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);

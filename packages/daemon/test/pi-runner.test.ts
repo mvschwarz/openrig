@@ -16,7 +16,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import readline from "node:readline";
 import {
-  createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
+  createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, MAX_UNANCHORED_REFRESH_HOLD_TURNS, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar, readSessionTailEntryId, SESSION_TAIL_READ_LIMIT_BYTES, startHeartbeatTimer,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
@@ -2104,59 +2104,112 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
   });
 
   it.each(["pi", "omp"] as const)(
-    "unanswered or invalid-JSON full refreshes without v2 do not block turns 2 through 5 (%s)",
+    "unanchored full refreshes without v2 hold for three completed turns and allow a new full read on the fourth (%s)",
     (runtime) => {
+      expect(MAX_UNANCHORED_REFRESH_HOLD_TURNS).toBe(3);
       const endTurn = () => JSON.stringify(runtime === "omp" ? { type: "agent_end", isTerminal: true } : { type: "agent_end" });
       const getEntriesCalls = (rpc: Record<string, unknown>[]) => rpc.filter((cmd) => cmd.type === "get_entries");
 
-      // Case 1: truncated/invalid JSON reply after turn 1, then unanswered turns 2..5, then live entryId turn 6.
+      // Case 1: slow valid reply within 3 completed turns does not cause an overlapping full read.
+      const fSlow = fakeIo();
+      fSlow.io.readLastEntryId = () => null;
+      const slowCore = new RunnerCore(fSlow.io, { sessionName: SESSION, launchId: `launch-slow-${runtime}` }, { runtime });
+      slowCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      slowCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-slow-${runtime}` } }));
+
+      slowCore.handlePiLine(endTurn());
+      expect(getEntriesCalls(fSlow.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      slowCore.handlePiLine(endTurn()); // Turn 2: held
+      slowCore.handlePiLine(endTurn()); // Turn 3: held
+      expect(getEntriesCalls(fSlow.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      slowCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-slow-3" }] } }));
+      expect(fSlow.sidecars.at(-1)?.lastEntryId).toBe("e-slow-3");
+      slowCore.handlePiLine(endTurn()); // Turn 4: anchored bounded refresh
+      expect(fSlow.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-slow-3", id: "pi-runner-cursor-refresh:2" });
+
+      // Case 2: truncated/invalid-JSON lost reply holds through turns 2 and 3, then sends a new full read on turn 4 (and turn 7).
       const fTrunc = fakeIo();
       fTrunc.io.readLastEntryId = () => null;
       const truncCore = new RunnerCore(fTrunc.io, { sessionName: SESSION, launchId: `launch-trunc-${runtime}` }, { runtime });
       truncCore.start(runtime === "omp" ? { type: "ready" } : undefined);
       truncCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-trunc-${runtime}` } }));
 
-      truncCore.handlePiLine(endTurn());
+      truncCore.handlePiLine(endTurn()); // Turn 1
       expect(getEntriesCalls(fTrunc.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
       const truncatedReply = '{"type":"response","id":"pi-runner-cursor-refresh"';
       truncCore.handlePiLine(truncatedReply);
       expect(fTrunc.lines).toContain(truncatedReply);
       expect(fTrunc.lines.some((line) => line.startsWith("[omp-runner] ERROR rpc frame:"))).toBe(false);
 
-      for (let turn = 2; turn <= 5; turn++) {
-        truncCore.handlePiLine(endTurn());
-        expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", id: `pi-runner-cursor-refresh:${turn}` });
-      }
+      truncCore.handlePiLine(endTurn()); // Turn 2: held
+      truncCore.handlePiLine(endTurn()); // Turn 3: held
+      expect(getEntriesCalls(fTrunc.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+
+      truncCore.handlePiLine(endTurn()); // Turn 4: previous full read treated as lost -> new full read
       expect(getEntriesCalls(fTrunc.rpc)).toEqual([
         { type: "get_entries", id: "pi-runner-cursor-refresh" },
         { type: "get_entries", id: "pi-runner-cursor-refresh:2" },
-        { type: "get_entries", id: "pi-runner-cursor-refresh:3" },
-        { type: "get_entries", id: "pi-runner-cursor-refresh:4" },
-        { type: "get_entries", id: "pi-runner-cursor-refresh:5" },
       ]);
 
+      truncCore.handlePiLine(endTurn()); // Turn 5: held by #2
+      truncCore.handlePiLine(endTurn()); // Turn 6: held by #2
+      expect(getEntriesCalls(fTrunc.rpc)).toHaveLength(2);
+
+      truncCore.handlePiLine(endTurn()); // Turn 7: #2 treated as lost -> new full read #3
+      expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+
+      // Live entryId switches immediately to bounded since without waiting for the 3-turn window.
       truncCore.handlePiLine(JSON.stringify({ type: "message_end", entryId: "live-1" }));
       truncCore.handlePiLine(endTurn());
-      expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-1", id: "pi-runner-cursor-refresh:6" });
+      expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-1", id: "pi-runner-cursor-refresh:4" });
 
-      // Case 2: valid JSON without entries after turn 1, then unanswered turns 2..5, then recovery on turn 5 reply.
+      // Case 3a: silent/unanswered lost reply sends a new full read on turn 4; late stale reply after #2 settles is ignored.
       const fUnans = fakeIo();
       fUnans.io.readLastEntryId = () => null;
       const unansCore = new RunnerCore(fUnans.io, { sessionName: SESSION, launchId: `launch-unans-${runtime}` }, { runtime });
       unansCore.start(runtime === "omp" ? { type: "ready" } : undefined);
       unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-unans-${runtime}` } }));
 
+      unansCore.handlePiLine(endTurn()); // Turn 1 -> #1
+      unansCore.handlePiLine(endTurn()); // Turn 2 -> held
+      unansCore.handlePiLine(endTurn()); // Turn 3 -> held
+      expect(getEntriesCalls(fUnans.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      unansCore.handlePiLine(endTurn()); // Turn 4 -> #2
+      expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "e-recovered-4" }] } }));
+      expect(fUnans.sidecars.at(-1)?.lastEntryId).toBe("e-recovered-4");
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-stale-1" }] } }));
+      expect(fUnans.sidecars.at(-1)?.lastEntryId).toBe("e-recovered-4");
       unansCore.handlePiLine(endTurn());
-      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: {} }));
-      for (let turn = 2; turn <= 5; turn++) {
-        unansCore.handlePiLine(endTurn());
-        expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", id: `pi-runner-cursor-refresh:${turn}` });
-      }
-      expect(getEntriesCalls(fUnans.rpc)).toHaveLength(5);
-      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:5", command: "get_entries", success: true, data: { entries: [{ id: "e-recovered-5" }] } }));
-      expect(fUnans.sidecars.at(-1)?.lastEntryId).toBe("e-recovered-5");
-      unansCore.handlePiLine(endTurn());
-      expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-recovered-5", id: "pi-runner-cursor-refresh:6" });
+      expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-recovered-4", id: "pi-runner-cursor-refresh:3" });
+
+      // Case 3b: late reply to #1 arriving after turn 4 dispatched #2 (before #2 settles) still advances, then #2 advances further.
+      const fLate = fakeIo();
+      fLate.io.readLastEntryId = () => null;
+      const lateCore = new RunnerCore(fLate.io, { sessionName: SESSION, launchId: `launch-late-${runtime}` }, { runtime });
+      lateCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      lateCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-late-${runtime}` } }));
+
+      lateCore.handlePiLine(endTurn()); // Turn 1 -> #1
+      lateCore.handlePiLine(endTurn()); // Turn 2 -> held
+      lateCore.handlePiLine(endTurn()); // Turn 3 -> held
+      lateCore.handlePiLine(endTurn()); // Turn 4 -> #2
+      expect(fLate.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+      lateCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-late-1" }] } }));
+      expect(fLate.sidecars.at(-1)?.lastEntryId).toBe("e-late-1");
+      lateCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "e-fresh-2" }] } }));
+      expect(fLate.sidecars.at(-1)?.lastEntryId).toBe("e-fresh-2");
+
+      // Case 4: valid JSON reply without entries settles #1 immediately so turn 2 can send #2.
+      const fEmptyShape = fakeIo();
+      fEmptyShape.io.readLastEntryId = () => null;
+      const emptyShapeCore = new RunnerCore(fEmptyShape.io, { sessionName: SESSION, launchId: `launch-shape-${runtime}` }, { runtime });
+      emptyShapeCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      emptyShapeCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-shape-${runtime}` } }));
+      emptyShapeCore.handlePiLine(endTurn());
+      emptyShapeCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: {} }));
+      emptyShapeCore.handlePiLine(endTurn());
+      expect(fEmptyShape.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
 
       // Control 1: unrelated non-JSON stdout noise without v2 still preserves a valid pending refresh reply.
       const fNoise = fakeIo();
@@ -2169,7 +2222,7 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
       noiseCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-after-noise" }] } }));
       expect(fNoise.sidecars.at(-1)?.lastEntryId).toBe("e-after-noise");
 
-      // Control 2: a confirmed transport-limit oversized error without v2 still suppresses later unanchored full reads.
+      // Control 2: a confirmed transport-limit oversized error without v2 still suppresses later unanchored full reads past turn 4.
       const fBig = fakeIo();
       fBig.io.readLastEntryId = () => null;
       const bigCore = new RunnerCore(fBig.io, { sessionName: SESSION, launchId: `launch-big-${runtime}` }, { runtime });
@@ -2178,7 +2231,9 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
       bigCore.handlePiLine(endTurn());
       bigCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "RPC response exceeded the transport limit" }));
       const rpcCountAfterOversized = fBig.rpc.length;
-      bigCore.handlePiLine(endTurn());
+      for (let turn = 2; turn <= 5; turn++) {
+        bigCore.handlePiLine(endTurn());
+      }
       expect(fBig.rpc).toHaveLength(rpcCountAfterOversized);
     },
   );
@@ -2209,19 +2264,38 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     { label: "Entry not found message", payload: { error: "Entry not found: e-stale" } },
     { label: "Unknown entries cursor message", payload: { error: "Unknown entries cursor: e-stale" } },
   ])("recovers from refused cursor on turn-end refresh via bounded local tail or single unanchored fallback ($label)", ({ payload }) => {
-    // Case 1: local tail holds a new valid entry id -> recovery uses bounded since=tailId.
+    const REPLAY_LOSS_NOTICE = "[omp-runner] Startup restore replay was lost; later cursor refreshes will advance without replaying missed history.";
+
+    // Case 1: OMP refuses startup catch-up as unknown -> prints ERROR and one-time replay-loss notice BEFORE bounded tail recovery.
     let tailId: string | null = "e-live";
     const fBounded = fakeIo();
+    let noticePrintedBeforeRecoveryRpc = false;
+    const origSendRpc = fBounded.io.sendRpc;
+    fBounded.io.sendRpc = (cmd) => {
+      if (cmd.id === "pi-runner-cursor-refresh") {
+        noticePrintedBeforeRecoveryRpc = fBounded.lines.includes(REPLAY_LOSS_NOTICE);
+      }
+      origSendRpc(cmd);
+    };
     fBounded.io.readLastEntryId = () => tailId;
     const bounded = new RunnerCore(fBounded.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-stale" });
     bounded.start();
     bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s1" } }));
     bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, ...payload }));
+    expect(noticePrintedBeforeRecoveryRpc).toBe(true);
+    expect(fBounded.lines.filter((line) => line.startsWith("[omp-runner] ERROR rpc:"))).toHaveLength(1);
+    expect(fBounded.lines.filter((line) => line === REPLAY_LOSS_NOTICE)).toHaveLength(1);
     expect(fBounded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-live", id: "pi-runner-cursor-refresh" });
-    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-live-2" }] } }));
+    // Recovery saves the tail past unreplayed history (empty delta confirms tailId) without duplicating the replay-loss notice.
+    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] } }));
+    expect(fBounded.sidecars.at(-1)?.lastEntryId).toBe("e-live");
+    bounded.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fBounded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-live", id: "pi-runner-cursor-refresh:2" });
+    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "e-live-2" }] } }));
     expect(fBounded.sidecars.at(-1)?.lastEntryId).toBe("e-live-2");
+    expect(fBounded.lines.filter((line) => line === REPLAY_LOSS_NOTICE)).toHaveLength(1);
 
-    // Case 2: turn-end refresh fails with unknown cursor and local tail still matches the refused cursor -> one unanchored fallback, no loop.
+    // Case 2: turn-end refresh fails with unknown cursor and local tail still matches the refused cursor -> one unanchored fallback, no loop, no startup replay-loss notice.
     tailId = "e-stale";
     const fFallback = fakeIo();
     fFallback.io.readLastEntryId = () => tailId;
@@ -2232,6 +2306,7 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     expect(fFallback.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-stale", id: "pi-runner-cursor-refresh" });
     fallback.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, ...payload }));
     expect(fFallback.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+    expect(fFallback.lines).not.toContain(REPLAY_LOSS_NOTICE);
     const countAfterRecovery = fFallback.rpc.length;
     fallback.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, ...payload }));
     expect(fFallback.rpc).toHaveLength(countAfterRecovery);
