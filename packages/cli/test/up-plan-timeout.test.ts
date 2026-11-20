@@ -80,10 +80,13 @@ describe("rig up --plan and the daemon's time to answer", () => {
     expect(timeoutMs).toBe(120_000);
   });
 
-  it("waits as long as an apply does on another host", async () => {
+  it.each([
+    { flags: [], timeoutMs: 120_000 },
+    { flags: ["--timeout", "900"], timeoutMs: 900_000 },
+  ])("uses the requested wait budget on another host: $timeoutMs ms", async ({ flags, timeoutMs }) => {
     remote.calls.length = 0;
-    await runUp(["/tmp/rig.yaml", "--plan", "--json", "--host", "vps-a"], vi.fn());
-    expect(remote.calls.filter((c) => c.path === "/api/up").map((c) => c.timeoutMs)).toEqual([120_000]);
+    await runUp(["/tmp/rig.yaml", "--plan", "--json", "--host", "vps-a", ...flags], vi.fn());
+    expect(remote.calls.filter((c) => c.path === "/api/up").map((c) => c.timeoutMs)).toEqual([timeoutMs]);
   });
 
   it("a plan that times out says no rig or seat changed, not that the outcome is unknown", async () => {
@@ -128,7 +131,7 @@ describe("rig up --plan and the daemon's time to answer", () => {
   it("an apply on another host that times out keeps its unknown outcome", async () => {
     remote.result = REMOTE_TIMEOUT;
     try {
-      const { logs, exitCode } = await runUp(["/tmp/rig.yaml", "--json", "--host", "vps-a"], vi.fn());
+      const { logs, exitCode } = await runUp(["/tmp/rig.yaml", "--json", "--host", "vps-a", "--timeout", "900"], vi.fn());
       const out = JSON.parse(logs.find((l) => l.startsWith("{")) ?? "{}");
       expect(out.outcomeUnknown).toBe(true);
       expect(out.changed).toBeUndefined();
