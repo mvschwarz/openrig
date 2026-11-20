@@ -1151,7 +1151,7 @@ function buildMissionCreateCommand(): Command {
         const enclosing = enclosingMissionsRoot(missionsRoot);
         if (enclosing) {
           for (const node of readParentScope(enclosing).filter((node) => node.id === id)) {
-            rootAdvisories.push(`Mission ID ${id} is already used by ${node.path} in the enclosing project's missions (${enclosing}). Pass --id, or set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml.`);
+            rootAdvisories.push(`Mission ID ${id} is already used by ${node.path} in the enclosing project's missions (${enclosing}). Edit this mission's id: before creating its slices, since their ids inherit it. For later missions, set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml, or pass --id.`);
           }
         }
         // Resolve titles + render templates before any filesystem side

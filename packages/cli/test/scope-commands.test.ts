@@ -2186,7 +2186,7 @@ describe("a nested project's mission ids", () => {
     expect(r.exitCode).toBe(0);
     const mission = JSON.parse(r.stdout).mission;
     expect(mission.id).toBe("OPR.99.0.1");
-    expect(mission.advisories).toEqual([`Mission ID OPR.99.0.1 is already used by ${path.join(root, "missions", "backlog")} in the enclosing project's missions (${path.join(root, "missions")}). Pass --id, or set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml.`]);
+    expect(mission.advisories).toEqual([`Mission ID OPR.99.0.1 is already used by ${path.join(root, "missions", "backlog")} in the enclosing project's missions (${path.join(root, "missions")}). Edit this mission's id: before creating its slices, since their ids inherit it. For later missions, set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml, or pass --id.`]);
     expect(fs.existsSync(path.join(nested(), "missions", "work"))).toBe(true);
   });
 
