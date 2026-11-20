@@ -256,11 +256,9 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
       ? "This daemon's host id isn't known yet, so hosted members on its rosters, and the roster entries of the team's seats, can't be matched to it."
       : "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
   }
-  // A seat in two rosters is one member: the first roster (by file name) supplies its entry, and its declaration.
-  const declaredLeads: Array<{ session: string; team: string }> = [];
-  for (const member of declaring) {
-    if (member.host === host && !declaredLeads.some((d) => d.session === member.seat)) declaredLeads.push({ session: member.seat, team: member.lead_of! });
-  }
+  // A seat in two rosters is one member: the first roster (by file name) supplies its entry. Every entry that declares
+  // lead_of counts, and an entry without one declares nothing; rig_team keeps one declaration per resolved seat and team.
+  const declaredLeads = declaring.filter((member) => member.host === host).map((member) => ({ session: member.seat, team: member.lead_of! }));
   const members = new Map<string, HostedMember>();
   for (const { roster, member } of candidates) {
     if (member.host !== host || members.has(member.seat) || seats.has(member.seat)) continue;
@@ -2224,8 +2222,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           }, !!access?.external);
         const note = hosted.note ? { hostedMembersNote: hosted.note } : {};
         // A declared entry point names the lead only where the daemon names no single lead; a lead it names always wins.
-        const led = declaredLead(view, (hosted.declaredLeads ?? []).map((d) => ({ ...d, logicalId: inventory.find((seat) =>
-          seat.canonicalSessionName === d.session || logicalAddress(seat.logicalId) === d.session)?.logicalId ?? null })), !!hosted.note);
+        // One per seat (either of its names) and team: the same seat declaring two teams is two declarations.
+        const resolved = (hosted.declaredLeads ?? []).map((d) => ({ ...d, logicalId: inventory.find((seat) =>
+          seat.canonicalSessionName === d.session || logicalAddress(seat.logicalId) === d.session)?.logicalId ?? null }));
+        const declaredSeat = (d: { session: string; logicalId: string | null }) => d.logicalId ?? d.session;
+        const led = declaredLead(view, resolved.filter((d, i) =>
+          resolved.findIndex((e) => declaredSeat(e) === declaredSeat(d) && e.team === d.team) === i), !!hosted.note);
         // The names a person knows the team by are for a person's assistant on an external grant; an internal caller's
         // answer is as it was.
         if (!access?.external) return mapResult({ status: 200, data: { ...view, ...led, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });
