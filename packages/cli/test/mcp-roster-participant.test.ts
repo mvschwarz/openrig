@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, type McpAccess } from "../src/mcp-server.js";
+import { createMcpServer, MEMBER_WORKFLOW, type McpAccess } from "../src/mcp-server.js";
 import { DaemonClient, type DaemonResponse } from "../src/client.js";
 import { parseRoster } from "../src/commands/roster.js";
 
@@ -55,7 +55,7 @@ async function connect(folder: string, external: boolean, representative: string
   await mcp.connect(clientTransport);
   // An external grant's sole rig is found for it; an internal caller names the rig.
   const team = async () => ((await mcp.callTool({ name: "rig_team", arguments: external ? {} : { rigId: "team" } })) as { structuredContent: Record<string, any> }).structuredContent;
-  return { team, close: async () => { await mcp.close(); await server.close(); } };
+  return { team, instructions: () => mcp.getInstructions() ?? "", close: async () => { await mcp.close(); await server.close(); } };
 }
 
 describe("a roster entry's participant app and kind", () => {
@@ -155,6 +155,21 @@ describe("a roster entry's declared lead_of", () => {
         expect(team.lead).toEqual({ session: at("net-chatgpt"), logicalId: "net.chatgpt", declared: true, team: "Sam's team" });
         expect(team.leadNote).toBe("Sam's team's entry point: send work for that team here. It doesn't manage this network or its other participants."
           + " Some rosters couldn't be read, so another entry point may be declared.");
+      } finally { await s.close(); }
+    }
+  });
+
+  // network-sme's condition: on a network hub, "the rig's lead" means the delegation-root lead only, never a declared entry point.
+  it("never gives a network grant the member workflow, which sends questions to the rig's lead; a team member gets it", async () => {
+    for (const external of [true, false]) {
+      const s = await connect(rosters([member(at("net-chatgpt"), { lead_of: "Sam's team" })]), external);
+      try {
+        if (external) {
+          expect(s.instructions()).not.toContain(MEMBER_WORKFLOW);
+          expect(s.instructions()).not.toContain("member-workflow/");
+        } else {
+          expect(s.instructions()).toContain(MEMBER_WORKFLOW);
+        }
       } finally { await s.close(); }
     }
   });
