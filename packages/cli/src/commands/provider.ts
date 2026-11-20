@@ -5,6 +5,7 @@ import { DaemonClient, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
 
 // Slice-04 (OPR.0.5.0.4) — the `rig provider` CLI verb surface (packet 3ffa3c22 §3), grammar per
 // the auth.ts precedent (conventions/cli-read-command-grammar). Daemon-backed: reads/precheck go
@@ -25,6 +26,8 @@ type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "di
 type SeatView = { home?: string; activity?: string; peers: Peer[] };
 type SwitchReport = { credentialKind?: "api-key"; home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
   restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean; effort?: string };
+
+const VALID_ACCOUNT_PROVIDERS: readonly string[] = ["claude", "codex"];
 
 // A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
 const SWITCH_TIMEOUT_MS = 120_000;
@@ -58,7 +61,7 @@ function printClaude(claude: { credentialKind?: "api-key"; label: string; tokenF
 }
 
 /** Build provider views and account switches; an isolated-home switch first requires the daemon to acknowledge its plan. */
-export function providerCommand(depsOverride?: StatusDeps): Command {
+export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunOnHostDeps; env?: NodeJS.ProcessEnv } = {}): Command {
   const cmd = new Command("provider").description(
     "Provider accounts and usage signals, and moving one Codex seat to another login saved in its Codex home",
   );
@@ -851,6 +854,130 @@ switch or restart because a report was refused.`)
         for (const error of res.data.errors ?? []) console.error(`- ${error}`);
         handleHttpError(res, "move report");
       }
+    });
+
+  // #3625: the accounts a daemon knows by label, each a reference on that daemon's own machine. With --host the same
+  // command runs there, over the host's SSH entry, the way rig auth --host does.
+  type AccountRefView = { provider: string; label: string; kind: string; file: string | null; codexHome: string | null; login: string | null };
+  const describeRef = (a: AccountRefView): string => a.kind === "codex_saved_login" ? `the login ${a.login} saved in ${a.codexHome}`
+    : `the ${a.kind === "claude_api_key_file" ? "API-key" : "token"} file ${a.file}`;
+  const onHost = async (hostId: string, argv: string[], opts: { json?: boolean; changes?: string }) => {
+    const env = remote.env ?? process.env;
+    const seat = (env.OPENRIG_SESSION_NAME ?? env.RIGGED_SESSION_NAME)?.trim() || undefined;
+    const origin = await originFor(seat, remote.host?.selfHostId ?? (() => localSelfHostId(realDeps())));
+    await runOnSshHost(hostId, argv.slice(0, 3).join(" "), argv, {
+      origin, ...(opts.json ? { json: true } : {}), ...(opts.changes ? { changes: { check: opts.changes } } : {}),
+    }, remote.host);
+  };
+  const refusal = (message: string) => { console.error(message); process.exitCode = 1; };
+  const providerProblem = (provider: string | undefined, required: boolean): string | null =>
+    provider === undefined ? (required ? "Name the provider: --provider claude or --provider codex." : null)
+      : VALID_ACCOUNT_PROVIDERS.includes(provider) ? null : `--provider must be claude or codex, not ${provider}.`;
+
+  const account = cmd
+    .command("account")
+    .description("Accounts this daemon knows by your label: a Claude token or API-key file, or a Codex login saved in a Codex home")
+    .addHelpText("after", `
+Each account is your label and a reference on the daemon's own machine: the absolute path of a private (0600 or 0400) file
+holding a Claude subscription token or API key, or a Codex home and the name of a login saved there (rig auth list
+--codex-home <home> lists them). Only the reference is kept: the file isn't read or copied, and no credential passes
+through OpenRig. Adding one checks it first: the file exists, is a regular file, is private and isn't empty, or the login
+is saved in that home. A refusal says why and stores nothing. A label is unique per provider, and the same label can name
+a Claude and a Codex account. A label is your name for a reference, not proof of the login a running seat uses.
+
+With --host, the command runs on that registered machine over its SSH entry, as this seat, and the reference is a path on
+that machine. Only the command and its output cross the connection.`);
+
+  account
+    .command("add <label>")
+    .description("Add an account by label, after checking its reference on the daemon's machine")
+    .option("--provider <p>", "claude or codex")
+    .option("--token-file <path>", "Claude: the absolute path of a 0600 or 0400 file holding a subscription token")
+    .option("--api-key-file <path>", "Claude: the absolute path of a 0600 or 0400 file holding an API key")
+    .option("--codex-home <dir>", "Codex: the Codex home the login is saved in")
+    .option("--login <name>", "Codex: the saved login's name in that home")
+    .option("--host <id>", "Add it on this registered machine instead, over its SSH entry; the paths are on that machine")
+    .option("--json", "Output as parseable JSON")
+    .action(async (label: string, opts: { provider?: string; tokenFile?: string; apiKeyFile?: string; codexHome?: string; login?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, true) ?? (opts.provider === "claude"
+        ? (opts.codexHome !== undefined || opts.login !== undefined ? "A Claude account is a --token-file or --api-key-file, not --codex-home or --login."
+          : (opts.tokenFile === undefined) === (opts.apiKeyFile === undefined) ? "A Claude account needs one of --token-file <path> or --api-key-file <path>." : null)
+        : opts.tokenFile !== undefined || opts.apiKeyFile !== undefined ? "A Codex account is --codex-home and --login, not a token or API-key file."
+          : opts.codexHome === undefined || opts.login === undefined ? "A Codex account needs --codex-home <dir> and --login <name>." : null);
+      if (problem) return refusal(`${problem} Nothing was stored.`);
+      const fields: Array<[string, string | undefined]> = [["--token-file", opts.tokenFile], ["--api-key-file", opts.apiKeyFile], ["--codex-home", opts.codexHome], ["--login", opts.login]];
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "account", "add", label, "--provider", opts.provider!,
+          ...fields.flatMap(([flag, value]) => value === undefined ? [] : [flag, value]), ...(opts.json ? ["--json"] : [])],
+        { json: opts.json, changes: `rig provider account list --host ${opts.host} --provider ${opts.provider}` });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const res = await client.post<{ ok: boolean; account?: AccountRefView; code?: string; message?: string }>("/api/provider/account-refs", {
+        provider: opts.provider, label,
+        ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}), ...(opts.apiKeyFile !== undefined ? { apiKeyFile: opts.apiKeyFile } : {}),
+        ...(opts.codexHome !== undefined ? { codexHome: opts.codexHome } : {}), ...(opts.login !== undefined ? { login: opts.login } : {}),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (handleHttpError(res, "account add")) return;
+      const added = res.data.account!;
+      console.log(`Added the ${added.provider} account ${added.label}: ${describeRef(added)}.`);
+      console.log(added.kind === "codex_saved_login" ? "Checked that the login is saved there; nothing was read or copied."
+        : "Checked that the file exists, is private and isn't empty; it wasn't read.");
+    });
+
+  account
+    .command("list")
+    .description("The accounts this daemon knows, by provider and label, with each one's reference")
+    .option("--provider <p>", "Only claude or only codex")
+    .option("--host <id>", "List that registered machine's accounts instead, over its SSH entry")
+    .option("--json", "Output as parseable JSON")
+    .action(async (opts: { provider?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, false);
+      if (problem) return refusal(problem);
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "account", "list", ...(opts.provider ? ["--provider", opts.provider] : []), ...(opts.json ? ["--json"] : [])], { json: opts.json });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const res = await client.get<{ accounts: AccountRefView[] }>(`/api/provider/account-refs${opts.provider ? `?provider=${opts.provider}` : ""}`);
+      if (handleHttpError(res, "account list")) return;
+      if (opts.json) { console.log(JSON.stringify(res.data)); return; }
+      if (res.data.accounts.length === 0) {
+        console.log("No accounts on this daemon. Add one with rig provider account add <label> --provider claude|codex (rig provider account --help).");
+        return;
+      }
+      for (const a of res.data.accounts) console.log(`${a.provider}  ${a.label}  ${describeRef(a)}`);
+    });
+
+  account
+    .command("remove <label>")
+    .description("Remove an account's label; its file or saved login is left as it is")
+    .option("--provider <p>", "claude or codex")
+    .option("--host <id>", "Remove it on that registered machine instead, over its SSH entry")
+    .option("--json", "Output as parseable JSON")
+    .action(async (label: string, opts: { provider?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, true);
+      if (problem) return refusal(`${problem} Nothing changed.`);
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "account", "remove", label, "--provider", opts.provider!, ...(opts.json ? ["--json"] : [])],
+          { json: opts.json, changes: `rig provider account list --host ${opts.host} --provider ${opts.provider}` });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const res = await client.delete<{ ok: boolean; account?: AccountRefView; code?: string; message?: string }>(
+        `/api/provider/account-refs/${opts.provider}/${encodeURIComponent(label)}`);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (handleHttpError(res, "account remove")) return;
+      console.log(`Removed the ${opts.provider} account ${label}. Its ${res.data.account?.kind === "codex_saved_login" ? "saved login" : "file"} is left as it is, and seats already switched to it keep their own reference.`);
     });
 
   return cmd;

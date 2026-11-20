@@ -3,8 +3,9 @@ import { sendCommand, type SendDeps } from "../src/commands/send.js";
 import { captureCommand, type CaptureDeps } from "../src/commands/capture.js";
 import { psCommand, type PsDeps } from "../src/commands/ps.js";
 import { whoamiCommand, type WhoamiDeps } from "../src/commands/whoami.js";
+import { providerCommand } from "../src/commands/provider.js";
 import type { CrossHostResult, RunCrossHostCommandOpts } from "../src/cross-host-executor.js";
-import type { HostRegistryLoadResult } from "../src/host-registry.js";
+import type { HostEntry, HostRegistryLoadResult } from "../src/host-registry.js";
 
 // Capture stdout / stderr / exitCode for command actions.
 interface CapturedOutput {
@@ -729,5 +730,72 @@ describe("ps --host (cross-host argv forwarding, OPR.0.4.0.34)", () => {
     const capActive: { argv?: readonly string[] } = {};
     await psWithCapture(capActive).parseAsync(["--host", "vm-a", "--active", "--json"], { from: "user" });
     expect(capActive.argv).toContain("--active");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `rig provider account add|list|remove --host <id>` (#3625)
+// ---------------------------------------------------------------------------
+
+describe("provider account --host (runs on that machine's SSH entry)", () => {
+  const SSH_AND_HTTP: HostRegistryLoadResult = { ok: true, registry: { hosts: [
+    { id: "vm-a", transport: "ssh", target: "vm-a.local" },
+    { id: "vm-http", transport: "http", url: "http://vm-a.local:7433" },
+  ] as HostEntry[] } };
+  let ran: Array<{ host: string; argv: readonly string[]; origin?: string }>;
+  const account = (args: string[], reply: CrossHostResult = { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 }) => {
+    ran = [];
+    const clientFactory = vi.fn();
+    return providerCommand({ lifecycleDeps: { exists: () => false } as never, clientFactory: clientFactory as never }, {
+      env: { OPENRIG_SESSION_NAME: "dev-core@fleet" },
+      host: {
+        hostRegistryLoader: () => SSH_AND_HTTP,
+        selfHostId: async () => "host-a",
+        crossHostRun: async (entry, argv, opts) => { ran.push({ host: entry.id, argv, origin: opts?.originTriple }); return reply; },
+      },
+    }).parseAsync(["account", ...args], { from: "user" }).then(() => clientFactory);
+  };
+
+  it("add, list and remove send the same command to that machine, as this seat, and never reach the local daemon", async () => {
+    const local = await account(["add", "max-1", "--provider", "claude", "--token-file", "/keys/max-1", "--host", "vm-a"],
+      { ok: true, failedStep: "none", stdout: "Added the claude account max-1: the token file /keys/max-1.\n", stderr: "", remoteExitCode: 0 });
+    expect(ran).toEqual([{ host: "vm-a", argv: ["rig", "provider", "account", "add", "max-1", "--provider", "claude", "--token-file", "/keys/max-1"], origin: "dev-core@fleet@host-a" }]);
+    expect(local).not.toHaveBeenCalled();
+    expect(captured.stdoutWrites.join("")).toContain("Added the claude account max-1");
+    expect(captured.stderrLines).toContain("[via host=vm-a (vm-a.local)]");
+
+    await account(["add", "work", "--provider", "codex", "--codex-home", "/homes/a", "--login", "work", "--json", "--host", "vm-a"]);
+    expect(ran[0]!.argv).toEqual(["rig", "provider", "account", "add", "work", "--provider", "codex", "--codex-home", "/homes/a", "--login", "work", "--json"]);
+    await account(["list", "--provider", "codex", "--json", "--host", "vm-a"]);
+    expect(ran[0]!.argv).toEqual(["rig", "provider", "account", "list", "--provider", "codex", "--json"]);
+    await account(["remove", "max-1", "--provider", "claude", "--host", "vm-a"]);
+    expect(ran[0]!.argv).toEqual(["rig", "provider", "account", "remove", "max-1", "--provider", "claude"]);
+  });
+
+  it("the remote refusal comes back as its own output and exit status", async () => {
+    await account(["add", "open", "--provider", "claude", "--token-file", "/keys/open", "--host", "vm-a"],
+      { ok: false, failedStep: "remote-command-failed", stdout: "", stderr: "the token file /keys/open must be private (0600 or 0400), and it is 0644. Nothing was stored.\n", remoteExitCode: 1 } as CrossHostResult);
+    expect(captured.stderrWrites.join("")).toContain("must be private (0600 or 0400)");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("a lost connection during add or remove is an unknown outcome naming the list to check; during list, a failure", async () => {
+    const lost = { ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect to host: Connection refused" } as CrossHostResult;
+    await account(["remove", "max-1", "--provider", "claude", "--host", "vm-a"], lost);
+    expect(captured.stderrLines.join("\n")).toContain("remote-outcome-unknown");
+    expect(captured.stderrLines.join("\n")).toContain("rig provider account list --host vm-a --provider claude");
+    captured.stderrLines.length = 0;
+    await account(["list", "--host", "vm-a"], lost);
+    expect(captured.stderrLines.join("\n")).not.toContain("remote-outcome-unknown");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("an HTTP entry can't run it, and a bad option is refused here; neither runs anything", async () => {
+    await account(["list", "--host", "vm-http"]);
+    expect(ran).toEqual([]);
+    expect(captured.stderrLines.join("\n")).toContain("rig provider account list --host vm-http");
+    await account(["add", "x", "--provider", "claude", "--host", "vm-a"]);
+    expect(ran).toEqual([]);
+    expect(process.exitCode).toBe(1);
   });
 });

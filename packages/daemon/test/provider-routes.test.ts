@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Hono } from "hono";
 import { providerRoutes } from "../src/routes/provider.js";
 import type { ClaudeSeatRelaunch, ProviderService } from "../src/domain/provider/provider-service.js";
@@ -322,5 +325,89 @@ describe("provider routes", () => {
     const res = await appWith(null).request("/api/provider/status");
     expect(res.status).toBe(503);
     expect((await res.json()).error).toBe("provider_service_unavailable");
+  });
+});
+
+describe("provider account reference routes (#3625)", () => {
+  // Synthetic file contents, not a credential; no answer may carry them.
+  const CONTENT = "synthetic-content-never-echoed";
+
+  function refsApp(): { app: Hono; dir: string; done: () => void } {
+    const db = createFullTestDb();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "account-ref-routes-"));
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, new RigRepository(db));
+      await next();
+    });
+    app.route("/api/provider", providerRoutes());
+    return { app, dir, done: () => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  }
+  const post = (app: Hono, body: unknown) => app.request("/api/provider/account-refs", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+  it("adds, lists and removes; a label with '@' and '.' goes through the path", async () => {
+    const { app, dir, done } = refsApp();
+    try {
+      const token = path.join(dir, "token");
+      fs.writeFileSync(token, CONTENT, { mode: 0o600 });
+      const home = path.join(dir, "codex");
+      fs.mkdirSync(path.join(home, "auth-profiles"), { recursive: true });
+      fs.writeFileSync(path.join(home, "auth-profiles", "work.json"), CONTENT, { mode: 0o600 });
+
+      const added = await post(app, { provider: "claude", label: "ops@team.1", tokenFile: token });
+      expect(added.status).toBe(201);
+      expect(await added.json()).toMatchObject({ ok: true, account: { provider: "claude", label: "ops@team.1", kind: "claude_token_file", file: token } });
+      expect((await post(app, { provider: "codex", label: "work", codexHome: home, login: "work" })).status).toBe(201);
+
+      const all = await (await app.request("/api/provider/account-refs")).json();
+      expect(all.accounts.map((a: { provider: string; label: string }) => `${a.provider}/${a.label}`)).toEqual(["claude/ops@team.1", "codex/work"]);
+      const codex = await (await app.request("/api/provider/account-refs?provider=codex")).json();
+      expect(codex.accounts).toHaveLength(1);
+      expect(JSON.stringify(all)).not.toContain(CONTENT);
+
+      const removed = await app.request(`/api/provider/account-refs/claude/${encodeURIComponent("ops@team.1")}`, { method: "DELETE" });
+      expect(removed.status).toBe(200);
+      expect(await removed.json()).toMatchObject({ ok: true, account: { label: "ops@team.1" } });
+      expect((await app.request(`/api/provider/account-refs/claude/${encodeURIComponent("ops@team.1")}`, { method: "DELETE" })).status).toBe(404);
+    } finally { done(); }
+  });
+
+  it("refuses a malformed request (400), an unusable reference (400) and a duplicate label (409), storing nothing", async () => {
+    const { app, dir, done } = refsApp();
+    try {
+      const open = path.join(dir, "open");
+      fs.writeFileSync(open, CONTENT, { mode: 0o644 });
+      fs.chmodSync(open, 0o644);
+      const ok = path.join(dir, "ok");
+      fs.writeFileSync(ok, CONTENT, { mode: 0o600 });
+
+      const malformed = await post(app, { provider: "claude", label: "a", tokenFile: ok, apiKeyFile: ok });
+      expect(malformed.status).toBe(400);
+      expect(await malformed.json()).toMatchObject({ ok: false, code: "invalid_reference" });
+      expect((await app.request("/api/provider/account-refs", { method: "POST", body: "[]", headers: { "content-type": "application/json" } })).status).toBe(400);
+      expect((await app.request("/api/provider/account-refs", { method: "POST", body: "{", headers: { "content-type": "application/json" } })).status).toBe(400);
+
+      const unusable = await post(app, { provider: "claude", label: "open", tokenFile: open });
+      expect(unusable.status).toBe(400);
+      const refusal = await unusable.json();
+      expect(refusal).toMatchObject({ ok: false, code: "reference_unusable" });
+      expect(refusal.message).toContain("must be private (0600 or 0400)");
+      expect(JSON.stringify(refusal)).not.toContain(CONTENT);
+
+      expect((await post(app, { provider: "claude", label: "a", tokenFile: ok })).status).toBe(201);
+      const duplicate = await post(app, { provider: "claude", label: "a", tokenFile: ok });
+      expect(duplicate.status).toBe(409);
+      expect(await duplicate.json()).toMatchObject({ ok: false, code: "duplicate_label" });
+
+      expect((await (await app.request("/api/provider/account-refs")).json()).accounts).toHaveLength(1);
+      expect((await app.request("/api/provider/account-refs?provider=pi")).status).toBe(400);
+      expect((await app.request("/api/provider/account-refs/pi/a", { method: "DELETE" })).status).toBe(400);
+    } finally { done(); }
+  });
+
+  it("is 503 when the daemon wires no database", async () => {
+    const res = await appWith(stubService).request("/api/provider/account-refs");
+    expect(res.status).toBe(503);
   });
 });

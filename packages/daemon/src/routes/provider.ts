@@ -18,6 +18,7 @@ import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
 import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
+import { ProviderAccountRefsRepository, readAccountRefInput, type AccountRefProvider } from "../domain/provider/provider-account-refs.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance, transportSenderSession } from "./require-sender-identity.js";
@@ -315,6 +316,47 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       (a) => (provider === undefined || a.provider === provider) && (account === undefined || a.accountId === account),
     );
     return c.json({ accounts }, 200);
+  });
+
+  // #3625: the accounts this daemon knows by label, each a reference local to this host (a Claude token or API-key file,
+  // or a Codex home and saved login). Separate from /accounts, which is what the read model observed: a label here is
+  // the operator's name for a reference, not proof of any login.
+  const accountRefsOf = (c: Context): ProviderAccountRefsRepository | null => {
+    const rigRepo = c.get("rigRepo" as never) as RigRepository | undefined;
+    return rigRepo ? new ProviderAccountRefsRepository(rigRepo.db) : null;
+  };
+
+  router.get("/account-refs", (c) => {
+    const refs = accountRefsOf(c);
+    if (!refs) return c.json({ error: "account_refs_unavailable" }, unavailable);
+    const provider = c.req.query("provider");
+    if (!okProvider(provider)) return c.json({ error: `invalid provider: ${provider}` }, 400);
+    return c.json({ accounts: refs.list(provider as AccountRefProvider | undefined) }, 200);
+  });
+
+  router.post("/account-refs", async (c) => {
+    const refs = accountRefsOf(c);
+    if (!refs) return c.json({ error: "account_refs_unavailable" }, unavailable);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return c.json({ error: "body must be a JSON object" }, 400);
+    const input = readAccountRefInput(raw as Record<string, unknown>);
+    if ("problem" in input) return c.json({ ok: false, code: "invalid_reference", message: `${input.problem}. Nothing was stored.` }, 400);
+    const result = refs.add(input);
+    return c.json(result, result.ok ? 201 : result.code === "duplicate_label" ? 409 : 400);
+  });
+
+  router.delete("/account-refs/:provider/:label", (c) => {
+    const refs = accountRefsOf(c);
+    if (!refs) return c.json({ error: "account_refs_unavailable" }, unavailable);
+    const provider = c.req.param("provider");
+    if (!VALID_PROVIDERS.has(provider)) return c.json({ error: `invalid provider: ${provider}` }, 400);
+    const result = refs.remove(provider as AccountRefProvider, c.req.param("label"));
+    return c.json(result, result.ok ? 200 : result.code === "not_found" ? 404 : 409);
   });
 
   router.get("/bindings", async (c) => {

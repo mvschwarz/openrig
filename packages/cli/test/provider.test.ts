@@ -424,3 +424,112 @@ describe("rig provider switch --seat tells the person what follows", () => {
     expect((await run(["switch", "--seat", "dev-a@rig", "--to-account", "work", "--token-file", "/tokens/work"], kept)).logs).toContain(`effort: ${effort}`);
   });
 });
+
+describe("rig provider account add|list|remove (#3625)", () => {
+  let server: http.Server;
+  let port: number;
+  const seen: Array<{ url: string; method: string; body: string }> = [];
+  const TOKEN = { provider: "claude", label: "max-1", kind: "claude_token_file", file: "/keys/max-1", codexHome: null, login: null, createdAt: "2026-11-20T21:00:00.000Z" };
+  const CODEX = { provider: "codex", label: "work", kind: "codex_saved_login", file: null, codexHome: "/homes/codex-a", login: "work", createdAt: "2026-11-20T21:00:00.000Z" };
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        seen.push({ url: req.url ?? "", method: req.method ?? "", body });
+        const reply = (status: number, data: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+        if (req.method === "GET" && req.url?.startsWith("/api/provider/account-refs")) {
+          return reply(200, { accounts: req.url.includes("provider=codex") ? [CODEX] : req.url.includes("empty") ? [] : [TOKEN, CODEX] });
+        }
+        if (req.method === "POST" && req.url === "/api/provider/account-refs") {
+          const sent = JSON.parse(body) as { provider: string; label: string };
+          if (sent.label === "open") return reply(400, { ok: false, code: "reference_unusable", message: "the token file /keys/open must be private (0600 or 0400), and it is 0644. Nothing was stored." });
+          return reply(201, { ok: true, account: sent.provider === "codex" ? CODEX : TOKEN });
+        }
+        if (req.method === "DELETE" && req.url === "/api/provider/account-refs/claude/max-1") return reply(200, { ok: true, account: TOKEN });
+        if (req.method === "DELETE") return reply(404, { ok: false, code: "not_found", message: "There's no claude account labelled nope." });
+        reply(404, { error: "not found" });
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as { port: number }).port;
+  });
+  afterAll(() => server.close());
+
+  it("add sends the label and reference, and says it was checked, not read", async () => {
+    const claude = await run(["account", "add", "max-1", "--provider", "claude", "--token-file", "/keys/max-1"], runningDeps(port));
+    expect(claude.exitCode).toBeFalsy();
+    expect(seen.at(-1)).toMatchObject({ method: "POST", url: "/api/provider/account-refs" });
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "claude", label: "max-1", tokenFile: "/keys/max-1" });
+    expect(claude.logs).toEqual(["Added the claude account max-1: the token file /keys/max-1.", "Checked that the file exists, is private and isn't empty; it wasn't read."]);
+
+    const key = await run(["account", "add", "api", "--provider", "claude", "--api-key-file", "/keys/api"], runningDeps(port));
+    expect(key.exitCode).toBeFalsy();
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "claude", label: "api", apiKeyFile: "/keys/api" });
+
+    const codex = await run(["account", "add", "work", "--provider", "codex", "--codex-home", "/homes/codex-a", "--login", "work", "--json"], runningDeps(port));
+    expect(codex.exitCode).toBeFalsy();
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "codex", label: "work", codexHome: "/homes/codex-a", login: "work" });
+    expect(JSON.parse(codex.logs[0]!)).toEqual({ ok: true, account: CODEX });
+  });
+
+  it("a refused add prints the daemon's reason and exits 1, in JSON too", async () => {
+    const human = await run(["account", "add", "open", "--provider", "claude", "--token-file", "/keys/open"], runningDeps(port));
+    expect(human.exitCode).toBe(1);
+    expect(human.logs).toEqual(["the token file /keys/open must be private (0600 or 0400), and it is 0644. Nothing was stored."]);
+    const json = await run(["account", "add", "open", "--provider", "claude", "--token-file", "/keys/open", "--json"], runningDeps(port));
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.logs[0]!)).toMatchObject({ ok: false, code: "reference_unusable" });
+  });
+
+  it.each([
+    [[], "Name the provider"],
+    [["--provider", "pi", "--token-file", "/k"], "--provider must be claude or codex"],
+    [["--provider", "claude"], "one of --token-file <path> or --api-key-file <path>"],
+    [["--provider", "claude", "--token-file", "/k", "--api-key-file", "/k"], "one of --token-file <path> or --api-key-file <path>"],
+    [["--provider", "claude", "--token-file", "/k", "--login", "w"], "not --codex-home or --login"],
+    [["--provider", "codex", "--codex-home", "/h"], "needs --codex-home <dir> and --login <name>"],
+    [["--provider", "codex", "--codex-home", "/h", "--login", "w", "--token-file", "/k"], "not a token or API-key file"],
+  ])("add checks its own options before anything goes out: %j", async (flags, message) => {
+    const before = seen.length;
+    const result = await run(["account", "add", "x", ...flags], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain(message);
+    expect(result.logs.join("\n")).toContain("Nothing was stored.");
+    expect(seen.length).toBe(before);
+  });
+
+  it("list prints one line per account with its reference, filters by provider, and says when there are none", async () => {
+    const all = await run(["account", "list"], runningDeps(port));
+    expect(all.logs).toEqual(["claude  max-1  the token file /keys/max-1", "codex  work  the login work saved in /homes/codex-a"]);
+    const codex = await run(["account", "list", "--provider", "codex", "--json"], runningDeps(port));
+    expect(seen.at(-1)!.url).toBe("/api/provider/account-refs?provider=codex");
+    expect(JSON.parse(codex.logs[0]!)).toEqual({ accounts: [CODEX] });
+    expect((await run(["account", "list", "--provider", "pi"], runningDeps(port))).exitCode).toBe(1);
+  });
+
+  it("remove names the provider, says the file is left alone, and an unknown label exits 1", async () => {
+    const removed = await run(["account", "remove", "max-1", "--provider", "claude"], runningDeps(port));
+    expect(removed.exitCode).toBeFalsy();
+    expect(seen.at(-1)).toMatchObject({ method: "DELETE", url: "/api/provider/account-refs/claude/max-1" });
+    expect(removed.logs[0]).toBe("Removed the claude account max-1. Its file is left as it is, and seats already switched to it keep their own reference.");
+    const unknown = await run(["account", "remove", "nope", "--provider", "claude"], runningDeps(port));
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.logs).toEqual(["There's no claude account labelled nope."]);
+    const before = seen.length;
+    expect((await run(["account", "remove", "max-1"], runningDeps(port))).exitCode).toBe(1);
+    expect(seen.length).toBe(before);
+  });
+
+  it("--help says only the reference is kept, how adding checks it, and what --host does", async () => {
+    const help = providerCommand(runningDeps(port)).commands.find((c) => c.name() === "account")!;
+    let text = "";
+    help.configureOutput({ writeOut: (s) => (text += s) });
+    help.outputHelp();
+    expect(text).toContain("Only the reference is kept");
+    expect(text).toContain("A refusal says why and stores nothing");
+    expect(text).toContain("With --host, the command runs on that registered machine");
+    expect(text).toMatch(/add \[options\] <label>/);
+  });
+});
