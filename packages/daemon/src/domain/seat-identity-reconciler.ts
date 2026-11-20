@@ -94,7 +94,16 @@ interface RunningSeatRow {
 
 type RunnerProcessCensus = { rows: NativeProcessRow[]; permissionHiddenPids: number[] };
 
-type PaneObservation = { pid: number | null; command: string | null; dead?: boolean };
+type PaneObservation = { pid: number | null; command: string | null; dead?: boolean; observedAt: string };
+
+/** Both completion and periodic checks use the same unavailable-observation mapping. */
+export function tmuxUnavailableIdentity(input: {
+  nodeId: string; runtime: string | null; sessionName: string; registeredPane: string | null; observedAt: string;
+}): SeatIdentityVerdict {
+  return { nodeId: input.nodeId, verdict: input.runtime === "codex" ? "mismatch" : "tmux_unavailable",
+    evidenceSource: null, reason: "tmux_unavailable", sessionName: input.sessionName, observedAt: input.observedAt,
+    evidence: { registeredPane: input.registeredPane, observedPid: null, observedCommand: null, matchedLayer: null } };
+}
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
@@ -214,8 +223,6 @@ export class SeatIdentityReconciler {
     this.store.pruneExcept([...seats.map((s) => s.node_id), ...this.releasedSeats()]);
     if (seats.length === 0) return;
 
-    const observedAt = this.now().toISOString();
-
     // One tmux availability probe per poll. If tmux is entirely unreachable
     // (throws) OR reports zero live sessions while we have running seats in
     // the DB, treat it as a transient tmux blip and record `tmux_unavailable`
@@ -227,6 +234,7 @@ export class SeatIdentityReconciler {
     } catch {
       liveSessions = null;
     }
+    const observedAt = this.now().toISOString();
     if (generation !== this.generation) return;
     if (liveSessions === null || liveSessions.size === 0) {
       // An empty listing can't tell a blip from a server that's gone, but each seat's own probe can: tmux saying no
@@ -239,12 +247,13 @@ export class SeatIdentityReconciler {
         .catch(() => null));
       for (const seat of seats) {
         const probe = await this.tmux.probeSession?.(seat.session_name).catch(() => null) ?? null;
+        const probeAt = this.now().toISOString();
         if (generation !== this.generation) return;
         const absent = probe !== null && (probe.state === "absent" || probeShowsNoServer(probe));
         const elsewhere = absent && await recordedProcessStillRunning(this.db, { nodeId: seat.node_id, sessionName: seat.session_name }, processes);
         if (generation !== this.generation) return;
         const gone = absent && !elsewhere;
-        this.store.upsert(gone ? this.sessionMissingVerdict(seat, observedAt) : this.tmuxUnavailableVerdict(seat, observedAt));
+        this.store.upsert(gone ? this.sessionMissingVerdict(seat, probeAt) : this.tmuxUnavailableVerdict(seat, probeAt));
         // As on the observed path below: the run whose grant was captured before this sweep has ended.
         const observedGrant = observedGrants.get(seat.node_id);
         if (gone && observedGrant) grants!.revoke({ grantId: observedGrant.grantId }, "runner_exit_observed");
@@ -253,7 +262,11 @@ export class SeatIdentityReconciler {
     }
 
     const readPanes = async (): Promise<Map<string, PaneObservation>> => {
-      try { return new Map(await this.tmux.readAllPaneProcesses?.() ?? []); }
+      try {
+        const rows = await this.tmux.readAllPaneProcesses?.() ?? [];
+        const sampledAt = this.now().toISOString();
+        return new Map([...rows].map(([pane, row]) => [pane, { ...row, observedAt: sampledAt }]));
+      }
       catch { return new Map(); }
     };
     let panes = await readPanes();
@@ -264,7 +277,8 @@ export class SeatIdentityReconciler {
       const existing = panes.get(target);
       if (existing) return existing;
       const pid = await this.tmux.getPanePid(target);
-      const observed = { pid, command: pid === null ? null : await this.tmux.getPaneCommand(target) };
+      const command = pid === null ? null : await this.tmux.getPaneCommand(target);
+      const observed = { pid, command, observedAt: this.now().toISOString() };
       panes.set(target, observed);
       return observed;
     };
@@ -338,7 +352,7 @@ export class SeatIdentityReconciler {
         if (generation !== this.generation) return;
         // A single seat's tmux failure must not crash the loop; record it as
         // unavailable observation (non-green for Codex).
-        this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
+        this.store.upsert(this.tmuxUnavailableVerdict(seat, this.now().toISOString()));
       }
     }
   }
@@ -356,15 +370,8 @@ export class SeatIdentityReconciler {
   }
 
   private tmuxUnavailableVerdict(seat: RunningSeatRow, observedAt: string): SeatIdentityVerdict {
-    return {
-      nodeId: seat.node_id,
-      verdict: seat.runtime === "codex" ? "mismatch" : "tmux_unavailable",
-      evidenceSource: null,
-      reason: "tmux_unavailable",
-      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
-      sessionName: seat.session_name,
-      observedAt,
-    };
+    return tmuxUnavailableIdentity({ nodeId: seat.node_id, runtime: seat.runtime,
+      sessionName: seat.session_name, registeredPane: seat.tmux_pane, observedAt });
   }
 
   private async computeVerdict(
@@ -405,25 +412,28 @@ export class SeatIdentityReconciler {
 
     // From the sweep's one batched list-panes when the pane is in it; otherwise read per pane as before.
     const batched = panes?.get(seat.tmux_pane) ?? null;
+    if (batched) base.observedAt = batched.observedAt;
     if (batched?.dead === true) {
       // Pane IDs can outlive their stored association after a move or server restart.
       // Only observed membership in the exact session proves this executor exited.
       const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
-      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, observedAt);
+      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, this.now().toISOString());
       return {
         ...base, verdict: "pane_missing", evidenceSource: "pane_process", reason: "pane_exited",
         evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: batched.command, matchedLayer: null },
       };
     }
     const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
+    if (!batched) base.observedAt = this.now().toISOString();
     if (pid === null) {
       // getPanePid collapses transport/read failures into null. Only a readable census
       // showing another pane, or a successful session snapshot proving absence, establishes loss.
       const sessionAlive = liveSessions.has(seat.session_name);
       if (sessionAlive) {
         const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+        base.observedAt = this.now().toISOString();
         if (!currentPanes?.length || currentPanes.some(pane => pane.id === seat.tmux_pane)) {
-          return this.tmuxUnavailableVerdict(seat, observedAt);
+          return this.tmuxUnavailableVerdict(seat, base.observedAt);
         }
       }
       return {
@@ -436,8 +446,9 @@ export class SeatIdentityReconciler {
     }
 
     const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
+    if (!batched) base.observedAt = this.now().toISOString();
     if (command === null && seat.runtime === "claude-code") {
-      return this.tmuxUnavailableVerdict(seat, observedAt);
+      return this.tmuxUnavailableVerdict(seat, base.observedAt);
     }
     if (seat.runtime === "codex" || (seat.runtime === "claude-code" && (seat.resume_token != null || native !== null)
       && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
@@ -480,6 +491,7 @@ export class SeatIdentityReconciler {
         this.tmux.getPanePid(seat.tmux_pane), this.tmux.getPaneCommand(seat.tmux_pane),
         this.tmux.listPanes?.(seat.session_name, true).catch(() => null) ?? null,
       ]);
+      unconfirmed.observedAt = this.now().toISOString();
       const selected = this.db.prepare(`SELECT s.id AS session_id,s.startup_status,n.runtime,b.tmux_session,b.tmux_pane FROM sessions s
         JOIN nodes n ON n.id=s.node_id LEFT JOIN bindings b ON b.node_id=n.id WHERE n.id=? ORDER BY s.id DESC LIMIT 1`)
         .get(seat.node_id) as { session_id: string; startup_status: string | null; runtime: string | null; tmux_session: string | null; tmux_pane: string | null } | undefined;

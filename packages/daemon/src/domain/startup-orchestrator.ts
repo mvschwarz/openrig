@@ -1081,10 +1081,12 @@ export class StartupOrchestrator {
         runtime: input.adapter.runtime, expectedResumeToken: session?.resumeToken,
         launchedExecutable, listProcesses: this.listProcesses, assertCurrent: current });
       if (!current()) return changed();
-      if (!identity.ok) {
+      if (!identity.ok && identity.reason === "tmux_unavailable") {
+        this.recordSubmissionWarning(deliveryInput, `Startup runtime observation is unavailable: ${identity.detail}`);
+      } else if (!identity.ok) {
         // Only a newly observed empty shell can license failed-start recovery. An unreadable pane is unknown.
         const emptyShell = input.adapter.runtime !== "terminal" && current()
-          && await verifyPaneEmptyShell({ target: input.binding.tmuxPane ?? input.binding.tmuxSession,
+          && await verifyPaneEmptyShell({ target: this.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? input.binding.tmuxSession,
             tmux: this.tmuxAdapter, listProcesses: this.listProcesses }).catch(() => false);
         if (!current()) return changed();
         return this.fail(deliveryInput, "attention_required", [`Startup runtime identity is unverified: ${identity.detail}`],
