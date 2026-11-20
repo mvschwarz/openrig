@@ -1533,11 +1533,14 @@ function stableJsonKey(value: unknown): string {
 export interface ClaudeSelfReportRead {
   listFiles(dir: string): string[];
   readFile(path: string): string;
+  /** Whether a process with this PID is running. Default: signal 0 (a process we may not signal still exists). */
+  isAlive?(pid: number): boolean;
 }
 
 const defaultSelfReportRead: ClaudeSelfReportRead = {
   listFiles: (dir) => fs.readdirSync(dir),
   readFile: (p) => fs.readFileSync(p, "utf8"),
+  isAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } },
 };
 
 /** Read the freshest self-report for `sessionName` as ladder evidence, or null.
@@ -1550,12 +1553,24 @@ export function readClaudeSelfReportEvidence(input: {
   sessionsDir: string;
   sessionName: string;
   seatNodeId: string;
+  /** The seat's verified native Claude PID. Its own `<pid>.json` is the seat's, whatever its `name` (the conversation
+   *  title, which `/rename` changes) says, while that process runs. */
+  pid?: number;
   read?: ClaudeSelfReportRead;
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
   const read = input.read ?? defaultSelfReportRead;
   try {
     let best: { status: string; statusUpdatedAt: number } | null = null;
-    for (const file of read.listFiles(input.sessionsDir)) {
+    if (input.pid !== undefined && (read.isAlive ?? defaultSelfReportRead.isAlive!)(input.pid)) {
+      try {
+        const record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, `${input.pid}.json`))) as
+          { pid?: unknown; status?: unknown; statusUpdatedAt?: unknown };
+        if (record.pid === input.pid && typeof record.status === "string" && typeof record.statusUpdatedAt === "number") {
+          best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
+        }
+      } catch { /* no file for this process: the name match below, as before */ }
+    }
+    for (const file of best ? [] : read.listFiles(input.sessionsDir)) {
       if (!file.endsWith(".json")) continue;
       let record: { name?: unknown; status?: unknown; statusUpdatedAt?: unknown };
       try {

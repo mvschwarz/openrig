@@ -266,7 +266,11 @@ export class SeatActivityService {
       }
       if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
         const evd = this.selfReportReader(paneId, seatNodeId);
-        if (evd) this.reportEvidence(evd); // null = unreadable ⇒ the rung simply stales
+        // Unread on two sweeps running (no file for this seat, unknown status), its last report retires, so the rungs
+        // below decide. One unread sweep, such as a file read mid-write, keeps it.
+        seat.selfReportUnread = evd ? 0 : (seat.selfReportUnread ?? 0) + 1;
+        if (evd) this.reportEvidence(evd);
+        else if (seat.selfReportUnread >= 2 && seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE)) this.arbitrate(seat);
       }
     }
     return record;
@@ -1066,6 +1070,8 @@ interface NeedsInputShape {
 }
 
 const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
+/** The Claude self-report rung's one source (`pid.json`, read by the sweep). */
+const CLAUDE_SELF_REPORT_SOURCE = "claude:pid-json";
 
 /** What a qualified Codex structural frame says about a prompt: a choice or permission prompt on screen (1), or a
  *  complete empty composer (0), observed at the capture's start. Null for anything else. */
@@ -1101,6 +1107,8 @@ interface SeatLadderState {
   occupant?: { paneId: string | null; pid: number | null };
   /** What keeps the copied Codex prompt evidence valid where it's read: its frame's freshness, capture start and pane. */
   structuralPrompt?: { freshMs: number; startedMs: number; pane: { id: string; pid: number } };
+  /** Sweeps in a row whose self-report read returned nothing. */
+  selfReportUnread?: number;
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;

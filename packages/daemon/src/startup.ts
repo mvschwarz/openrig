@@ -704,7 +704,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     selfReportReader: (sessionName, seatNodeId) => {
       // The seat's own Claude config dir when it declares one, where its Claude writes pid.json.
       const sessionsDir = nodePath.join(claudeConfigRootFor(db, seatNodeId), "sessions");
-      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId });
+      // The verified native process's own pid.json is the seat's after a /rename; the name match stays the fallback.
+      const identity = new SeatIdentityStore(db).getForNode(seatNodeId);
+      const pid = identity?.verdict === "verified" && identity.sessionName === sessionName ? identity.evidence.observedPid ?? undefined : undefined;
+      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId, pid });
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
     restoreHookEvidence: (seat, runtime) => restoredRunnerHookEvidence(agentActivityStore, seat, runtime),
