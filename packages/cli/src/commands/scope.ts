@@ -45,6 +45,8 @@ import {
   buildMissionDependencyGraph,
   ensureMissionId,
   ensureMissionIdPersisted,
+  enclosingMissionsRoot,
+  projectIdPrefix,
   findMission,
   indexerReadsStatusIn,
   readIndexerSliceStatus,
@@ -1134,12 +1136,28 @@ function buildMissionCreateCommand(): Command {
             });
           }
           id = opts.id;
-        } else if (isReleaseName) {
-          id = inferMissionDotId(name, null);
         } else {
-          const peers = listMissions(missionsRoot);
-          const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id));
-          id = inferMissionDotId(name, ordinal);
+          // The project's own prefix (project.yaml scope.idPrefix; OPR unless declared).
+          const idPrefix = projectIdPrefix(missionsRoot, rootAdvisories);
+          if (isReleaseName) {
+            id = inferMissionDotId(name, null, idPrefix);
+          } else {
+            const peers = listMissions(missionsRoot);
+            const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id), idPrefix);
+            id = inferMissionDotId(name, ordinal, idPrefix);
+          }
+        }
+        // A project nested in another: an id the enclosing project's missions already use is named, not refused. It's
+        // advisory, so a check that can't read the enclosing project says so, and the create goes on as before.
+        try {
+          const enclosing = enclosingMissionsRoot(missionsRoot);
+          if (enclosing) {
+            for (const node of readParentScope(enclosing).filter((node) => node.id === id)) {
+              rootAdvisories.push(`Mission ID ${id} is already used by ${node.path} in the enclosing project's missions (${enclosing}). Edit this mission's id: before creating its slices, since their ids inherit it. For later missions, set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml, or pass --id.`);
+            }
+          }
+        } catch (error) {
+          rootAdvisories.push(`The enclosing project's mission IDs couldn't be checked for ${id}: ${(error as Error).message}`);
         }
         // Resolve titles + render templates before any filesystem side
         // effects. A stale current or legacy notes-template override must

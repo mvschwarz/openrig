@@ -123,18 +123,20 @@ type InventorySeat = SeatActivityFields & {
 
 const NO_SINGLE_LEAD = "No single lead: the rig has no one seat that delegates to others and that nothing delegates to, or that seat has no session.";
 
-/** A rig with no delegation root can still name a team's entry point: a roster entry's declared lead_of. Exactly one gives
- *  the lead, marked declared; several give none, and the note names them. A delegation root always wins, and nothing
- *  routes or escalates to a declared lead. */
-function declaredLead(view: Record<string, unknown>, declared: Array<{ session: string; team: string; logicalId: string | null }>):
-  Record<string, unknown> {
+/** Where the daemon names no single lead (no delegation root, several, or one with no session), a roster entry's declared
+ *  lead_of can still name a team's entry point. Exactly one gives the lead, marked declared; several give none, and the note
+ *  names them. A lead the daemon names always wins, and nothing routes or escalates to a declared lead. An unread roster may
+ *  hold another declaration, so the note says so. */
+function declaredLead(view: Record<string, unknown>, declared: Array<{ session: string; team: string; logicalId: string | null }>,
+  rostersIncomplete = false): Record<string, unknown> {
   if (view.leadNote !== NO_SINGLE_LEAD || declared.length === 0) return {};
   if (declared.length > 1) {
     return { leadNote: `${NO_SINGLE_LEAD} Several roster entries declare lead_of (${declared.map((d) => `${d.session} for ${d.team}`).join(", ")}), so none is shown as the lead.` };
   }
   const [d] = declared;
   return { lead: { session: d!.session, logicalId: d!.logicalId, declared: true, team: d!.team },
-    leadNote: `${d!.team}'s entry point: send work for that team here. It doesn't manage this network or its other participants.` };
+    leadNote: `${d!.team}'s entry point: send work for that team here. It doesn't manage this network or its other participants.`
+      + (rostersIncomplete ? " Some rosters couldn't be read, so another entry point may be declared." : "") };
 }
 
 /** A rig's team from its detail (authored delegates_to edges and the daemon's representative) and its node inventory
@@ -773,12 +775,12 @@ export const MEMBER_WORKFLOW_VERSION = "member-workflow/v3";
 const MEMBER_AUTHORITY = "If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may.";
 export const MEMBER_WORKFLOW = [
   `Member workflow (${MEMBER_WORKFLOW_VERSION}). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act.`,
-  "For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it.",
+  "For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. An item titled \"Checked on …\" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself.",
   "Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files.",
   MEMBER_AUTHORITY,
   "When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask.",
   "If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress.",
-  "Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it; a lead marked declared is only a team's entry point, so ask the seat the item came from instead), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
+  "Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
   "Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.",
 ].join(" ");
 
@@ -2221,9 +2223,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows`, checkIn: await checkInOf(seat) };
           }, !!access?.external);
         const note = hosted.note ? { hostedMembersNote: hosted.note } : {};
-        // A declared entry point names the lead only where the daemon reports no delegation root.
+        // A declared entry point names the lead only where the daemon names no single lead; a lead it names always wins.
         const led = declaredLead(view, (hosted.declaredLeads ?? []).map((d) => ({ ...d, logicalId: inventory.find((seat) =>
-          seat.canonicalSessionName === d.session || logicalAddress(seat.logicalId) === d.session)?.logicalId ?? null })));
+          seat.canonicalSessionName === d.session || logicalAddress(seat.logicalId) === d.session)?.logicalId ?? null })), !!hosted.note);
         // The names a person knows the team by are for a person's assistant on an external grant; an internal caller's
         // answer is as it was.
         if (!access?.external) return mapResult({ status: 200, data: { ...view, ...led, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });

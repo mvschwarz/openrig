@@ -881,9 +881,9 @@ describe("MCP Server", () => {
     for (const part of ["rig_queue_list with owned set", "rig_queue_claim", "blockedOn that person", "blockedOn that new qitemId"]) expect(MEMBER_WORKFLOW).toContain(part);
     // v2: the closure reason a finished item takes, and scope described from the grant, not the tool list.
     for (const part of ["closure reason no-follow-on", "a listed tool isn't access", "names the shared roots you may read"]) expect(MEMBER_WORKFLOW).toContain(part);
-    // v3: a lead rig_team marks declared is only a team's entry point, not who answers for a shared channel's item.
+    // v3: an item titled "Checked on …" is OpenRig's check on other work, to act on, not a task to close.
     expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v3");
-    expect(MEMBER_WORKFLOW).toContain("a lead marked declared is only a team's entry point, so ask the seat the item came from instead");
+    expect(MEMBER_WORKFLOW).toContain("An item titled \"Checked on …\" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself.");
     const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
     expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
     for (const old of ["member-workflow/v1", "member-workflow/v2"]) expect(doc).not.toContain(old);
