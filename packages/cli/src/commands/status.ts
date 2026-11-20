@@ -7,6 +7,7 @@ import {
   getDaemonUrl,
   type LifecycleDeps,
   statusGuardMessage,
+  terminalsDegradedLine,
 } from "../daemon-lifecycle.js";
 import { readLifecycleDescription } from "../daemon-lifecycle-status.js";
 import { realDeps } from "./daemon.js";
@@ -43,7 +44,9 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
     // JSON mode: one object, same keys on every path; sections the command did not
     // (or could not) read are null rather than absent.
     const emit = (daemon: Record<string, unknown>, rest: Record<string, unknown> = {}): void => {
-      console.log(JSON.stringify({ daemon: { ...daemon, ...(status.databaseWarnings ? { databaseWarnings: status.databaseWarnings } : {}) }, kernel: null, workspaceRoot: null, rigs: null, cmux: null, ...rest }, null, 2));
+      // #3315: `terminals` (whether the daemon reaches its tmux server) is read from healthz, apart from `healthy`.
+      console.log(JSON.stringify({ daemon: { ...daemon, ...(status.databaseWarnings ? { databaseWarnings: status.databaseWarnings } : {}) }, kernel: null, workspaceRoot: null, rigs: null, cmux: null,
+        terminals: status.terminals ?? null, ...rest }, null, 2));
     };
 
     const deps = depsOverride ?? {
@@ -155,6 +158,9 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
     }
 
     console.log(`Daemon running on port ${status.port}`);
+    // #3315: the daemon is up; whether its terminals answer is a separate line, shown when one does not.
+    const terminalsLine = terminalsDegradedLine(status.terminals);
+    if (terminalsLine) console.log(terminalsLine);
 
     // OPR.0.3.3.04.2 (AC-2): kernel readiness is a DISTINCT signal from daemon
     // health - the kernel rig auto-boots on daemon-start, and a daemon can be up

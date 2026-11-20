@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 const ulid = monotonicFactory();
 import type { Session, Binding } from "./types.js";
-import { validateSessionName } from "./session-name.js";
+import { boundSessionNameProblem, validateSessionName } from "./session-name.js";
 import { formatWatchdogRegistrationError } from "./watchdog-auto-registration.js";
 import type { ClaudeLaunchedProcess, ClaudeResumeRotation } from "./native-process-lineage.js";
 
@@ -107,6 +107,8 @@ export interface LatestLiveSession {
   cwd: string | null;
   /** The community harness this session was launched for, when it was. */
   communityHarness?: string | null;
+  /** `claimed` for a session OpenRig didn't launch (adopted, bound, or joined with `rig attach --self`). */
+  origin?: string | null;
 }
 
 export interface WatchdogRegistrationObserver {
@@ -291,8 +293,11 @@ export class SessionRegistry {
     sessionName: string,
     kind: OccupantKind = "initial",
     reservedGeneration?: string | null,
+    /** The launch keeps the name the seat was bound to (an adopted seat's own name): accepted when boundSessionNameProblem finds none.
+     *  launchedCwd: the folder this launch starts the seat in, which rig down also cleans. */
+    opts?: { keptBoundName?: boolean; launchedCwd?: string },
   ): Session {
-    if (!validateSessionName(sessionName)) {
+    if (!validateSessionName(sessionName) && !(opts?.keptBoundName === true && boundSessionNameProblem(sessionName) === null)) {
       throw new Error(
         `Invalid session name "${sessionName}": must match legacy r{NN}-{suffix} or canonical {pod}-{member}@{rig} format with allowed characters (a-z, A-Z, 0-9, -, _, ., @)`
       );
@@ -305,11 +310,18 @@ export class SessionRegistry {
         "INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)"
       )
       .run(id, nodeId, sessionName);
+    this.recordLaunchedCwd(id, opts?.launchedCwd);
     this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
     );
+  }
+
+  /** The folder a launch started this session in, which rig down also cleans. A database without the column records none. */
+  recordLaunchedCwd(sessionId: string, cwd: string | null | undefined): void {
+    if (!cwd) return;
+    try { this.db.prepare("UPDATE sessions SET launched_cwd = ? WHERE id = ?").run(cwd, sessionId); } catch { /* no column */ }
   }
 
   /** Register a claimed session — skips naming validation, sets origin='claimed', startup_status='ready'. */
@@ -822,13 +834,13 @@ export class SessionRegistry {
   getLatestLiveSessions(rigId: string): LatestLiveSession[] {
     const rows = this.db.prepare(`
       SELECT n.id as node_id, s.id as session_id, s.session_name, s.status, n.runtime, n.cwd, s.resume_type, s.resume_token,
-        ${sessionCommunityHarnessSelect(this.db)} as community_harness
+        s.origin, ${sessionCommunityHarnessSelect(this.db)} as community_harness
       FROM nodes n
       JOIN sessions s ON s.node_id = n.id
       WHERE n.rig_id = ?
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
         AND s.status IN ('running', 'idle', 'unknown')
-    `).all(rigId) as Array<{ node_id: string; session_id: string; session_name: string; status: string; runtime: string | null; cwd: string | null; resume_type: string | null; resume_token: string | null; community_harness: string | null }>;
+    `).all(rigId) as Array<{ node_id: string; session_id: string; session_name: string; status: string; runtime: string | null; cwd: string | null; resume_type: string | null; resume_token: string | null; origin: string | null; community_harness: string | null }>;
 
     return rows.map((r) => ({
       nodeId: r.node_id,
@@ -840,6 +852,7 @@ export class SessionRegistry {
       resumeToken: r.resume_token,
       cwd: r.cwd,
       communityHarness: r.community_harness,
+      origin: r.origin,
     }));
   }
 

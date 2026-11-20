@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   validateLedger,
+  ceilingWarning,
   resolveGateWithLedger,
   renderLedgerState,
   CUT_CEILING_ISO,
@@ -19,11 +21,14 @@ import {
 //   Rail 4  cut ceiling           — no resident's expiry may outlive the 0.5.2 cut
 
 const CEIL = "2025-09-01"; // an explicit test ceiling (the real one is CUT_CEILING_ISO)
+// An explicit clock as well as an explicit ceiling: the ceiling's staleness and a resident's expiry
+// are both read against this date, so these cases keep their meaning at any real date.
+const TODAY = "2025-08-10";
 const ok = (over = {}) => ({ suite: "flaky-suite", reason: "contention flake", receipt: "A/B sha abc", owner: "dev-driver", expiry: "2025-08-20", ...over });
 
 // ---- Rail 3: schema ----------------------------------------------------------------------------
 test("rail 3 — a resident missing receipt/owner/expiry is REJECTED (each named)", () => {
-  const r = validateLedger([{ suite: "x", reason: "r" }], { cutCeiling: CEIL });
+  const r = validateLedger([{ suite: "x", reason: "r" }], { cutCeiling: CEIL, today: TODAY });
   assert.equal(r.valid, false);
   for (const field of ["receipt", "owner", "expiry"]) {
     assert.ok(r.errors.some((e) => e.includes(field)), `missing ${field} must be reported`);
@@ -38,13 +43,13 @@ test("rail 3 — LEDGER_ENTRY_FIELDS names the required schema (receipt+owner+ex
 
 // ---- Rail 4: cut ceiling -----------------------------------------------------------------------
 test("rail 4 — a resident whose expiry EXCEEDS the cut ceiling is REJECTED", () => {
-  const r = validateLedger([ok({ expiry: "2099-12-31" })], { cutCeiling: CEIL });
+  const r = validateLedger([ok({ expiry: "2099-12-31" })], { cutCeiling: CEIL, today: TODAY });
   assert.equal(r.valid, false);
   assert.ok(r.errors.some((e) => /ceiling|cut/i.test(e)), "ceiling violation must be reported");
 });
 
 test("rail 4 — a well-formed resident within the ceiling VALIDATES clean", () => {
-  const r = validateLedger([ok()], { cutCeiling: CEIL });
+  const r = validateLedger([ok()], { cutCeiling: CEIL, today: TODAY });
   assert.equal(r.valid, true);
   assert.deepEqual(r.errors, []);
 });
@@ -52,6 +57,41 @@ test("rail 4 — a well-formed resident within the ceiling VALIDATES clean", () 
 test("rail 4 — CUT_CEILING_ISO is a real ISO date (the mechanism has a concrete ceiling)", () => {
   assert.match(CUT_CEILING_ISO, /^\d{4}-\d\d-\d\d/);
   assert.equal(Number.isNaN(Date.parse(CUT_CEILING_ISO)), false);
+});
+
+// A ceiling is a date a person sets at a cut. Once it has gone by, no resident can satisfy both
+// "expiry <= ceiling" and "expiry has not passed", so the ledger cannot excuse anything until a cut
+// moves it. That is worth saying out loud and not worth failing an otherwise healthy gate on.
+test("rail 4 — a ceiling in the past is a WARNING, and an empty ledger still passes", () => {
+  const r = resolveGateWithLedger({ failures: [], ledger: [], now: "2025-12-01", cutCeiling: "2025-09-01" });
+  assert.equal(r.gate, "pass");
+  assert.equal(r.validity.valid, true);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /cut ceiling 2025-09-01 has passed/);
+  assert.match(renderLedgerState(r), /cut ceiling 2025-09-01 has passed/);
+});
+
+test("rail 4 — a ceiling that is still ahead says nothing", () => {
+  const r = resolveGateWithLedger({ failures: [], ledger: [], now: "2025-08-10", cutCeiling: "2025-09-01" });
+  assert.deepEqual(r.warnings, []);
+});
+
+test("rail 4 — the shipped ceiling's own state is reported, and the date is not moved here", () => {
+  // 2026-09-30 is behind today, so the ledger cannot admit a resident until a cut moves it; the gate
+  // reports that and does not decide the cut date on its own.
+  const warning = ceilingWarning(CUT_CEILING_ISO);
+  if (Date.parse(CUT_CEILING_ISO) < Date.now()) {
+    assert.match(warning, /has passed/);
+  } else {
+    assert.equal(warning, null);
+  }
+});
+
+test("rail 4 — the ledger file and the module name the same ceiling", () => {
+  // Two declarations of one cut date: the module's constant is the default the resolver uses, and the
+  // ledger file's is what the gate loads. They have to agree, or moving one leaves the other stale.
+  const ledger = JSON.parse(readFileSync(new URL("./gate-lane-exclusions.json", import.meta.url), "utf8"));
+  assert.equal(ledger.cutCeiling, CUT_CEILING_ISO);
 });
 
 // ---- Rail 1: green-with-exclusions -------------------------------------------------------------
@@ -108,6 +148,6 @@ test("rail 3 — expiry must be a calendar date, not a coerced or truncated valu
 });
 
 test("rail 3 — leap days validate only in leap years", () => {
-  assert.equal(validateLedger([ok({ expiry: "2024-02-29" })], { cutCeiling: CEIL }).valid, true);
-  assert.equal(validateLedger([ok({ expiry: "2025-02-29" })], { cutCeiling: CEIL }).valid, false);
+  assert.equal(validateLedger([ok({ expiry: "2024-02-29" })], { cutCeiling: CEIL, today: TODAY }).valid, true);
+  assert.equal(validateLedger([ok({ expiry: "2025-02-29" })], { cutCeiling: CEIL, today: TODAY }).valid, false);
 });

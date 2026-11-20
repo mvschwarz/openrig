@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONTROL_OPTION, supportsControlMode } from "../src/adapters/tmux-control.js";
 import type { TmuxServerSelection } from "../src/domain/tmux-server-selection.js";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
@@ -145,6 +145,13 @@ describe.skipIf(!nativeAvailable)("two isolated daemon instances with tmux contr
       const paneHome = native(socket, ["show-environment", "-t", `=${SEAT}`, "HOME"]);
       expect(paneHome).toMatch(/^HOME=/);
       expect(realpathSync(paneHome.slice(5))).toBe(realpathSync(shared.home));
+
+      // An early probe can back off while this server has no seat yet. Captures can succeed via the spawned
+      // fallback meanwhile, so wait for an actual control client before testing the two-instance control path.
+      await vi.waitFor(async () => {
+        await capture(instance);
+        expect(controlSessions(socket)).toHaveLength(1);
+      }, { timeout: 45_000, interval: 100 });
     }
 
     expect(a.scaffold.openrigHome).not.toBe(b.scaffold.openrigHome);

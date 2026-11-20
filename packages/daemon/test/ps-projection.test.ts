@@ -4,7 +4,7 @@ import { monotonicFactory } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention, arbitratedNeedsInputSignal } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
-import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { attachTerminalActivityAndWork, getNodeInventory } from "../src/domain/node-inventory.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -48,6 +48,95 @@ describe("PsProjectionService", () => {
     db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(id, rigId, "manual", "complete", "{}", createdAt ?? new Date().toISOString().replace("T", " ").slice(0, 19));
   }
+
+  it("keeps an unlaunched held seat visible without degrading an otherwise running rig, until it owes work", () => {
+    const rigId = seedRig("planned-hold");
+    seedSession(seedNode(rigId, "worker"), "running");
+    const held = seedNode(rigId, "optional.worker");
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+
+    const row = () => attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db }).find((n) => n.nodeId === held)!;
+    expect(row()).toMatchObject({ heldReason: "on demand", needsAttention: false, hasAssignedWork: false });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "running", status: "partial", runningCount: 1, attentionCount: 0 });
+
+    const destination = "optional-worker@planned-hold";
+    db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
+      VALUES ('q-planned', datetime('now'), datetime('now'), 'operator@test', ?, 'pending', 'routine', 'routine', 'work')`).run(destination);
+    expect(row()).toMatchObject({ needsAttention: true, hasAssignedWork: true });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1, attentionCount: 1 });
+  });
+
+  it("keeps attention on a held seat whose earlier restore already ended failed", () => {
+    const rigId = seedRig("held-after-failure");
+    seedSession(seedNode(rigId, "worker"), "running");
+    const held = seedNode(rigId, "optional.worker");
+    // An earlier restore named this seat and ended `failed`; it recorded no startup error, so only
+    // the restore outcome carries the fact. A later subset launch leaves the seat out and writes
+    // `node.held` for it without recording any result.
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'restore.completed', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ result: { nodes: [{ nodeId: held, status: "failed" }] } }));
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+
+    const row = () => attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db }).find((n) => n.nodeId === held)!;
+    expect(row()).toMatchObject({ heldReason: "on demand", restoreOutcome: "failed", needsAttention: true, hasAssignedWork: false });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1, attentionCount: 1 });
+  });
+
+  it("does not count all held seats as running or hide an unexpected detached seat", () => {
+    const rigId = seedRig("held-only");
+    const held = seedNode(rigId, "optional.worker");
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "stopped", runningCount: 0, attentionCount: 0 });
+    seedSession(seedNode(rigId, "running"), "running");
+    seedNode(rigId, "unexpected");
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1 });
+  });
+
+  it("retains attention for held seats with startup errors or an unresolvable work destination", () => {
+    const rigId = seedRig("held-errors");
+    const failed = seedNode(rigId, "optional.failed");
+    const unresolved = seedNode(rigId, "unresolved");
+    for (const node of [failed, unresolved]) {
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+        .run(rigId, node, JSON.stringify({ reason: "on demand" }));
+    }
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.startup_failed', ?, datetime('now'))")
+      .run(rigId, failed, JSON.stringify({ error: "launch failed" }));
+    const nodes = attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db });
+    expect(nodes.map((node) => node.needsAttention)).toEqual([true, true]);
+    expect(ps.getEntries()[0]!.attentionCount).toBe(2);
+  });
+
+  // A pane restore left as a bare shell (no harness started) carries its own marker and isn't counted running. A seat
+  // that needs attention for another reason (an identity question here) keeps the existing running count, and so does a
+  // later launch on a once-bare seat: the marker belongs to the session that recorded it.
+  it("a seat restore left as a bare shell isn't counted running; other attention still is", () => {
+    const rigId = seedRig("shell-only");
+    const shell = seedNode(rigId, "shell");
+    const asked = seedNode(rigId, "asked");
+    const relaunched = seedNode(rigId, "relaunched");
+    const bus = new EventBus(db);
+    for (const [nodeId, stage] of [[shell, "harness_not_started"], [asked, "identity_verification"], [relaunched, "harness_not_started"]] as const) {
+      const id = seedSession(nodeId, "running");
+      db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = ?").run(id);
+      bus.emit({ type: "node.startup_failed", rigId, nodeId, error: `fixture ${stage}`, sessionId: id, stage });
+    }
+    // The relaunch's own session needs attention (an identity check that records no startup failure).
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(relaunched);
+    const next = seedSession(relaunched, "running");
+    db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = ?").run(next);
+
+    const entries = ps.getEntries();
+    expect(entries[0]!.nodeCount).toBe(3);
+    expect(entries[0]!.runningCount).toBe(2);
+    const inventory = getNodeInventory(db, rigId);
+    expect(inventory.find((node) => node.logicalId === "shell")).toMatchObject({ startupStatus: "attention_required", latestErrorStage: "harness_not_started" });
+    expect(inventory.find((node) => node.logicalId === "asked")).toMatchObject({ startupStatus: "attention_required", latestErrorStage: "identity_verification" });
+    expect(inventory.find((node) => node.logicalId === "relaunched")).toMatchObject({ sessionStatus: "running", startupStatus: "attention_required", latestErrorStage: null });
+  });
 
   // T1: All nodes running -> status: running
   it("all nodes running -> status: running", () => {

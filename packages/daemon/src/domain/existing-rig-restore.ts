@@ -67,6 +67,8 @@ export async function runExistingRigRestore(
   choice: Extract<RestoreSnapshotChoice, { ok: true }>,
   opts: {
     freshLogicalIds?: string[]; nonInterruptive?: boolean; exists: (path: string) => boolean;
+    /** `rig up <rig> --existing --cwd <dir>`: launch every restored seat there, for this run only. */
+    cwdOverride?: string;
     automatic?: boolean; onSnapshot?: (snapshotId: string) => void; onSessionLaunched?: (nodeId: string, sessionId: string) => void;
   },
 ) {
@@ -92,6 +94,7 @@ export async function runExistingRigRestore(
     // OPR.0.3.4.2 — operation B opt-in seats from `rig up --existing --fresh`.
     freshLogicalIds: opts.freshLogicalIds,
     nonInterruptive: opts.nonInterruptive,
+    ...(opts.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
     snapshotSelection,
     onSessionLaunched: opts.onSessionLaunched,
     automatic: opts.automatic,

@@ -124,7 +124,10 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.default_lines",
   "ui.timezone",
   // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
+  // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
   "ui.enabled",
+  // TUI topology: whether a remote rig's seats may be read through this daemon (off by default).
+  "ui.topology_remote_seats",
   // OPR.0.4.0.1 — global cap on simultaneously-live terminals (default 2).
   "ui.terminal.max_live_terminals",
   "recovery.auto_drive_provider_prompts",
@@ -302,6 +305,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.timezone": { primary: "OPENRIG_UI_TIMEZONE" },
   "ui.enabled": { primary: "OPENRIG_UI_ENABLED" },
+  "ui.topology_remote_seats": { primary: "OPENRIG_UI_TOPOLOGY_REMOTE_SEATS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
   "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
@@ -419,6 +423,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.timezone": ["ui", "timezone"],
   "ui.enabled": ["ui", "enabled"],
+  "ui.topology_remote_seats": ["ui", "topologyRemoteSeats"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
@@ -504,6 +509,22 @@ export interface ResolvedSetting {
 
 export function isSettingsValidKey(key: string): key is SettingsValidKey {
   return (SETTINGS_VALID_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * The keys that define what this daemon may reach, and so are worth recording when a caller changes
+ * them over HTTP.
+ *
+ * `files.allowlist` is the allowlist the /api/files routes enforce (domain/files/path-safety.ts) and
+ * `progress.scan_roots` is the tree the progress scan walks. Both are ordinary settings: the Settings
+ * page saves and resets them through `POST`/`DELETE /api/config/:key`, and that stays. What a reader
+ * of the event stream could not see before is that they changed at all, so a change is published as
+ * `settings.changed`. Recording it is the point; refusing it would take away a path people use.
+ */
+export const BOUNDARY_SETTING_KEYS: readonly SettingsValidKey[] = ["files.allowlist", "progress.scan_roots"];
+
+export function isBoundarySettingKey(key: string): boolean {
+  return (BOUNDARY_SETTING_KEYS as readonly string[]).includes(key);
 }
 
 const REMOVED_CONTEXT_KEY = "context.packs_root";
@@ -726,6 +747,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "ui.preview.default_lines": return 50;
     case "ui.timezone": return "America/Los_Angeles";
     case "ui.enabled": return false;
+    case "ui.topology_remote_seats": return false;
     case "recovery.auto_drive_provider_prompts": return false;
     case "recovery.provider_auth_env_allowlist": return "";
     // V1 Phase 4 — Advisor default per universal-shell.md L83;

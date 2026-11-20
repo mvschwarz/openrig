@@ -22,7 +22,7 @@ type LaunchResponse = {
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
-  targetNodes?: Array<{ nodeId: string; logicalId: string }>;
+  targetNodes?: Array<{ nodeId: string; logicalId: string; permission?: { summary?: string } }>;
   snapshotSelection?: { snapshotId: string; kind: string; createdAt: string; ageMs: number; mode: "explicit" | "automatic"; rationale: string; newerUsableAlternative: unknown };
   nonTargetEffects?: { mode: "unchanged" | "detach_and_hold"; reason: string | null; affected: unknown[] };
   planOnly?: boolean;
@@ -320,6 +320,11 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         if (opts.plan && res.data.planOnly) {
           console.log("Plan only; no changes made.");
           printSnapshotSelection(res.data.snapshotSelection);
+          // Each target and the permission this launch will start it with (--json has the whole account).
+          if (res.data.targetNodes?.length) console.log("Targets:");
+          for (const target of res.data.targetNodes ?? []) {
+            console.log(`  ${target.logicalId}${target.permission?.summary ? `: ${target.permission.summary}` : ""}`);
+          }
           console.log(`Non-target effect: ${res.data.nonTargetEffects?.mode ?? "unavailable"}`);
           for (const node of res.data.nonTargetEffects?.affected ?? []) {
             const affected = node as { logicalId?: string; reason?: string };
@@ -345,7 +350,10 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         const heldIds = (res.data.held ?? []).map((n) => `${n.logicalId} (${n.reason})`).join(", ");
         if (running.length) console.log(`Launched: ${running.map((n) => n.logicalId).join(", ")}`);
         if (heldIds) console.log(`Held: ${heldIds}`);
-        if (res.data.alreadyRunning?.length) console.log(`Already running: ${res.data.alreadyRunning.map((n) => n.logicalId).join(", ")}`);
+        // Launch saw only a live session not proved to be a bare shell: the pane is kept, and no agent is proven running there.
+        if (res.data.alreadyRunning?.length) {
+          console.log(`Not relaunched, live session (its agent isn't proven running): ${res.data.alreadyRunning.map((n) => n.logicalId).join(", ")}`);
+        }
         // OPR.0.4.3.28 correction — proceed-with-warning: print non-blocking launch warnings (e.g.
         // liveness_probe_unknown) WITHOUT setting a non-zero exit.
         for (const w of res.data.warnings ?? []) console.warn(`Warning: ${w}`);
@@ -409,7 +417,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         for (const w of res.data.warnings ?? []) console.warn(`Warning: ${w}`);
       };
       if (res.data.code === "already_running" || (res.data.alreadyRunning && res.data.alreadyRunning.length > 0)) {
-        console.log(`Node ${logicalId} is already running in rig ${rigLabel} (not relaunched)`);
+        console.log(`Node ${logicalId} has a live session in rig ${rigLabel}, so it wasn't relaunched. Its agent isn't proven running.`);
         console.log(`For a fresh occupant: rig seat launch ${rigName ? `${logicalId}@${rigName}` : logicalId} --fresh --stop --reason "<why>"`);
         printLaunchWarnings();
         return;

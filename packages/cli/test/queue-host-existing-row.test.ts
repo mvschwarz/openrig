@@ -52,6 +52,7 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
   let local: Awaited<ReturnType<typeof serve>>;
   let remote: Awaited<ReturnType<typeof serve>>;
   let remoteAnswer: Answer;
+  let remoteRow: Record<string, unknown>;
   let home: string;
   let out: string[];
   let err: string[];
@@ -79,11 +80,22 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
       ? { status: 200, data: { healthy: true, selfHostId: "vm-a" } }
       : { status: 500, data: { error: "the selected daemon must not be asked for the row" } });
     localPort = Number(new URL(local.url).port);
+    remoteRow = { ...ROW };
+    const remoteTransitions: Array<{ transitionId: number; state: string; transitionNote: string | null }> = [
+      { transitionId: 1, state: "pending", transitionNote: null },
+    ];
     remoteAnswer = (req) => {
       if (req.path === "/healthz") return { status: 200, data: { healthy: true, selfHostId: "devbox-id" } };
-      if (req.path.endsWith("/transitions")) return { status: 200, data: [{ transitionId: 1, state: "pending" }] };
+      if (req.path.endsWith("/transitions")) return { status: 200, data: remoteTransitions };
       if (req.path.startsWith("/api/queue/list")) return { status: 200, data: [ROW] };
-      return { status: 200, data: ROW };
+      if (req.method === "POST" && req.path.endsWith("/update")) {
+        remoteRow = { ...remoteRow, ...(req.body as Record<string, unknown>) };
+        const transitionNote = (req.body as { transitionNote?: unknown }).transitionNote;
+        if (typeof transitionNote === "string") {
+          remoteTransitions.push({ transitionId: remoteTransitions.length + 1, state: String(remoteRow.state), transitionNote });
+        }
+      }
+      return { status: 200, data: remoteRow };
     };
     remote = await serve((req) => remoteAnswer(req));
     hosts = [
@@ -121,7 +133,7 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
   it("transitions --host reads the remote log", async () => {
     await run("transitions", "qitem-remote-1", "--host", "devbox", "--json", "--full");
     expect(remoteQueueCalls().map((c) => c.path)).toEqual(["/api/queue/qitem-remote-1/transitions"]);
-    expect(JSON.parse(out.join("\n"))).toEqual([{ transitionId: 1, state: "pending" }]);
+    expect(JSON.parse(out.join("\n"))).toEqual([{ transitionId: 1, state: "pending", transitionNote: null }]);
   });
 
   it("list --host lists the remote rows, its filters kept and no rig derived from this host's seat", async () => {
@@ -143,7 +155,7 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
 
   it("update --host writes on the remote daemon, the actor stamped with this host's id", async () => {
     await run("update", "qitem-remote-1", "--host", "devbox", "--state", "done", "--closure-reason", "no-follow-on", "--note", "settled from vm-a", "--json");
-    const [call] = remoteQueueCalls();
+    const call = remoteQueueCalls().find((entry) => entry.method === "POST");
     expect(call).toMatchObject({ method: "POST", path: "/api/queue/qitem-remote-1/update" });
     expect(call!.headers["x-openrig-session"]).toBe("dev@fabrica@vm-a");
     expect(call!.headers.authorization).toBe("Bearer s3cret");
@@ -208,7 +220,7 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
   it("a self-id learned at the entry's current URL routes to that entry", async () => {
     bind({ observedUrl: remote.url });
     await run("update", "qitem-remote-1", "--host", "devbox-self-id", "--state", "done", "--json");
-    expect(remoteQueueCalls().map((c) => c.path)).toEqual(["/api/queue/qitem-remote-1/update"]);
+    expect(remoteQueueCalls().map((c) => c.path)).toEqual(["/api/queue/qitem-remote-1/update", "/api/queue/qitem-remote-1"]);
     expect(process.exitCode).toBeUndefined();
   });
 
@@ -263,7 +275,9 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
     const { compactOutputEnabled } = await import("../src/queue-receipt.js");
     expect(compactOutputEnabled()).toBe(true);
     // The remote daemon's own id equals the alias: the receipt must still call the row remote.
-    remoteAnswer = (req) => req.path === "/healthz" ? { status: 200, data: { selfHostId: "devbox" } } : { status: 200, data: ROW };
+    remoteAnswer = (req) => req.path === "/healthz"
+      ? { status: 200, data: { selfHostId: "devbox" } }
+      : { status: 200, data: { ...ROW, state: "in-progress" } };
     await run("update", "qitem-remote-1", "--host", "devbox", "--state", "in-progress", "--json");
     const receipt = JSON.parse(out.join("\n"));
     expect(receipt.host).toBe("devbox");
@@ -274,13 +288,15 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
     local.close();
     local = await serve((req) => req.path === "/healthz"
       ? { status: 200, data: { selfHostId: "vm-a" } }
-      : { status: 200, data: req.path.startsWith("/api/queue/list") ? [] : ROW });
+      : { status: 200, data: req.path.startsWith("/api/queue/list") ? [] : { ...ROW, state: "done" } });
     localPort = Number(new URL(local.url).port);
     await run("show", "qitem-remote-1", "--json");
     await run("list", "--json");
     await run("update", "qitem-remote-1", "--state", "done", "--json");
     expect(remote.seen).toEqual([]);
-    expect(localQueueCalls().map((c) => c.path.split("?")[0])).toEqual(["/api/queue/qitem-remote-1", "/api/queue/list", "/api/queue/qitem-remote-1/update"]);
+    expect(localQueueCalls().map((c) => c.path.split("?")[0])).toEqual([
+      "/api/queue/qitem-remote-1", "/api/queue/list", "/api/queue/qitem-remote-1/update", "/api/queue/qitem-remote-1",
+    ]);
     // The local list still derives the rig from the seat, and no sender is stamped with a host id.
     expect(new URL(localQueueCalls()[1]!.path, "http://x").searchParams.get("rig")).toBe("fabrica");
     expect(localQueueCalls()[2]!.headers["x-openrig-session"]).toBe("dev@fabrica");

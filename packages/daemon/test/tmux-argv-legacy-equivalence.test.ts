@@ -106,6 +106,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.listWindows(SESSION);
   await a.listPanes(SESSION);
   await a.listPanes("=seat:1");
+  await a.serverStartTime(SESSION);
   await a.probeSession(SESSION);
   await a.hasSession(SESSION);
   await a.createSession(SESSION, "/w x", { PATH: "/a b:$HOME", Q: "it's" });

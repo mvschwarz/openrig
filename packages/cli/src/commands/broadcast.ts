@@ -137,7 +137,7 @@ selection, not the agent@rig@host sugar.`)
       if (opts.json) {
         console.log(JSON.stringify(res.data));
         const results = ((res.data as Record<string, unknown>)["results"] as Array<{ ok: boolean }> | undefined) ?? [];
-        if (res.status >= 400 || results.some((r) => !r.ok)) process.exitCode = 1;
+        if (res.status >= 400 || (res.data["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) process.exitCode = 1;
         return;
       }
 
@@ -205,7 +205,7 @@ async function runCrossHostBroadcast(
       result,
     }));
     const results = ((result.data as Record<string, unknown> | undefined)?.["results"] as Array<{ ok: boolean }> | undefined) ?? [];
-    if (!result.ok || results.some((r) => !r.ok)) process.exitCode = 1;
+    if (!result.ok || ((result.data as Record<string, unknown> | undefined)?.["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) process.exitCode = 1;
     return;
   }
 
@@ -222,9 +222,12 @@ async function runCrossHostBroadcast(
  *  local route does, so per-target honesty prints identically. A partial
  *  fan-out sets a non-zero exit either way. */
 function renderBroadcastResults(data: Record<string, unknown>): void {
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; outcome?: string; managedCompaction?: { notice?: unknown } }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; outcome?: string; runnerReceipt?: { requestId: string; stage: string; reconciliation?: string; erasedAt?: string; result?: { submissionUnknown?: boolean } }; managedCompaction?: { notice?: unknown } }>) ?? [];
   for (const r of results) {
-    if (r.outcome === "retained") {
+    if (r.runnerReceipt) {
+      const receipt = r.runnerReceipt;
+      console.log(`${r.sessionName}: ${receipt.reconciliation || receipt.erasedAt || receipt.result?.submissionUnknown ? "native effect unknown" : `native receipt ${receipt.stage}`}; request ${receipt.requestId}`);
+    } else if (r.outcome === "retained") {
       // A guard or the seat's setting held it: nothing was typed, so it isn't "sent" (as `rig send` says).
       console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`);
     } else if (r.ok) {
@@ -238,7 +241,7 @@ function renderBroadcastResults(data: Record<string, unknown>): void {
     }
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
   }
-  console.log(`${data["sent"]}/${data["total"]} delivered${heldSuffix(results)}`);
+  console.log(`${data["sent"]}/${data["total"]} delivered${heldSuffix(results)}${data["pendingNative"] ? `; ${data["pendingNative"]} native pending` : ""}${data["indeterminateNative"] ? `; ${data["indeterminateNative"]} native effect unknown` : ""}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const advisory = data["warning"] as string | undefined;
@@ -246,7 +249,7 @@ function renderBroadcastResults(data: Record<string, unknown>): void {
     console.log(`Advisory: ${advisory}`);
   }
 
-  if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
+  if ((data["failed"] as number) > 0 || (data["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }
 }

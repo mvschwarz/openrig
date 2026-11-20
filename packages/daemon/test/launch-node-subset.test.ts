@@ -15,6 +15,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -143,6 +144,34 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(result.launched?.[0]).toMatchObject({ status: "awaiting-decision", error: "No session was started for this seat. Restore a snapshot whose saved startup runtime matches the seat's current runtime." });
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
+  });
+
+  it.each([
+    ["codex", "claude-code"],
+    ["claude-code", "codex"],
+  ])("plans saved startup %s on live %s as unknown with restore's reason, never a definite mode", (saved, live) => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext(saved) });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(live, nodeIds[0]);
+    const result = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    const permission = result.targetNodes?.[0]?.permission;
+    expect(permission).toMatchObject({ basis: "unknown" });
+    expect(permission?.summary).toContain("restore stops for a runtime decision before it starts this seat. No session was started for this seat.");
+    expect(permission?.summary).not.toContain("On restore");
+  });
+
+  it("plans a seat recreated under the saved name as unknown with the launch's own refusal, never the replacement's account", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    // The snapshot saved dev.driver as another node; the current dev.driver has the same runtime and its own choice.
+    const snapshotId = seedSnapshot(rigId, ["saved-driver", nodeIds[1]!], { "saved-driver": emptyStartupContext("claude-code") });
+    new NativePermissionStore(db).write(nodeIds[0]!, { runtime: "claude-code", mode: "plan" }, "person@host", "the replacement's own choice");
+    const target = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId }).targetNodes?.[0];
+    expect(target).toEqual({ nodeId: "saved-driver", logicalId: "dev.driver", permission: { basis: "unknown", runtime: "claude-code",
+      summary: "Unknown: restore stops before it starts this seat. A snapshot seat was removed or recreated. Select history for the current seat." } });
+    // Execution keeps its existing refusal for the same seat.
+    const launched = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    expect(launched).toMatchObject({ ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." });
+    expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
   it("returns rig_not_found for unknown rig", async () => {
@@ -309,6 +338,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
     expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
+    // Each target carries the permission this launch will start it with, from restore's own posture rule.
+    expect(result.targetNodes?.[0]?.permission?.summary).toEqual(expect.any(String));
   });
 
   it("plans single-node subset by node id with nonTargetMode unchanged (#887)", () => {
@@ -740,6 +771,25 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "superseded" });
     });
 
+    it("#3253: a takeover chooses its path before the process is ended, and goes ahead without a limit it can't apply", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      const order: string[] = [];
+      const notice = { state: "not_applied", kind: "unverified", reason: "asking the systemd user manager timed out", retryable: true,
+        requested: { tasksMax: 256 } };
+      const plan = vi.fn(async () => { order.push("plan"); return notice; });
+      const signal = (tmux as any).signalPaneProcess;
+      (tmux as any).signalPaneProcess = vi.fn(async (...a: unknown[]) => { order.push("signal"); return signal(...a); });
+      Object.assign(tmux, { seatProcessLimitsRecoveryPlan: plan });
+      const adapter = readyAdapter("claude-code");
+      await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+      expect(order[0]).toBe("plan");
+      // the respawn runs in recovery mode: a limit can't stop it once the process has ended
+      expect((tmux as any).respawnPane).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+        expect.objectContaining({ processLimitsMode: "recovery" }));
+    });
+
     it("launches a kept running effort in place of the saved one, without saving it as the seat's choice", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       db.prepare("UPDATE nodes SET effort = 'low' WHERE id = ?").run(nodeIds[0]);
@@ -1006,7 +1056,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const { rigId, nodeIds, freshLaunch, launch } = guarded();
       const result = await launch();
       expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
-      expect(freshLaunch).toHaveBeenCalledWith(rigId, nodeIds[0]);
+      expect(freshLaunch).toHaveBeenCalledWith(rigId, nodeIds[0], { processLimitsMode: "recovery" });
       expect(tmux.killSession).toHaveBeenCalledOnce();
       expect(tmux.createSession).toHaveBeenCalledTimes(2);
       const sessions = sessionRegistry.getSessionsForRig(rigId).filter((session) => session.nodeId === nodeIds[0]);

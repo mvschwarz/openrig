@@ -12,6 +12,8 @@ metadata:
     - queue create
     - queue transitions
     - queue block
+    - queue update
+    - queue resolve
     - workflow project
     - send
   openrig:
@@ -164,6 +166,27 @@ row their reply landed as. The update posts in that thread unless one of the
 cases above applies, and `--verify` reports it the same way. A message the
 human started at the top level of the channel has no thread yet, so the answer
 posts as a new message.
+
+For unsolicited status updates, send a person what changed, not your standing
+state. After the first notice, check what you last sent them about that work:
+if nothing changed, send nothing, however many times you wake; if something did,
+say what changed rather than re-sending the earlier brief. Answer the person's
+questions even when the work has not changed. When their answer arrives, close
+the ask it answers. A registered person's reply in the ask's own thread resolves
+it, recorded as theirs. A reply routed to someone else, a shared channel's
+correspondence from someone unregistered, and a late reply that recovery finds
+don't answer it, so check what the ask recorded. For an answer that reached you
+any other way (in another of your threads, or as a new message), close the ask
+yourself, noting which reply answered it, so their answer isn't left reading as
+ignored:
+
+```bash
+rig queue update <ask-id> --state done --closure-reason no-follow-on \
+  --note "<which reply answered it>"
+```
+
+That resumes a row blocked on the ask. For a row parked on the person itself,
+`rig queue resolve <id> --decision "<their words>"` records it instead.
 
 A **decision** with a few clear choices can carry `--human-questions-file <path>`:
 a JSON array of 1–4 questions, each

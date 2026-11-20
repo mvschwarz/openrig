@@ -11,7 +11,8 @@
 // has no /proc, so there it is skipped rather than passed without checking
 // anything.
 import { describe, it, expect, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
@@ -20,6 +21,8 @@ import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-en
 import { spawnScenarioDaemon, runRig } from "./helpers/scenario-daemon.js";
 import { stageTopologyRoot } from "./helpers/scenario-stage.js";
 import { PARENT_SESSION_ENV_KEYS } from "../src/domain/parent-session-env.js";
+import { TmuxAdapter, defaultTmuxFileOps } from "../src/adapters/tmux.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -53,7 +56,13 @@ function parseEnv(text: string, separator: string): Record<string, string> {
 
 describe.runIf(process.platform === "linux")("seat environment from a daemon started inside Claude Code and Herdr", () => {
   const scaffolds: HermeticScaffold[] = [];
-  afterEach(() => { for (const s of scaffolds.splice(0)) s.cleanup(); });
+  afterEach(() => {
+    for (const scaffold of scaffolds.splice(0)) {
+      const root = scaffold.root;
+      scaffold.cleanup();
+      expect(existsSync(root)).toBe(false);
+    }
+  });
 
   // "daemon": the daemon starts the tmux server. "existing": a tmux server that
   // already carries the parent identity is running before the daemon starts.
@@ -120,6 +129,31 @@ describe.runIf(process.platform === "linux")("seat environment from a daemon sta
       const daemonEnv = environOf(String(health.pid));
       expect([daemonEnv["HC_SCOPE"], daemonEnv["HC_TERMINAL_ID"], daemonEnv["HC_TERMINAL_SOCKET"]]).toEqual([undefined, undefined, undefined]);
       expect(daemonEnv).toMatchObject({ HC_SESSION: "default", HC_SOCKET: "/run/hc.sock" });
+
+      // Exercise credential cleanup in a running throwaway rig. A server-global
+      // value must stay hidden after the seat's one-off value is removed, or the
+      // next shell pane in that seat would inherit a credential from tmux.
+      const session = seatPanes[0]![0];
+      const hookKey = "OPENRIG_ACTIVITY_HOOK_TOKEN";
+      const seedConfig = join(scaffold.root, "global-hook-token.conf");
+      writeFileSync(seedConfig, `set-environment -g ${hookKey} ${randomBytes(32).toString("hex")}\n`, { mode: 0o600 });
+      await tmux(["source-file", seedConfig]);
+      let sequence = 0;
+      const fileOps = defaultTmuxFileOps();
+      fileOps.tmpName = () => join(scaffold.root, `tmux-env-${++sequence}.conf`);
+      const adapter = new TmuxAdapter(async () => { throw new Error("legacy tmux transport not expected"); }, fileOps,
+        args => tmux(args.slice(1)).then(result => result.stdout));
+      await adapter.setSessionEnv(session, hookKey, randomBytes(32).toString("hex"));
+      await adapter.unsetSessionEnv(session, hookKey);
+
+      const presenceFile = join(scaffold.root, "hook-presence.json");
+      const probeFile = join(scaffold.root, "hook-presence.cjs");
+      writeFileSync(probeFile,
+        `const fs=require("node:fs");const present=Object.hasOwn(process.env,${JSON.stringify(hookKey)});`
+          + `fs.writeFileSync(${JSON.stringify(presenceFile)},JSON.stringify(present));\n`, { mode: 0o600 });
+      await tmux(["new-window", "-d", "-t", `=${session}:`, `${shellQuote(process.execPath)} ${shellQuote(probeFile)}`]);
+      for (let i = 0; i < 50 && !existsSync(presenceFile); i++) await new Promise(r => setTimeout(r, 100));
+      expect(JSON.parse(readFileSync(presenceFile, "utf8"))).toBe(false);
 
       if (server === "existing") {
         // Owner state is untouched: a tmux server already started inside a scoped terminal keeps the global

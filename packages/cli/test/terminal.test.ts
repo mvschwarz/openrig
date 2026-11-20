@@ -3,6 +3,7 @@
 // semantics for explicit cmux (partial-with-names = exit 0; zero-pane = non-zero).
 // The default desktop path is exercised in terminal-open-window-default.test.ts.
 
+import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { TerminalDeps } from "../src/commands/terminal.js";
 import { createProgram } from "../src/index.js";
@@ -78,6 +79,21 @@ describe("rig terminal CLI", () => {
     vi.spyOn(console, "log").mockImplementation((...a) => logs.push(a.join(" ")));
     vi.spyOn(console, "error").mockImplementation(() => {});
     process.exitCode = undefined;
+  });
+
+  it.each(["status", "views"])("authenticates terminal %s GETs with the terminal bearer", async command => {
+    vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "synthetic-terminal-command-token");
+    try {
+      const { deps } = makeDeps();
+      const client = deps.clientFactory("http://localhost:7433");
+      deps.clientFactory = () => client;
+      await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", command, "--json"]);
+      expect(client.get).toHaveBeenCalledWith(`/api/terminal/${command}`, {
+        headers: { Authorization: "Bearer synthetic-terminal-command-token" },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("registers open/close/views/status/attach subcommands", () => {
@@ -301,5 +317,50 @@ describe("rig terminal CLI", () => {
     await program.parseAsync(["node", "rig", "terminal", "status", "--provider", "herdr", "--json"]);
     const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/terminal/status"));
     expect(call!.path).toContain("provider=herdr");
+  });
+
+  it.each([
+    { label: "--session work", argv: ["--session", "work"], code: "unsupported_terminal_session" },
+    { label: "--provider tmux", argv: ["--provider", "tmux"], code: "close_unsupported" },
+    { label: "--provider herdr", argv: ["--provider", "herdr"], code: "close_unsupported" },
+    { label: "--provider empty", argv: ["--provider", ""], code: "close_unsupported" },
+  ])("single-view close rejects $label before calling daemon (human & --json)", async ({ argv, code }) => {
+    for (const json of [false, true]) {
+      logs = [];
+      process.exitCode = undefined;
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ terminalDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "terminal", "close", "rv-1", ...argv, ...(json ? ["--json"] : [])]);
+      expect(calls).toHaveLength(0);
+      expect(process.exitCode).toBe(1);
+      if (json) expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code });
+      else expect(logs[0]).toContain("Not closed:");
+    }
+  });
+
+  it("single-view close retains herdr-app default and --app-home forwarding", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/terminal/close": { status: 200, data: { provider: "herdr-app", ok: true, opened: [], absent: [], degraded: [], pages: 0 } } },
+    });
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "close", "rv-7", "--app-home", "/tmp/custom-app", "--json"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.find(c => c.path === "/api/terminal/close")?.body).toEqual({
+      view: "rv-7",
+      provider: "herdr-app",
+      herdrApp: { appHome: resolve("/tmp/custom-app") },
+    });
+
+    const prog2 = createProgram({ terminalDeps: deps });
+    prog2.exitOverride();
+    await prog2.parseAsync(["node", "rig", "terminal", "close", "rv-8", "--provider", "herdr-app", "--app-home", "/tmp/custom-app2", "--json"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(calls.filter(c => c.path === "/api/terminal/close")[1]?.body).toEqual({
+      view: "rv-8",
+      provider: "herdr-app",
+      herdrApp: { appHome: resolve("/tmp/custom-app2") },
+    });
   });
 });

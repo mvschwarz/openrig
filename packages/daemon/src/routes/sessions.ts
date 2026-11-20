@@ -42,13 +42,14 @@ import { validateResumeToken } from "../domain/resume-token-validation.js";
 import type { PermissionDriftReader } from "../domain/permission-drift-observer.js";
 import { ProcessCensus } from "../domain/process-census.js";
 import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
+import { effectiveRuntimeHome } from "../domain/seat-runtime-home.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 import { runSyncSiteWhenSlow } from "../domain/sync-site-wrap.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
-const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
+const generationThreadIds = new CodexThreadIdResolver();
 
 /** The node inventory's synchronous steps run one at a time, each after a turn of the event loop. They're SQLite work
  *  that can't yield, so concurrent requests ran their whole builds back to back and a read queued behind a burst (a
@@ -335,7 +336,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
     if (!instantiator) return c.json({ ok: false, code: "internal_error", message: "Pod instantiator unavailable" }, 500);
     const result = await instantiator.retryFirstStart(rigId, node.id, retry.member, retry.rigRoot);
-    return c.json(result, result.ok ? 201 : result.code === "failed" ? 500 : 409);
+    return c.json(result, result.ok ? 201 : processLimitsStatus(result.code) ?? (result.code === "failed" ? 500 : 409));
   }
 
   if (node.podId || body.snapshotId !== undefined) {
@@ -344,7 +345,8 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
       const firstStart = await instantiator?.launchFirstMaterializedNode(rigId, node.id);
       if (firstStart) {
         if (firstStart.ok) (c.get("snapshotCapture" as never) as SnapshotCapture | undefined)?.captureSnapshot(rigId, "auto-rehydrate");
-        return c.json(firstStart, firstStart.ok ? 201 : firstStart.code === "target_liveness_unknown" ? 503 : 409);
+        return c.json(firstStart, firstStart.ok ? 201
+          : processLimitsStatus(firstStart.code) ?? (firstStart.code === "target_liveness_unknown" ? 503 : 409));
       }
     }
     const { restoreOrchestrator } = getDeps(c);
@@ -387,12 +389,22 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     const status = result.code === "node_not_found" ? 404
       : result.code === "already_bound" ? 409
       : result.code === "invalid_session_name" ? 400
+      // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry.
+      : result.code === "process_limits_unverified" ? 409
+      : /^process_limits_/.test(result.code) ? 422
       : 500;
     return c.json(result, status);
   }
 
   return c.json(result, 201);
 });
+
+/** #3253: the HTTP status of a launch refused for the seat's process limit, as the legacy launch maps it (only an
+ *  unverified check may pass on retry: 409; the rest are 422); undefined for any other code. */
+function processLimitsStatus(code: string | undefined): 409 | 422 | undefined {
+  if (code === "process_limits_unverified") return 409;
+  return code !== undefined && /^process_limits_/.test(code) ? 422 : undefined;
+}
 
 // POST /api/rigs/:rigId/nodes/launch-subset — multi-target managed subset launch
 nodesRoutes.post("/launch-subset", async (c) => {
@@ -841,24 +853,35 @@ const generationRecord = async (c: Context) => {
       if (!pid || pid !== verifiedPanePid) {
         return c.json({ error: "record_identity_unverified", message: `The bound pane for '${sessionName}' no longer matches its verified occupant.` }, 409);
       }
-      let verifiedNativeThreadId: string | undefined;
+      // Match the expected-identity reader: select this seat's home, then carry the
+      // positive PID/start-time lookup's home into the transcript lookup as well.
+      const codexHome = effectiveRuntimeHome(registry.db, context!.nodeId, "codex", process.env.CODEX_HOME || undefined);
+      const threads = codexHome ? new CodexThreadIdResolver({ codexHome }) : generationThreadIds;
+      let verifiedNativeThreadId: string | undefined, verifiedHome: string | undefined;
+      const homes = new Set<string>();
       const live = await resolveLiveCodexThreadId(binding.tmuxPane, {
         getPanePid: async () => pid,
         listProcesses: () => generationCensus.list(),
         readThreadIdByPid: async (nativePid, startedAt) => {
-          const threadId = startedAt ? await generationThreadIds.resolve(nativePid, startedAt) : undefined;
-          if (nativePid === identity.evidence.observedPid) verifiedNativeThreadId = threadId;
-          return threadId;
+          if (!startedAt) return undefined;
+          const read = await threads.resolveWithHome(nativePid, startedAt);
+          if (read.thread && read.codexHome) homes.add(read.codexHome);
+          if (nativePid === identity.evidence.observedPid) { verifiedNativeThreadId = read.thread; verifiedHome = read.codexHome; }
+          return read.thread;
         },
       });
       if (!live.ok) return c.json({ error: "record_identity_unverified", message: live.reason }, 409);
       sessionId = live.id;
-      transcriptPath = store.readCodexTranscriptPath(sessionId);
       // Dual-PID verdicts must name the process whose thread was selected; legacy verdicts only identify the root. A different
       // conversation under a surviving wrapper isn't a binding change, so it says what it is.
       if (identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId) {
         return c.json({ error: "record_identity_unverified", message: `The Codex conversation in the pane for '${sessionName}' isn't the one its verified process owned, so no generation record is served.` }, 409);
       }
+      const recordHome = verifiedHome ?? (homes.size === 1 ? [...homes][0] : undefined);
+      if (!recordHome) {
+        return c.json({ error: "record_identity_unverified", message: `The current native process's record home for '${sessionName}' could not be established.` }, 409);
+      }
+      transcriptPath = store.readCodexTranscriptPath(sessionId, recordHome);
       if (registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
         || registry.getBindingForNode(context!.nodeId)?.tmuxPane !== binding.tmuxPane
         || await tmuxAdapter.getPanePid?.(binding.tmuxPane) !== pid) {

@@ -198,6 +198,9 @@ async function ensureLocal(deps: NetworkConnectorDeps, binding: NetworkBinding, 
         full.body ?? "",
         "",
         "---",
+        // What leaves this install is what reportBack sends: the queued and pickup notes, then the result (closingWords).
+        "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
+        "Put in your answer only what this seat's sharing instructions allow.",
         `Answer by closing this item with your result: rig queue update ${localId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
         "OpenRig returns the resolution to the hub item.",
       ].join("\n"),
@@ -231,11 +234,17 @@ function finalItem(repo: QueueRepository, start: QueueItem): QueueItem | null {
 
 /** What the hub hears as the result: the resolution, else the closer's own note on the close itself. The close is read
  *  with `closingTransition`, since later notes on a closed item repeat its state. Other notes on the item can be
- *  OpenRig's or another seat's, and name local seats, so they're never sent. */
+ *  OpenRig's or another seat's, and name local seats, so they're never sent. A handoff-and-complete with no note of the
+ *  closer's carries the queue's own note, which isn't the closer's either: `handoff-and-complete to <seat>` locally, and
+ *  `cross-host handoff to <seat>` across hosts, with what it overrode when a claim was made while it was forwarded. */
 function closingWords(repo: QueueRepository, item: QueueItem): string {
   if (item.resolution) return item.resolution;
   const close = repo.closingTransition(item.qitemId, item.state);
-  return close?.transitionNote && close.actorSession === item.destinationSession ? close.transitionNote : "Closed without a stated result.";
+  const note = close?.transitionNote;
+  const crossHost = `cross-host handoff to ${item.handedOffTo}`;
+  const queueWrote = close?.closureReason === "handed_off_to" && (note === `handoff-and-complete to ${close.closureTarget}`
+    || note === crossHost || !!note?.startsWith(`${crossHost} (this overrode `));
+  return note && !queueWrote && close.actorSession === item.destinationSession ? note : "Closed without a stated result.";
 }
 
 /** The hub items a binding's result never reached because someone else closed them first, for status. */
@@ -261,11 +270,13 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
         result.unknown++;
       };
       if (!local || receipt.outcome === "unknown") {
-        await unknown(`This item's local record (${receipt.local_qitem_id}) is gone, so whether it ran is unknown. It won't be run again.`);
+        // The hub's requester can't see a local id (an outside caller's view hides it), so hub notes leave it out. This
+        // host's receipt keeps it.
+        await unknown("This item's local record is gone, so whether it ran is unknown. It won't be run again.");
         continue;
       }
       if (!receipt.queued_sent_at) {
-        await hub.note(receipt.hub_qitem_id, `Queued for the connected local seat as ${local.qitemId}. Not picked up yet.`);
+        await hub.note(receipt.hub_qitem_id, "Queued for the connected local seat. Not picked up yet.");
         mark("queued_sent_at", receipt);
       }
       if (!receipt.pickup_sent_at && local.claimedAt) {
@@ -275,7 +286,7 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
       }
       const end = local.state === "handed-off" ? finalItem(deps.queueRepo, local) : local;
       if (!end) {
-        await unknown(`This item was handed on from ${local.qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+        await unknown("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
         continue;
       }
       if (!FINAL.has(end.state)) continue;

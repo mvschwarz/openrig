@@ -685,7 +685,7 @@ as no rig by that name or a failed boot).
         } else if (res.data["wouldCaptureCurrentState"] === true) {
           console.log(`Snapshot: none usable — apply would first capture current DB state as an auto-rehydrate snapshot.`);
         }
-        const planNodes = (res.data["nodes"] as Array<{ logicalId: string; intendedAction: string; reason?: string; tokenState?: string; provenance?: string | null; lastVerified?: string | null; freshRequired?: boolean; runtimePrompt?: string }>) ?? [];
+        const planNodes = (res.data["nodes"] as Array<{ logicalId: string; intendedAction: string; reason?: string; tokenState?: string; provenance?: string | null; lastVerified?: string | null; freshRequired?: boolean; runtimePrompt?: string; permission?: { summary?: string } }>) ?? [];
         for (const n of planNodes) {
           console.log(`  ${n.logicalId}: ${n.intendedAction}${n.reason ? ` — ${n.reason}` : ""}`);
           // OPR.0.4.3.20 FR-6 — per-seat token truth: present/missing/stale/unverified
@@ -698,6 +698,8 @@ as no rig by that name or a failed boot).
             const prompt = n.runtimePrompt ? `; ${n.runtimePrompt}` : "";
             console.log(`      token: ${n.tokenState}${reverify}${prov}${verified}${fresh}${prompt}`);
           }
+          // The permission restore will start the seat with, and where it comes from (--json has the whole account).
+          if (n.permission?.summary) console.log(`      permission: ${n.permission.summary}`);
         }
         console.log("No changes made.");
         return;
@@ -729,6 +731,12 @@ as no rig by that name or a failed boot).
             console.log(`  ${n.logicalId}: ${n.status}`);
           }
         }
+        // A seat of this rig outside the snapshot's intended roster (added or claimed after that roster was recorded) wasn't started.
+        const skipped = ((res.data["excludedNodes"] as Array<{ logicalId: string; reason: string }> | undefined) ?? [])
+          .filter((excluded) => excluded.reason === "current_seat_not_in_intended_roster").map((excluded) => excluded.logicalId);
+        for (const logicalId of skipped) {
+          console.log(`  ${logicalId}: skipped — not in this restore's roster (added or claimed after that roster was recorded)`);
+        }
         // Every seat running still exits 1 when the restore isn't whole; say why, so nobody retries a start that worked.
         if (rigResult === "partially_restored" && nodes.length > 0 && nodes.every((n) => launchStatusRunning(n.status))) {
           const fresh = nodes.filter((n) => (n.status === "fresh" || n.status === "fresh-primed") && !n.noConversation).length;
@@ -736,6 +744,7 @@ as no rig by that name or a failed boot).
           const reasons = [
             ...(fresh > 0 ? [`${fresh} started fresh without their conversation`] : []),
             ...(gapped.length > 0 ? [`${gapped.join(", ")} came back with a gap named in a warning`] : []),
+            ...(skipped.length > 0 ? [`${skipped.join(", ")} ${skipped.length === 1 ? "was" : "were"} skipped`] : []),
           ];
           console.log(`${nodes.length === 1 ? "The one seat is" : `All ${nodes.length} seats are`} running${reasons.length > 0 ? `; ${reasons.join("; ")}` : ""}. The restore isn't whole, so rig up exits 1.`);
         }

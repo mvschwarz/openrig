@@ -131,6 +131,19 @@ export function revokeGrant(file: string, name: string): Promise<boolean> {
   });
 }
 
+/** Issues a new token for an existing grant, keeping its scope; the previous token stops
+ *  matching the moment this publishes. The token is shown once and never stored. */
+export function rotateGrant(file: string, name: string): Promise<string> {
+  return withGrantsLock(file, () => {
+    const grants = readGrants(file);
+    const existing = grants?.find((grant) => grant.name === name);
+    if (!grants || !existing) throw new Error(`No grant named ${name}.`);
+    const token = `orm_${randomBytes(32).toString("base64url")}`;
+    writeGrants(file, grants.map((grant) => (grant.name === name ? { ...grant, tokenSha256: sha256(token) } : grant)));
+    return token;
+  });
+}
+
 /** The grant a bearer token matches, compared in constant time. */
 export function grantFor(grants: readonly McpGrant[], token: string): McpGrant | null {
   const digest = Buffer.from(sha256(token), "hex");

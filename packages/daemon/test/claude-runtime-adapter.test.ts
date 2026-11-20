@@ -12,6 +12,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 
 const probeEvidence = expect.objectContaining({
   status: expect.any(String), code: expect.any(String),
@@ -53,6 +54,55 @@ function makeBinding(cwd = "/project"): NodeBinding {
     cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd,
   };
 }
+
+it("shares a poll's Claude idle-shell listings without collapsing each two-sample proof", async () => {
+  let reads = 0;
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  const listProcesses = vi.fn(async () => {
+    reads++;
+    return [900, 910, 920].map((pid) => ({
+      pid, ppid: 1, pgid: pid, tpgid: pid === 910 && reads === 3 ? 911 : pid,
+      executableName: "bash", command: "/bin/bash", startedAt,
+    }));
+  });
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "$ ");
+  tmux.getPanePid = vi.fn(async (target) => Number(target));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses });
+  const pass = new ObservationPass({ now: () => 0 });
+  const codes = [];
+  for (const pid of [900, 910, 920]) {
+    const result = await adapter.checkReady({ ...makeBinding(), tmuxSession: String(pid) }, { observationPass: pass });
+    codes.push("code" in result ? result.code : "ready");
+  }
+  expect(codes).toEqual(["returned_to_shell", "awaiting_runtime", "returned_to_shell"]);
+  expect(reads).toBe(4);
+});
+
+it("reduces enumerations for a sequential poll of Claude idle shells", async () => {
+  const rows = Array.from({ length: 90 }, (_, i) => ({
+    pid: 1000 + i, ppid: 1, pgid: 1000 + i, tpgid: 1000 + i,
+    executableName: "bash", command: "/bin/bash", startedAt: "Sat Jan  1 12:00:00 2000",
+  }));
+  const listProcesses = vi.fn(async () => rows);
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "$ ");
+  tmux.getPanePid = vi.fn(async (target) => Number(target));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses });
+  const poll = async (pass?: ObservationPass) => {
+    for (let pid = 1000; pid < 1090; pid++) {
+      const result = await adapter.checkReady({ ...makeBinding(), tmuxSession: String(pid) }, pass ? { observationPass: pass } : undefined);
+      expect(result).toMatchObject({ ready: false, code: "returned_to_shell" });
+    }
+  };
+  await poll();
+  expect(listProcesses).toHaveBeenCalledTimes(180);
+  listProcesses.mockClear();
+  await poll(new ObservationPass({ now: () => 0 }));
+  expect(listProcesses).toHaveBeenCalledTimes(91);
+});
 
 function makeEntry(overrides?: Partial<ProjectionEntry>): ProjectionEntry {
   return {
@@ -100,6 +150,26 @@ it("the pod-aware managed continuation retains custom options and the current re
   await adapter.launchHarness({ ...makeBinding(), permissionMode: "auto", claudeExecutable: "/native/claude", claudeLaunch: launch }, { name: "seat", resumeToken: "same" });
   expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationConfigDir: launch.configDir }), "auto");
   expect(command).toHaveBeenCalledWith([...launch.args, "--permission-mode", "auto", "--resume", "same"], { OPENRIG_RESUME_LAUNCH: "same" });
+});
+
+it.each([
+  ["replaces the running block with the saved one", { environment: ["$defaults", "Saved B"] }],
+  ["drops the running block after a clear", undefined],
+  ["drops the running block when the saved one can't be read", { unreadable: "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it." }],
+] as const)("a managed continuation from captured arguments %s, and records what it sent", async (_label, choice) => {
+  const tmux = mockTmux();
+  tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+  const command = vi.fn((_args: string[]) => "private-launch");
+  const prepare = vi.fn(async () => ({ command, assertCurrent: () => {}, warnings: [] }));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, claudeManagedLaunch: { prepare } as never });
+  const running = { permissions: { deny: ["Read(./private/**)"] }, autoMode: { environment: ["Running A"] } };
+  const launch = { args: ["--settings", JSON.stringify(running), "--model", "opus"], configDir: null, warnings: [] };
+  const result = await adapter.launchHarness({ ...makeBinding(), permissionMode: "auto", claudeExecutable: "/native/claude", claudeLaunch: launch,
+    ...(choice ? { claudeAutoMode: choice as never } : {}) }, { name: "seat", resumeToken: "same" });
+  const sent = command.mock.calls[0]![0];
+  const block = choice && !("unreadable" in choice) ? choice : undefined;
+  expect(JSON.parse(sent[sent.indexOf("--settings") + 1]!)).toEqual({ permissions: running.permissions, ...(block ? { autoMode: block } : {}) });
+  expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: block ?? null } });
 });
 
 // 51-07 A1 — a per-agent model declared in the spec must reach the claude launch command.
@@ -408,6 +478,61 @@ describe("Claude Code runtime adapter", () => {
       reason: "The probe pane returned to a shell instead of staying inside the runtime.",
       code: "returned_to_shell",
     });
+  });
+
+  // #3245: an organization's Claude Code managed settings set disableSideloadFlags, so Claude refuses the plugin folders
+  // OpenRig passes and exits at startup. The variable's line is the reported one and the flag's is the one Claude's plugin
+  // troubleshooting gives; these are tmux fixtures, not a native run. Only the refusal itself is quoted.
+  const sideloadRefusalCore = "CLAUDE_CODE_PLUGIN_DIRS is disabled by your organization's managed settings (disableSideloadFlags)";
+  const sideloadRefusal = `${sideloadRefusalCore}. Unset it to continue.`;
+  const sideloadReason = (line: string) => `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load this seat's skills and plugins, so this seat can't start while that setting applies.`;
+
+  it.each([
+    ["the plugin-folder variable, as reported", sideloadRefusal, sideloadRefusalCore],
+    ["a rejected flag, as Claude's troubleshooting gives it", "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)",
+      "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)"],
+    ["a refusal after other text on its line, which isn't quoted", `Error: token=example ${sideloadRefusal}`, sideloadRefusalCore],
+  ])("checkReady names Claude's sideload refusal for %s on a pane back at its shell, and keeps waiting (#3245)", async (_label, line, quoted) => {
+    expect(await idleShellAfter(line)).toEqual({ ready: false, reason: sideloadReason(quoted), code: "returned_to_shell" });
+  });
+
+  it("checkReady keeps a wrapped sideload refusal whole by reading the joined capture (#3245)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("bash");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    const shown = (joined: boolean) => `$ claude --name dev-impl@test-rig\n${joined ? sideloadRefusal
+      : `${sideloadRefusal.slice(0, 80)}\n${sideloadRefusal.slice(80)}`}\nuser@example.test:~/project$ `;
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, _n?: number, opts?: { joinWrappedLines?: boolean }) =>
+      shown(opts?.joinWrappedLines === true));
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: false, reason: sideloadReason(sideloadRefusalCore), code: "returned_to_shell" });
+  });
+
+  it.each([
+    ["an ordinary failed start", "Error: something else went wrong"],
+    ["a settings file printed in the shell", `"disableSideloadFlags": true`],
+    ["settings output holding both terms with a false value", `{"managed settings":{"disableSideloadFlags":false}}`],
+    ["a sentence that discusses the setting", "# disableSideloadFlags in managed settings rejects CLAUDE_CODE_PLUGIN_DIRS"],
+  ])("checkReady keeps the plain returned-to-shell reason for %s (#3245)", async (_label, line) => {
+    expect(await idleShellAfter(line)).toEqual({
+      ready: false,
+      reason: "The probe pane returned to a shell instead of staying inside the runtime.",
+      code: "returned_to_shell",
+    });
+  });
+
+  it("checkReady stays ready when a working Claude conversation quotes the sideload refusal (#3245)", async () => {
+    const tmux = mockTmux();
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
+      `Claude Code v2.1.325\n> Why did my seat print "${sideloadRefusal}"?\n● It's a managed setting.\n❯ `);
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
   });
 
   it("checkReady returns awaiting_runtime when the shell label is a launch script still starting Claude", async () => {
@@ -900,6 +1025,17 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  it("launchHarness names Claude's sideload refusal when a resume's pane is back at its shell (#3245)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`${sideloadRefusal}\nuser@example.test %`);
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${sideloadReason(sideloadRefusalCore)}`, recovery: "retry_fresh" });
+  });
+
   describe("a resume still starting is watched, not failed (pane command is sh for every OpenRig launch)", () => {
     const startedAt = "Fri Oct 16 15:00:00 2026";
     const pane = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "-zsh", executableName: "zsh", startedAt };
@@ -1256,7 +1392,7 @@ describe("Claude Code runtime adapter", () => {
       ok: true,
       resumeToken: "abc-123",
       resumeType: "claude_id",
-      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments" },
+      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments", claudeAutoMode: null },
     });
     expect(tmux.sendKeys).toHaveBeenCalledTimes(2);
     expect(tmux.sendKeys).toHaveBeenNthCalledWith(2, "r01-impl", ["Enter"]);
@@ -1288,7 +1424,7 @@ describe("Claude Code runtime adapter", () => {
       ok: true,
       resumeToken: "abc-123",
       resumeType: "claude_id",
-      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments" },
+      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments", claudeAutoMode: null },
     });
   });
 

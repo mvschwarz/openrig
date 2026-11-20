@@ -76,7 +76,7 @@ function collisionFsOps(): AgentResolverFsOps {
   };
 }
 
-function rigYaml(opts: { name?: string; rigPolicy?: string; memberPolicy?: string } = {}): string {
+function rigYaml(opts: { name?: string; rigPolicy?: string; memberPolicy?: string; runtime?: string } = {}): string {
   const rigPolicy = opts.rigPolicy ? `permission_policy: ${opts.rigPolicy}\n` : "";
   const memberPolicy = opts.memberPolicy ? `        permission_policy: ${opts.memberPolicy}\n` : "";
   return `version: "0.2"
@@ -86,7 +86,7 @@ ${rigPolicy}pods:
     label: Dev
     members:
       - id: impl
-        runtime: claude-code
+        runtime: ${opts.runtime ?? "claude-code"}
         agent_ref: local:agents/impl
         profile: default
 ${memberPolicy}        cwd: .
@@ -96,6 +96,18 @@ edges: []
 }
 
 const policyLines = (warnings: string[]) => warnings.filter((warning) => warning.includes("permission_policy"));
+// A team Claude Code or Codex seat with no policy gets its own line saying it launches with the team default; the absent
+// line above it stays as ruled.
+const teamDefaultLine = (id: string) => `${id}: no permission policy, so this seat launches at the floor with the team default's`
+  + " allowances, unless it has its own permission mode, Codex envelope or named Codex profile";
+// A config-surface policy's line says it's recorded but its rules aren't applied, and what the seat launches with:
+// the team default's allowances for standard or open, and none for any other. A kernel seat never gets the team default.
+const notApplied = (ref: string, kernel = false) => !kernel && (ref === "builtin:standard" || ref === "builtin:open")
+  ? `; ${ref} is recorded, but its rules aren't applied at launch: this seat launches at the floor with the team default's allowances,`
+    + " unless it has its own permission choice, rules or named Codex profile (the applying-a-permission-policy skill applies more per seat)"
+  : `; ${ref} is recorded, but its rules aren't applied at launch: unless the seat has an explicit native permission mode, Codex envelope`
+    + " or named Codex profile, it launches at the floor without the team default's allowances until its rules are applied per seat"
+    + " (the applying-a-permission-policy skill)";
 
 function createTestApp(...args: Parameters<typeof createBaseTestApp>) {
   const setup = createBaseTestApp(...args);
@@ -149,6 +161,48 @@ describe("Seam C permission-policy discovery", () => {
     expect(policyLines(result.warnings)).toEqual([
       "dev.impl: permission_policy absent; launch_posture=floor",
     ]);
+    // The seat still launches with the team default, and a separate line says so (#3230).
+    expect(result.warnings).toContain(teamDefaultLine("dev.impl"));
+  });
+
+  it("says a team Codex seat with no policy launches with the team default, and gives a recorded none or a kernel seat no such line", async () => {
+    const codex = await rigPreflight({ rigSpecYaml: rigYaml({ runtime: "codex" }), rigRoot: RIG_ROOT, fsOps: fsOps() });
+    expect(codex.warnings).toContain(teamDefaultLine("dev.impl"));
+    expect(policyLines(codex.warnings)).toEqual(["dev.impl: permission_policy absent; launch_posture=floor"]);
+
+    // A recorded none keeps its meaning: an explicit floor, without the team default.
+    const none = await rigPreflight({ rigSpecYaml: rigYaml({ memberPolicy: "none" }), rigRoot: RIG_ROOT, fsOps: fsOps() });
+    expect(none.warnings).not.toContain(teamDefaultLine("dev.impl"));
+
+    // A recorded standard says so on its own policy line.
+    const standard = await rigPreflight({ rigSpecYaml: rigYaml({ rigPolicy: "builtin:standard" }), rigRoot: RIG_ROOT, fsOps: fsOps() });
+    expect(standard.warnings).not.toContain(teamDefaultLine("dev.impl"));
+
+    // Kernel seats launch with the kernel's own defaults, not the team default.
+    const kernel = await rigPreflight({ rigSpecYaml: rigYaml({ name: "kernel" }), rigRoot: RIG_ROOT, fsOps: fsOps() });
+    expect(policyLines(kernel.warnings)).toEqual(["dev.impl: permission_policy absent; launch_posture=floor"]);
+    expect(kernel.warnings).not.toContain(teamDefaultLine("dev.impl"));
+  });
+
+  it("decides kernel from the rig the seats join, not the template's name, for both notes", async () => {
+    const standardLine = (kernel: boolean) =>
+      'dev.impl: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard", kernel);
+
+    // A team template appended to the kernel rig: its seats are kernel seats, with no team default.
+    const intoKernel = await rigPreflight({ rigSpecYaml: rigYaml(), rigRoot: RIG_ROOT, fsOps: fsOps(), rigNameOverride: "kernel" });
+    expect(policyLines(intoKernel.warnings)).toEqual(["dev.impl: permission_policy absent; launch_posture=floor"]);
+    expect(intoKernel.warnings).not.toContain(teamDefaultLine("dev.impl"));
+    const standardIntoKernel = await rigPreflight({
+      rigSpecYaml: rigYaml({ rigPolicy: "builtin:standard" }), rigRoot: RIG_ROOT, fsOps: fsOps(), rigNameOverride: "kernel" });
+    expect(policyLines(standardIntoKernel.warnings)).toEqual([standardLine(true)]);
+
+    // The reverse: a template named kernel appended to a team rig: its seats are team seats, with the team default.
+    const intoTeam = await rigPreflight({
+      rigSpecYaml: rigYaml({ name: "kernel" }), rigRoot: RIG_ROOT, fsOps: fsOps(), rigNameOverride: "policy-discovery" });
+    expect(intoTeam.warnings).toContain(teamDefaultLine("dev.impl"));
+    const standardIntoTeam = await rigPreflight({
+      rigSpecYaml: rigYaml({ name: "kernel", rigPolicy: "builtin:standard" }), rigRoot: RIG_ROOT, fsOps: fsOps(), rigNameOverride: "policy-discovery" });
+    expect(policyLines(standardIntoTeam.warnings)).toEqual([standardLine(false)]);
   });
 
   it("carries policy discovery and existing preflight advisories through materialize in order", async () => {
@@ -317,7 +371,7 @@ describe("Seam C permission-policy discovery", () => {
       if (!materialized.ok) return;
       expect(materialized.result.warnings).toEqual([
         'dev.impl: permission_policy ref="policies/operator-full.md" origin=custom launch_posture=full_bypass',
-        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard"),
       ]);
 
       const launched = await setup.podInstantiator.launchValidatedSpec(
@@ -483,7 +537,7 @@ describe("Seam C permission-policy discovery", () => {
 
       expect(overrideResponse.status).toBe(201);
       expect(overrideBody.result.warnings).toEqual([
-        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard"),
         "later launch warning",
       ]);
       expect(bindings[1]?.launchPosture).toBe("floor");
@@ -524,7 +578,7 @@ describe("Seam C permission-policy discovery", () => {
         "dev.impl: permission_policy absent; launch_posture=floor",
       ]);
       expect(policyLines(attached.result.warnings ?? [])).toEqual([
-        'dev.impl: permission_policy ref="builtin:locked" origin=builtin launch_posture=floor',
+        'dev.impl: permission_policy ref="builtin:locked" origin=builtin launch_posture=floor' + notApplied("builtin:locked"),
       ]);
     } finally {
       db.close();
@@ -576,7 +630,7 @@ describe("Seam C permission-policy discovery", () => {
     });
     expect(valid.ready).toBe(true);
     expect(policyLines(valid.warnings)).toEqual([
-      'dev.impl: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+      'dev.impl: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard"),
     ]);
   });
 });

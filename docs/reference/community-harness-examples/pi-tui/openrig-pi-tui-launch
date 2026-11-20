@@ -9,6 +9,12 @@
 #     an id can open another session whose id starts the same way, so neither is used to resume.
 set -eu
 
+# Managed run authority belongs to the parent runner, never this native TUI or its probes.
+# Keep legacy hook-only environments unchanged.
+if [ "${OPENRIG_RUN_ID+x}" = x ]; then
+  unset OPENRIG_RUN_ID OPENRIG_ACTIVITY_HOOK_TOKEN
+fi
+
 pi="${OPENRIG_PI:-pi}"
 state="${OPENRIG_HOME:-$HOME/.openrig}/state/pi-tui/${OPENRIG_NODE_ID:-${OPENRIG_SESSION_NAME:-default}}"
 sessions="$state/sessions"

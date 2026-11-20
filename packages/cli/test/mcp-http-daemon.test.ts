@@ -258,6 +258,12 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     for (const derived of ["successors", "successorsTruncated", "successorNote"]) expect(handedOn.structured.item).not.toHaveProperty(derived);
     expect(handedOn.text).not.toContain(next);
     expect(handedOn.text).not.toContain("qitem-more-");
+    const handedOnList = await asCarol("rig_queue_list", { all: true, destination: "impl@team" });
+    for (const row of handedOnList.structured.items) {
+      for (const derived of ["successors", "successorsTruncated", "successorNote"]) expect(row).not.toHaveProperty(derived);
+    }
+    expect(handedOnList.text).not.toContain(next);
+    expect(handedOnList.text).not.toContain("qitem-more-");
 
     // Artifacts: a root outside the grant is out of reach, directly or through an item.
     fs.writeFileSync(path.join(shared, "report.md"), "ARTIFACT body");
@@ -267,6 +273,22 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const viaItem = await asCarol("rig_artifact_read", { qitemId: withRef.qitemId });
     expect(viaItem.structured).toMatchObject({ available: false, roots: [] });
     expect(viaItem.text).not.toContain("ARTIFACT body");
+  });
+
+  it("an owner lists a handed-off origin with its successor's current state", async () => {
+    const owner = await grant("owner", { owner: true });
+    const served = await listen();
+    const asOwner = await connect(served.url, owner);
+    const source = await repo.create({ sourceSession: "lead@team", destinationSession: "impl@team", body: "request", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "impl@team", toSession: "qa@other", nudge: false });
+    repo.claim({ qitemId: created.qitemId, destinationSession: "qa@other" });
+
+    const listed = await asOwner("rig_queue_list", { all: true, destination: "impl@team" });
+
+    expect(listed.isError).toBe(false);
+    expect(listed.structured.items).toEqual([expect.objectContaining({ qitemId: source.qitemId, state: "handed-off",
+      successors: [{ qitemId: created.qitemId, destinationSession: "qa@other", state: "in-progress", via: "handedOffFrom" }],
+    })]);
   });
 
   it("a scoped grant's root_unknown names only the shared roots it may read, and an unscoped caller still sees them all", async () => {

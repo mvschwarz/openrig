@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { runningShippedSpecsRoot } from "../src/domain/builtin-startup-files.js";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
@@ -456,6 +457,24 @@ describe("contained Claude restore activity resources", () => {
     }
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // Restore reads a saved hooks resource from the running install, as replay does (#261). A seat saved under another
+  // install (an older version, or one under a home that moved) gets this install's resource instead of a path that's gone.
+  it("projects a saved hooks resource from the running install when it was saved under another install", async () => {
+    const oldSpecs = "/old/lib/node_modules/@openrig/cli/daemon/specs";
+    const shipped = { category: "runtime_resource", resourceType: "claude_activity_hooks", effectiveId: "shared:claude-activity-hooks",
+      sourceSpec: "shared", sourcePath: `${oldSpecs}/agents/shared`, resourcePath: "runtime/claude-activity-hooks.json",
+      absolutePath: `${oldSpecs}/agents/shared/runtime/claude-activity-hooks.json`, mergeStrategy: "managed_block" };
+    const f = seed(false, false, "claude-code", true, cwd, [shipped] as never);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const savedCall = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(savedCall?.[0].entries.find((e) => e.resourceType === "claude_activity_hooks")?.absolutePath)
+      .toBe(path.join(runningShippedSpecsRoot(), "agents", "shared", "runtime", "claude-activity-hooks.json"));
+    expect(result.result.warnings.filter((w) => w.startsWith("Restore activity hooks:"))).toEqual([]);
   });
 
   // CodeRabbit follow-up on #2373: the legacy resume adapter must receive the

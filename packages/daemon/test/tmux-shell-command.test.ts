@@ -87,6 +87,14 @@ describe("shell launch transport", () => {
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
+  it.each(["fish", "bash"])("runs a POSIX-only script under a POSIX shell in a %s pane: sh for fish, sourced otherwise", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true, posix: true })).toEqual({ ok: true });
+    const quotedPath = shellQuote(f.scriptPath);
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(shell === "fish" ? `/bin/sh ${quotedPath}` : `( . ${quotedPath} )`);
+  });
+
   it("uses only the existing sh dependency for the fish capability probe", async () => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");

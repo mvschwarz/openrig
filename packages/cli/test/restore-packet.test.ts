@@ -880,6 +880,25 @@ describe("M2c-CLI packet-writer atomic emission", () => {
     };
   }
 
+  it("writes every packet file, and the packet directory, owner-only", async () => {
+    // The packet carries the source seat's conversation text, so it must not be readable by anyone
+    // else on the machine. Windows reports 0o666 for every writable file and directory whatever mode
+    // was asked for (measured on this host), so the assertion runs where the mode means something:
+    // every CI runner is Linux or macOS. On Windows the files still land in a per-user temp tree.
+    const { writePacket } = await import("../src/restore-packet/packet-writer.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const targetDir = path.join(tmpRoot, "packet-modes");
+    await writePacket(buildBaselineOpts(targetDir) as Parameters<typeof writePacket>[0]);
+
+    if (process.platform !== "win32") {
+      expect(fs.statSync(targetDir).mode & 0o077, "packet directory").toBe(0);
+      for (const name of ["restore-instructions.md", "transcript-latest.md", "touched-files.md", "restore-summary.json"]) {
+        expect(fs.statSync(path.join(targetDir, name)).mode & 0o077, name).toBe(0);
+      }
+    }
+  });
+
   it("emits 4 required files + restore-summary.json schema-valid", async () => {
     const { writePacket } = await import("../src/restore-packet/packet-writer.js");
     const fs = await import("node:fs");

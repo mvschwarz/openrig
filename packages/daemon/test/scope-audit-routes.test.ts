@@ -566,4 +566,31 @@ describe("qitem-43d69e17 — audit route total queue-scan load contract", () => 
     // Contract: constant.
     expect(scans()).toBeLessThanOrEqual(4);
   });
+
+  it("#2727 treats an in-place status: done slice as satisfied in dependencyGraph.ready", async () => {
+    const missionDir = path.join(missionsRoot, "inplace-done-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), `---\nid: OPR.99.0.10\n---\n${VALID_MISSION_BRIEF}`, "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "NOTES.md"), "# Notes\n", "utf8");
+
+    const s1 = path.join(missionDir, "slices", "01-delivered");
+    fs.mkdirSync(path.join(s1, "proof"), { recursive: true });
+    fs.writeFileSync(path.join(s1, "SPEC.md"), validSliceReadme("---\nid: OPR.99.0.10.1\nstatus: done\n---", "01-delivered"), "utf8");
+    fs.writeFileSync(path.join(s1, "PROGRESS.md"), "# Progress\n", "utf8");
+    fs.writeFileSync(path.join(s1, "proof", "qa.md"), "QA pass\n", "utf8");
+
+    const s2 = path.join(missionDir, "slices", "02-next");
+    fs.mkdirSync(s2, { recursive: true });
+    fs.writeFileSync(path.join(s2, "SPEC.md"), validSliceReadme("---\nid: OPR.99.0.10.2\nstatus: active\ndepends_on: [OPR.99.0.10.1]\n---", "02-next"), "utf8");
+    fs.writeFileSync(path.join(s2, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=inplace-done-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      graph: { ready: string[]; waiting: Array<{ slice: string; waitingOn: string[] }> };
+    };
+    expect(body.graph.ready).toEqual(["OPR.99.0.10.2"]);
+    expect(body.graph.waiting).toEqual([]);
+  });
 });

@@ -22,6 +22,7 @@ import {
   parseWatchdogSpec,
   WatchdogPolicyEngine,
 } from "../src/domain/watchdog-policy-engine.js";
+import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import type { PolicyEvaluation } from "../src/domain/policies/types.js";
 
@@ -182,6 +183,23 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     expect(after.lastFireAt).not.toBeNull();
     expect(after.actionable).toBe(true);
     expect(after.lastActionableAt).not.toBeNull();
+  });
+
+  it("records what the send's own result says in the shared words: taken, and render-verified only when the screen showed it", async () => {
+    const results = [{ ok: true, sessionName: "alice@rig", outcome: "rendered-unconfirmed" as const, verified: false },
+      { ok: true, sessionName: "alice@rig", outcome: "delivered" as const, verified: true }];
+    const engine = makeEngine({ deliver: makeWatchdogDeliver({ sessionTransport: { send: async () => results.shift()! } }) });
+    const job = jobsRepo.register({
+      policy: "periodic-reminder", specYaml: "policy: periodic-reminder\ntarget:\n  session: alice@rig\nmessage: ping\n",
+      targetSession: "alice@rig", intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    await engine.evaluate(job);
+    await engine.evaluate(jobsRepo.getByIdOrThrow(job.jobId));
+    const [verified, unconfirmed] = log.listForJob(job.jobId);
+    // Both stay `sent`, as before; the notes say which was only taken by the route.
+    expect(unconfirmed).toMatchObject({ outcome: "sent", evaluationNotes: expect.objectContaining({ deliveryFact: "accepted" }) });
+    expect(unconfirmed?.evaluationNotes).not.toHaveProperty("deliveryRenderVerified");
+    expect(verified).toMatchObject({ outcome: "sent", evaluationNotes: expect.objectContaining({ deliveryFact: "accepted", deliveryRenderVerified: true }) });
   });
 
   it("evaluate(quiet skip — no_actionable_artifacts) does NOT record history nor emit event (POC parity)", async () => {

@@ -344,7 +344,8 @@ it.each(['unresolved','rejected'])('owner notice starts after the lifecycle leas
   await new Promise<void>(()=>{});
  }});
  await e.maybeAutoCompact(high);completeMap(e);await e.maybeAutoCompact(high);
- vi.spyOn(f.transport,'send').mockResolvedValue({ok:false,sessionName:seat,sent:false,reason:'target_activity_unknown'});
+ // A refusal that escalates (a typed draft); unknown readiness waits for its bounded fallback instead.
+ vi.spyOn(f.transport,'send').mockResolvedValue({ok:false,sessionName:seat,sent:false,reason:'draft_input_busy'});
  await staleTick(e);await staleTick(e);
  for(let i=0;i<10;i++)await Promise.resolve();
  expect(held).toEqual([false]);

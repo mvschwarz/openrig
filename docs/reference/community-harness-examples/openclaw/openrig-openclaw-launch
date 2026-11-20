@@ -5,6 +5,12 @@
 # Resume checks that exact key at its owner; an unavailable lookup is not a missing conversation.
 set -eu
 
+# Managed run authority belongs to the parent runner, never this native TUI or its probes.
+# Keep legacy hook-only environments unchanged.
+if [ "${OPENRIG_RUN_ID+x}" = x ]; then
+  unset OPENRIG_RUN_ID OPENRIG_ACTIVITY_HOOK_TOKEN
+fi
+
 openclaw="${OPENRIG_OPENCLAW:-openclaw}"
 mode=local
 if [ "${1:-}" = --gateway ]; then mode=gateway; shift; fi

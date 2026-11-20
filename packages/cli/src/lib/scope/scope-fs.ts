@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { selectRigProject, rigFromSession } from "@openrig/daemon/project-catalog";
 import { ConfigStore } from "../../config-store.js";
 
 import type {
@@ -77,6 +78,65 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   }
 }
 
+/** The line-based frontmatter reader the daemon's slice indexer applies to a
+ *  slice's files (`parseFrontmatter` in packages/daemon/src/domain/slices/slice-indexer.ts):
+ *  every line is trimmed at any indentation, `#` lines are skipped, wrapping quotes are
+ *  stripped, an inline `#` stays in the value, and the last `status:` line wins. */
+function parseIndexerFrontmatter(content: string): Record<string, string> {
+  if (!content.startsWith("---")) return {};
+  const rest = content.slice(3);
+  const endIdx = rest.indexOf("\n---");
+  if (endIdx === -1) return {};
+  const out: Record<string, string> = {};
+  for (const line of rest.slice(0, endIdx).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = trimmed.slice(0, colonIdx).trim();
+    let value = trimmed.slice(colonIdx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** The files the slice indexer merges for a slice's frontmatter, in its merge order:
+ *  later files win, so `PROGRESS.md` overrides the node file (`SPEC.md` / `README.md`). */
+function indexerFrontmatterFiles(sliceAbsPath: string): string[] {
+  const node = resolveNodeFile(sliceAbsPath);
+  return [
+    path.join(sliceAbsPath, "IMPLEMENTATION-PRD.md"),
+    ...(node ? [path.join(sliceAbsPath, path.basename(node))] : []),
+    path.join(sliceAbsPath, "PROGRESS.md"),
+  ];
+}
+
+/** Whether the slice indexer would read a `status` out of this file on its own. */
+export function indexerReadsStatusIn(content: string): boolean {
+  return Object.prototype.hasOwnProperty.call(parseIndexerFrontmatter(content), "status");
+}
+
+/** Read a slice's status back the way the slice indexer does, and name the file that
+ *  supplies it. `status` is `null` when no file gives the indexer one. This follows the
+ *  indexer's merge (later files win) rather than listing frontmatter shapes up front, so it
+ *  reads what every shape actually becomes; a parity test holds it to the real indexer. */
+export function readIndexerSliceStatus(sliceAbsPath: string): { status: string | null; file: string | null } {
+  let status: string | null = null;
+  let file: string | null = null;
+  for (const candidate of indexerFrontmatterFiles(sliceAbsPath)) {
+    if (!fs.existsSync(candidate)) continue;
+    const frontmatter = parseIndexerFrontmatter(fs.readFileSync(candidate, "utf8"));
+    if (Object.prototype.hasOwnProperty.call(frontmatter, "status")) {
+      status = frontmatter["status"]!;
+      file = candidate;
+    }
+  }
+  return { status, file };
+}
+
 /** Update specific keys in a markdown file's frontmatter. The writer owns only
  *  those keys in valid mappings, preserving inline comments and unowned bytes.
  *  Invalid mappings retain the legacy line-based update with a warning. Valid
@@ -88,12 +148,17 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
+  fs.writeFileSync(absPath, editFrontmatter(original, updates, absPath), "utf8");
+}
+
+export function editFrontmatter(original: string, updates: Record<string, unknown>, absPath: string, strict = false): string {
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
   if (!match) {
+    if (strict && /^---[ \t]*\r?\n/.test(original)) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
-    const separator = original.startsWith("\n") ? "" : "\n";
-    fs.writeFileSync(absPath, `---\n${yaml}\n---\n${separator}${original}`, "utf8");
-    return;
+    const newline = original.includes("\r\n") ? "\r\n" : "\n";
+    const separator = original.startsWith(newline) ? "" : newline;
+    return `---${newline}${yaml}${newline}---${newline}${separator}${original}`;
   }
 
   const originalBlock = match[1]!;
@@ -105,14 +170,14 @@ export function updateFrontmatter(
     block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
   } catch (error) {
     if (!(error instanceof ScopeCliError)) throw error;
+    if (strict) throw error;
     console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
     // Start again from the original block, including when a splice removed a used anchor.
     block = updateFrontmatterLines(originalBlock, updates);
     const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
-    fs.writeFileSync(absPath, updated, "utf8");
-    return;
+    return updated;
   }
-  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + original.slice(blockEnd), "utf8");
+  return original.slice(0, blockStart) + block + original.slice(blockEnd);
 }
 
 /** Keep main's line-based update for YAML that cannot use source-range splicing. */
@@ -248,6 +313,62 @@ export function readProjectMissionsRoot(projectRoot: string, warnings: string[])
   return projectMissionsRoot(projectRoot, projectManifest, warnings);
 }
 
+/** The project.yaml at `dir` as an object, or null when there's none or it doesn't parse. */
+function readProjectManifest(dir: string): Record<string, unknown> | null {
+  try {
+    const value = YAML.parse(fs.readFileSync(path.join(dir, "project.yaml"), "utf8")) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The nearest project.yaml at or above `from`, as its folder, or null. */
+function nearestProjectRoot(from: string): string | null {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "project.yaml"))) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+/** The project that declares `missionsRoot`: the nearest project.yaml at or above it, when its missions root is that
+ *  folder. */
+function owningProject(missionsRoot: string): { root: string; manifest: Record<string, unknown> | null } | null {
+  const target = path.resolve(missionsRoot);
+  const root = nearestProjectRoot(target);
+  if (!root) return null;
+  const manifest = readProjectManifest(root);
+  return projectMissionsRoot(root, manifest, []) === target ? { root, manifest } : null;
+}
+
+const PROJECT_ID_PREFIX_RE = /^[A-Z]{2,3}$/;
+
+/** The dot-ID prefix for missions minted in `missionsRoot`: its project.yaml's optional `scope.idPrefix` (2-3 uppercase
+ *  letters, such as OPS), so a project nested in another workspace doesn't repeat that workspace's ids. Absent, or
+ *  invalid (with a warning): OPR, as before. */
+export function projectIdPrefix(missionsRoot: string, warnings: string[] = []): string {
+  const owner = owningProject(missionsRoot);
+  const scope = owner?.manifest?.["scope"];
+  const value = scope !== null && typeof scope === "object" && !Array.isArray(scope)
+    ? (scope as Record<string, unknown>)["idPrefix"]
+    : undefined;
+  if (value === undefined) return DEFAULT_PROJECT_PREFIX;
+  if (typeof value === "string" && PROJECT_ID_PREFIX_RE.test(value)) return value;
+  warnings.push(`${path.join(owner!.root, "project.yaml")}: optional scope.idPrefix must be 2-3 uppercase letters (such as OPS); kept ${DEFAULT_PROJECT_PREFIX}`);
+  return DEFAULT_PROJECT_PREFIX;
+}
+
+/** The missions root of the project that encloses the one declaring `missionsRoot` (the next project.yaml above it), or
+ *  null when there's none. */
+export function enclosingMissionsRoot(missionsRoot: string): string | null {
+  const owner = owningProject(missionsRoot);
+  if (!owner || path.dirname(owner.root) === owner.root) return null;
+  const root = nearestProjectRoot(path.dirname(owner.root));
+  if (!root) return null;
+  const missions = projectMissionsRoot(root, readProjectManifest(root), []);
+  return missions && missions !== path.resolve(missionsRoot) ? missions : null;
+}
+
 /** Locate the missions root from an explicit workspace override or the typed
  * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
  * candidates, but selection comes from configuration. */
@@ -255,6 +376,10 @@ export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
   configPath?: string;
+  /** An absolute slice is an explicit target, so it keeps the previous workspace resolution. */
+  targetPath?: string;
+  /** Mission creation may create a new missions tree within an existing project. */
+  allowMissingProjectMissions?: boolean;
   /**
    * Fail instead of falling back to the configured root when an explicit
    * override (`--workspace` or OPENRIG_WORK_ROOT) names no missions tree.
@@ -291,8 +416,49 @@ export function resolveMissionsRoot(opts: {
       });
     }
   }
+  if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+    const rig = rigFromSession(process.env.OPENRIG_SESSION_NAME);
+    if (rig) {
+      try {
+        const config = new ConfigStore(opts.configPath);
+        const selected = selectRigProject(String(config.get("workspace.catalog_path")), rig);
+        if (selected) {
+          const manifestPath = path.join(selected.root, "project.yaml");
+          if (fs.existsSync(manifestPath)) {
+            let manifest: unknown;
+            try { manifest = YAML.parse(fs.readFileSync(manifestPath, "utf8")); }
+            catch (error) {
+              throw new ScopeCliError({ fact: `Cannot read ${manifestPath}: ${(error as Error).message}`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            }
+            const fields = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest as Record<string, any> : null;
+            if (!fields) throw new ScopeCliError({ fact: `${manifestPath} must be a YAML object.`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            const declared = fields.id ?? fields.metadata?.id;
+            if (declared && declared !== selected.id) throw new ScopeCliError({ fact: `Catalog project '${selected.id}' conflicts with project identity '${declared}'.`, consequence: "No project was selected.", action: "Correct the project identity or select a workspace explicitly." });
+          }
+          const warnings: string[] = [];
+          const root = readProjectMissionsRoot(selected.root, warnings);
+          for (const warning of warnings) console.error(`warning: ${warning}`);
+          if (!root || (fs.existsSync(root) ? !fs.statSync(root).isDirectory() : !opts.allowMissingProjectMissions)) throw new ScopeCliError({
+            fact: `Project '${selected.id}' selected by rig '${rig}' has no readable missions root.`,
+            consequence: "The command did not use the shared workspace.",
+            action: "Create its missions tree or select a workspace explicitly.",
+          });
+          console.error(`Project ${selected.id}: ${selected.root} (selected by rig ${rig})`);
+          return root;
+        }
+      } catch (error) {
+        const problem = error instanceof Error ? error.message : String(error);
+        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select a workspace explicitly with --workspace or OPENRIG_WORK_ROOT.`);
+      }
+    }
+  }
   const configured = configuredMissionsRoot(opts.configPath);
-  if (configured) return configured;
+  if (configured) {
+    if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+      console.error(`Project unbound: ${configured} (configured missions root)`);
+    }
+    return configured;
+  }
   throw new ScopeCliError({
     fact: `Configured workspace.slices_root is not a readable directory: ${(new ConfigStore(opts.configPath).get("workspace.slices_root") as string) || "(unset)"}.`,
     consequence: "No mission tree to operate on.",
@@ -628,22 +794,24 @@ export function nextSliceNN(missionAbsPath: string): number {
 
 /** Mint or read the dot-ID for a mission. If the mission's README has
  *  an `id:` field, return it. Otherwise infer from the folder name
- *  (release-X.Y.Z → OPR.X.Y.Z; otherwise escape band). */
+ *  (release-X.Y.Z → <PFX>.X.Y.Z; otherwise escape band), with the
+ *  project's prefix (projectIdPrefix; OPR unless declared). */
 export function ensureMissionId(
   mission: MissionInfo,
   missionsRoot: string,
 ): string {
   if (mission.id) return mission.id;
+  const prefix = projectIdPrefix(missionsRoot);
   // Try release-pattern first; if it matches, no peer scan needed.
   try {
-    const id = inferMissionDotId(mission.name, null);
+    const id = inferMissionDotId(mission.name, null, prefix);
     return id;
   } catch {
     // Fall through to escape-band path.
   }
   const peers = listMissions(missionsRoot).filter((m) => m.name !== mission.name);
-  const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id));
-  return inferMissionDotId(mission.name, ordinal);
+  const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id), prefix);
+  return inferMissionDotId(mission.name, ordinal, prefix);
 }
 
 /** Same as ensureMissionId, but ALSO writes the inferred id back into

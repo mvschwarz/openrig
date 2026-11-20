@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -94,6 +94,38 @@ describe("default onboarding pack", () => {
     const canonicalParagraphs = new Set(canonPaths.flatMap((path) => paragraphs(readFileSync(path, "utf8"))));
     const copied = paragraphs(text).filter((paragraph) => canonicalParagraphs.has(paragraph));
     expect(copied).toEqual([]);
+  });
+
+  it("starts an ordinary seat without the installer procedure, and points the installing agent to the rigs skill for it", () => {
+    const stepTwo = readFileSync(PACK_PATHS[1]!, "utf8");
+    // Installer-only guidance, as it was written in the section (issue #3228): none of it belongs in every seat's startup text.
+    for (const installerOnly of [
+      "rig daemon start --no-kernel",
+      "rig terminal open saved:kernel",
+      "tmuxAttachCommand",
+      "Over headless SSH",
+      "Installation is complete when",
+      "This is the agent that installed OpenRig",
+    ]) expect(stepTwo, installerOnly).not.toContain(installerOnly);
+    // The route stays: the heading an installing agent looks for, and the skill plus the reference that holds the procedure.
+    expect(stepTwo).toContain("## When you are installing OpenRig for someone");
+    const pointer = stepTwo.match(/Use the `(\w+)` skill and read its `([\w./-]+)`/);
+    expect(pointer, "the short pointer").not.toBeNull();
+    const [, skill, reference] = pointer!;
+    expect(skill).toBe("rigs");
+    expect(existsSync(resolve(DAEMON_ROOT, "assets/skills", skill!, reference!)), `${skill}/${reference} must ship in the package`).toBe(true);
+    // An older install may lack the skill or the reference: the pointer names the guide's two sections and both ways to read it
+    // (PR #3238 review), and those sections exist in the guide the package ships.
+    expect(stepTwo).toContain("If the skill or that reference is missing");
+    expect(stepTwo).toContain('"Start the kernel and check its state"');
+    expect(stepTwo).toContain('"Open the kernel conversations"');
+    expect(stepTwo).toContain("`rig context get reference/getting-started.md`");
+    expect(stepTwo).toContain("`daemon/docs/reference/getting-started.md` in the installed `@openrig/cli` package");
+    const guide = readFileSync(resolve(REPO_ROOT, "docs/reference/getting-started.md"), "utf8");
+    expect(guide).toMatch(/^## Start the kernel and check its state$/m);
+    expect(guide).toMatch(/^## Open the kernel conversations$/m);
+    expect(readFileSync(PACK_PATHS[0]!, "utf8")).not.toContain("rig terminal open");
+    expect(stepTwo.length, "the section is a pointer, not the procedure").toBeLessThan(5_000);
   });
 
   it("keeps operator contact open without teaching a router hop", () => {

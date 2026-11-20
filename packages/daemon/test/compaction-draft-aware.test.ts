@@ -30,7 +30,7 @@ function frame(body: string): ComposerSnapshot {
     cursor: { x: 2 + stringWidth(body), y: 2, width: 100000, height: 60 }, inMode: false };
 }
 
-async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware"; footer?: boolean; refuseDraft?: boolean; suggestion?: "faint" | "plain" } = { pane: "%1" }) {
+async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware" | "queue-only" | "urgent-only" | "hold"; footer?: boolean; refuseDraft?: boolean; suggestion?: "faint" | "plain" } = { pane: "%1" }) {
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
@@ -105,6 +105,79 @@ it.each([
   expect(outcome).toMatchObject(skipMap ? { triggered: true } : { preparation: { delivery: "delivered", compact: "not_sent" } });
   expect(f.body()).toBe("");
   expect(f.effects()).toEqual({ compactPastes: skipMap ? 1 : 0, prepPastes: 1, enters: skipMap ? 2 : 1 });
+});
+
+// #3076: queue-only is about how OpenRig's notices reach a seat a person types in, not lifecycle work. Managed compaction
+// and its restore go ahead there, under the same lifecycle lease and draft checks as at off; urgent-only and an explicit
+// hold still refuse them.
+it.each([["queue-only", true], ["urgent-only", false], ["hold", false]] as const)("at %s, managed compaction and its restore go ahead: %s", async (mode, goes) => {
+  const f = await fixture({ pane: "%1", mode });
+  const outcomes = [await f.e.maybeAutoCompact(input)];
+  if (f.e.getPreparationState(seat)) f.stageMap();
+  let compacted = false;
+  for (let i = 0; i < 8; i++) {
+    outcomes.push(await f.e.maybeAutoCompact(input));
+    compacted ||= f.effects().compactPastes > 0;
+    if (compacted && f.e.getOwedRestore(seat) === null) break;
+  }
+  if (goes) {
+    expect(compacted).toBe(true);
+    expect(f.e.getOwedRestore(seat)).toBeNull();
+    expect(f.effects().compactPastes).toBe(1);
+  } else {
+    expect(new Set(outcomes.map(o => JSON.stringify(o)))).toEqual(new Set([JSON.stringify({ triggered: false, reason: "typing_guard_enabled" })]));
+    expect(f.writes).toEqual([]);
+  }
+});
+
+// #3076: at queue-only, managed compaction never types over a person's draft. Each write waits while the input holds a
+// draft, without the refusal draft-aware gives lifecycle work, and compaction and its restore go ahead once it is empty.
+it("at queue-only, managed compaction and its restore wait for a draft to go, then go ahead", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  f.draft("an unsent message");
+  const held = await f.e.maybeAutoCompact(input);
+  expect(held).not.toMatchObject({ reason: "typing_guard_enabled" });
+  expect(f.body()).toBe("an unsent message");
+  expect(f.writes).toEqual([]);
+  f.draft("");
+  let compacted = false;
+  for (let i = 0; i < 8 && !compacted; i++) {
+    await f.e.maybeAutoCompact(input);
+    if (f.e.getPreparationState(seat) && f.effects().prepPastes > 0) f.stageMap();
+    compacted = f.effects().compactPastes > 0;
+  }
+  expect(compacted).toBe(true);
+  expect(f.e.getOwedRestore(seat)).not.toBeNull();
+  f.draft("typed before the restore");
+  const before = f.writes.length;
+  await f.e.maybeAutoCompact(input);
+  expect(f.body()).toBe("typed before the restore");
+  expect(f.writes.length).toBe(before);
+  f.draft("");
+  for (let i = 0; i < 8 && f.e.getOwedRestore(seat) !== null; i++) await f.e.maybeAutoCompact(input);
+  expect(f.e.getOwedRestore(seat)).toBeNull();
+  expect(f.effects().compactPastes).toBe(1);
+});
+
+// #3418 follow-up: a manual rig compact at queue-only sends its preparation under the same lifecycle lease as managed
+// compaction, so it's lifecycle work there, not a notice held for the person; with a draft, it still never types over it.
+it("at queue-only, a manual compaction's preparation goes out under the lifecycle lease, never held", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true });
+  f.e.cancelPreparation(seat);
+  expect(outcome).toMatchObject({ preparation: { delivery: "delivered", compact: "not_sent" } });
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 1, enters: 1 });
+  expect(f.rows().filter(r => r.kind === "prep" && r.state === "held")).toEqual([]);
+});
+
+it("at queue-only, a manual compaction's preparation does not type over a draft", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  f.draft("an unsent message");
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true });
+  f.e.cancelPreparation(seat);
+  expect(outcome).toMatchObject({ triggered: false });
+  expect(f.body()).toBe("an unsent message");
+  expect(f.writes).toEqual([]);
 });
 
 it("checks the composer after buffer setup, immediately before the preparation paste", async () => {
@@ -252,8 +325,8 @@ it("manual, someone is drafting in the input box (existing-behaviour control, gr
 // indeterminate prep row, one retained /compact row per busy poll, and an indeterminate /compact row.)
 // ---------------------------------------------------------------------------------------------------------
 
-it("pane-less draft-aware seat, automatic, busy x4 then idle: refused before any preparation or /compact, no outbox row at all", async () => {
-  const f = await fixture({ pane: null });
+it.each(["draft-aware", "queue-only"] as const)("pane-less %s seat, automatic, busy x4 then idle: refused before any preparation or /compact, no outbox row at all", async mode => {
+  const f = await fixture({ pane: null, mode });
   const outcomes = [await f.e.maybeAutoCompact(input)];
   f.activity("running");
   for (let i = 0; i < 4; i++) outcomes.push(await f.e.maybeAutoCompact(input));

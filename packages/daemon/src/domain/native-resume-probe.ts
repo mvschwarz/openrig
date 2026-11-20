@@ -3,8 +3,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
 import { operationalLaunchArg } from "../adapters/kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "./claude-mcp.js";
-import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
-import { codexMemberEnvelope, type CodexMemberPermissions } from "./codex-member-permissions.js";
+import { codexMemberLaunch, type CodexMemberPermissions } from "./codex-member-permissions.js";
 import {
   observeCodexSandbox,
   type AppliedLaunchObservation,
@@ -40,6 +39,11 @@ export interface ProbeShellReadyInput {
   paneContent: string | null;
 }
 
+/** Comparison outcome between the current occupant generation's recorded launch observation and current resume flags:
+ *  - `recorded_match`: recorded sandbox and non-null approval match current flags, with no unrecorded `workspace-write` envelope options.
+ *  - `recorded_difference`: recorded sandbox or approval differs from current resume flags.
+ *  - `recorded_uncertain`: recorded launch matches as far as observed, or saved posture is empty, while unrecorded approval or unrecorded `workspace-write` envelope options (`writable_roots`, `network_access`, `exclude_*`) prevent proving a full match.
+ *  - `no_recorded_launch`: no observed Codex sandbox launch record exists for the current occupant generation. */
 export type CodexResumeLabelStatus =
   | "recorded_match"
   | "recorded_difference"
@@ -79,11 +83,20 @@ const CODEX_RENDERED_SUFFIX = "(?: [A-Z][A-Za-z0-9]*)? (?:default|none|minimal|l
 const CODEX_RENDERED_GPT_FIELD = new RegExp(`^[Gg][Pp][Tt]-\\d[\\w.-]*${CODEX_RENDERED_SUFFIX}$`);
 const CODEX_RENDERED_MODEL_FIELD = new RegExp(`^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\\d[A-Za-z0-9._:/@-]*${CODEX_RENDERED_SUFFIX}(?:\\s+⚠ \\d+ warnings?)?$`);
 
+const CODEX_PERMISSION_PROFILE_VALUE = "permissions:";
+
+// A filesystem choice records its permission profile as the sandbox value; show the flag that selects it.
+function codexSandboxFlag(sandbox: string): string {
+  return sandbox.startsWith(CODEX_PERMISSION_PROFILE_VALUE)
+    ? `-c default_permissions=${JSON.stringify(sandbox.slice(CODEX_PERMISSION_PROFILE_VALUE.length))}`
+    : `-s ${sandbox}`;
+}
+
 function formatCurrentCodexFlags(
   sandbox: string,
   approval: CodexObservedApprovalPolicy | null | undefined,
 ): string {
-  return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox}`;
+  return approval ? `${codexSandboxFlag(sandbox)} -a ${approval}` : codexSandboxFlag(sandbox);
 }
 
 function formatRecordedCodexFlags(
@@ -92,7 +105,7 @@ function formatRecordedCodexFlags(
 ): string {
   // Historical launch observations (and floor launches without an explicit -a flag) store approval_policy as NULL;
   // never infer an approval value from current settings or claim NULL proves no -a flag was emitted.
-  return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox} (approval unrecorded)`;
+  return approval ? `${codexSandboxFlag(sandbox)} -a ${approval}` : `${codexSandboxFlag(sandbox)} (approval unrecorded)`;
 }
 
 const CODEX_LAUNCH_WRAPPER_OMISSION_LABEL = "omits launch_wrapper (managed resume uses the wrapper)";
@@ -111,15 +124,13 @@ export function buildCodexResumeDisplay(
   const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
   const effectivePosture = input.resolvedPosture ?? "floor";
   const permissions = input.codexPermissions;
-  const hasFilesystemPolicy = permissions !== undefined && "filesystem" in permissions;
-  const envelope = permissions && !("filesystem" in permissions) ? codexMemberEnvelope(permissions) : undefined;
-  // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (member permission envelope,
-  // resolved posture with an empty env so ambient OPENRIG_YOLO never leaks, and operationalLaunchArg).
-  // A filesystem choice currently uses the posture fallback here; label that omission below.
-  const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, {}, effectivePosture);
+  const choice = permissions ? codexMemberLaunch(permissions) : undefined;
+  // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (the member's permission choice,
+  // envelope or filesystem; resolved posture with an empty env so ambient OPENRIG_YOLO never leaks; and operationalLaunchArg).
+  const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, {}, effectivePosture);
   const postureArg = posture + operationalLaunchArg(
     "codex",
-    envelope
+    choice
       ? { nonInterruptive: input.nonInterruptive }
       : {
           kernelAuthority: input.kernelAuthority,
@@ -144,10 +155,11 @@ export function buildCodexResumeDisplay(
   let currentSandbox: string | null = null;
   let currentApproval: CodexObservedApprovalPolicy | null | undefined = null;
   let currentFlags: string;
-  if (envelope) {
-    currentSandbox = envelope.sandboxPolicy.type;
-    currentApproval = envelope.approvalPolicy;
-    currentFlags = formatCurrentCodexFlags(currentSandbox, currentApproval);
+  if (choice && permissions) {
+    currentSandbox = choice.observation.value;
+    // A filesystem on-request launch records no approval, so it can't prove a match; the flags still show it.
+    currentApproval = choice.observation.approvalPolicy ?? null;
+    currentFlags = formatCurrentCodexFlags(currentSandbox!, permissions.approval);
   } else {
     const obs = observeCodexSandbox(posture);
     if (obs.state === "observed" && obs.value) {
@@ -166,18 +178,7 @@ export function buildCodexResumeDisplay(
     && recorded.state === "observed"
     && recorded.value !== null;
 
-  if (hasFilesystemPolicy) {
-    return {
-      command,
-      status: hasObservedRecord ? "recorded_uncertain" : "no_recorded_launch",
-      label: composeCodexResumeLabel(
-        `shown command uses posture fallback ${postureArg.trim()}; does not carry the agent's filesystem policy (managed resume carries it)`,
-        hasLaunchWrapper,
-      ),
-    };
-  }
-
-  if (!envelope && input.emptySavedPosture) {
+  if (!choice && input.emptySavedPosture) {
     const fallbackClause = `saved posture empty, showing fallback ${currentFlags} (managed resume posture unknown)`;
     if (!hasObservedRecord) {
       return {
@@ -203,6 +204,19 @@ export function buildCodexResumeDisplay(
   }
 
   const recordedApproval = recorded.approvalPolicy ?? null;
+  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
+  // A filesystem launch records only the profile name, never its entries, so the same name can't prove the same policy.
+  if (permissions && "filesystem" in permissions && recorded.value === currentSandbox && recordedApproval === currentApproval) {
+    return {
+      command,
+      status: "recorded_uncertain",
+      label: composeCodexResumeLabel(
+        `launched with ${recordedFlags}; the launch record doesn't keep the filesystem entries; a resume now uses ${currentFlags}`,
+        hasLaunchWrapper,
+      ),
+    };
+  }
+
   // A NULL approval_policy cannot distinguish a plain floor launch without -a from a pre-upgrade envelope whose
   // on-request/untrusted approval was not recorded, so only a non-null recorded approval can prove recorded_match.
   if (
@@ -211,6 +225,19 @@ export function buildCodexResumeDisplay(
     && recordedApproval !== null
     && recordedApproval === currentApproval
   ) {
+    // observeCodexEnvelope records only sandbox type and approval_policy, not sandbox_workspace_write.* options
+    // (writable_roots, network_access, exclude_tmpdir_env_var, exclude_slash_tmp), so workspace-write envelopes retain
+    // conservative uncertainty rather than claiming unrecorded workspace flags matched.
+    if (permissions?.sandbox === "workspace-write") {
+      return {
+        command,
+        status: "recorded_uncertain",
+        label: composeCodexResumeLabel(
+          "workspace-write options from current settings (not recorded at launch)",
+          hasLaunchWrapper,
+        ),
+      };
+    }
     return {
       command,
       status: "recorded_match",
@@ -218,7 +245,6 @@ export function buildCodexResumeDisplay(
     };
   }
 
-  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
   const isSameSandboxUnrecordedApproval = currentSandbox !== null
     && recorded.value === currentSandbox
     && recorded.value !== "read-only"
@@ -470,7 +496,7 @@ export function assessNativeResumeProbe(
         detail: "Codex reported that the requested saved session does not exist.",
       };
     }
-    if (looksLikeCodexAuthRefusal(paneContent)) {
+    if (currentCodexAuthRefusal(paneContent, paneCommand)) {
       return {
         status: "attention_required",
         code: "codex_auth_refusal",
@@ -582,12 +608,16 @@ function looksLikeClaudeBypassConsentPrompt(paneContent: string): boolean {
 }
 
 // Claude Code's "gated grants" backstop (2.1.319+, #2820 item 2). Its marks, which the plain workspace trust prompt
-// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, and the option that
-// declines them. Its default choice declines them ("No, continue without these permissions") or exits ("No, exit").
-// The marks are read on the whitespace-joined screen too, so a row that a narrow pane wraps still counts.
-const CLAUDE_GATED_GRANTS_MARK = /This folder pre-approves \d+ tool permissions?\b|No, continue without these permissions/;
+// lacks: the warning that the folder's .claude/settings.json pre-approves tool permissions, the note under the list
+// ("These will apply without asking"), and the option that declines them. Its default choice declines them ("No,
+// continue without these permissions") or exits ("No, exit"); in the "No, exit" variant only the warning and the note
+// mark it, and a long permission list can scroll the warning out. The marks are read on the whitespace-joined screen
+// too, so a row that a narrow pane wraps still counts.
+const CLAUDE_GATED_GRANTS_MARK =
+  /This folder pre-approves \d+ tool permissions?\b|These will apply without asking\b|No, continue without these permissions/;
 // One row of the backstop's marks, or of a part of one that a narrow pane wrapped.
-const CLAUDE_GATED_GRANTS_MARK_ROW = /This folder pre-approves\b|No, continue without\b|without these permissions\b/;
+const CLAUDE_GATED_GRANTS_MARK_ROW =
+  /This folder pre-approves\b|These will apply without\b|apply without asking\b|No, continue without\b|without these permissions\b/;
 const CLAUDE_TRUST_FOOTER = "Enter to confirm · Esc to cancel";
 const CLAUDE_TRUST_YES = "Yes, I trust this folder";
 const CLAUDE_TRUST_EXIT = "No, exit";
@@ -621,9 +651,18 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
  *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
   const rows = claudeWithoutDrafts(paneContent.trimEnd().split(/\r?\n/));
+  // A header-like row inside a trust dialog's content is the dialog's text, not Claude's header: it never ends the dialog.
+  const scan = rows.map((row, at) => isClaudeVersionHeader(row) && insideClaudeTrustDialog(rows, at) ? "" : row);
   let current = rows;
+  // Walking up, the first row whose suffix has Claude's own UI (claudeDrawnAfter(scan.slice(at))) is the row where that
+  // UI starts: a header, a reply, or the opening rule of an input frame whose closing rule is below. Testing only that
+  // row keeps the walk linear on a tall screen.
+  let ruleBelow = false;
   for (let at = rows.length - 1; at >= 0; at--) {
-    if (!claudeDrawnAfter(rows.slice(at))) continue;
+    if (at + 2 < scan.length && CLAUDE_INPUT_RULE.test(scan[at + 2]!)) ruleBelow = true;
+    const drawn = isClaudeVersionHeader(scan[at]!) || /^[●⏺]/.test(scan[at]!)
+      || (ruleBelow && CLAUDE_INPUT_RULE.test(scan[at]!) && /^\s*❯/.test(scan[at + 1] ?? ""));
+    if (!drawn) continue;
     const framed = CLAUDE_INPUT_RULE.test(rows[at]!) && /^\s*❯/.test(rows[at + 1] ?? "");
     const closing = framed ? rows.findIndex((row, index) => index > at + 1 && CLAUDE_INPUT_RULE.test(row)) : -1;
     current = rows.slice((closing >= 0 ? closing : at) + 1);
@@ -726,9 +765,15 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   const verb = drawn.map((line) => /Choose (?:a|the) conversation|Select a conversation/.test(line)).lastIndexOf(true);
   if (verb < 0) return false;
   const recentStart = Math.max(verb + 1, drawn.length - 30);
-  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
+  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[❯›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
+  if (lastOption < 0) return false;
+  // A narrow pane wraps the last option's title onto the rows right under it, indented to the title's column; such a
+  // row is the option's text even when it reads like Claude's header ("     ▐▛███▜▌   Claude Code v2.1.322 twice").
+  const titleColumn = drawn[lastOption]!.search(/(?<=\d+\.\s+)\S/);
+  let titleEnd = lastOption;
+  while (drawn[titleEnd + 1]?.trim() && drawn[titleEnd + 1]!.search(/\S/) >= titleColumn) titleEnd++;
   // A draft's own numbered rows can read as the last options, so the input frame counts anywhere after the heading.
-  return lastOption >= 0 && !claudeDrawnAfter(drawn.slice(lastOption + 1)) && !hasClaudeInputFrame(drawn.slice(verb + 1));
+  return !claudeDrawnAfter(drawn.slice(titleEnd + 1)) && !hasClaudeInputFrame(drawn.slice(verb + 1));
 }
 
 /** Claude Code's "Resume session" picker (2.1.309), drawn when `claude --resume` has no exact session to open: a bare
@@ -764,8 +809,61 @@ function claudeSearchBoxEnd(rows: string[], top: number): number {
  *  doesn't count: it can sit under a live chooser, and a missed chooser reads resumed. Hint rows and blank rows under the
  *  options belong to the chooser. */
 function claudeDrawnAfter(rows: string[]): boolean {
-  return hasClaudeInputFrame(rows) || rows.some((line) => line.includes("Claude Code v") || /^[●⏺]/.test(line));
+  return hasClaudeInputFrame(rows) || rows.some((line) => isClaudeVersionHeader(line) || /^[●⏺]/.test(line));
 }
+
+/** A row drawn like Claude's version header (CLAUDE_VERSION_HEADER). The substring test first lets every other row,
+ *  a full-width rule of box characters included, skip the pattern. */
+function isClaudeVersionHeader(line: string): boolean {
+  return line.includes("Claude Code v") && CLAUDE_VERSION_HEADER.test(line);
+}
+
+/** Whether row `at` sits inside the content of a trust dialog drawn on these rows (#2820): below the dialog's heading
+ *  ("Accessing workspace:") or a mark of the gated-grants backstop, with no reply of Claude's or input frame between
+ *  them, and above the dialog's end. The dialog ends at its last footer ("Enter to confirm · Esc to cancel") before a
+ *  reply or an input frame. A row with a footer below it is inside; a row with no footer below it is inside while the
+ *  dialog is still being drawn, and outside once the footer of the dialog's options block, above the row, closed it:
+ *  that is where Claude's real header sits. The dialog's text can read like an option or the footer ("No, exit",
+ *  "Enter to confirm · Esc to cancel": a path, a title or a grant that a narrow pane wraps), and that text sits above
+ *  the real options and footer, so it never ends the dialog. A path or a grant that forges the "Yes, I trust this
+ *  folder" option and, anywhere below it, the footer, above a header-like row, captured before the real footer is
+ *  drawn, is a known limit of a textual boundary. */
+function insideClaudeTrustDialog(rows: string[], at: number): boolean {
+  const isReply = (row: string) => /^[●⏺]/.test(row);
+  const isFooter = (row: string) => row.trim() === CLAUDE_TRUST_FOOTER;
+  let heading = -1;
+  for (let index = at - 1; index >= 0 && heading < 0; index--) {
+    const row = rows[index]!;
+    if (isReply(row)) return false;
+    if (row.trim() === "Accessing workspace:" || CLAUDE_GATED_GRANTS_MARK_ROW.test(row)) heading = index;
+  }
+  if (heading < 0 || hasClaudeInputFrame(rows.slice(heading, at))) return false;
+  for (let index = at + 1; index < rows.length; index++) {
+    const row = rows[index]!;
+    if (isReply(row) || (CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(rows[index + 1] ?? ""))) break;
+    if (isFooter(row)) return true;
+  }
+  // No footer below: the dialog is still being drawn, unless a footer above the row closed it. Only the footer of the
+  // dialog's own options block closes it, so it counts only below one of its options ("Yes, I trust this folder", which
+  // both the plain prompt and the backstop draw); a row of the dialog's text equal to the footer, above the options,
+  // does not.
+  const option = rows.findIndex((row, index) => index > heading && index < at && CLAUDE_TRUST_OPTION_ROW.exec(row)?.[2] === CLAUDE_TRUST_YES);
+  return option < 0 || !rows.slice(option + 1, at).some(isFooter);
+}
+
+// Claude's version header row: "Claude Code v<x.y.z>" at column 0, or after Claude's logo or a box border (with any
+// blanks around them), and a blank, a border or the row's end after it ("Claude Code v2.1.303",
+// " ▐▛███▜▌   Claude Code v2.1.322", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "╭─── Claude Code v2.0.14 ───╮"). The same
+// words elsewhere are not the header: a pre-approved grant ("Bash(echo Claude Code v*)"), the workspace path
+// ("/tmp/Claude Code v2/lab"), or a path or a title that a narrow pane wraps onto an indented row ("   Claude Code
+// v2.1.300 upgrade notes", the last option of a legacy chooser). A path wrapped onto a row that starts with one of the
+// glyphs (" ─Claude Code v2.1.322 lab") still reads like the header: inside a trust dialog, insideClaudeTrustDialog
+// keeps it the dialog's text. A logo glyph this list lacks only makes the header wait for Claude's input frame or a
+// reply, the safe direction; add it here. The prefix has one way to match (blanks, then the first glyph, then
+// anything of both), so a long row of glyphs never backtracks.
+const CLAUDE_HEADER_GLYPHS = "▐▛▜▌▙▟▀▄█▝▘▗▖╭╮─│✻╱✦";
+const CLAUDE_VERSION_HEADER = new RegExp(
+  `^(?:\\s*[${CLAUDE_HEADER_GLYPHS}][\\s${CLAUDE_HEADER_GLYPHS}]*)?Claude Code v\\d+\\.\\d+\\.\\d+(?=$|[\\s─╮╯│])`, "u");
 
 // On a named session Claude labels the frame's top rule (`─────…── probe-claude@rig ─`), so a rule may carry text after a space.
 const CLAUDE_INPUT_RULE = /^\s*─{3,}(?:\s.*)?$/;
@@ -874,12 +972,71 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 //    logged out or signed in to another account. Please sign in again."
 //   "Your access token could not be refreshed. Please log out and sign
 //    in again."
-function looksLikeCodexAuthRefusal(paneContent: string): boolean {
-  if (!paneContent.includes("access token could not be refreshed")) return false;
-  return (
-    paneContent.includes("Please sign in again")
-    || paneContent.includes("Please log out and sign in again")
-  );
+// codex-cli 0.162.1 has those two and three more ("... because your refresh token has expired / was already used / was
+// revoked. Please log out and sign in again."), all starting the same way.
+//
+// The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
+// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message. Its
+// opening words must fit on that first row; the sign-in instruction may wrap onto any number of rows after it.
+const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
+const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
+const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;
+const CODEX_MESSAGE_ROW = /^(?:[›»•■]|Error: |ERROR: )/;
+// A shell's own prompt row ends like one. Other prompt endings aren't recognized.
+const SHELL_PROMPT_END = /[$%#>❯]\s?$/;
+const squeeze = (text: string): string => text.replace(/\s+/g, "");
+// Codex's own marks on its message, at column 0: a TUI error cell or the CLI's error label. A row carrying one is Codex's
+// message even inside a fenced block the pane leaves open (a reply cut off mid-block, or one whose opening marker
+// scrolled above the probe's window, which makes its closer read as an opener). An unmarked row there stays a quote.
+const CODEX_MARKED_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )Your access token could not be refreshed\b/;
+// Character wrap at a shell can leave the message's closing period alone on the next row.
+const CLOSING_PUNCTUATION_ROW = /^\.\s*$/;
+
+/** A fence marker row moves fenced-block state: three or more backticks or tildes open a block, and only the same family,
+ *  at least as long, with nothing after it closes it. The state after the row, or undefined when it isn't a marker. */
+function codexFenceAfter(fence: string, line: string): string | undefined {
+  const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!marker) return undefined;
+  if (!fence) return marker[1]!;
+  return marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim() ? "" : fence;
+}
+
+// A refusal blocks only as the newest thing Codex printed, as Claude's counts only as its latest response
+// (`currentClaudeLoginRefusal`). The message runs from its first row to the row that completes its sign-in instruction;
+// a blank, message or input row before that ends it without one. After it only blank rows may follow, then either
+// Codex's composer (an input row that isn't a numbered option, with its model footer below it and no message), or, for a
+// pane back at its shell, one row that ends like a shell prompt. Anything else (a prompt just submitted, a numbered
+// chooser, a newer reply or error, unrecognized output) means the refusal isn't shown to be current, and the probe goes
+// on to read the rest of the pane.
+function currentCodexAuthRefusal(paneContent: string, paneCommand: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  let at = -1;
+  let fence = "";
+  for (let i = 0; i < lines.length; i++) {
+    const next = codexFenceAfter(fence, lines[i]!);
+    if (next !== undefined) fence = next;
+    else if (fence ? CODEX_MARKED_REFUSAL_ROW.test(lines[i]!) : CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
+  }
+  if (at < 0) return false;
+  let end = -1;
+  for (let i = at; i < lines.length && end < 0; i++) {
+    const line = lines[i]!;
+    if (i > at && (line.trim() === "" || CODEX_MESSAGE_ROW.test(line) || CODEX_INPUT_ROW.test(line))) break;
+    const message = squeeze(lines.slice(at, i + 1).join(""));
+    if (CODEX_AUTH_INSTRUCTIONS.some((instruction) => message.includes(squeeze(instruction)))) end = i;
+  }
+  if (end < 0) return false;
+  if (!lines[end]!.trimEnd().endsWith(".") && CLOSING_PUNCTUATION_ROW.test(lines[end + 1] ?? "")) end++;
+  const after = lines.slice(end + 1);
+  let inputAt = -1;
+  for (let i = after.length - 1; i >= 0 && inputAt < 0; i--) if (CODEX_INPUT_ROW.test(after[i]!)) inputAt = i;
+  const below = inputAt < 0 ? [] : after.slice(inputAt + 1);
+  const composer = inputAt >= 0 && hasCodexComposer(after[inputAt]!)
+    && below.some(isCodexModelFooterLine) && !below.some((line) => CODEX_MESSAGE_ROW.test(line));
+  const rows = (composer ? after.slice(0, inputAt) : after).filter((line) => line.trim() !== "");
+  if (rows.length === 0) return true;
+  return !composer && rows.length === 1 && SHELL_COMMANDS.has(paneCommand)
+    && !CODEX_MESSAGE_ROW.test(rows[0]!) && SHELL_PROMPT_END.test(rows[0]!);
 }
 
 function looksLikeCodexLoginPrompt(paneContent: string): boolean {
@@ -888,10 +1045,9 @@ function looksLikeCodexLoginPrompt(paneContent: string): boolean {
   let fence = "";
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
-    if (marker) {
-      if (!fence) fence = marker[1]!;
-      else if (marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim()) fence = "";
+    const next = codexFenceAfter(fence, line);
+    if (next !== undefined) {
+      fence = next;
       welcome = -1;
     } else if (!fence && line === "  Welcome to Codex, OpenAI's command-line coding agent") {
       welcome = index;

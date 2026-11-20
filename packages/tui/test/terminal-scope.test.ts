@@ -9,10 +9,10 @@ import type { Action } from "../src/types.js";
 
 const snap = demoSnapshot();
 
-function page(open: (dispatch: (action: Action) => void) => void) {
-  const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+function page(open: (dispatch: (action: Action) => void) => void, snapshot = snap) {
+  const view = createViewState({ instanceId: "t", getSnapshot: () => snapshot });
   open((action) => view.dispatch(action));
-  const screen = renderScreen(view.get(), snap, { cols: 140, rows: 40 });
+  const screen = renderScreen(view.get(), snapshot, { cols: 140, rows: 40 });
   const button = (label: string) => {
     const y = screen.lines.findIndex((line) => line.includes(label)) + 1;
     return y > 0 ? screen.hitMap.find((hit) => hit.y === y && hit.action?.type === "act")?.action : undefined;
@@ -24,6 +24,14 @@ function page(open: (dispatch: (action: Action) => void) => void) {
 }
 
 describe("the terminal button opens the scope being viewed", () => {
+  it("combined rig action uses its known ID while displaying its name", () => {
+    const snapshot = structuredClone(snap);
+    const rig = snapshot.hosts.flatMap(host => host.rigs).find(row => row.name === "openrig-build")!;
+    rig.id = "rig-stable-id";
+    const { button, buttonViews } = page(dispatch => dispatch(parseCommand("rig openrig-build")), snapshot);
+    expect(button("Open terminals ▸ rig openrig-build")).toEqual({ type: "act", act: "open-terminal", view: "rig:rig-stable-id" });
+    expect(buttonViews).toEqual(["rig:rig-stable-id"]);
+  });
   it("an agent's page opens just that agent", () => {
     const { button, buttonViews } = page((dispatch) => dispatch(parseCommand("agent dev50.driver")));
     expect(button("Open terminal ▸ dev50.driver")).toEqual({ type: "act", act: "open-terminal", view: "seat:openrig-build/dev50.driver" });

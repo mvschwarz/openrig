@@ -12,7 +12,7 @@ export interface InputReadDiagnostic {
 const reasons = new Set(["capture_unavailable", "pane_in_mode", "invalid_cursor", "incomplete_frame",
   "ambiguous_composer", "unrecognized_composer", "read_timeout", "read_budget_spent", "cursor_moved",
   "cursor_unavailable", "cursor_outside", "unrecognized_input_box", "input_not_clear",
-  "paste_controls", "paste_long", "paste_viewport"]);
+  "paste_controls", "paste_long", "paste_viewport", "client_activity_unavailable"]);
 
 /** Copy only fixed vocabulary and cursor flags. Unknown reader reasons remain content-free. */
 export function inputReadDiagnostic(check: InputReadDiagnostic["check"], reading: {

@@ -3,7 +3,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { createMcpServer, dropUnfilledSeat, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
-import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, startMcpHttpServer } from "../mcp-http.js";
+import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, rotateGrant, startMcpHttpServer } from "../mcp-http.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -181,6 +181,24 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       try {
         if (!(await revokeGrant(mcpTokenFilePath(), name))) { console.error(`No grant named ${name}.`); process.exitCode = 1; return; }
         console.log(`Revoked ${name}: its next request is refused. Its rows and records stay.`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+  token
+    .command("rotate <name>")
+    .description(
+      "Issue a new token for an existing file-backed grant, keeping its name, seat, scopes, flags and createdAt; clients must switch to the new token, the old one stops working at the next authentication, and rotation does not cancel work already authorized",
+    )
+    .action(async (name: string) => {
+      try {
+        const issued = await rotateGrant(mcpTokenFilePath(), name);
+        console.log(`New token for ${name}, shown once (only its hash is kept):`);
+        console.log(issued);
+        console.log("Clients must switch to it: the previous token stops matching at the next authentication, and rotation does not cancel work already authorized.");
+        console.log("File-backed grants only: tokens behind --grant-service and provider credentials are not rotated here.");
+        console.log(`Revoke with: rig mcp token revoke ${name}`);
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

@@ -25,8 +25,8 @@ describe("AgentActivityStore — single production construction site (W2a-1)", (
     });
   }
 
-  it("has exactly one production construction site, and it injects both generation resolvers", () => {
-    const sites: Array<{ file: string; injectsResolver: boolean; injectsMembership: boolean }> = [];
+  it("has exactly one production construction site, and it injects the generation resolvers and the adoption rule", () => {
+    const sites: Array<{ file: string; injectsResolver: boolean; injectsMembership: boolean; injectsAdoption: boolean }> = [];
     for (const file of walkTs(srcDir)) {
       const text = fs.readFileSync(file, "utf8");
       const re = /new AgentActivityStore\(/g;
@@ -38,6 +38,7 @@ describe("AgentActivityStore — single production construction site (W2a-1)", (
           file: path.relative(srcDir, file),
           injectsResolver: /resolveOccupantGeneration/.test(window),
           injectsMembership: /isRegisteredOccupantGeneration/.test(window),
+          injectsAdoption: /isOccupantContinuedByAdoption/.test(window),
         });
       }
     }
@@ -55,6 +56,11 @@ describe("AgentActivityStore — single production construction site (W2a-1)", (
       sites[0]?.injectsMembership,
       `the sole construction site (${sites[0]?.file}) must inject isRegisteredOccupantGeneration — ` +
         `otherwise an uncommitted reservation can be misreported as a dead tenure`,
+    ).toBe(true);
+    expect(
+      sites[0]?.injectsAdoption,
+      `the sole construction site (${sites[0]?.file}) must inject isOccupantContinuedByAdoption — ` +
+        `otherwise an adopted, still-running seat's hooks read as a dead tenure`,
     ).toBe(true);
   });
 });

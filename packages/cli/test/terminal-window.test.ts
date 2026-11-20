@@ -11,7 +11,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
   const get = vi.fn(async (url: string): Promise<{ status: number; data: unknown }> => ({ status: 200, data: url.includes("preview") ? preview : { providers: [{ liveness: { alive: options.alive !== false } }] } }));
   const post = vi.fn(async (): Promise<{ status: number; data: unknown }> => options.refusal ? { status: options.refusal, data: { error: "view changed" } } : { status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } });
   const client = { baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get, post } as unknown as DaemonClient;
-  let pane = 0;
+  let pane = 0, window = 0;
   const exec = vi.fn(async (file: string, args: string[]) => {
     if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { workspaces: [] } });
     if (args.includes("--version")) {
@@ -23,6 +23,10 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
     if (file === "/bin/sh") return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/tmux";
     if (args.at(-1) === "default-size") return "120x40";
     if (args.includes("show-options") && args.at(-1) === "window-size") return "latest";
+    if (args.includes("#{session_id}|#{window_id}|#{pane_id}")) {
+      if (args.includes("new-session") || args.includes("new-window")) window++;
+      return `$1|@${window}|%${++pane}`;
+    }
     if (args.includes("#{pane_id}")) return `%${++pane}`;
     return "";
   });
@@ -31,6 +35,20 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
 }
 
 describe("desktop terminal view", () => {
+  it("authenticates terminal preview and status GETs with the terminal bearer", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "synthetic-terminal-window-token");
+    try {
+      const f = fixture();
+      const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+      expect(result.ok).toBe(true);
+      const options = { headers: { Authorization: "Bearer synthetic-terminal-window-token" } };
+      expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=saved%3Akernel&provider=herdr", options);
+      expect(f.get).toHaveBeenCalledWith("/api/terminal/status?provider=herdr", options);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("creates and attaches its viewer on the server named by the daemon preview", async () => {
     const f = fixture({ herdr: false });
     const socket = "/private/openrig instance.sock";
@@ -468,7 +486,7 @@ describe("measured welcome layout", () => {
     f.deps.exec = vi.fn(async (file, args) => file === "/usr/bin/osascript" ? `window:${columns}` : original(file, args));
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result.ok).toBe(true);
-    expect(f.get).toHaveBeenCalledWith(`/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=${columns}`);
+    expect(f.get).toHaveBeenCalledWith(`/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=${columns}`, { headers: {} });
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", viewportColumns: columns, expectedPlan: columns >= 120 ? "wide" : "narrow" }, { timeoutMs: 45_000 });
     expect(vi.mocked(f.deps.exec).mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
   });
@@ -604,8 +622,8 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result.ok).toBe(true);
     expect(result.notes?.join(" ")).toContain("width could not be measured");
-    expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=200");
-    expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=saved%3Akernel&provider=herdr");
+    expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=200", { headers: {} });
+    expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=saved%3Akernel&provider=herdr", { headers: {} });
     expect(f.post).toHaveBeenCalledWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "bound-plan" }, expect.anything());
   });
 

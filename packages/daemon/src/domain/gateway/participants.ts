@@ -448,8 +448,13 @@ export interface SharedChannelAddress { entityId: string; address: string; chann
 /** Every registered shared channel, as an address. An unreadable participant file lists none (outbound to a channel
  *  then waits, and the queue refuses a new row to it, as for any unknown address). */
 export function sharedChannelAddresses(home: string = getOpenRigHome()): SharedChannelAddress[] {
+  return readSharedChannelAddresses(home) ?? [];
+}
+
+/** The same list, but null when the participant file can't be read, for a caller that must tell "none" from "unknown". */
+export function readSharedChannelAddresses(home: string = getOpenRigHome()): SharedChannelAddress[] | null {
   const side = readParticipantsFile(home);
-  if (!side.ok) return [];
+  if (!side.ok) return null;
   return Object.entries(side.file.participants).flatMap(([id, entry]) => entry.kind === "shared-channel"
     ? [{ entityId: id, address: `${id}@${ADDRESS_DOMAIN}`, channelId: entry.channel.channelId, connectorRef: entry.channel.connectorRef }]
     : []);

@@ -3,7 +3,7 @@ import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAdd
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
+import { COMPOSER_COLLAPSED_PASTE_PATTERN, composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
 
 /** A binding is captured before waiting. Never rebind an old operation to a new occupant. */
 export interface GuardTarget {
@@ -26,6 +26,8 @@ interface Lease {
   staged?: { text: string; collapsedPaste: string | null };
   /** #2429: the delivery's own check found the paste this guard left unsubmitted, then the adapter submitted it. */
   ownLeftover?: "recognized" | "submitted";
+  /** A lifecycle lease at queue-only: each write is checked as draft-aware, without draft-aware's lifecycle refusal. */
+  queueOnlyLifecycle?: boolean;
 }
 
 export class DeliveryGuardError extends Error {
@@ -52,8 +54,9 @@ export interface GuardPreference {
 export const TYPING_GUARD_MODES = ["off", "draft-aware", "hold"] as const;
 export type TypingGuardMode = (typeof TYPING_GUARD_MODES)[number];
 /** The middle interruption levels, and a terminal member's default. `off` is always interrupt and `hold` is full quiet;
- *  these sit between, deciding by the input's source and urgency. */
-export const INTERRUPTION_LEVELS = ["openrig-urgent", "urgent-only", "sends-only"] as const;
+ *  these sit between, deciding by the input's source and urgency. `queue-only` is for a seat a person types in: deliberate
+ *  sends type draft-aware, and OpenRig's own notices never type (#3076). */
+export const INTERRUPTION_LEVELS = ["openrig-urgent", "urgent-only", "sends-only", "queue-only"] as const;
 export type InterruptionLevel = (typeof INTERRUPTION_LEVELS)[number];
 export interface TypingGuardSettings { mode: TypingGuardMode; level?: InterruptionLevel }
 export interface TypingGuardConfig extends TypingGuardSettings { revision: string }
@@ -80,6 +83,9 @@ export interface AdmissionInput { source: "openrig" | "agent"; urgent: boolean; 
 
 /** Whether a level lets this input type. Every other input at the seat is held, never refused or lost. */
 export function levelAdmits(level: InterruptionLevel, input: AdmissionInput): boolean {
+  // queue-only decides before urgency: OpenRig's own notice never types there, urgent ones included (no hidden urgent
+  // bypass). It is held with its urgency, or reaches the seat as a queue row (#3076).
+  if (level === "queue-only") return input.source === "agent";
   if (input.urgent) return true;
   if (level === "openrig-urgent") return input.source === "openrig";
   if (level === "sends-only") return input.source === "agent";
@@ -97,7 +103,7 @@ export function parseTypingGuardSettings(value: unknown): TypingGuardSettings {
     return { mode: level === "sends-only" ? "off" : "hold", level };
   }
   if (!(TYPING_GUARD_MODES as readonly unknown[]).includes(config.mode)) {
-    throw new DeliveryGuardError("invalid_typing_guard", "mode must be off, draft-aware, openrig-urgent, urgent-only, sends-only or hold.");
+    throw new DeliveryGuardError("invalid_typing_guard", "mode must be off, draft-aware, openrig-urgent, urgent-only, sends-only, queue-only or hold.");
   }
   if (config.holdSeconds !== undefined || config.maxAttempts !== undefined) throw new DeliveryGuardError("invalid_typing_guard", "Draft-aware sends return their result immediately; retry settings are not supported.");
   return { mode: config.mode as TypingGuardMode };
@@ -113,10 +119,22 @@ function storedGuard(raw: string | null | undefined, enabled: number): TypingGua
 }
 
 /** Whether this configuration holds the input. With a level, a classified input is decided by the level; an input with
- *  no classification (lifecycle work, a direct adapter write) is held only where the coarse mode holds. */
-function holds(config: TypingGuardConfig, input?: AdmissionInput): boolean {
+ *  no classification (lifecycle work, a direct adapter write) is held only where the coarse mode holds. Lifecycle work
+ *  isn't held at queue-only: that level is about how OpenRig's notices reach a seat a person types in, so managed
+ *  compaction, its restore and recovery go ahead there, with the draft-aware check on each write but without
+ *  draft-aware's refusal of an active seat (#3076). Its stored coarse mode stays hold, so a daemon without the level
+ *  still refuses them. */
+function holds(config: TypingGuardConfig, input?: AdmissionInput, lifecycle = false): boolean {
   if (config.level && input) return !levelAdmits(config.level, input);
+  if (lifecycle && config.level === "queue-only") return false;
   return config.mode === "hold";
+}
+
+/** Whether a seat's guard preference refuses a writing lifecycle operation: the same rule lifecycle() applies, for a
+ *  preflight that reads the preference without taking a lease. */
+export function preferenceHoldsLifecycle(preference: Pick<GuardPreference, "desired" | "effective" | "desiredLevel" | "effectiveLevel"> | undefined): boolean {
+  if (!preference) return false;
+  return (preference.desired && preference.desiredLevel !== "queue-only") || (preference.effective && preference.effectiveLevel !== "queue-only");
 }
 
 /** One serialization domain for preference activation, delivery and writing lifecycle.
@@ -182,6 +200,13 @@ export class SeatDeliveryGuard {
       ...(desired.level ? { desiredLevel: desired.level } : {}), ...(effective.level ? { effectiveLevel: effective.level } : {}) };
   }
 
+  /** Whether the seat is at the queue-only level, desired or effective: OpenRig's own reminders reach it as queue rows or
+   *  notes on its rows, never typed (#3076). */
+  queueOnly(nodeId: string): boolean {
+    const { desired, effective } = this.configuration(nodeId);
+    return desired.level === "queue-only" || effective.level === "queue-only";
+  }
+
   /** Whether the seat's configuration would hold this input now (desired or effective, as the operation decides). */
   holdsInput(nodeId: string, input: AdmissionInput): boolean {
     const config = this.configuration(nodeId);
@@ -218,6 +243,12 @@ export class SeatDeliveryGuard {
 
   private same(a: GuardTarget, b: GuardTarget): boolean {
     return a.nodeId === b.nodeId && a.session === b.session && a.occupant === b.occupant && a.pane === b.pane;
+  }
+
+  /** Runs `fn` under the seat's delivery lease, after every send already waiting for it: the same owner typed sends take,
+   *  with no admission of its own. The hook bridge's poll claims messages under it (#3270). */
+  exclusive<T>(nodeId: string, fn: () => T | Promise<T>): Promise<T> {
+    return this.serial(nodeId, async () => fn());
   }
 
   private async serial<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
@@ -281,7 +312,13 @@ export class SeatDeliveryGuard {
 
   /** fn must include lifecycle preflight, effects and last write. Retention callbacks
    * execute under this same lease, before any pane capture/paste/submit branch. */
-  async operation<T>(name: string, fn: () => Promise<T>, held?: (target: GuardTarget) => Promise<T>, input?: AdmissionInput): Promise<T> {
+  operation<T>(name: string, fn: () => Promise<T>, held?: (target: GuardTarget) => Promise<T>, input?: AdmissionInput): Promise<T> {
+    return this.leased(name, fn, held, input, false);
+  }
+
+  /** `lifecycle`: the lease is lifecycle()'s own, for a writing lifecycle operation. */
+  private async leased<T>(name: string, fn: () => Promise<T>, held: ((target: GuardTarget) => Promise<T>) | undefined,
+    input: AdmissionInput | undefined, lifecycle: boolean): Promise<T> {
     const bound = this.target(name);
     const inherited = this.scope.getStore()?.get(bound.nodeId);
     if (inherited?.active && inherited.target.nodeId === bound.nodeId) {
@@ -292,17 +329,23 @@ export class SeatDeliveryGuard {
       const current = this.target(name);
       if (!this.same(bound, current)) throw new DeliveryGuardError("guard_target_changed", "Input target changed while waiting; no input written.");
       const config = this.configuration(bound.nodeId);
-      if (!input?.override && (holds(config.desired, input) || holds(config.effective, input))) {
+      if (!input?.override && (holds(config.desired, input, lifecycle) || holds(config.effective, input, lifecycle))) {
         if (held) return held(bound);
         throw new DeliveryGuardError("typing_guard_enabled", "Automatic input is paused for this seat. Select off or draft-aware mode explicitly before this writing operation.");
       }
       // Input a middle level lets through still never types over a person's draft: it's delivered as draft-aware.
-      const admittedByLevel = !!input && (config.desired.level === "openrig-urgent" || config.desired.level === "urgent-only"
-        || config.effective.level === "openrig-urgent" || config.effective.level === "urgent-only");
+      const draftAwareLevel = (level?: InterruptionLevel) => level === "openrig-urgent" || level === "urgent-only" || level === "queue-only";
+      const admittedByLevel = !!input && (draftAwareLevel(config.desired.level) || draftAwareLevel(config.effective.level));
+      // Lifecycle work queue-only lets through writes as draft-aware too: compaction, its restore and recovery never
+      // type over a person's draft there; only draft-aware's refusal of an active seat is left out (lifecycle()). A
+      // draft-aware side (desired or effective, while a change is pending) keeps that refusal.
+      const queueOnlyLifecycle = lifecycle && !input && (config.desired.level === "queue-only" || config.effective.level === "queue-only")
+        && config.desired.mode !== "draft-aware" && config.effective.mode !== "draft-aware";
       const lease: Lease = { target: bound, active: true, origin: "automatic", humanEpoch: this.humanEpochs.get(bound.nodeId) ?? 0,
         // Explicit interaction keeps serialization/binding checks; its own last-paste reader replaces automatic draft retention.
-        config: input?.override ? DEFAULT_GUARD : admittedByLevel ? { mode: "draft-aware", revision: config.desired.revision }
-          : config.desired.mode === "draft-aware" ? config.desired : config.effective };
+        config: input?.override ? DEFAULT_GUARD : admittedByLevel || queueOnlyLifecycle ? { mode: "draft-aware", revision: config.desired.revision }
+          : config.desired.mode === "draft-aware" ? config.desired : config.effective,
+        ...(queueOnlyLifecycle ? { queueOnlyLifecycle: true } : {}) };
       lease.serialOwner = lease;
       try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [lease.target.nodeId, lease]]), fn); }
       finally { lease.active = false; }
@@ -378,9 +421,9 @@ export class SeatDeliveryGuard {
       const id = ids[index]; if (!id) return fn();
       if (!writing.has(id)) return this.custodyInPass(id, () => acquire(index + 1));
       if (this.ownsLifecycle(id)) return acquire(index + 1);
-      return this.operation(id, async () => {
+      return this.leased(id, async () => {
         const lease = this.scope.getStore()!.get(id)!;
-        if (lease.config?.mode === "draft-aware") {
+        if (lease.config?.mode === "draft-aware" && !lease.queueOnlyLifecycle) {
           // Only a positively absent input may receive fresh startup/resume writes.
           // An active protected seat requires an explicit guard mode change first.
           const absent = !lease.target.pane || await this.inputAbsent?.(lease.target) === true;
@@ -389,7 +432,7 @@ export class SeatDeliveryGuard {
         }
         lease.lifecycle = true;
         return acquire(index + 1);
-      });
+      }, undefined, undefined, true);
     };
     return acquire(0);
   }
@@ -514,9 +557,13 @@ export class SeatDeliveryGuard {
     }
     if (submit) {
       // The TUI may render the collapsed label only after notePasted's read.
-      // If no label was recorded, recognize it in this same lease and original composer.
-      const collapsed = lease.staged && !lease.staged.collapsedPaste && !!lease.inputFrame
+      // If no label was recorded, recognize it in this same lease and original composer. A label without a line count
+      // (`[Pasted text #K]`, a single-line paste) says only its paste ID, and a person may have replaced our paste with
+      // their own single line by then: that one counts as ours only when notePasted recorded it (#2429).
+      const late = lease.staged && !lease.staged.collapsedPaste && !!lease.inputFrame
         && lease.inputFrame === input.frame && ownCollapsedPaste(input, lease.staged.text);
+      const label = late ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(late) : null;
+      const collapsed = !!late && !(label && label[1] === undefined);
       const owned = lease.staged && (composerContainsOwnedText(input, lease.staged.text)
         || !!collapsed || !!lease.staged.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === lease.staged.collapsedPaste);
       if (!owned) throw new DeliveryGuardError("draft_input_changed", "The input no longer contains only this delivery's staged text. Enter was not sent.");
@@ -549,7 +596,9 @@ export class SeatDeliveryGuard {
     const quiet = async () => {
       if (!this.inputActivity) return;
       const last = await this.inputActivity(target).then(at => ({ at }), () => null);
-      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.");
+      // Its own diagnostic: a caller keeps the last one it was given, which would otherwise be an earlier refusal's.
+      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.",
+        inputReadDiagnostic("draft-aware", null, "client_activity_unavailable"));
       // tmux reports whole seconds: activity at N.999 s reads as N, so the quiet window counts from the end of that second.
       if (last.at !== null && Date.now() - (last.at + CLIENT_ACTIVITY_PRECISION_MS) < INPUT_QUIET_MS) {
         throw new DeliveryGuardError("draft_input_busy", "A writable client of this seat had recent activity. Automatic delivery is held; nothing was pasted.");

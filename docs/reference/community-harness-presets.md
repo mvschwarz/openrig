@@ -1,15 +1,15 @@
 # Community harness presets
 
 A community harness is a coding harness an outside contributor maintains. You install it as one small data file, and a
-rig member runs it by naming it as its `runtime`. OpenRig doesn't test these harnesses. It shows them as community
-harnesses, and it reads their activity only from what the screen shows.
+rig member runs it by naming it as its `runtime`. OpenRig doesn't qualify every installed harness. It shows them as community
+harnesses; plain presets use screen observations, while declared runners and hosted Pi-RPC programs report their activity.
 
 For what an integration author owns end to end, including a runner's duties and running a harness somewhere else, see
 the draft [integration author contracts](author-contracts.md).
 
 ## What a community harness gets
 
-What OpenRig does for a community-harness seat, capability by capability. **Partly** and **no** mean OpenRig shows that it doesn't know;
+What OpenRig does for a plain community-harness seat, capability by capability. **Partly** and **no** mean OpenRig shows that it doesn't know;
 it never reads an unsupported capability as idle, working, ready or verified.
 
 | Capability | Supported | How it works, or what you see instead |
@@ -21,7 +21,7 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A [runner preset](#runner-presets-runner-true)'s own reports decide it instead. |
 | Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
 | Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. A [runner preset](#runner-presets-runner-true) is the exception: its runner submits the agent's permission requests to OpenRig, which asks a person, and the default is permit (section 7 of the [harness and runner contract](harness-runner-contract.md)). |
-| Cancel | no | OpenRig has no verb that cancels a running turn. A [runner preset](#runner-presets-runner-true) whose runner follows the contract takes `rig send <seat> "/abort" --raw` as its cancel, but not while the seat needs input, and only as a request (see [Cancel](harness-runner-contract.md#6-cancel-requested-isnt-the-same-as-done)). To a plain preset, `/abort` is ordinary input. Say in the preset's `limits` whether the harness has a cancel and how to use it. `rig seat stop` and `rig down` end the seat's tmux session; anything the harness runs outside its pane, such as a gateway, is its own, and the preset's `limits` should say what keeps running. Restarting in place and switching harness are refused. |
+| Cancel | no | A plain preset has no live native cancellation consumer. Its own manual controls remain available; `/abort` is ordinary input unless that program defines it. An implemented runner can support the [named native command](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1), subject to its own capability and turn mapping. `rig seat stop` and `rig down` end the seat's tmux session; work outside that pane, such as a gateway, has separate custody and lifecycle. List those limits in the preset. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
 
 **Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
@@ -193,6 +193,8 @@ one at a time and in order, without making the agent wait. It finds the address 
 - **A runner's full duties** (liveness, input, cancellation and permissions) are in the draft
   [harness and runner contract](harness-runner-contract.md).
 
+A runner declaration is not a native-input or wake declaration. The optional [run-bound channel](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1) advertises implemented operations through an authenticated live hello; Core supports preset-owned consumers plus input-only managed OMP and hosted Pi-RPC consumers. The dsh example implements input, dedicated wake and named cancellation using its own invocation mapping. Typed remains every program's default, native selection is explicit per seat, and a Pi-compatible wrapper does not qualify or adopt another program's native operations.
+
 ## Pi-compatible RPC harnesses (`protocol: pi-rpc`)
 
 For a community harness that is a fork of Pi or speaks Pi's CLI and JSONL RPC protocol (such as OmO Native on senpi or Prime Agent), set `protocol: pi-rpc`.
@@ -209,6 +211,7 @@ limits:
 ```
 
 - **OpenRig runs the harness through its existing Pi runner.** Instead of screen scraping, the harness runs under `pi-runner` inside the seat's pane. The runner provides input buffering, paste framing, prompt/steer RPC queueing, clean transcript mirroring, and typed activity hook reporting to the daemon.
+- **Native input is optional and input-only for this class.** Typed remains the default. A current hosted kind2 run can advertise the implemented input channel and accept ordered prompts with correlated native responses. It does not inherit builtin Pi wake/cancel or program qualification. See [runtime coverage and qualification](harness-runner-contract.md#runtime-coverage-and-qualification); a preset name, common ABI or stream output alone enables no operation.
 - **`command` is the executable.** OpenRig resolves `command` (e.g. `omo` or `/usr/local/bin/senpi`) against the seat pane's environment, resolving symlinks and version-manager shims (such as `mise`) safely.
 - **Session identity and resume come from the runner.** Transcripts and sessions are persisted as JSONL files under `$OPENRIG_HOME/state/pi/<session>/sessions/`, and the fork's `get_state` reports the session file, so `launch_result` and `names_conversation` aren't needed.
   - **With `resume: true`** declared, resuming or restoring a seat continues that exact session file via `--session <file>`. Without it, the preset is launch-only; a restore that would resume its saved conversation waits for a fresh-start decision.

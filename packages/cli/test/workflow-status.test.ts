@@ -219,3 +219,60 @@ describe("status verb wire behavior", () => {
     expect(calls).toEqual(["/api/workflow/list"]);
   });
 });
+
+// route adopted a queue handoff's successor: only a live successor is the owner's to project from; any other state,
+// a canceled one included, gets the pointer to inspect it.
+describe("route's next step after an adopted handoff", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ["pending", "The owner advances with the action rig workflow show WF-1 prints for packet q-new (it carries any --evidence-ref or acceptance flags the step needs)"],
+    ["blocked", "The owner advances with the action rig workflow show WF-1 prints for packet q-new (it carries any --evidence-ref or acceptance flags the step needs)"],
+    ["done", "The successor is already done; its outcome is on rig queue show q-new"],
+    ["canceled", "The successor is already canceled; its outcome is on rig queue show q-new"],
+  ])("a %s successor", async (state, next) => {
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    const deps: WorkflowDeps = {
+      lifecycleDeps: {} as WorkflowDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        get: async () => ({ status: 200, data: [] }),
+        post: async () => ({ status: 200, data: { stepId: "review", closedPacketId: "q-old", newPacketId: "q-new", toSession: "r2@rig",
+          instanceStatus: "active", adoptedHandoff: { successorState: state } } }),
+      }) as never,
+    };
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "route", "WF-1", "--to", "r2@rig"]);
+    expect(lines.join("\n")).toContain(next);
+  });
+});
+
+// A routed or redriven packet's close can need --evidence-ref or acceptance flags, so the next step names the command
+// that carries them (workflow show's action) instead of a bare project command that a receipt-required step refuses.
+describe("route's and resume's next step point to the exact command", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ["route", ["route", "WF-1", "--to", "r2@rig"], { stepId: "review", closedPacketId: "q-old", newPacketId: "q-new", fromSession: "r1@rig", toSession: "r2@rig", instanceStatus: "active" }, "The new owner"],
+    ["resume", ["resume", "WF-1"], { stepId: "review", newPacketId: "q-new", ownerSession: "r2@rig", ownerSource: "resolved", resumeCount: 1 }, "The owner"],
+  ])("%s", async (_verb, argv, data, who) => {
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    const deps: WorkflowDeps = {
+      lifecycleDeps: {} as WorkflowDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        get: async () => ({ status: 200, data: [] }),
+        post: async () => ({ status: 200, data }),
+      }) as never,
+    };
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", ...argv]);
+    const output = lines.join("\n");
+    expect(output).toContain(`next:  ${who} advances with the action rig workflow show WF-1 prints for packet q-new (it carries any --evidence-ref or acceptance flags the step needs)`);
+    expect(output).not.toContain("--current-packet q-new --exit <exit>");
+  });
+});

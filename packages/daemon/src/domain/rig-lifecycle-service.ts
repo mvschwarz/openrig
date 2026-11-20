@@ -7,6 +7,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { findOtherSessionOwner } from "./session-owner.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 type ClaimedSessionRow = {
   session_id: string;
@@ -537,7 +538,9 @@ export class RigLifecycleService {
     }
 
     const preserveDetachedClaimedSession = node.latest_session_origin === "claimed" && node.latest_session_status === "detached";
-    const keepSession = preserveDetachedClaimedSession || sessionOwner !== null;
+    // Removing membership does not stop an external CLI's caller-owned process or require a tmux server.
+    const externallyOwned = seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.node_id)?.attachmentType)) === "external";
+    const keepSession = externallyOwned || preserveDetachedClaimedSession || sessionOwner !== null;
     const sessionStopped = !keepSession && Boolean(node.latest_session_name);
 
     let sessionsKilled = 0;

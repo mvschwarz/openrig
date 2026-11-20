@@ -146,6 +146,24 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
 }
 
 describe("TerminalService — view resolution + one-shape result", () => {
+  it("uses the injected tmux server for single, bulk and batched catalog composition", async () => {
+    let reads = 0;
+    const args = ["-S", "/fixture/injected.sock"];
+    const { deps, herdr } = makeDeps({ tmuxServerArgs: () => { reads++; return args; },
+      listRigSeatsBatch: () => new Map([["acme-build", rigRows]]) });
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "acme-build" });
+    expect(preview).toHaveProperty("composed.localTmuxServer", args);
+    const afterSingle = reads;
+    expect(afterSingle).toBeGreaterThan(0);
+    await service.openAll({});
+    expect(herdr.lastView?.localTmuxServer).toEqual(args);
+    const afterBulk = reads;
+    expect(afterBulk).toBeGreaterThan(afterSingle);
+    const catalog = await service.listViews(true);
+    expect(catalog.catalog.some(entry => entry.view === "rig:acme-build")).toBe(true);
+    expect(reads).toBeGreaterThan(afterBulk);
+  });
   it.each([false, true])("keeps the view outcome and puts the human handoff beside it (provider unavailable=%s)", async unavailable => {
     const { deps, herdr } = makeDeps({ resolveLocalTmux: () => "/opt/tools/tmux" });
     let calls = 0;

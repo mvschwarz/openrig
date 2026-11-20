@@ -255,6 +255,19 @@ describe("Session routes", () => {
     expect(res.status).toBe(409);
   });
 
+  it.each([["process_limits_unverified", true, 409], ["process_limits_unsupported", false, 422], ["process_limits_setup", false, 422],
+    ["process_limits_invalid", false, 422]] as const)("#3253: POST .../launch refused with %s -> %s", async (code, retryable, status) => {
+    const tmux = mockTmuxAdapter();
+    const problem = { kind: code.slice("process_limits_".length), reason: "fixture" };
+    vi.spyOn(tmux, "createSession").mockResolvedValue({ ok: false, code, message: "not started", retryable, processLimits: problem } as never);
+    const { app, rigRepo } = createTestApp(db, { tmux });
+    const rig = rigRepo.createRig("r01");
+    rigRepo.addNode(rig.id, "dev1-impl", { role: "worker" });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/launch`, { method: "POST" });
+    expect(res.status).toBe(status);
+    expect(await res.json()).toMatchObject({ ok: false, code, retryable, processLimits: problem });
+  });
+
   it("POST .../launch nonexistent node -> 404", async () => {
     const { app, rigRepo } = createTestApp(db);
     const rig = rigRepo.createRig("r01");

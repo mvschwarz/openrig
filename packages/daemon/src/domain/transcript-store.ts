@@ -1,8 +1,8 @@
 import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, fstatSync, readFileSync } from "node:fs";
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { getLastCaptureAt, getLastCheckedAt, DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
+import { scanTranscriptGrep } from "./transcript-grep.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
@@ -392,66 +392,14 @@ export class TranscriptStore {
     }
   }
 
-  grep(rigName: string, sessionName: string, pattern: string): string[] | null {
-    try {
-      const filePath = this.getTranscriptPath(rigName, sessionName);
-      if (!existsSync(filePath)) return null;
-      return this.grepSync(filePath, pattern);
-    } catch {
-      return null;
-    }
-  }
-
-  private grepSync(filePath: string, pattern: string): string[] {
-    const regex = new RegExp(pattern);
-    const matches: string[] = [];
-    const fd = openSync(filePath, "r");
-    const decoder = new StringDecoder("utf-8");
-    try {
-      const stat = fstatSync(fd);
-      const CHUNK_SIZE = 64 * 1024;
-      let remainder: string[] = [];
-
-      for (let offset = 0; offset < stat.size; offset += CHUNK_SIZE) {
-        const readSize = Math.min(CHUNK_SIZE, stat.size - offset);
-        const buf = readTranscriptChunk(fd, readSize, offset);
-        // StringDecoder handles incomplete multibyte sequences at chunk boundaries
-        const lines = decoder.write(buf).split("\n");
-        // Scan only the new chunk. Joining and splitting the growing remainder
-        // on every read makes a long captured line quadratic.
-        if (lines.length === 1) {
-          remainder.push(lines[0]!);
-          continue;
-        }
-        lines[0] = remainder.join("") + lines[0];
-        remainder = [lines.pop() ?? ""];
-
-        for (const rawLine of lines) {
-          const stripped = this.stripAnsi(rawLine);
-          for (const subLine of stripped.split("\n")) {
-            const cleaned = stripShellPromptPrefix(subLine);
-            if (cleaned && regex.test(cleaned)) {
-              matches.push(cleaned);
-            }
-          }
-        }
-      }
-
-      // Flush any remaining bytes from the decoder
-      const finalChunk = remainder.join("") + decoder.end();
-      if (finalChunk) {
-        const stripped = this.stripAnsi(finalChunk);
-        for (const subLine of stripped.split("\n")) {
-          const cleaned = stripShellPromptPrefix(subLine);
-          if (cleaned && regex.test(cleaned)) {
-            matches.push(cleaned);
-          }
-        }
-      }
-    } finally {
-      closeSync(fd);
-    }
-
-    return matches;
+  /** Scan this session's transcript for a pattern.
+   *
+   *  The scan runs on its own thread with a deadline (domain/transcript-grep.ts): a pattern the route
+   *  accepts as valid syntax can backtrack catastrophically, and on this thread that would stop every
+   *  other request and every sweep for as long as it ran. Returns null when the file is missing, and
+   *  rejects with TranscriptGrepTimeoutError when the scan outlived its bound.
+   */
+  async grep(rigName: string, sessionName: string, pattern: string): Promise<string[] | null> {
+    return scanTranscriptGrep(this.getTranscriptPath(rigName, sessionName), pattern);
   }
 }

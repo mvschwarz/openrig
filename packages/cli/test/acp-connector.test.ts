@@ -85,6 +85,20 @@ describe("rig acp run", () => {
     expect(q.task().notes.at(-1)).toContain("settled: no process carrying this run's marker remains");
   });
 
+  it("preserves UTF-8 stderr across pipe reads in the run log", async () => {
+    const diagnostic = "警告: café 🙂\n".repeat(32_768);
+    const run = options({ agent: [process.execPath, "-e",
+      `process.stderr.write("警告: café 🙂\\n".repeat(32768)); import(${JSON.stringify(FAKE_AGENT)});`,
+    ] });
+    const q = memoryQueue("scenario:reply PONG");
+    expect((await runAcpAssignment(q.queue, run)).kind).toBe("completed");
+    const stderr = readFileSync(run.logPath, "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.direction === "stderr")
+      .map((entry) => entry.text).join("");
+    expect(stderr === diagnostic).toBe(true);
+  });
+
   it("carries a permission request to the owning seat and returns the documented answer to that request once", async () => {
     const q = memoryQueue("scenario:permission");
     const stop = owner(q, "lead@studio", ["allow-once"]);

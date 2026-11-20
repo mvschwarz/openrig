@@ -29,7 +29,9 @@ it.each([false, true])("community contract: exact up --existing reopens the save
         ...(missing ? { error: "missing" } : { nativeRef: "saved-chat" }) }));
       return { ok: true as const };
     });
-    const tmux = { createSession: vi.fn(async () => ({ ok: true })), hasSession: async () => false,
+    // A confirmed stop: an unresumable saved conversation rolls back the blank session this restore launched, and only a
+    // stop tmux confirms lets that rollback go on to awaiting-decision.
+    const tmux = { createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })), hasSession: async () => false,
       listSessions: async () => [], listWindows: async () => [],
       listPanes: async () => [{ id: "%1", index: 0, cwd: home, width: 80, height: 24, active: true }],
       getPanePid: async () => 1234, getPaneCommand: async () => "node",
@@ -74,6 +76,8 @@ it.each([false, true])("community contract: exact up --existing reopens the save
     expect(sendShellCommand.mock.calls[0]![1]).not.toContain("OPENRIG_CONVERSATION=");
     expect(sendShellCommand.mock.calls[0]![1]).not.toMatch(/OPENRIG_FIRST_INPUT='/);
     expect(tmux.sendText).not.toHaveBeenCalled();
+    if (missing) expect(tmux.killSession).toHaveBeenCalledWith("dev-worker@community-existing");
+    else expect(tmux.killSession).not.toHaveBeenCalled();
     if (!missing) {
       expect(process.exitCode ?? 0).toBe(0);
       expect(db.prepare("SELECT resume_token FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1").get(node.id))

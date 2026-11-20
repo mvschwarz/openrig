@@ -53,6 +53,22 @@ describe("cursor-bound composer input", () => {
     expect(inspectComposerInput(frame, "codex").state).toBe("unknown");
   });
 
+  // D18: while a turn runs, Codex 0.167 replaces the shortcuts hint with its queue hint once the box holds text, as
+  // it does right after our paste into a busy seat (Codex 0.167.1 and 0.167.2, banked); the narrow form drops "message".
+  it.each(["  tab to queue message", "  tab to queue", "  tab to queue message · Plan mode", "  tab to queue message   ⚠ 1 · f2"])
+  ("reads the input box above Codex's queue hint (%j)", hint => {
+    const frame = codexTwoRowComposer("a pasted message");
+    frame.screen = frame.screen.replace("  ? for shortcuts                ⚠ 1 · f2", hint);
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "text", rows: ["a pasted message"] });
+  });
+
+  it.each(["  tab to queue messages", "  shift+tab to queue message", "  tab to queued", "  press tab to queue message"])
+  ("keeps a near miss of the queue hint unknown (%j)", hint => {
+    const frame = codexTwoRowComposer("a pasted message");
+    frame.screen = frame.screen.replace("  ? for shortcuts                ⚠ 1 · f2", hint);
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+  });
+
   // #2605: Claude 2.1.319 prints "✔ Update installed · Restart to update" on its own row under the footer in a narrow
   // pane. The draft-aware guard read every idle prompt there as unknown and held each wake as draft_input_unknown.
   it("reads the input under Claude's own-row Restart to update banner, and nothing like it (#2605)", () => {
@@ -94,6 +110,28 @@ describe("cursor-bound composer input", () => {
     const snapshot = claude(body);
     snapshot.screen = snapshot.screen.replace("? for shortcuts", "⏵⏵ accept edits on (shift+tab to cycle)\n✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…");
     expect(inspectComposerInput(snapshot, "claude-code").state).toBe(body ? "text" : "empty");
+  });
+
+  // D04 at full width: Claude 2.1.322 and 2.1.323 draw the paste hint and an auto-update failure on one footer row
+  // (200x50, as banked), where an 80-column pane gives the failure its own clipped row (above).
+  it.each([
+    "✘ Auto-update failed · Run claude doctor",
+    "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",
+    "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code",
+    "✘ Auto-update failed · Try claude doctor or cd ~/.claude/local && npm update @anthropic-ai/claude-code",
+  ])("reads the paste hint and %s on one footer row", warning => {
+    const frame = (body: string, right = warning) => {
+      const snapshot = claude(body, undefined, 200);
+      snapshot.screen = snapshot.screen.replace("? for shortcuts", `  paste again to expand${" ".repeat(97)}${right}`);
+      return snapshot;
+    };
+    expect(inspectComposerInput(frame(""), "claude-code").state).toBe("empty");
+    expect(inspectComposerInput(frame("person's draft"), "claude-code").state).toBe("text");
+    // Only a known failure shares the row; a near miss, or one clipped at this width, keeps the input unknown.
+    for (const nearMiss of [warning + " now", warning.replace("failed", "succeeded"), warning.replace("doctor", "doctors"),
+      "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…"]) {
+      expect(inspectComposerInput(frame("", nearMiss), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+    }
   });
 
   it("keeps near misses unknown below the footer and warning text inside a draft", () => {
@@ -270,5 +308,23 @@ describe("cursor-bound composer input", () => {
     expect(ownCollapsedPaste(opaque, "one\ntwo")).toBeNull();
     expect(composerContainsOwnedText(opaque, "one\ntwo\nthree")).toBe(false);
     expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #4 +2 lines] foreign")), "one\ntwo\nthree")).toBeNull();
+  });
+
+  it("does not own a count-less label drawn beside the expected head unless the text spells it out (#2429)", () => {
+    const head = `reminder: ${"x".repeat(24)}`;
+    const quoting = `see [Pasted text #2] in ${head}`;
+    const matched = (drawn: string) => ({ ...inspectComposerInput(claude(drawn.replace("\n", ""))), collapsedPaste: drawn, pasteMatchesExpected: true });
+    // The base reads are the ones the transport would trust: text with the cursor at its end.
+    for (const drawn of [`[Pasted text #2] ${head}`, `[Pasted text #2] ${quoting}`]) expect(matched(drawn)).toMatchObject({ state: "text", cursorAtEnd: true });
+    expect(ownCollapsedPaste(matched(`[Pasted text #2] ${head}`), head)).toBeNull();
+    expect(ownCollapsedPaste(matched(`${head} [Pasted text #2]`), head)).toBeNull();
+    // A wrap may split the label.
+    expect(ownCollapsedPaste(matched(`[Pasted te\nxt #2] ${head}`), head)).toBeNull();
+    // A label our own text spells out is ours, but only as many times as it does.
+    expect(ownCollapsedPaste(matched(quoting), quoting)).toBe(quoting);
+    expect(ownCollapsedPaste(matched(`[Pasted text #2] ${quoting}`), quoting)).toBeNull();
+    // The bare label is still read by its count, and a counted label keeps the transport's identity check.
+    expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #1]")), `reminder: ${"x".repeat(1190)}`)).toBe("[Pasted text #1]");
+    expect(ownCollapsedPaste(matched(`[Pasted text #2 +3 lines] ${head}`), head)).toBe(`[Pasted text #2 +3 lines] ${head}`);
   });
 });

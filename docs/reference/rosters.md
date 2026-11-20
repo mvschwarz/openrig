@@ -103,13 +103,43 @@ status reads unknown, with the reason. See [Check-in status](hosted-members.md#c
 
 Any member can declare a `label`: how the person knows it, which an assistant can say back, such as
 `"claude (Sam's assistant, invited)"`. It's plain text of at most 200 characters, with no control characters, line or
-paragraph separators, bidirectional embeddings, overrides or isolates, or angle brackets. Joiners and direction marks
-are allowed, as names need them. A label that breaks those rules doesn't stop the roster loading: it's ignored with
-`label_problem`, and the member is named by its seat as before. An external caller's entry carries that
-`label_problem`, so an unusable label doesn't read as absent.
+paragraph separators, bidirectional embeddings, overrides or isolates, word joiner or invisible operators (U+2060 to
+U+2064), byte-order mark (U+FEFF), or angle brackets. The zero-width space, the zero-width joiner and non-joiner, and
+the direction marks are allowed, as names need them. A label that breaks those rules doesn't stop the roster
+loading: it's ignored with `label_problem`, and the member is named by its seat as before. An external caller's entry
+carries that `label_problem`, so an unusable label doesn't read as absent.
 
-The roster at `rosters/network-<rig>.json` names that rig's team: for an external caller, `rig_team` reports its `name`
-as `rig.displayName`, beside the rig's own name. The name follows the label rule; one that breaks it isn't shown, and
+A member whose owner says it takes no requests declares `takes_requests: false`, with an optional `takes_requests_note`
+saying why in plain text (the label rule). `rig_team` shows it as `takesRequests: false` and `takesRequestsNote` on that
+entry, so a sender's assistant can choose another before sending. Work sent to it is still written:
+`rig_queue_create` and `rig_queue_handoff` answer as before, and add `requestsAdvisory` with the note, so the sender
+can send it elsewhere. When some rosters can't be read, or this daemon's host id isn't known yet, `requestsAdvisory`
+says whether it takes requests isn't known, and the write goes ahead. A `takes_requests` that isn't `true` or `false`,
+or a note that breaks the label rule or comes without `takes_requests: false`, doesn't stop the roster loading:
+`takes_requests_problem` says why, and an unusable note leaves the flag in place.
+
+A member can also carry `app`, which client the participant uses (such as `chatgpt`, `claude`, `claude-code`, `codex`,
+`hermes`, `openrig` or `studio`), and `kind`, what kind of participant it is (`persistent` or `shared`), as the service
+that issued its access recorded them. Each is a short lowercase token: a letter, then up to 31 lowercase letters, digits
+or hyphens. OpenRig passes the value through as recorded and doesn't keep its own list: the issuing service owns the
+values. `rig_team` shows them as `participant: { app, kind }` on that member's entry, apart from a seat's own `kind`
+(its node kind). Absent or empty is unknown; neither is inferred from a name or label. A value that isn't a token is
+dropped on its own, `participant_problem` (`participantProblem` in `rig_team`) says why, and the roster still loads.
+
+A member can also declare `lead_of`, the team it's the entry point for, as a plain name of up to 40 characters. Where
+the daemon names no single lead (no `delegates_to` root, several, or one with no session) and exactly one entry of the
+rig declares it, `rig_team` shows that entry as `lead: { session, logicalId, declared: true, team }`, with the note
+"`<team>`'s entry point: send work for that team here. It doesn't manage this network or its other participants." If
+some rosters couldn't be read, the note adds that another entry point may be declared. A lead the daemon names always
+stays the lead. With several declarations there's no lead, and the note names them. The same seat declaring the same
+team in more than one roster, under either of its names, counts once; one seat declaring two teams counts as several.
+It's context only: nothing escalates or routes to a declared lead. A value that isn't a plain name is dropped,
+`lead_of_problem` says why, and the roster still loads.
+
+The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
+rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
+external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the
+label rule; one that breaks it isn't shown, and
 `rig.displayNameProblem` says why. When an external caller's default list of its own open items is empty,
 `rig_queue_list` adds a line its assistant can repeat, such as
 `No open requests are addressed to you on the team "Sam's team".` (a list of every state says `No requests …`).

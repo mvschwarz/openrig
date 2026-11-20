@@ -347,6 +347,40 @@ describe("QueueRepository", () => {
     expect(row.closureTarget).toBe(successor.qitemId);
   });
 
+  it.each(["qitem-missing", "qitem-replacement@far-host"])("a superseded qitem close reports unverified successor custody: %s", async (target) => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "old", nudge: false });
+    const closed = repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "canceled",
+      closureReason: "superseded", closureTarget: target });
+    expect(closed).toMatchObject({ state: "canceled", closureReason: "superseded", closureTarget: target,
+      handoffAdvisory: { status: "unverified", target, reason: "no-live-local-successor" } });
+    expect(closed.handoffAdvisory?.message).toContain("supersession");
+  });
+
+  it("a superseded close accepts an unlinked replacement by its local ID without an advisory", async () => {
+    const source = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "old", nudge: false });
+    const replacement = await repo.create({ sourceSession: "other@rig", destinationSession: "next@rig", body: "replacement", nudge: false });
+    expect(replacement.handedOffFrom).toBeNull();
+    const closed = repo.update({ qitemId: source.qitemId, actorSession: "bob@rig", state: "canceled",
+      closureReason: "superseded", closureTarget: replacement.qitemId });
+    expect(closed.handoffAdvisory).toBeUndefined();
+    expect(repo.getById(source.qitemId)?.handoffAdvisory).toBeUndefined();
+  });
+
+  it("an unavailable supersession advisory lookup does not fail a committed close", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "old", nudge: false });
+    const prepare = db.prepare.bind(db);
+    const lookup = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+      if (sql.includes("SELECT 1 FROM queue_items")) throw new Error("lookup unavailable");
+      return prepare(sql);
+    });
+    try {
+      expect(repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "canceled",
+        closureReason: "superseded", closureTarget: "qitem-replacement@far-host" })).toMatchObject({ state: "canceled" });
+      expect(repo.getById(item.qitemId)?.handoffAdvisory).toBeUndefined();
+    } finally { lookup.mockRestore(); }
+    expect(repo.getById(item.qitemId)?.state).toBe("canceled");
+  });
+
   it("Atom 2a: a plain cancel (no reason) stays abandoned — closureReason null", async () => {
     const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "abandon me" });
     repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });

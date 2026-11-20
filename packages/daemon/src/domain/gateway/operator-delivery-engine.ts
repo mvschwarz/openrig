@@ -23,6 +23,12 @@ import {
   resolveAvailability,
   type DeliveryDecision,
 } from "./delivery-rules-engine.js";
+import {
+  RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG, RETURN_ROUTE_NOTE_PREFIX,
+  isEpisodeRelay, relayTaskId, resolveEscalationReturnRoute, routeOnThisHost,
+} from "../return-route.js";
+import { shellQuote } from "../../adapters/shell-quote.js";
+import { OPENRIG_SENDER } from "../../lib/pane-envelope.js";
 
 export interface OperatorDeliveryEngine {
   /** Read durable pre-marker custody without dispatching or rechecking readiness. */
@@ -30,6 +36,8 @@ export interface OperatorDeliveryEngine {
   dispatchEscalation: (
     row: QueueItem,
     reason: string,
+    /** Fresh admission for the originating work, checked after readiness and before a new dispatch. */
+    deliveryDeferred?: () => boolean,
   ) => Promise<{ decision: string; resolved: boolean; notificationKey?: string; dispatched?: boolean; decisionId?: string }>;
 }
 
@@ -53,6 +61,43 @@ export function buildDeferralFirePayload(row: QueueItem, notificationKey: string
 
 function describeDecision(d: DeliveryDecision): string {
   return d.deferMinutes !== undefined ? `${d.outcome}-deferred-${d.deferMinutes}m` : d.outcome;
+}
+
+/** The seat a prompt alert is about, or the escalated row's own seat. */
+function escalatedSeat(row: QueueItem): string {
+  const tag = row.tags?.find(t => t.startsWith("prompt-destination:") || t.startsWith("consumed-prompt-destination:"));
+  return tag ? tag.slice(tag.indexOf(":") + 1) : row.destinationSession;
+}
+
+/** The relay task's words: what the agent at the route does with it, for a seat's prompt or any other escalation. */
+function relayBody(row: QueueItem, route: string, relayId: string, notificationKey: string, anchors: string[], reason: string): string {
+  const seat = escalatedSeat(row);
+  const work = anchors.length ? ` (${anchors.join(", ")})` : "";
+  // Every value is quoted for the shell, and the person's words go in single quotes, so nothing in a name or in their words
+  // is run or changed.
+  const queue = `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue`;
+  const literal = `Keep their words in single quotes, writing each ' in them as '\\'', so the shell runs and changes nothing in them.`;
+  const pickup = `Claim it when you pick it up (${queue} claim ${shellQuote(relayId)}). That tells OpenRig it reached you; it isn't the ` +
+    `person's answer or approval, and closing or canceling this task doesn't clear anything at the seat.`;
+  const record = `Record only what they tell you: ${queue} update ${shellQuote(relayId)} --state done --closure-reason no-follow-on ` +
+    `--resolution '<their words>'. ${literal}`;
+  const ref = `(OpenRig escalation ${row.qitemId}, notification ${notificationKey})`;
+  if (row.tags?.includes("wake-prompt-refusal")) {
+    return `${seat} is stopped at a prompt in the work you handed over${work}, and it can't go on until someone answers.\n\n` +
+      `${pickup}\n\n` +
+      `Bring it to the person. Capture it first: rig capture ${shellQuote(seat)} shows the prompt's own words and the choices it offers. ` +
+      `Show them the seat, the exact action and the choices. ${record}\n\n` +
+      `No other agent passes this answer on. Once you've recorded it, send their choice yourself, as the rigs skill says for a ` +
+      `seat's prompt: capture the seat again first (a changed prompt needs a new answer), then ` +
+      `rig send ${shellQuote(seat)} "<key>" --dangerously-interact --reason 'task ${relayId}: <their words>', quoting their words the ` +
+      `same way. A no stays a no, never pick a ` +
+      `"don't ask again" choice they didn't pick, and never send again while the effect is unknown. If the prompt has gone when ` +
+      `you look, tell them it isn't waiting any more and send nothing. OpenRig retires its alert when the seat's prompt reads ` +
+      `clear.\n\n${ref}`;
+  }
+  return `The work you handed over${work} is stuck at ${seat}: ${reason}.\n\n${pickup}\n\n` +
+    `Tell the person in your own words, with what you can see (rig ps --nodes shows the team's seats), and ask what they want ` +
+    `done. ${record}\n\n${ref}`;
 }
 
 /** The production port for the operator rung (A1.2: this engine IS the rung's
@@ -95,6 +140,7 @@ export function makeOperatorDeliveryEngine(deps: {
         if (note.startsWith("slack-owner-notification-posted ")) resolved = "posted";
         if (note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)) resolved = "accepted";
         if (note.startsWith("delivery-termination:")) resolved = "terminated";
+        if (note.startsWith(`${RELAY_CLAIMED_PREFIX} `)) resolved = "picked-up";
       }
     }
     return resolved;
@@ -102,10 +148,11 @@ export function makeOperatorDeliveryEngine(deps: {
   return {
     hasAcceptedEscalation: row => {
       const key = notificationKeyFor(row);
-      return resolvedFor(row, key) !== null || new DispatchBuffer(deps.home).pending()
-        .some(d => d.decisionId === `operator:${key}`);
+      // This episode's relay task at the return route holds the episode, as an accepted gateway decision does.
+      return resolvedFor(row, key) !== null || isEpisodeRelay(deps.queueRepo.getById(relayTaskId(key)), row.qitemId, key, OPENRIG_SENDER)
+        || new DispatchBuffer(deps.home).pending().some(d => d.decisionId === `operator:${key}`);
     },
-    async dispatchEscalation(row: QueueItem, _reason: string) {
+    async dispatchEscalation(row: QueueItem, reason: string, deliveryDeferred?: () => boolean) {
       // The episode identity the receipt must carry (Slice 14's ledger accepts
       // the current qitemId:transitionId key; an ordinary row without an owner
       // transition uses its meaningful-progress episode in the synthetic key).
@@ -113,18 +160,79 @@ export function makeOperatorDeliveryEngine(deps: {
 
       const decisionId = `operator:${notificationKey}`;
       const accepted = () => new DispatchBuffer(deps.home).pending().some(d => d.decisionId === decisionId);
+      const deferred = () => deliveryDeferred?.() ? accepted()
+        ? { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId }
+        : { decision: "deferred:rig_delivery_drain", resolved: false, dispatched: false }
+        : null;
       const resolved = resolvedFor(row, notificationKey);
       if (resolved) return { decision: resolved, resolved: true, dispatched: true, notificationKey, decisionId };
       // An accepted decision belongs to the gateway even if registry access or
       // routing changes before the ladder records its dispatch marker.
       if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };
+      // This episode's relay task, already made (its dispatch marker may not be recorded yet), keeps the episode at the
+      // destination it was made for, whatever the work's routes now say, as accepted gateway custody does above.
+      const relayId = relayTaskId(notificationKey);
+      const existing = deps.queueRepo.getById(relayId);
+      const retained = (): QueueItem | null => {
+        const found = deps.queueRepo.getById(relayId);
+        return isEpisodeRelay(found, row.qitemId, notificationKey, OPENRIG_SENDER) ? found : null;
+      };
+      if (isEpisodeRelay(existing, row.qitemId, notificationKey, OPENRIG_SENDER)) {
+        return { decision: `return-route:${existing!.destinationSession}`, resolved: false, dispatched: true, notificationKey };
+      }
+      const noteOnce = (note: string) => {
+        if (deps.queueRepo.listTransitions(row.qitemId).some(t => t.transitionNote === note)) return;
+        deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "wake-ladder@system", transitionNote: note,
+          closureTarget: row.state === "in-progress" ? deps.queueRepo.retainedClaimBlocker(row.qitemId) : undefined });
+      };
+      // A goal handed over with a return route takes its new escalations to that conversation as one relay task per episode,
+      // ahead of the registry and any connector (return-route.ts). An episode the gateway already accepted stays with it (above).
+      const routed = resolveEscalationReturnRoute(deps.queueRepo.db, row);
+      const local = routed.kind === "route" ? routeOnThisHost(routed.route) : null;
+      if (routed.kind === "route" && local && existing) {
+        // Another row holds the relay's id. It isn't this episode's relay: it's left as it is, and the existing route is used.
+        noteOnce(`${RETURN_ROUTE_NOTE_PREFIX}relay-id-taken relay=${relayId} notification_key=${notificationKey}: another row holds this episode's relay id, so no relay was made; the existing route is used`);
+      } else if (routed.kind === "route" && local) {
+        const held = deferred();
+        if (held) return held;
+        let made = true;
+        try {
+          await deps.queueRepo.create({
+            qitemId: relayId, sourceSession: OPENRIG_SENDER, destinationSession: local, wakeTrigger: "openrig",
+            body: relayBody(row, local, relayId, notificationKey, routed.anchors, reason),
+            summary: row.tags?.includes("wake-prompt-refusal")
+              ? `${escalatedSeat(row)} is stopped at a prompt in the work you handed over`
+              : `The work you handed over is stuck at ${escalatedSeat(row)}`,
+            tags: [RELAY_TAG, `${RELAY_FOR_PREFIX}${row.qitemId}`, `${RELAY_KEY_PREFIX}${notificationKey}`],
+            // A conversation's address has no pane to wake: its agent reads the task on the person's next turn, and its claim
+            // is the delivery evidence.
+            nudge: false,
+          });
+        } catch (error) {
+          // The relay may have been written before the failure surfaced: keep it if it's there. Otherwise say so on the row and
+          // take the existing route, and the rest of the ladder goes on.
+          const kept = retained();
+          if (kept) return { decision: `return-route:${kept.destinationSession}`, resolved: false, dispatched: true, notificationKey };
+          const code = (error as { code?: unknown })?.code;
+          noteOnce(`${RETURN_ROUTE_NOTE_PREFIX}relay-not-made relay=${relayId} notification_key=${notificationKey}${typeof code === "string" ? ` code=${code}` : ""}: the relay task couldn't be made; the existing route is used`);
+          made = false;
+        }
+        if (made) return { decision: `return-route:${local}`, resolved: false, dispatched: true, notificationKey };
+      }
+      // A route this daemon can't deliver to, or two that disagree, is said on the row; the episode takes the existing route.
+      if (routed.kind === "conflict") {
+        noteOnce(`${RETURN_ROUTE_NOTE_PREFIX}conflict routes=${routed.routes.join(",")} notification_key=${notificationKey}: this work carries more than one return route, so neither was chosen; the existing route is used`);
+      } else if (routed.kind === "route" && !local) {
+        noteOnce(`${RETURN_ROUTE_NOTE_PREFIX}on-another-host route=${routed.route} notification_key=${notificationKey}: this daemon doesn't deliver to another host's conversation; the existing route is used`);
+      }
       let reg: LoadResult;
       try {
         reg = deps.registry ? deps.registry.loadHumanRegistry() : loadHumanRegistry(deps.home);
       } catch {
         return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
       }
-      if (!reg.ok) return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
+      // Nobody registered yet is its own refusal (noHumans), not a broken registry: say so, as the empty list below does.
+      if (!reg.ok) return { decision: reg.noHumans ? "undeliverable:no-registered-human" : "unavailable:human-registry", resolved: false, dispatched: false };
       // The escalation goes to the default person, never simply the first file: with several people and none chosen,
       // it's undeliverable and says so.
       const human = resolveDefaultPerson(reg.entities, deps.home).person;
@@ -142,9 +250,9 @@ export function makeOperatorDeliveryEngine(deps: {
           botToken: resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined }),
           home: deps.home,
         }, { entities: reg.entities }));
-        if (!readiness.ready) return { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
+        if (!readiness.ready) return deferred() ?? { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
       } catch {
-        return { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };
+        return deferred() ?? { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };
       }
       const decision = decideDelivery({
         level: "ALERT",
@@ -176,6 +284,10 @@ export function makeOperatorDeliveryEngine(deps: {
         ownerNotificationKind: "human-required",
         tags: [...new Set([...(row.tags ?? []), "escalation"])],
       };
+      // Readiness can yield. An already accepted decision still belongs to the gateway;
+      // a new dispatch must recheck the original destination as well as its carrier.
+      const held = deferred();
+      if (held) return held;
       let res: DispatchResult;
       try {
         res = deps.dispatch(OUTBOUND_OP, human.address, payload, { decisionId });

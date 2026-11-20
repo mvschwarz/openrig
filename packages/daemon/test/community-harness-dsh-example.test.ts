@@ -1,3 +1,4 @@
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -61,6 +62,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const text = message.params.prompt.map((part) => part.text).join("");
       const end = (stopReason) => reply({ stopReason });
       if (text.includes("EXIT")) process.exit(0);
+      if (text === "BUSY") { say("old unrelated output"); return setTimeout(() => end("end_turn"), 150); }
+      if (text.startsWith("WAKE:")) { if (text !== "WAKE:EMPTY") say("actual " + text); return setTimeout(() => text === "WAKE:FAIL" ? send({ id: message.id, error: { code: -32603, message: "turn failed" } }) : end(text === "WAKE:CANCEL" ? "cancelled" : text === "WAKE:UNKNOWN" ? "unreported" : "end_turn"), 100); }
       const two = ["TWOASK", "TWOTALK", "TWOQUIT"].find((word) => text.includes(word));
       if (two) {
         // Two permission requests at once; the turn ends once both are answered. After the first answer, TWOTALK says
@@ -114,14 +117,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
+type Permissions = "uncorrelated" | "turn_withdrawn" | "runner_turn_unbound" | "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fakeOpenRig(permissions: Permissions) {
+async function fakeOpenRig(permissions: Permissions, turnReportingUnavailable = false) {
   const hooks: Hook[] = [];
+  const channelRequests: string[] = [];
   const submits: Array<{ auth: string | undefined; body: Record<string, unknown>; at: number }> = [];
   const withdraws: Array<{ askId: string; body: Record<string, unknown> }> = [];
   const server: Server = createServer((req, res) => {
@@ -131,14 +135,21 @@ async function fakeOpenRig(permissions: Permissions) {
       const json = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
       const url = new URL(req.url ?? "/", "http://openrig.test");
       const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      if (url.pathname === "/api/activity/runner-channel") channelRequests.push(req.method ?? "unknown");
       if (req.method === "POST" && url.pathname === "/api/activity/hooks") { hooks.push({ auth: req.headers.authorization, body, at: Date.now() }); return json(200, { ok: true }); }
+      if (turnReportingUnavailable && url.pathname === "/api/activity/runner-channel") {
+        if (body.type === "turn") return json(503, { code: "temporarily_unavailable" });
+        return json(req.method === "POST" ? 200 : 404, { ok: true });
+      }
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
         submits.push({ auth: req.headers.authorization, body, at: Date.now() });
+        if (["turn_withdrawn", "runner_turn_unbound"].includes(permissions)) return json(409, { ok: false, code: permissions });
         if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         if (permissions === "stale") return json(409, { ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant." });
         if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
         if (permissions === "revoked") return json(401, { ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was asked." });
+        if (permissions === "uncorrelated") return json(200, { ok: true, state: "permitted", optionId: "allow", correlation: "unverified" });
         if (permissions === "permitted") return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
         if (permissions === "two") return json(200, { ok: true, askId: `ask-${submits.length}`, created: true });
         // Two asks, and OpenRig takes 1.5 s to answer the second one's submit.
@@ -181,7 +192,7 @@ async function fakeOpenRig(permissions: Permissions) {
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   cleanups.push(() => server.close());
   const address = server.address() as { port: number };
-  return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws };
+  return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws, channelRequests };
 }
 
 function start(openrig: { url: string }, env: Record<string, string> = {}, binVar = "OPENRIG_DSH") {
@@ -229,6 +240,16 @@ const requests = (log: Array<Record<string, unknown>>, method: string) => log.fi
 const responseTo = (log: Array<Record<string, unknown>>, id: string) => log.find((entry) => entry.id === id && entry.method === undefined);
 
 describe("the documented dsh example runner", () => {
+  it("keeps legacy install-token input independent of an inherited run claim", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RUN_ID: "inherited-predecessor" });
+    await waitFor(seat.launch, "the launch record");
+    seat.type("legacy input");
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "ordinary legacy input completion");
+    expect(requests(seat.log(), "session/prompt")).toHaveLength(1);
+    expect(openrig.channelRequests).toEqual([]);
+  });
+
   it("opens a conversation, writes the launch record, and only then reads ready, with uploads off and no hook token for dsh", async () => {
     const openrig = await fakeOpenRig("absent");
     // A DSH_HOME the person's shell exports (its startup files run after the seat's env:) isn't the seat's home.
@@ -267,6 +288,22 @@ describe("the documented dsh example runner", () => {
     expect(String(record.producer)).toMatch(/dsh 0\.0\.1 \(as its ACP handshake reports it\); ACP 1/);
   }, 30_000);
 
+  it("shows the accepted permission correlation warning without treating it as a refusal", async () => {
+    const openrig = await fakeOpenRig("uncorrelated"), seat = start(openrig);
+    await waitFor(seat.launch, "launch"); seat.type("PERMIT");
+    await waitFor(() => seat.out().includes("accepted without verified native-turn correlation"), "visible uncorrelated diagnostic");
+    expect(seat.out()).not.toContain("[permission] refused");
+  });
+  it("ordinary person prompts and terminal progress do not wait for unavailable turn reporting", async () => {
+    const openrig = await fakeOpenRig("absent", true);
+    const seat = start(openrig, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_test", OPENRIG_RUN_ID: "run" });
+    await waitFor(seat.launch, "launch"); seat.type("first ordinary input"); seat.type("second ordinary input");
+    await waitFor(() => requests(seat.log(), "session/prompt").length === 2, "both ordinary native prompts", 5_000);
+    await waitFor(() => ["1", "2"].every(turnId => openrig.hooks.some(hook => hook.body.hookEvent === "Stop" && hook.body.subtype === "end_turn" && hook.body.turnId === turnId)), "both turn ends", 5_000);
+    expect(requests(seat.log(), "session/prompt").map(frame => (frame.params as { prompt: unknown }).prompt)).toEqual([
+      [{ type: "text", text: "first ordinary input" }], [{ type: "text", text: "second ordinary input" }],
+    ]);
+  });
   it("sends one submitted block as one prompt and reports working, then idle, in order", async () => {
     const openrig = await fakeOpenRig("absent");
     const seat = start(openrig);
@@ -393,6 +430,8 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 
   it.each([
     ["the submit says the request isn't the current occupant's", "stale"],
+    ["the native turn was withdrawn", "turn_withdrawn"],
+    ["the native turn is unbound", "runner_turn_unbound"],
     ["the person said no and the agent has no reject option", "saidno"],
   ] as const)("answers cancelled and holds no attention when %s", async (_case, permissions) => {
     const openrig = await fakeOpenRig(permissions);
@@ -721,5 +760,227 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(loadCommunityHarnessPreset("dsh", EXAMPLE)).toMatchObject({ ok: true, preset: {
       command: "openrig-dsh-runner.mjs", runner: true, launchResult: true, namesConversation: false, resume: false, firstInput: true,
     } });
+  });
+});
+
+
+async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status: number; code: string }, frameHint?: string) {
+  const frames: Array<Record<string, unknown>> = [], stages = new Map<string, string>(), posts: Array<Record<string, unknown>> = [];
+  const streams = new Set<import("node:http").ServerResponse>();
+  let lostAck = refusal !== undefined, lostResult = false, refusalSent = false;
+  let refusedAck: import("node:http").ServerResponse | undefined;
+  const offer = () => {
+    const frame = frames.find(f => stages.get(String(f.requestId)) === "offered") ?? frames.find(f => !stages.has(String(f.requestId)));
+    if (!frame) return; stages.set(String(frame.requestId), "offered");
+    const data = JSON.stringify(frame);
+    const wire = `${frame.stage === "offered" && frameHint !== "omit" ? `: runner-frame-chars=${frameHint ?? data.length}\n` : ""}event: request\nid: ${frame.sequence}\ndata: ${data}\n\n`;
+    for (const stream of streams) {
+      if (wire.length > 2 * 1024 * 1024) {
+        // A JSON escape can cross HTTP chunks; send its backslash before the remainder.
+        const split = wire.indexOf("\\") + 1;
+        stream.write(wire.slice(0, split)); setTimeout(() => { if (!stream.destroyed) stream.write(wire.slice(split)); }, 10);
+      } else stream.write(wire);
+    }
+  };
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/api/activity/runner-channel") {
+      res.writeHead(200, { "content-type": "text/event-stream" }); res.flushHeaders(); streams.add(res); offer(); req.on("close", () => streams.delete(res)); return;
+    }
+    let raw = ""; req.on("data", chunk => { raw += chunk; }); req.on("end", () => {
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      const reply = (value: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(value)); };
+      if (req.url !== "/api/activity/runner-channel") return reply({ ok: true, tokenPersisted: true });
+      posts.push(body);
+      if (body.type === "hello") return reply({ capabilities: { input: true, wake: true, cancel: false }, receipts: [] });
+      stages.set(String(body.requestId), String(body.type));
+      if (body.type === "ack") {
+        offer();
+        if (refusal && body.requestId === "FIRST" && !refusalSent) { refusedAck = res; return; }
+        if (refusal && body.requestId === "LATER") {
+          reply({ receipt: { stage: body.type } });
+          setTimeout(() => { refusalSent = true; refusedAck!.writeHead(refusal.status, { "content-type": "application/json" }); refusedAck!.end(JSON.stringify({ code: refusal.code })); }, 25); return;
+        }
+        if (!lostAck) { lostAck = true; res.destroy(); return; }
+      }
+      if (body.type === "result" && body.requestId === lostResultId && !lostResult) { lostResult = true; res.destroy(); return; }
+      reply({ receipt: { stage: body.type } });
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => { for (const stream of streams) stream.destroy(); server.closeAllConnections(); server.close(); });
+  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, posts,
+    push: (ids: string[], payloadText?: string) => { for (const id of ids) frames.push({ version: 1, runId: "native-run", requestId: id, sequence: frames.length + 1,
+      kind: id.startsWith("WAKE:") ? "wake" : "input", payload: id.startsWith("WAKE:") ? { question: payloadText ?? id } : { text: payloadText ?? id } }); offer(); },
+    pushNativeInput: (members: number, body: string) => {
+      const requestId = "GROUP";
+      const frame = { version: 1, requestId, nodeId: "node-🧭", runId: "native-run", sequence: frames.length + 1,
+        kind: "input", inputRoute: "native", stage: "offered", bindingHash: "b".repeat(64),
+        ...(members > 1 ? { memberIds: Array.from({ length: members }, (_, index) => index === 0 ? requestId : `source-🧭-${index}`) } : {}),
+        payload: { text: Array.from({ length: members }, () => body).join("\n") } };
+      frames.push(frame); offer(); return frame;
+    },
+    reconnect: () => { for (const stream of streams) stream.end(); } };
+}
+
+describe("the actual dsh runner native channel", () => {
+  it.each(["omit", "invalid", "9007199254740991", "1"])("the production dsh reader refuses an invalid or unannounced oversized frame (%s)", async hint => {
+    const channel = await nativeChannelFixture("none", undefined, hint), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.pushNativeInput(2, hint === "omit" ? "q" + "\0".repeat(1024 * 1024 - 1) : "q");
+    await waitFor(() => channel.posts.filter(post => post.type === "hello").length >= 2, "reader rejection and reconnect", 2000);
+    expect(channel.posts.filter(post => post.type === "ack")).toEqual([]);
+    expect(requests(runner.log(), "session/prompt")).toEqual([]);
+  });
+
+  it.each([{ members: 1, character: "\0" }, { members: 2, character: "\0" }, { members: 9, character: "\n" }])("the production dsh reader accepts $members-source ordinary or grouped escaped native input", async ({ members, character }) => {
+    const channel = await nativeChannelFixture("none"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    const body = "q" + character.repeat((members === 1 ? 2 : 1) * 1024 * 1024 - 1);
+    const frame = channel.pushNativeInput(members, body);
+    if (members === 1) {
+      expect(frame).not.toHaveProperty("memberIds");
+      expect(JSON.stringify(frame).length).toBeGreaterThan(6 * 1024 * 1024 + 64 * 1024);
+    }
+    // These waits measure acceptance, not runner speed: 1 s per escaped MiB, at least waitFor's 10 s. On slow CI runners
+    // the 9-source case (about 18 MiB escaped) has run up to about 6 s, so a flat 5 s ack wait failed unrelated PRs.
+    const budget = Math.max(10_000, Math.ceil(JSON.stringify(frame).length / (1024 * 1024)) * 1_000);
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "GROUP"), "native input acknowledged", budget);
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "native input completion", budget);
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    const prompts = requests(runner.log(), "session/prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ params: { prompt: [{ type: "text", text: Array.from({ length: members }, () => body).join("\n") }] } });
+    channel.push(["WAKE:AFTER-GROUP"]); // An unhinted successor uses its own legacy bound, including after reconnect.
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "WAKE:AFTER-GROUP"), "unhinted successor");
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  }, 60_000); // the 9-source frame's two 19 s waits, plus the hello and successor waits
+
+  it.each([
+    { status: 409, code: "runner_receipt_erased", later: true },
+    { status: 401, code: "runner_grant_revoked", later: false },
+    { status: 409, code: "runner_grant_stale", later: false },
+    { status: 409, code: "runner_grant_pending", later: true },
+    { status: 409, code: "runner_grant_unverified", later: true },
+  ])("ACK refusal $code preserves custody, progress and person controls", async ({ status, code, later }) => {
+    const channel = await nativeChannelFixture("none", { status, code }), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["BUSY", "FIRST", "LATER"]);
+    await waitFor(() => channel.posts.filter(post => post.type === "ack").length >= 3, "all acknowledgements");
+    await new Promise(resolve => setTimeout(resolve, 350));
+    if (later) await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "LATER"), "later progress without a person pump", 1000);
+    runner.type("person after refusal");
+    await waitFor(() => requests(runner.log(), "session/prompt").some(command => JSON.stringify(command).includes("person after refusal")), "person input");
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    const prompts = requests(runner.log(), "session/prompt").map(command => (command.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(prompts.filter(text => text === "FIRST")).toHaveLength(code === "runner_grant_pending" || code === "runner_grant_unverified" ? 1 : 0);
+    expect(prompts.filter(text => text === "LATER")).toHaveLength(later ? 1 : 0);
+    expect(prompts.filter(text => text === "BUSY")).toHaveLength(1);
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "BUSY" }));
+    expect(requests(runner.log(), "session/cancel")).toEqual([]);
+  });
+  it.each(["\n", "\0"])("accepts a full escaped question through the production dsh SSE reader (%j)", async character => {
+    const channel = await nativeChannelFixture("none"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    const question = "q" + character.repeat(1024 * 1024 - 1);
+    channel.push(["WAKE:LARGE"], question);
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "WAKE:LARGE"), "large question acknowledgement", 3000);
+    expect(channel.posts.filter(post => post.type === "ack" && post.requestId === "WAKE:LARGE")).toHaveLength(1);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+
+  it("flushes an active managed turn's terminal receipt after child exit and a lost result reply", async () => {
+    const channel = await nativeChannelFixture("WAKE:EXIT"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["WAKE:EXIT"]);
+    await waitFor(() => channel.posts.filter(post => post.type === "result" && post.requestId === "WAKE:EXIT").length === 2, "terminal receipt retry before exit", 3000);
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "WAKE:EXIT",
+      result: expect.objectContaining({ completion: "unknown", answer: null, submissionUnknown: true }) }));
+    expect(await runner.exited).toBe(0);
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(1);
+  });
+
+  it("uses one native prompt per request, queues busy wakes, and returns only dedicated answers despite lost receipt replies", async () => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
+    channel.push(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
+    await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "LATER"), "all native results");
+    const prompts = requests(runner.log(), "session/prompt").map(p => (p.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(prompts).toEqual(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
+    for (const id of ["WAKE:A", "WAKE:B"]) expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: id,
+      result: expect.objectContaining({ kind: "wake", answer: `actual ${id}`, completion: "completed" }) }));
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(4);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+  it("structured slash text never invokes the person's global abort parser", async () => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["WAKE:CONTROL"], "/abort");
+    await waitFor(() => channel.posts.find(post => post.type === "result" && post.requestId === "WAKE:CONTROL"), "literal answer");
+    expect(requests(runner.log(), "session/cancel")).toEqual([]);
+    expect(requests(runner.log(), "session/prompt")[0]).toMatchObject({ params: { prompt: [{ type: "text", text: "/abort" }] } });
+  });
+  it.each([["CANCEL", "interrupted"], ["FAIL", "failed"], ["UNKNOWN", "unknown"], ["EMPTY", "unknown"]] as const)("terminal %s releases the wake barrier without an answer", async (suffix, completion) => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
+    channel.push([`WAKE:${suffix}`, "WAKE:AFTER"]);
+    await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "WAKE:AFTER"), "barrier released");
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: `WAKE:${suffix}`, result: expect.objectContaining({ answer: null, completion }) }));
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
+  });
+});
+
+
+describe("dsh outstanding prompt ownership", () => {
+  it("person abort before the prompt write suppresses that prompt even after its preparation resolves", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() };
+    const writes: string[] = []; child.stdin.on("data", data => writes.push(String(data)));
+    const peer = new AgentPeer(child, () => {}); let release!: () => void;
+    const active = peer.request("session/prompt", { sessionId: "conversation", prompt: [] }, () => new Promise<void>(resolve => { release = resolve; }));
+    await Promise.resolve(); expect(peer.cancelUnsubmittedPrompt()).toBe(true); release();
+    expect(await active).toEqual({ stopReason: "interrupted" });
+    await new Promise(resolve => setImmediate(resolve)); expect(writes).toEqual([]);
+    child.stdout.end(); child.stdin.end();
+  });
+  it("a cancelled prewrite callback cannot report the next prompt scope", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() }; child.stdin.resume();
+    const peer = new AgentPeer(child, () => {}); const scopes: unknown[] = [];
+    const first = peer.request("session/prompt", { sessionId: "conversation", prompt: [] }, (scope: unknown) => { scopes.push(scope); });
+    expect(peer.cancelUnsubmittedPrompt()).toBe(true);
+    const second = peer.request("session/prompt", { sessionId: "conversation", prompt: [] }, (scope: unknown) => { scopes.push(scope); });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(scopes).toEqual([expect.objectContaining({ nativeTurnId: "dsh-prompt-2", requestId: 2 })]);
+    child.stdout.write(JSON.stringify({ id: 2, result: { stopReason: "end_turn" } }) + "\n"); await first; await second;
+    child.stdout.end(); child.stdin.end();
+  });
+  it("fences the exact outstanding prompt and suppresses an in-flight permission callback at the native write", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() };
+    const writes: string[] = []; child.stdin.on("data", data => writes.push(String(data)));
+    const peer = new AgentPeer(child, () => {});
+    let answer!: (value: unknown) => void;
+    peer.onRequest("session/request_permission", () => new Promise(resolve => { answer = resolve; }));
+    const active = peer.request("session/prompt", { sessionId: "conversation", prompt: [] });
+    const scope = peer.promptScope();
+    expect(scope).toMatchObject({ nativeTurnId: "dsh-prompt-1", requestId: 1, sessionId: "conversation" });
+    child.stdout.write(JSON.stringify({ id: 77, method: "session/request_permission", params: {} }) + "\n");
+    await Promise.resolve();
+    expect(peer.prepareCancellation("conversation")).toBe(false);
+    expect(peer.prepareCancellation(scope.nativeTurnId)).toBe(true);
+    answer({ outcome: { outcome: "selected", optionId: "allow" } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(writes.map(line => JSON.parse(line)).find(frame => frame.id === 77)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
+    child.stdout.write(JSON.stringify({ id: 1, result: { stopReason: "end_turn" } }) + "\n"); await active;
+    expect(peer.promptScope()).toBeNull();
+    expect(() => peer.request("session/prompt", { sessionId: "conversation", prompt: [] })).toThrow(/fenced/);
+    expect(peer.recheckCancellation(scope.nativeTurnId)).toBe(false);
+    const next = peer.request("session/prompt", { sessionId: "conversation", prompt: [] });
+    expect(peer.promptScope()).toMatchObject({ nativeTurnId: "dsh-prompt-2", requestId: 2 });
+    expect(peer.prepareCancellation(scope.nativeTurnId)).toBe(false);
+    child.stdout.write(JSON.stringify({ id: 2, result: { stopReason: "end_turn" } }) + "\n"); await next;
+    child.stdout.end(); child.stdin.end();
   });
 });

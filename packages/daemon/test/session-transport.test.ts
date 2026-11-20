@@ -21,6 +21,7 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, classifyStyledFrame, draftDeliveryAllows, readDraftDeliverySetting, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, writtenFact, type TransportReadinessChecker } from "../src/domain/session-transport.js";
+import { readSendOutcome } from "../src/domain/connection-contract.js";
 import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -630,6 +631,49 @@ describe("SessionTransport", () => {
     expect(sendKeys).toHaveBeenCalledTimes(1);
     expect(sendKeys.mock.calls[0]).toEqual(["dev-impl@my-rig", ["Enter"]]);
     expect(queue.getById(item.qitemId)?.lastNudgeResult).toBe("verified");
+  });
+
+  it.each(["typed", "native"])("%s input with a delivery ID keeps the outbox optional without a guard", async route => {
+    const { node } = seedCanonicalRig();
+    db.prepare("UPDATE nodes SET input_route = ? WHERE id = ?").run(route, node.id);
+    expect(db.prepare("PRAGMA table_info(outbox_entries)").all()).toEqual([]);
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ sendText, sendKeys }), { sleep: async () => {} });
+
+    const result = await transport.send("dev-impl@my-rig", "optional history", { deliveryId: "optional-history" });
+
+    if (route === "typed") {
+      expect(result.ok).toBe(true);
+      expect(sendText).toHaveBeenCalledOnce();
+      expect(sendKeys).toHaveBeenCalledOnce();
+    } else {
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "guard_unavailable" });
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([true, false])("a native member with primary present=%s never falls back to unguarded typed input", async primaryPresent => {
+    migrate(db, ALL_MIGRATIONS);
+    const { node } = seedCanonicalRig();
+    const outbox = new OutboxHandler(db);
+    const input = { senderSession: "sender", destinationSession: "dev-impl@my-rig", body: "retained native" };
+    for (const outboxId of ["native-owner", "native-member"]) outbox.record({ ...input, outboxId });
+    outbox.admitRunner({ ...input, outboxId: "native-owner", nodeId: node.id, runId: "run-one", kind: "input",
+      inputRoute: "native", payload: { text: input.body }, memberIds: ["native-owner", "native-member"] });
+    if (!primaryPresent) db.prepare("DELETE FROM outbox_entries WHERE outbox_id = 'native-owner'").run();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ sendText, sendKeys }), { sleep: async () => {} });
+
+    const result = await transport.send(input.destinationSession, input.body, { deliveryId: "native-member", actorSession: input.senderSession });
+
+    expect(result).toMatchObject(primaryPresent
+      ? { ok: true, runnerReceipt: { requestId: "native-owner", stage: "pending" } }
+      : { ok: false, reason: "native_receipt_unavailable" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -2785,6 +2829,38 @@ describe("SessionTransport", () => {
       expect(withEvidence.outcome).toBeUndefined();
       expect(fact).toMatchObject({ written: "submitted", terminalObserved: { outcome: null, verified: null } });
       expect(fact.messageId).toBe(fact.attemptId);
+      // In the shared words: the typed route took it, as OpenRig saw. Never that the member read it.
+      expect(fact.outcome).toEqual({ fact: "accepted", reporter: "openrig-observed", route: "typed" });
+    });
+
+    it("records a typed wake to a Codex seat with its own labelled outcome, on the typed route", async () => {
+      seedCanonicalRig("codex");
+      await createTransport(typing(), { eventBus: new EventBus(db) }).send("dev-impl@my-rig", "hello");
+      expect(evidence()).toEqual([expect.objectContaining({ sessionName: "dev-impl@my-rig",
+        outcome: { fact: "accepted", reporter: "openrig-observed", route: "typed" } })]);
+    });
+
+    it("reads each result shape's outcome in the shared words: unknown when the result doesn't establish one", () => {
+      const s = "dev-impl@my-rig";
+      expect([
+        { ok: true, sessionName: s },
+        { ok: true, sessionName: s, verified: true, outcome: "delivered" },
+        { ok: true, sessionName: s, verified: false, outcome: "rendered-unconfirmed" },
+        { ok: true, sessionName: s, outcome: "retained", sent: false, verified: false },
+        { ok: false, sessionName: s, outcome: "failed", inputPhase: "attempted" },
+        { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "submit_refused" },
+        { ok: false, sessionName: s, sent: false, inputPhase: "not_reached" },
+        { ok: false, sessionName: s, reason: "transport_unavailable" },
+        // A prompt answer typed without Enter: it succeeded, but whether the prompt took it isn't known.
+        { ok: true, sessionName: s, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified" },
+        // Text written and Enter refused before it was pressed: the text may sit in the input box.
+        { ok: false, sessionName: s, sent: true, outcome: "failed", inputPhase: "written", reason: "draft_input_changed" },
+      ].map((result) => {
+        const outcome = readSendOutcome(result, writtenFact(result as Parameters<typeof writtenFact>[0]));
+        return outcome.fact === "accepted" && outcome.renderVerified ? "accepted, render verified" : outcome.fact;
+      }))
+        .toEqual(["accepted", "accepted, render verified", "accepted", "held", "failed-effect-unknown", "failed-effect-unknown",
+          "not-delivered", "unknown", "unknown", "failed-effect-unknown"]);
     });
 
     it("uses the caller's delivery id as the message, and gives each attempt its own id", async () => {
@@ -2795,6 +2871,18 @@ describe("SessionTransport", () => {
       const facts = evidence();
       expect(facts.map((fact) => fact.messageId)).toEqual(["msg-1", "msg-1"]);
       expect(new Set(facts.map((fact) => fact.attemptId)).size).toBe(2);
+    });
+
+    it.each([
+      ["pending", {}, "none"], ["offered", {}, "unknown"], ["accepted", {}, "unknown"],
+      ["rejected", {}, "none"], ["submitted", {}, "submitted"], ["completed", {}, "submitted"],
+      ["completed", { result: { completion: "failed" } }, "submitted"],
+      ["completed", { result: { submissionUnknown: true } }, "uncertain"],
+      ["accepted", { reconciliation: "receiver_state_lost" }, "uncertain"],
+      ["submitted", { reconciliation: "native_ownership_unknown" }, "uncertain"],
+      ["pending", { erasedAt: "2026-11-16" }, "unknown"],
+    ])("native written evidence follows %s and its uncertainty (%j)", (stage, extra, fact) => {
+      expect(writtenFact({ ok: true, sessionName: "native@r", runnerReceipt: { stage, ...extra as object } } as Parameters<typeof writtenFact>[0])).toBe(fact);
     });
 
     it("reads what was written from each result shape, and nothing the result doesn't show", () => {

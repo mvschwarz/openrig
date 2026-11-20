@@ -69,12 +69,12 @@ esac
 `);
     await chmod(rigStub, 0o755);
 
-    const viteNode = fileURLToPath(new URL("../../../node_modules/vite-node/vite-node.mjs", import.meta.url));
+    const tsxLoader = new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href;
     const entry = fileURLToPath(new URL("../src/main.ts", import.meta.url));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind TCP");
 
-    const child = spawn(process.execPath, [viteNode, "--script", entry, "--instance", "refresh-policy-test", "--no-color", "--url", `http://127.0.0.1:${address.port}`], {
+    const child = spawn(process.execPath, ["--import", tsxLoader, entry, "--instance", "refresh-policy-test", "--no-color", "--url", `http://127.0.0.1:${address.port}`], {
       env: {
         ...process.env,
         OPENRIG_HOME: root,

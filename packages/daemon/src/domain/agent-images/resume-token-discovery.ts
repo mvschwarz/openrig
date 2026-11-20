@@ -86,6 +86,28 @@ export function discoverResumeToken(db: Database.Database, sourceSession: string
   return { ok: true, result: { runtime, nativeId: null, nodeCwd } };
 }
 
+/** The two records a Claude seat's conversation is discovered from, kept apart: its telemetry (context_usage.session_id)
+ *  and its resume token (sessions.resume_token). discoverResumeToken prefers the first; a caller that must not pick one
+ *  silently (#3218 item 2) compares them itself. Null when the session is unknown or not a Claude seat. */
+export function discoverClaudeConversationRecords(db: Database.Database, sourceSession: string):
+  { sessionName: string; nodeId: string; nodeCwd: string | null; telemetry: string | null; resumeToken: string | null } | null {
+  const sessionName = savedSessionName(db, sourceSession);
+  const sessionRow = db
+    .prepare("SELECT node_id, resume_token FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
+    .get(sessionName) as { node_id: string; resume_token: string | null } | undefined;
+  if (!sessionRow) return null;
+  const nodeRow = db.prepare("SELECT runtime, cwd FROM nodes WHERE id = ?").get(sessionRow.node_id) as
+    { runtime: string | null; cwd: string | null } | undefined;
+  if (nodeRow?.runtime !== "claude-code") return null;
+  return {
+    sessionName,
+    nodeId: sessionRow.node_id,
+    nodeCwd: nodeRow.cwd ?? null,
+    telemetry: discoverClaudeContextSessionId(db, sessionRow.node_id, sessionName),
+    resumeToken: sessionRow.resume_token?.trim() || null,
+  };
+}
+
 function discoverClaudeContextSessionId(
   db: Database.Database,
   nodeId: string,

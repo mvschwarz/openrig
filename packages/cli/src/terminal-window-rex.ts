@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import path from "node:path";
-import type { DaemonClient } from "./client.js";
+import { terminalAuthHeaders, type DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 import type { WindowDeps } from "./terminal-window.js";
@@ -90,7 +90,7 @@ export async function openRexView(client: DaemonClient, view: string, deps: Wind
     const rexArgs = ["--autostart=false", ...(server ? ["-S", server] : [])];
     const call: RexCall = async (method, params, timeoutMs) =>
       JSON.parse(await deps.exec(rex, [...rexArgs, "api", "call", method, JSON.stringify(params)], timeoutMs)) as Record<string, unknown>;
-    const status = await client.get<RexStatus>("/api/terminal/status?provider=rex");
+    const status = await client.get<RexStatus>("/api/terminal/status?provider=rex", { headers: terminalAuthHeaders() });
     const daemonRex = status.data?.providers?.[0];
     if (status.status >= 400 || !daemonRex?.status?.available) {
       const detail = daemonRex?.liveness?.detail ? ` (${daemonRex.liveness.detail})` : "";
@@ -108,7 +108,7 @@ export async function openRexView(client: DaemonClient, view: string, deps: Wind
     }
     const measured = await deps.columns?.().catch(() => undefined);
     const viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;
-    const preview = await client.get<RexPreview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=rex${viewportColumns === undefined ? "" : `&viewportColumns=${viewportColumns}`}`);
+    const preview = await client.get<RexPreview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=rex${viewportColumns === undefined ? "" : `&viewportColumns=${viewportColumns}`}`, { headers: terminalAuthHeaders() });
     if (preview.status >= 400 || !("composed" in preview.data)) return fail((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
     const { planId, composed } = preview.data;
     if (expectedPlan !== undefined && expectedPlan !== planId) return fail("The terminal view changed since preview. Refresh the preview before opening.");

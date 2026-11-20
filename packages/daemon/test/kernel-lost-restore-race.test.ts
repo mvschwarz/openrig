@@ -11,7 +11,7 @@ import { restoreExistingRigUnattended } from "../src/domain/existing-rig-restore
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("real automatic kernel restore and manual-up race", () => {
-  it.each(["auto-first", "manual-first", "auto-rehydrate", "auto-first-fresh"])("restores once: %s", async mode => {
+  it.each(["auto-first", "manual-first", "auto-rehydrate", "auto-first-fresh", "auto-first-blank-cwd"])("restores once: %s", async mode => {
     const db = createFullTestDb();
     const name = "operator-agent@kernel", token = "00000000-0000-4000-8000-000000001078";
     const live = new Set([name]);
@@ -94,9 +94,10 @@ describe("real automatic kernel restore and manual-up race", () => {
           expect(response.status).toBe(200);
           expect(await response.json()).toMatchObject({ nodes: [{ logicalId: "operator.agent", status: "fresh-primed" }] });
         } else {
-          // The same restore, asked for by hand: it waits for the running one instead of colliding.
+          // The same restore, asked for by hand: it waits for the running one instead of colliding. A blank --cwd is no
+          // override, as for a fresh launch, so it is still the same restore.
           let settled = false;
-          const manual = up().then((response) => { settled = true; return response; });
+          const manual = up(mode === "auto-first-blank-cwd" ? { cwdOverride: "   " } : {}).then((response) => { settled = true; return response; });
           await new Promise<void>(r => setTimeout(r, 20));
           expect(settled).toBe(false);
           release();

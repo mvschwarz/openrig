@@ -2,7 +2,7 @@
 // backfill, driven end-to-end through the commander tree against a tmp
 // substrate fixture.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -70,6 +70,78 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
   let env: { root: string; missionsRoot: string };
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  it("replaces current state, stamps it once, and preserves other sections", async () => {
+    const slice = await createSlice(env, "current-state");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "# Progress\r\n\r\n## Current state\r\n\r\nOld\r\n\r\n### Detail\r\nold detail\r\n\r\n## Outcomes\r\n\r\n- [ ] Keep\r\n");
+    const args = ["slice", "progress", slice, "--current-state", "Waiting\nNext: review", "--json"];
+    const first = await run(args, env.missionsRoot);
+    expect(first.exitCode).toBe(0);
+    const written = fs.readFileSync(file, "utf8");
+    expect(written).toMatch(/current_state_updated:.*\d{4}-\d\d-\d\dT/);
+    expect(written).toContain("## Current state\r\n\r\nWaiting\r\nNext: review\r\n\r\n## Outcomes\r\n\r\n- [ ] Keep\r\n");
+    expect(written).not.toContain("old detail");
+    const second = await run(args, env.missionsRoot);
+    expect(JSON.parse(second.stdout).progress.changed).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(written);
+  });
+
+  it("rejects conflicting modes without writing", async () => {
+    const slice = await createSlice(env, "current-state-conflict");
+    const file = path.join(slice, "PROGRESS.md");
+    const before = fs.readFileSync(file, "utf8");
+    const result = await run(["slice", "progress", slice, "--current-state", "new", "--add", "row", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(1);
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("updates malformed closed frontmatter through the tolerant writer", async () => {
+    const slice = await createSlice(env, "malformed-state");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "---\nowner: [invalid\n---\n# Progress\n\n## Current state\n\nOld\n\n## Other\n\nKeep\n");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
+      expect(result.exitCode).toBe(0);
+      const content = fs.readFileSync(file, "utf8");
+      expect(content).toContain("## Current state\n\nReady");
+      expect(content).toContain("## Other\n\nKeep");
+      expect(content).toContain("current_state_updated:");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+    } finally { warn.mockRestore(); }
+  });
+
+  it("updates an unterminated header without adding a timestamp block", async () => {
+    const slice = await createSlice(env, "unterminated-state");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "---\nowner: alice\n# Progress\n\n## Current state\n\nOld\n\n## Other\n\nKeep\n");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
+      expect(result.exitCode).toBe(0);
+      const content = fs.readFileSync(file, "utf8");
+      expect(content.match(/^---$/gm)).toHaveLength(1);
+      expect(content).not.toContain("current_state_updated:");
+      expect(content).toContain("## Other\n\nKeep");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("without a timestamp"));
+    } finally { warn.mockRestore(); }
+  });
+
+  it("recognizes closing hashes and does not rewrite an identical state", async () => {
+    const slice = await createSlice(env, "closing-hashes");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "# Progress\n\n## Current state ##\n\nOld\n\n## Other\n\nKeep\n");
+    const args = ["slice", "progress", slice, "--current-state", "Ready", "--json"];
+    expect((await run(args, env.missionsRoot)).exitCode).toBe(0);
+    const updated = fs.readFileSync(file, "utf8");
+    expect(updated.match(/^## Current state/gm)).toHaveLength(1);
+    expect(updated).toContain("## Current state ##\n\nReady");
+    expect(updated).toContain("## Other\n\nKeep");
+    const again = await run(args, env.missionsRoot);
+    expect(JSON.parse(again.stdout).progress.changed).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(updated);
+  });
 
   it("--add appends a UI-valid checkbox row into the default Rail section", async () => {
     const slicePath = await createSlice(env, "verb-add");
@@ -154,6 +226,12 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
     const readme = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
     expect(readme).toMatch(/## Rail\n\n- \[ \] Rail item/);
     expect(readme).toMatch(/progress_rail:\s*readme-only/); // frontmatter preserved
+    const state = await run(["slice", "progress", slicePath, "--current-state", "Waiting for review", "--json"], env.missionsRoot);
+    expect(state.exitCode).toBe(0);
+    const updated = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
+    expect(updated).toMatch(/current_state_updated:.*T/);
+    expect(updated).toContain("Waiting for review");
+    expect(fs.existsSync(path.join(slicePath, "PROGRESS.md"))).toBe(false);
   });
 
   it("errors when the scope has no progress surface (stale-host ghost)", async () => {
@@ -174,6 +252,18 @@ describe("rig scope mission progress (FR-3)", () => {
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
+  it("creates and timestamps a missing current-state section without changing other content", async () => {
+    await run(["mission", "repair", "release-0.4.0", "--json"], env.missionsRoot);
+    const file = path.join(env.missionsRoot, "release-0.4.0", "PROGRESS.md");
+    fs.writeFileSync(file, "---\nowner: somebody # retain\n---\n# Progress\n\n## Outcomes\n\nKeep\n");
+    const result = await run(["mission", "progress", "release-0.4.0", "--current-state", "Ready", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("owner: somebody # retain\n");
+    expect(content).toMatch(/current_state_updated:.*T/);
+    expect(content).toContain("## Outcomes\n\nKeep\n\n## Current state\n\nReady\n");
+  });
+
   it("--add updates the mission PROGRESS.md", async () => {
     // Backfill the mission PROGRESS.md first (the seed mission has none).
     await run(["mission", "repair", "release-0.4.0", "--json"], env.missionsRoot);
@@ -183,6 +273,108 @@ describe("rig scope mission progress (FR-3)", () => {
     expect(r.exitCode).toBe(0);
     const progress = fs.readFileSync(path.join(env.missionsRoot, "release-0.4.0", "PROGRESS.md"), "utf8");
     expect(progress).toMatch(/## Milestones[\s\S]*- \[ \] Mission milestone/);
+  });
+});
+
+describe("mission parent links", () => {
+  let env: { root: string; missionsRoot: string };
+  beforeEach(() => { env = seedSubstrate(); });
+  afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  it("creates, reads and clears links, warning about cycles and refusing missing targets", async () => {
+    const slice = await createSlice(env, "parent");
+    const sliceInfo = await run(["slice", "show", slice, "--json"], env.missionsRoot);
+    const sliceId = JSON.parse(sliceInfo.stdout).slice.id as string;
+    const created = await run(["mission", "create", "child", "--parent", sliceId, "--json"], env.missionsRoot);
+    expect(created.exitCode).toBe(0);
+    const childId = JSON.parse(created.stdout).mission.id as string;
+    expect((await run(["mission", "parent", "child", "OPR.0.4.0", "--json"], env.missionsRoot)).exitCode).toBe(0);
+    expect((await run(["mission", "show", "release-0.4.0"], env.missionsRoot)).stdout).toContain("child missions: child");
+    expect((await run(["mission", "parent", "child", sliceId, "--json"], env.missionsRoot)).exitCode).toBe(0);
+    const external = path.join(env.root, "external-mission");
+    writeFile(path.join(external, "SPEC.md"), `---\nid: ${childId}\n---\n# External\n`);
+    const externalBefore = fs.readFileSync(path.join(external, "SPEC.md"), "utf8");
+    const outside = await run(["mission", "parent", external, sliceId, "--json"], env.missionsRoot);
+    expect(outside.exitCode).toBe(1);
+    expect(fs.readFileSync(path.join(external, "SPEC.md"), "utf8")).toBe(externalBefore);
+    if (process.platform !== "win32") {
+      fs.symlinkSync(external, path.join(env.missionsRoot, "external-link"), "dir");
+      const viaLink = await run(["mission", "parent", "external-link", sliceId, "--json"], env.missionsRoot);
+      expect(viaLink.exitCode).toBe(1);
+      expect(fs.readFileSync(path.join(external, "SPEC.md"), "utf8")).toBe(externalBefore);
+    }
+    const missingWorkspace = await run(["mission", "parent", "child", sliceId, "--json"], path.join(env.root, "missing", "missions"));
+    expect(missingWorkspace.exitCode).toBe(1);
+    const child = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(child.parentId).toBe(sliceId);
+    expect(child.parent.name).toContain("parent");
+    const childFile = path.join(env.missionsRoot, "child", "mission.yaml");
+    const originalManifest = fs.readFileSync(childFile, "utf8");
+    fs.writeFileSync(childFile, `metadata: { "parent": ${sliceId} }\n`);
+    const flowParent = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(flowParent.parentChain[0].id).toBe(sliceId);
+    fs.writeFileSync(childFile, originalManifest);
+    const parentSlice = JSON.parse((await run(["slice", "show", slice, "--json"], env.missionsRoot)).stdout).slice;
+    expect(parentSlice.childMissions.map((node: { id: string }) => node.id)).toContain(childId);
+    const cycle = await run(["mission", "parent", "release-0.4.0", childId, "--json"], env.missionsRoot);
+    expect(cycle.exitCode).toBe(0);
+    expect(JSON.parse(cycle.stdout).warnings.join(" ")).toContain("cycle");
+    expect(JSON.parse((await run(["audit", "--mission", "release-0.4.0", "--json"], env.missionsRoot)).stdout).parentFindings.join(" ")).toContain("cycle");
+    await run(["mission", "parent", "release-0.4.0", "--clear", "--json"], env.missionsRoot);
+    const missing = await run(["mission", "parent", "child", "OPR.99.0.999", "--json"], env.missionsRoot);
+    expect(missing.exitCode).toBe(1);
+    fs.writeFileSync(path.join(slice, "SPEC.md"), `---\nid: ${sliceId}\nstatus: shipped-to-release\n---\n# Parent\n`);
+    const childManifest = path.join(env.missionsRoot, "child", "mission.yaml");
+    fs.writeFileSync(childManifest, fs.readFileSync(childManifest, "utf8").replace("status: planned", "status: active"));
+    const parentAudit = JSON.parse((await run(["audit", "--mission", "release-0.4.0", "--json"], env.missionsRoot)).stdout);
+    expect(parentAudit.parentFindings.join(" ")).toContain("is active while parent slice");
+    const cleared = await run(["mission", "parent", "child", "--clear", "--json"], env.missionsRoot);
+    expect(cleared.exitCode).toBe(0);
+    expect(JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission.parentId).toBeNull();
+    const manifest = path.join(env.missionsRoot, "child", "mission.yaml");
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, "utf8").replace("metadata:\n", "metadata:\n  parent: OPR.99.0.999\n"));
+    const audit = JSON.parse((await run(["audit", "--mission", "child", "--json"], env.missionsRoot)).stdout);
+    expect(audit.parentFindings.join(" ")).toContain("OPR.99.0.999");
+    writeFile(path.join(env.missionsRoot, "broken", "SPEC.md"), "---\nid: [bad\n---\n# Invalid\n");
+    const validRead = await run(["mission", "show", "child", "--json"], env.missionsRoot);
+    expect(JSON.parse(validRead.stdout).mission.id).toBe(childId);
+    writeFile(path.join(env.missionsRoot, "bad-directory", "SPEC.md"), "---\nid: OPR.99.0.42\n---\n");
+    writeFile(path.join(env.missionsRoot, "bad-directory", "slices"), "not a directory");
+    const withDirectoryGap = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(withDirectoryGap.id).toBe(childId);
+    expect(withDirectoryGap.parentWarnings.join(" ")).toContain("bad-directory");
+    const sliceWithGap = JSON.parse((await run(["slice", "show", slice, "--json"], env.missionsRoot)).stdout).slice;
+    expect(sliceWithGap.parentWarnings.join(" ")).toContain("bad-directory");
+    const tolerantWrite = await run(["mission", "parent", "child", sliceId, "--json"], env.missionsRoot);
+    expect(tolerantWrite.exitCode).toBe(0);
+    expect(JSON.parse(tolerantWrite.stdout).warnings.join(" ")).toContain("broken");
+    const withWarning = JSON.parse((await run(["audit", "--mission", "child", "--json"], env.missionsRoot)).stdout);
+    expect(withWarning.parentFindings.join(" ")).toContain("broken");
+    const idless = path.join(env.missionsRoot, "idless");
+    writeFile(path.join(idless, "SPEC.md"), "---\nparent: OPR.0.4.0\n---\n# Legacy\n");
+    const idlessClear = await run(["mission", "parent", "idless", "--clear", "--json"], env.missionsRoot);
+    expect(idlessClear.exitCode).toBe(0);
+    expect(fs.readFileSync(path.join(idless, "SPEC.md"), "utf8")).not.toContain("parent:");
+    const idlessSet = await run(["mission", "parent", "idless", sliceId, "--json"], env.missionsRoot);
+    expect(idlessSet.exitCode).toBe(0);
+    const idlessShow = JSON.parse((await run(["mission", "show", "idless", "--json"], env.missionsRoot)).stdout).mission;
+    expect(idlessShow.parentId).toBe(sliceId);
+    const children = JSON.parse((await run(["slice", "show", slice, "--json"], env.missionsRoot)).stdout).slice.childMissions;
+    expect(children).toEqual(expect.arrayContaining([expect.objectContaining({ name: "idless", id: null })]));
+    const duplicate = await run(["mission", "create", "different-name", "--id", "OPR.0.4.0", "--parent", sliceId, "--json"], env.missionsRoot);
+    expect(duplicate.exitCode).toBe(0);
+    expect(duplicate.stdout).toContain("release-0.4.0");
+    expect(fs.existsSync(path.join(env.missionsRoot, "different-name"))).toBe(true);
+    const ambiguous = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(ambiguous.parentGap).toContain("does not resolve uniquely");
+    const malformed = path.join(env.missionsRoot, "malformed-legacy");
+    writeFile(path.join(malformed, "SPEC.md"), "---\nid: [bad\nparent: OPR.0.4.0\n---\n# Legacy\n");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const malformedClear = await run(["mission", "parent", "malformed-legacy", "--clear", "--json"], env.missionsRoot);
+    expect(malformedClear.exitCode).toBe(0);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+    warning.mockRestore();
+    expect(fs.readFileSync(path.join(malformed, "SPEC.md"), "utf8")).toContain("parent: null");
   });
 });
 

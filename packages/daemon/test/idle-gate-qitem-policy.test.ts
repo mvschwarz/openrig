@@ -14,6 +14,7 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-policy-engine.js";
 import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.js";
+import { parkedRowNote, queuedAsRowNote } from "../src/domain/park-wake-text.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
 
 const NOW = new Date("2026-07-03T12:00:00.000Z");
@@ -155,7 +156,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   // alone: the condition receipt is proposed by the policy and banked by the
   // engine only on a delivery that returned ok. Testing the policy in isolation
   // would assert a decision while the defect QA found lives in the join.
-  function engineFor(deliveryStatus: () => "ok" | "failed") {
+  function engineFor(deliveryStatus: () => "ok" | "failed", policyDeps: Partial<Parameters<typeof makeIdleGateQitemPolicy>[0]> = {}) {
     let clock = NOW;
     const advance = (seconds: number) => { clock = new Date(clock.getTime() + seconds * 1000); };
     const jobsRepo = new WatchdogJobsRepository(db);
@@ -167,7 +168,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     };
     const engine = new WatchdogPolicyEngine({
       jobsRepo, historyLog, eventBus, deliver, now: () => clock,
-      additionalPolicies: [makeIdleGateQitemPolicy({ db, seatActivity })],
+      additionalPolicies: [makeIdleGateQitemPolicy({ db, seatActivity, ...policyDeps })],
     });
     const registered = jobsRepo.register({
       policy: "idle-gate-qitem",
@@ -181,7 +182,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     const receipt = () =>
       (db.prepare("SELECT last_fired_condition AS c FROM watchdog_jobs WHERE job_id = ?")
         .get(registered.jobId) as { c: string | null } | undefined)?.c ?? null;
-    return { attempts, evaluate, receipt, advance };
+    return { attempts, evaluate, receipt, advance, historyLog, jobId: registered.jobId };
   }
   function appendTransition(qitemId: string, note: string, id: number): void {
     db.prepare(
@@ -343,6 +344,40 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     appendTransition("q-gate-1", "escalation-rung: orchestrator -> orch@rig", 9003);
     // Past the window, so a skip here can only be the CONDITION gate — otherwise
     // this pin would pass on the throttle and prove nothing.
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(1);
+  });
+
+  it("a queue-only seat is never woken for its pending gate row: the row is the reminder, and the skip is recorded once (#3076)", async () => {
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const queueOnly = { value: true };
+    const { attempts, evaluate, advance, historyLog, jobId } = engineFor(() => "ok", { isQueueOnlySeat: () => queueOnly.value } as never);
+    for (let i = 0; i < 5; i++) {
+      await evaluate();
+      advance(301);
+    }
+    expect(attempts).toHaveLength(0);
+    expect(historyLog.listForJob(jobId).map((h) => h.skipReason)).toEqual(["queue_only_seat"]);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = 'q-gate-1'").get() as { n: number }).n,
+    ).toBe(1);
+    // Leaving queue-only, the idle seat is woken as before.
+    queueOnly.value = false;
+    await evaluate();
+    expect(attempts).toHaveLength(1);
+  });
+
+  it("a queue-only seat's park wake notes are wake machinery too, never material (#3076)", async () => {
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    // The notes as the delivery and the queue's park record write them.
+    appendTransition("q-gate-1", parkedRowNote("job-x", "Check the release notes first."), 9102);
+    appendTransition("q-gate-1", queuedAsRowNote("job-x", "queued_as_row", "qitem-watchdog-x"), 9103);
+    appendTransition("q-gate-1", queuedAsRowNote("job-x", "noted_on_queued_row", "qitem-watchdog-x"), 9104);
     advance(301);
     await evaluate();
     expect(attempts).toHaveLength(1);

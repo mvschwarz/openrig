@@ -45,6 +45,15 @@ function seat(launch: { executable: string; executableIsScript: boolean }) {
 const script = { executable: wrapper, executableIsScript: true };
 
 describe("a Claude launched through a #! wrapper script", () => {
+  it("reports the frozen executable it ran, for a fresh, resumed or forked launch (#2985 recovery, #3044 review S1)", async () => {
+    const launched = { launchedExecutable: { path: wrapper, isScript: true } };
+    expect(await seat(script).adapter.launchHarness(seat(script).binding, { name, freshInPlace: true })).toMatchObject({ ok: true, ...launched });
+    const resumed = seat(script);
+    expect(await resumed.adapter.launchHarness(resumed.binding, { name, resumeToken: token })).toMatchObject({ ok: true, ...launched });
+    const forked = seat(script);
+    expect(await forked.adapter.launchHarness(forked.binding, { name, forkSource: { kind: "native_id", value: token } })).toMatchObject({ ok: true, ...launched });
+  });
+
   it("resumes ready, recording the process the launch proved", async () => {
     const { adapter, binding } = seat(script);
     expect(await adapter.launchHarness(binding, { name, resumeToken: token })).toMatchObject({

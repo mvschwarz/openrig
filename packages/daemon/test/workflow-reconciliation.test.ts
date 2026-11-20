@@ -14,6 +14,7 @@ import { WorkflowInstanceStore } from "../src/domain/workflow-instance-store.js"
 import { inspectGraph, reviseGraph, recoverGraphOperation } from "../src/domain/workflow-reconciliation.js";
 import { buildExecutionView } from "../src/domain/execution-view.js";
 import { workflowRoutes } from "../src/routes/workflow.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { Hono } from "hono";
 
 describe("one preserved running graph and recoverable revision decision", () => {
@@ -112,13 +113,258 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(db.serialize()).toEqual(before);
   });
 
-  it("refuses lost obligations and newly eligible work rather than inventing a scheduling path", async () => {
+  it("refuses a lost obligation, even beside newly ready work it would otherwise project", async () => {
     const run = await progressed();
     project.lifecycle.profiles.release.required_steps = ["plan"];
     steps().pop(); save();
     expect(inspectGraph(db, run.instanceId).reasons.join(" ")).toContain("Required obligation finish cannot be removed");
     steps().push({ id: "new-root", actor_role: "owner", depends_on: ["plan"], allowed_exits: ["done"] }); save();
-    expect(inspectGraph(db, run.instanceId).reasons.join(" ")).toContain("no unfinished prerequisite");
+    expect(inspectGraph(db, run.instanceId)).toMatchObject({ status: "incompatible", projects: ["new-root"] });
+  });
+
+  // The release shape: publish and a required adoption both follow plan; the record waits on both, and close on the record.
+  const release = (extra: any[] = [], roles: Record<string, unknown> = {}) => {
+    const profile = project.lifecycle.profiles.release;
+    profile.required_steps = ["plan", "publish", "adoption", "record", "close"];
+    profile.workflow.roles = { ...profile.workflow.roles, ...roles };
+    profile.workflow.steps = [
+      { id: "plan", actor_role: "owner", depends_on: [], allowed_exits: ["handoff"], objective: "Choose" },
+      { id: "publish", actor_role: "owner", depends_on: ["plan"], allowed_exits: ["handoff", "failed"], objective: "Publish" },
+      { id: "adoption", actor_role: "owner", depends_on: ["plan"], allowed_exits: ["handoff", "waiting"], objective: "Adopt" },
+      { id: "record", actor_role: "owner", depends_on: ["publish", "adoption"], allowed_exits: ["handoff", "failed"], objective: "Record" },
+      { id: "close", actor_role: "owner", depends_on: ["record"], allowed_exits: ["done"], objective: "Close" },
+      ...extra,
+    ];
+    save();
+  };
+  const step = (id: string) => steps().find(s => s.id === id);
+  const frontier = (id: string) => runtime.inspect(id).frontier.map(f => f.stepId).sort();
+  const packet = (id: string, stepId: string) => runtime.inspect(id).frontier.find(f => f.stepId === stepId)!.packetId;
+  const close = (id: string, stepId: string, exit: "handoff" | "done" | "failed" = "handoff", by = runtime) =>
+    by.project({ instanceId: id, currentPacketId: packet(id, stepId), actorSession: "owner@rig", exit, closureEvidence: { evidence_ref: stepId + ".md" }, ...(exit === "failed" ? { resultNote: "broke" } : {}) });
+  async function planned(key = "release") {
+    const run = await runtime.instantiateLifecycle({ missionPath: mission, operationKey: key, rootObjective: "Release", createdBySession: "owner@rig" });
+    await runtime.project({ instanceId: run.instance.instanceId, currentPacketId: run.entryQitemId, actorSession: "owner@rig", exit: "handoff", closureEvidence: { evidence_ref: "plan.md" } });
+    return run.instance.instanceId;
+  }
+  async function published(key = "release") {
+    const id = await planned(key);
+    await close(id, "publish");
+    return id;
+  }
+
+  it("removes an obsolete order from unstarted work, keeps the live adoption, and projects the ready record once", async () => {
+    release();
+    const id = await published();
+    expect(frontier(id)).toEqual(["adoption"]);
+    const adoption = packet(id, "adoption"), adoptionRow = queue.getByIdOrThrow(adoption);
+    step("record").depends_on = ["publish"]; save();
+    const view = inspectGraph(db, id);
+    expect(view).toMatchObject({ status: "compatible", compatible: true, reasons: [], projects: ["record"] });
+    expect(view.changes).toEqual(expect.arrayContaining([
+      { kind: "dependency-removed", ref: "adoption before record" },
+      { kind: "required-order-removed", ref: "adoption before record" },
+      { kind: "required-order-removed", ref: "adoption before close" },
+      { kind: "step-projected", ref: "record" },
+    ]));
+    const sent = sends.length, input = apply(id);
+    const revision = await runtime.reviseGraph(input);
+    expect(revision.replayed).toBe(false);
+    const record = revision.projected[0]!.qitemId;
+    expect(revision.projected.map(p => p.step.id)).toEqual(["record"]);
+    expect(revision.receipt.projected).toEqual([{ stepId: "record", qitemId: record, owner: "owner@rig" }]);
+    expect(recoverGraphOperation(db, input.operationKey)?.receipt.projected).toEqual(revision.receipt.projected);
+    const instance = runtime.instanceStore.getByIdOrThrow(id);
+    expect(instance).toMatchObject({ status: "active", currentFrontier: [adoption, record] });
+    expect(runtime.instanceStore.listFrontierBindings(id).find(b => b.packetId === record)).toMatchObject({ stepId: "record", hopCount: 0, hopsBaseline: 0 });
+    expect(queue.getByIdOrThrow(adoption)).toEqual(adoptionRow);
+    const row = queue.getByIdOrThrow(record);
+    expect(row).toMatchObject({ destinationSession: "owner@rig", state: "pending" });
+    expect(row.tags).toContain("step:record");
+    expect(row.body).toContain("Projected by revision " + input.operationKey);
+    expect(row.body).toContain("Decision: " + input.reason);
+    expect(sends.length).toBeGreaterThan(sent);
+    // The same decision again, as after a lost response: no packet and no wake.
+    const after = db.serialize(), woke = sends.length;
+    expect(await runtime.reviseGraph(input)).toMatchObject({ replayed: true, projected: [] });
+    expect(db.serialize()).toEqual(after);
+    expect(sends.length).toBe(woke);
+    expect(inspectGraph(db, id).status).toBe("current");
+    // Ordinary projection carries on from the revised graph; the adoption closes on its own.
+    await close(id, "record");
+    expect(frontier(id)).toEqual(["adoption", "close"]);
+    await close(id, "adoption");
+    expect(frontier(id)).toEqual(["close"]);
+  });
+
+  it.each([
+    ["an unrelated change", () => { step("close").objective = "Close carefully"; }, "compatible"],
+    ["a source-only change", () => { plan.sdlc.catalog.address = "second.md"; }, "source-only"],
+  ] as const)("leaves a step that was already ready and never started alone on %s: nothing projected, and the revision applies", async (_label, mutate, status) => {
+    release();
+    const id = await published();
+    // An adoption completion the projector never acted on: record is ready under the bound graph and was never started.
+    // (A second dependency-free root is the natural case, but an eligible lifecycle can't hold one: the validator
+    // refuses a step unreachable from the entry.)
+    runtime.trailLog.record({ instanceId: id, stepId: "adoption", stepRole: "owner", closedAt: new Date().toISOString(), closureReason: "handoff", closureEvidence: {}, actorSession: "owner@rig", nextQitemId: null, priorQitemId: null } as never);
+    mutate(); save();
+    expect(inspectGraph(db, id)).toMatchObject({ status, compatible: true, projects: [] });
+    const sent = sends.length;
+    expect((await runtime.reviseGraph(apply(id))).projected).toEqual([]);
+    expect(inspectGraph(db, id).status).toBe("current");
+    expect(frontier(id)).toEqual(["adoption"]);
+    expect(queue.list({ tag: "step:record" } as never)).toHaveLength(0);
+    expect(sends.length).toBe(sent);
+  });
+
+  it("carries the revised slice associations: the step it projects, and later ones, get their newly active slice's tag", async () => {
+    release();
+    const id = await published();
+    expect(runtime.instanceStore.getByIdOrThrow(id).scope?.stepSlices?.record).toBeUndefined();
+    mkdirSync(join(mission, "slices", "record"), { recursive: true });
+    write(join(mission, "slices", "record", "slice.yaml"), { kind: "slice", metadata: { id: "record" }, composition: { mission: "../../mission.yaml" } });
+    plan.composition.slices.push({ ref: "slices/record/slice.yaml", order: 20 });
+    step("record").depends_on = ["publish"]; save();
+    const revision = await runtime.reviseGraph(apply(id));
+    const scope = runtime.instanceStore.getByIdOrThrow(id).scope;
+    expect(scope).toMatchObject({ project: "trial", mission: "trial", stepSlices: { record: "record" } });
+    expect(queue.getByIdOrThrow(revision.projected[0]!.qitemId).tags).toContain("slice:record");
+  });
+
+  it("projects nothing early while a remaining prerequisite is unfinished; the ordinary close projects it", async () => {
+    release();
+    const id = await planned();
+    step("record").depends_on = ["publish"]; save();
+    expect(inspectGraph(db, id)).toMatchObject({ status: "compatible", projects: [] });
+    expect((await runtime.reviseGraph(apply(id))).projected).toEqual([]);
+    expect(frontier(id)).toEqual(["adoption", "publish"]);
+    await close(id, "publish");
+    expect(frontier(id)).toEqual(["adoption", "record"]);
+  });
+
+  it.each(["live", "completed", "failed"] as const)("refuses to remove a required order from a %s step, with no write", async state => {
+    release();
+    const id = await published();
+    await close(id, "adoption");
+    if (state === "completed") await close(id, "record");
+    // A failed step's exception goes to the configured person.
+    if (state === "failed") await close(id, "record", "failed", new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue, exceptionDial: { hostDefault: () => null, humanFallbackSeat: "human@host" } }));
+    step("record").depends_on = ["publish"]; save();
+    const view = inspectGraph(db, id);
+    expect(view.status).toBe("incompatible");
+    expect(view.reasons).toContain("Required order adoption before record cannot be removed: record already has completed, live or failed work.");
+    const before = db.serialize();
+    await expect(runtime.reviseGraph(apply(id, "refused"))).rejects.toThrow("Revision refused");
+    expect(db.serialize()).toEqual(before);
+  });
+
+  it.each([
+    ["a changed completed step", () => { step("plan").objective = "Changed decision"; }, "explicit reconsideration"],
+    ["a removed required obligation", () => { project.lifecycle.profiles.release.required_steps = ["plan", "publish", "adoption", "record"]; }, "Required obligation close cannot be removed"],
+  ] as const)("refuses the whole revision when the order removal comes with %s", async (_label, mutate, reason) => {
+    release();
+    const id = await published();
+    step("record").depends_on = ["publish"]; mutate(); save();
+    const view = inspectGraph(db, id);
+    expect(view).toMatchObject({ status: "incompatible", projects: ["record"] });
+    expect(view.reasons.join(" ")).toContain(reason);
+    const before = db.serialize(), sent = sends.length;
+    await expect(runtime.reviseGraph(apply(id, "mixed"))).rejects.toThrow("Revision refused");
+    expect(db.serialize()).toEqual(before);
+    expect(sends.length).toBe(sent);
+  });
+
+  it("refuses a stale version or digest with no packet, and the ordinary path projects the record exactly once", async () => {
+    release();
+    const id = await published();
+    step("record").depends_on = ["publish"]; save();
+    const stale = apply(id);
+    step("record").objective = "Record differently"; save();
+    let before = db.serialize();
+    await expect(runtime.reviseGraph(stale)).rejects.toThrow("Authored input changed");
+    expect(db.serialize()).toEqual(before);
+    const current = apply(id);
+    await close(id, "adoption");
+    expect(frontier(id)).toEqual(["record"]);
+    before = db.serialize();
+    await expect(runtime.reviseGraph(current)).rejects.toThrow("progressed since inspection");
+    expect(db.serialize()).toEqual(before);
+    expect(queue.list({ tag: "step:record" } as never).length).toBe(1);
+  });
+
+  it("recovers a projecting revision by its key after a lost HTTP response, without another packet or wake", async () => {
+    release();
+    const id = await published();
+    step("record").depends_on = ["publish"]; save();
+    const input = apply(id);
+    const app = new Hono(); app.use("*", async (c, next) => { c.set("workflowRuntime" as never, runtime); await next(); }); app.route("/api/workflow", workflowRoutes());
+    expect((await app.request("/api/workflow/" + id + "/revision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) })).status).toBe(200);
+    const after = db.serialize(), sent = sends.length;
+    const recovered = await (await app.request("/api/workflow/operations/" + input.operationKey)).json() as any;
+    expect(recovered.receipt.projected).toEqual([{ stepId: "record", qitemId: packet(id, "record"), owner: "owner@rig" }]);
+    const replay = await app.request("/api/workflow/" + id + "/revision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+    expect(await replay.json()).toMatchObject({ replayed: true, projected: [] });
+    expect(db.serialize()).toEqual(after);
+    expect(sends.length).toBe(sent);
+  });
+
+  it("counts a prerequisite's completion only if it's newer than its own prerequisite's latest, as the projector does", async () => {
+    release();
+    const id = await published();
+    // plan completes again after publish did, so publish's completion no longer counts and record isn't ready.
+    runtime.trailLog.record({ instanceId: id, stepId: "plan", stepRole: "owner", closedAt: new Date().toISOString(), closureReason: "handoff", closureEvidence: {}, actorSession: "owner@rig", nextQitemId: null, priorQitemId: null } as never);
+    step("record").depends_on = ["publish"]; save();
+    expect(inspectGraph(db, id)).toMatchObject({ status: "compatible", projects: [] });
+  });
+
+  it("rolls back the revision, packet, frontier, keepalive and wake when the write fails after a packet is created", async () => {
+    release();
+    const id = await published();
+    step("record").depends_on = ["publish"]; save();
+    const guarded = new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue, watchdogJobsRepo: new WatchdogJobsRepository(db) });
+    const input = apply(id);
+    db.exec("CREATE TRIGGER fail_projection BEFORE INSERT ON events WHEN NEW.type = 'workflow.next_qitem_projected' BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END");
+    const before = db.serialize(), sent = sends.length;
+    await expect(guarded.reviseGraph(input)).rejects.toThrow("synthetic write failure");
+    expect(db.serialize()).toEqual(before);
+    expect(sends.length).toBe(sent);
+    expect(recoverGraphOperation(db, input.operationKey)).toBeNull();
+    db.exec("DROP TRIGGER fail_projection");
+    const jobs = () => (db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs").get() as { n: number }).n;
+    const armed = jobs();
+    expect((await guarded.reviseGraph(input)).projected).toHaveLength(1);
+    expect(jobs()).toBe(armed + 1);
+  });
+
+  it("refuses the whole revision when a projected step's owner can't be resolved", async () => {
+    release([], { ghost: {} });
+    const id = await published();
+    Object.assign(step("record"), { depends_on: ["publish"], actor_role: "ghost" }); save();
+    expect(inspectGraph(db, id)).toMatchObject({ status: "compatible", projects: ["record"] });
+    const before = db.serialize(), sent = sends.length;
+    await expect(runtime.reviseGraph(apply(id))).rejects.toThrow("cannot resolve next owner");
+    expect(db.serialize()).toEqual(before);
+    expect(sends.length).toBe(sent);
+  });
+
+  it("projects several ready steps with their own owner, gate, body and frontier", async () => {
+    release([{ id: "notes", actor_role: "reviewer", depends_on: ["publish", "adoption"], allowed_exits: ["handoff"], objective: "Write notes",
+      gate: { target: "human@host", summary: "Sign the notes", evidence_ref: "proof/notes.md" } }], { reviewer: { preferred_targets: ["reviewer@rig"] } });
+    const id = await published();
+    const adoption = packet(id, "adoption");
+    step("record").depends_on = ["publish"]; step("notes").depends_on = ["publish"]; save();
+    expect(inspectGraph(db, id).projects).toEqual(["record", "notes"]);
+    const revision = await runtime.reviseGraph(apply(id));
+    const [record, notes] = revision.projected;
+    expect(revision.projected.map(p => p.step.id)).toEqual(["record", "notes"]);
+    expect(queue.getByIdOrThrow(record!.qitemId)).toMatchObject({ destinationSession: "owner@rig", state: "pending" });
+    const gated = queue.getByIdOrThrow(notes!.qitemId);
+    expect(gated).toMatchObject({ state: "blocked", summary: "Sign the notes", evidenceRef: "proof/notes.md" });
+    expect(gated.tags).toEqual(expect.arrayContaining(["gate", "step:notes"]));
+    expect(gated.body).toContain("Projected by revision");
+    const instance = runtime.instanceStore.getByIdOrThrow(id);
+    expect(instance).toMatchObject({ status: "active", currentFrontier: [adoption, record!.qitemId, notes!.qitemId], currentStepId: null });
+    expect(runtime.instanceStore.listFrontierBindings(id).map(b => b.stepId).sort()).toEqual(["adoption", "notes", "record"]);
   });
 
   it("recovers an applied HTTP operation after response loss and unreadable authored input without duplicate effects", async () => {
@@ -192,14 +438,14 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(view).toMatchObject({ status: "compatible", adopted: false });
     expect(view.changes.some(c => c.kind === "exception-routing-changed")).toBe(true);
     const before = unchanged();
-    const adopted = runtime.reviseGraph(apply(run.instanceId));
+    const adopted = await runtime.reviseGraph(apply(run.instanceId));
     expect(adopted.receipt.changes).toEqual(view.changes);
     expect(unchanged()).toEqual(before);
     expect(runtime.exceptionReadiness(run.instanceId)?.selection).toMatchObject({ state: "selected", role: "owner" });
     expect(runtime.resolveExceptionRouteFor(run.workflowName, adopted.instance.workflowVersion, "stuck_overdue", run.boundRig)?.destinationSession).toBe("owner@rig");
     project.lifecycle.profiles.release.workflow.roles.owner.preferred_targets = ["other@rig"]; save();
     expect(runtime.inspectGraph(run.instanceId).status).toBe("incompatible");
-    expect(() => runtime.reviseGraph(apply(run.instanceId, "unsafe-role-edit"))).toThrow("Revision refused");
+    await expect(runtime.reviseGraph(apply(run.instanceId, "unsafe-role-edit"))).rejects.toThrow("Revision refused");
     expect(unchanged()).toEqual(before);
   });
 

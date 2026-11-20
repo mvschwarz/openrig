@@ -8,6 +8,9 @@ import type { ProjectSelection } from "./types.js";
 
 /** Usage across hosts: the daemon answers by its 15 s view deadline; 15 s + 5 s for its own read and the transfer. */
 export const USAGE_HOSTS_VIEW_WAIT_MS = 20_000;
+/** The fleet Projects view: the daemon answers within its own 10 s view deadline
+ *  whatever the registry's size, plus its 5 s read and the transfer. */
+export const FLEET_SCOPES_VIEW_WAIT_MS = 20_000;
 
 export interface DaemonClientOptions {
   baseUrl?: string;
@@ -66,7 +69,8 @@ export interface LaunchNodeResult {
 
 export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
   const notice = result.code === "already_running"
-    ? `agent already running: ${agent}`
+    // The launch kept a live session it couldn't prove is a bare shell; that isn't proof the agent is running.
+    ? `not relaunched, live session (its agent isn't proven running): ${agent}`
     : `agent run requested: ${agent}`;
   return [notice, ...(result.warnings ?? [])].join("\n");
 }
@@ -306,8 +310,10 @@ export class DaemonClient {
   hosts() {
     return this.get(`/api/hosts`);
   }
-  rigNodes(rigId: string) {
-    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
+  /** A rig's node inventory. With `host`, the same route read through this daemon's `?host=` forwarding for a
+   *  registered http-transport host (the read-only allowlist covers /api/rigs/:rigId/nodes). */
+  rigNodes(rigId: string, host?: string) {
+    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes${host ? `?host=${encodeURIComponent(host)}` : ""}`);
   }
   /** The existing per-seat effort report: requested, saved, emitted and observed.
    * A refusal is an answer, so the page reader doesn't count it as a failed read. */
@@ -356,6 +362,42 @@ export class DaemonClient {
   }
   scopesDetailed(project?: ProjectSelection | null) {
     return this.get(`/api/scopes?detail=1${this.projectQuery(project)}`);
+  }
+
+  /** #3093 fleet Projects: every registered host's rows as this daemon read them,
+   *  host-attributed beside per-host status. GET only; the daemon never writes. */
+  async fleetScopes(): Promise<import("./scopes/fleet-scopes-model.js").FleetScopesRead["status"]> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/scopes/fleet`, { headers: this.headers, signal: AbortSignal.timeout(FLEET_SCOPES_VIEW_WAIT_MS) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) return { status: res.status, error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}` };
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data["missions"]) || !Array.isArray(data["hosts"])) {
+      return { status: res.status, error: "the response was not a fleet Projects view" };
+    }
+    return { view: data as unknown as import("./scopes/fleet-scopes-model.js").FleetScopesView };
+  }
+
+  /** #3093: a fleet slice's DETAIL, read from its ORIGIN host through the daemon's
+   *  read-through (`?host=` envelope). The origin's shape is returned verbatim. */
+  async fleetSliceDetail(hostId: string, mission: string, slice: string): Promise<import("./scopes/fleet-scopes-model.js").FleetSliceDetailRead> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/scopes/slice?host=${encodeURIComponent(hostId)}&mission=${encodeURIComponent(mission)}&slice=${encodeURIComponent(slice)}`,
+        { headers: this.headers, signal: AbortSignal.timeout(USAGE_HOSTS_VIEW_WAIT_MS) });
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) {
+      const detail = data && typeof data["detail"] === "string" ? `: ${data["detail"]}` : typeof data?.["error"] === "string" ? `: ${data["error"]}` : "";
+      return { error: `HTTP ${res.status}${detail}` };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data) || typeof data["dirName"] !== "string") return { error: "the origin answered, but not with a slice detail" };
+    return { detail: data as unknown as import("./scopes/scopes-model.js").SliceScopeSnap };
   }
 
   /** EXECUTION view via the shipped generic view route; no new endpoint. */
@@ -469,8 +511,8 @@ export class DaemonClient {
 
   // --- drive-structure writes (BR-8: EXISTING contracts only; the ONLY two) ---
   /** the web's TerminalLauncher contract: POST /api/terminal/open {view} */
-  async terminalViews(): Promise<{ saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[] }> {
-    return await this.get("/api/terminal/views") as { saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[] };
+  async terminalViews(): Promise<{ saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[]; rigIdentities?: Array<{ id: string; name: string }> }> {
+    return await this.get("/api/terminal/views") as { saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[]; rigIdentities?: Array<{ id: string; name: string }> };
   }
   /** The preview behind "Open terminals". That action opens through `rig terminal open --window`, which composes with
    *  Rex's layout from inside Rex and otherwise Herdr's (falling back to plain tmux), or, from inside cmux, through

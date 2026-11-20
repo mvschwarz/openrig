@@ -621,6 +621,18 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(byName["dev.old"]).toMatchObject({ effort: null, effortSource: null });
   });
 
+  it("carries the configured account and leaves old-daemon values unknown", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const nodes = [
+      { ...base, logicalId: "dev.label", configuredAccount: "long-account-label" },
+      { ...base, logicalId: "dev.old" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const byName = Object.fromEntries(myrig(snap).pods[0]!.agents.map((agent) => [agent.name, agent]));
+    expect(byName["dev.label"]?.configuredAccount).toBe("long-account-label");
+    expect(byName["dev.old"]?.configuredAccount).toBeNull();
+  });
+
   it("reads seat effort once on agent detail and not at all on the rig table", async () => {
     const calls: string[] = [];
     const rigContext = { section: "topology" as const, viewTab: "table" as const, drill: [{ kind: "rig" as const, name: "myrig" }] };

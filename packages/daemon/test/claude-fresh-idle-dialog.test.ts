@@ -5,6 +5,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { ROUTE_DECLARATIONS } from "../src/domain/connection-contract.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 // A person can open a Claude dialog (a permission selector, a picker) in the seconds after the seat's Stop hook, and
@@ -51,6 +52,20 @@ describe("a fresh idle hook doesn't let a send type into a current Claude dialog
     expect(sent.paste).toBe(0);
     expect(sent.keys).toBe(0);
     expect(sent.captures).toBe(1);
+  });
+
+  it("reads the dialog because Claude Code is declared to support it: declared otherwise, the check doesn't run", async () => {
+    const claude = ROUTE_DECLARATIONS.find((d) => d.route === "typed")!.capabilities["claude-code"]!;
+    expect(claude.observe.dialog).toBe("supported");
+    claude.observe.dialog = "not-supported";
+    try {
+      // The same selector: with no dialog read declared, nothing reads it, and the send goes ahead as on any such runtime.
+      const sent = await sendAfterHook("Stop", permission);
+      expect(sent.result.ok).toBe(true);
+      expect(sent.captures).toBe(0);
+    } finally {
+      claude.observe.dialog = "supported";
+    }
   });
 
   it("an empty composer after Stop still sends", async () => {

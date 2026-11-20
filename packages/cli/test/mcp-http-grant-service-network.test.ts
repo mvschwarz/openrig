@@ -315,6 +315,50 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     }
   });
 
+  it("an assistant reads, picks up and answers a person's request addressed to its own seat, and nothing else a person sent", async () => {
+    // Without team/list, so another caller's item to it stays out of reach.
+    grants.set(B.key, { queue: ["create", "show", "list", "claim", "update"], artifact: ["read"] });
+    const served = await listen();
+    const b = await connect(served.url, B);
+    const refused = { isError: true, structured: { code: "out_of_scope" } };
+    const PERSON = "ana@external";
+    const make = async (sourceSession: string, destinationSession: string, body: string) =>
+      (await repo.create({ sourceSession, destinationSession, body, nudge: false } as never)).qitemId;
+    const fromPerson = await make(PERSON, B.seat, "Please draft the welcome note.");
+    const fromLead = await make(LEAD, B.seat, "for B");
+    const personToLead = await make(PERSON, LEAD, "for the lead");
+    const internal = await make(LEAD, `worker@${RIG}`, "team-internal");
+    const fromCaller = await make(`cus-vvmaexample02-caller@${RIG}`, B.seat, "from another caller");
+
+    // The person's request to B is in B's inbox, B reads it with its asker, picks it up and answers it on the same item.
+    const inbox = await b("rig_queue_list", { owned: true });
+    expect.soft(inbox.text).toContain(fromPerson);
+    const shown = await b("rig_queue_show", { qitemId: fromPerson });
+    expect.soft(shown.isError).toBe(false);
+    expect.soft(shown.structured?.item).toMatchObject({ sourceSession: PERSON, destinationSession: B.seat });
+    expect.soft(shown.text).toContain("Please draft the welcome note.");
+    expect.soft((await b("rig_queue_claim", { qitemId: fromPerson })).isError).toBe(false);
+    expect.soft((await b("rig_queue_update", { qitemId: fromPerson, state: "done", closureReason: "no-follow-on", resolution: "Drafted; see the notes." })).isError).toBe(false);
+    expect.soft(row(fromPerson)).toMatchObject({ state: "done", resolution: "Drafted; see the notes." });
+
+    // The team's request to B, as before.
+    expect(inbox.text).toContain(fromLead);
+    expect((await b("rig_queue_show", { qitemId: fromLead })).isError).toBe(false);
+    expect((await b("rig_queue_claim", { qitemId: fromLead })).isError).toBe(false);
+    // A person's request to another seat, the team's own item and another caller's item to B stay out of reach.
+    for (const qitemId of [personToLead, internal, fromCaller]) {
+      expect(inbox.text).not.toContain(qitemId);
+      expect(await b("rig_queue_show", { qitemId })).toMatchObject(refused);
+      expect(await b("rig_queue_claim", { qitemId })).toMatchObject(refused);
+      expect(await b("rig_queue_update", { qitemId, note: "mine?" })).toMatchObject(refused);
+      expect(row(qitemId).state).toBe("pending");
+    }
+    // B still can't send a person work.
+    const before = rows();
+    expect(await b("rig_queue_create", { destination: PERSON, body: "a task for a person" })).toMatchObject(refused);
+    expect(rows()).toBe(before);
+  });
+
   it("an assistant's park names a blocker it can read: a bare re-park after a claim is refused, whether the team's blocker is open or closed", async () => {
     const served = await listen();
     const b = await connect(served.url, B);

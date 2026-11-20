@@ -17,8 +17,19 @@ const LOCAL_RIGS = [{ id: "r-kernel", name: "kernel", lifecycleState: "running" 
 const REMOTE_RIGS = [{ id: "r-vps-kernel", name: "kernel", lifecycleState: "running" }, { id: "r-web", name: "web", lifecycleState: "stopped" }];
 const LOCAL_CHANGE: RecentTransitionSnap = { transitionId: 41, qitemId: "qitem-local", ts: "2026-10-25T19:00:00.000Z",
   actorSession: "local-seat@kernel", change: "created", rig: "kernel", targetKind: "qitem", target: "qitem-local" };
+// The seats a remote rig serves through its own daemon; `rig ps --host vps --nodes --rig web` shape.
+const REMOTE_NODES = [
+  { nodeId: "n-runner", logicalId: "runner", podNamespace: "ops", nodeKind: "agent", runtime: "claude", lifecycleState: "running",
+    sessionStatus: "running", canonicalSessionName: "runner@web",
+    contextUsage: { availability: "known", usedPercentage: 42, contextWindowSize: 200_000, totalInputTokens: 1, totalOutputTokens: 2 } },
+  { nodeId: "n-reviewer", logicalId: "reviewer", podNamespace: "ops", nodeKind: "agent", runtime: "codex", lifecycleState: "stopped",
+    sessionStatus: "stopped", canonicalSessionName: "reviewer@web",
+    contextUsage: { availability: "unknown", usedPercentage: null, contextWindowSize: null, totalInputTokens: null, totalOutputTokens: null } },
+];
 
-interface Fake { calls: string[]; ownName?: unknown; hosts?: unknown[]; hostsStatus?: number; remoteStatus?: number; aggregateHosts?: unknown[] }
+interface Fake { calls: string[]; ownName?: unknown; hosts?: unknown[]; hostsStatus?: number; remoteStatus?: number; aggregateHosts?: unknown[];
+  /** ui.topology_remote_seats as the daemon's config browser resolves it; absent = no entry. */
+  remoteSeatToggle?: boolean; remoteNodesStatus?: number; localNodesStatus?: number }
 
 function daemon(fake: Fake): DaemonClient {
   return new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (input) => {
@@ -40,6 +51,19 @@ function daemon(fake: Fake): DaemonClient {
       return Response.json({ items: [], hosts: [{ hostId: "local", status: "ok" }, ...(fake.aggregateHosts ?? [])] });
     }
     if (u.pathname === "/api/queue/recent-transitions") return Response.json([LOCAL_CHANGE]);
+    if (u.pathname === "/api/config") return Response.json({ observedAt: "2026-10-25T19:00:00.000Z", home: null, readOnly: true,
+      sources: [{ id: "general", state: "available", path: null, detail: "fixture" }], exclusions: [],
+      entries: fake.remoteSeatToggle === undefined ? [] : [{ key: "ui.topology_remote_seats", group: "general", value: fake.remoteSeatToggle,
+        defaultValue: false, source: "file", visibility: "shown", reason: null, scope: "Displayed daemon instance",
+        application: "Resolved configuration; running application unverified." }] });
+    if (u.pathname.startsWith("/api/rigs/") && u.pathname.endsWith("/nodes")) {
+      if (u.searchParams.get("host")) {
+        if (fake.remoteNodesStatus) return Response.json({ error: "remote_read_failed" }, { status: fake.remoteNodesStatus });
+        return Response.json(REMOTE_NODES);
+      }
+      if (fake.localNodesStatus) return Response.json({ error: "read_failed" }, { status: fake.localNodesStatus });
+      return Response.json([]);
+    }
     if (u.pathname.endsWith("/nodes") || u.pathname.startsWith("/api/queue/")) return Response.json([]);
     return Response.json({}, { status: 404 });
   }) as typeof fetch });
@@ -185,6 +209,133 @@ describe("a registered remote host in the topology tree (#2049)", () => {
     expect(text).toContain("rig kernel on vps · running");
     expect(text).toContain("rig ps --host vps --nodes --rig kernel");
     expect(fake.calls.filter((call) => call.endsWith("/nodes"))).toEqual([]);
+  });
+
+  it("reads and renders a remote rig's seats only with ui.topology_remote_seats on", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { snap, text } = await page(fake, "host vps", { type: "drill", resource: "rig", name: "web", target: { host: "vps" } });
+    expect(fake.calls).toContain("/api/config?view=browser");
+    expect(fake.calls).toContain("/api/rigs/r-web/nodes?host=vps");
+    expect(snap.topologyRemoteSeats).toBe(true);
+    expect(snap.hosts.find((host) => host.name === "vps")?.rigs.find((rig) => rig.name === "web")?.pods.map((pod) => [pod.name, pod.agents.map((agent) => agent.name)]))
+      .toEqual([["ops", ["runner", "reviewer"]]]);
+    expect(text).toContain("rig web on vps · stopped · seats read through this daemon");
+    expect(text).toContain("runner");
+    expect(text).toContain("reviewer");
+    expect(text).toContain("2 seats");
+    expect(text).not.toContain("Its seats aren't read in this view");
+  });
+
+  it("keeps the rig ps pointer and reads no seats while the toggle is off", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: false };
+    const { text } = await page(fake, "host vps", { type: "drill", resource: "rig", name: "web", target: { host: "vps" } });
+    expect(fake.calls.filter((call) => call.includes("/nodes"))).toEqual([]);
+    expect(text).toContain("Its seats aren't read in this view: rig ps --host vps --nodes --rig web");
+  });
+
+  it("names a failed remote seat read instead of an empty rig", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true, remoteNodesStatus: 502 };
+    const { snap, text } = await page(fake, "host vps", { type: "drill", resource: "rig", name: "web", target: { host: "vps" } });
+    expect(snap.readErrors).toEqual([expect.stringMatching(/^nodes\(web\): .*502/)]);
+    expect(text).toContain("Inventory unavailable for web on vps");
+    expect(text).not.toContain("no seats reported");
+  });
+
+
+  it("a local rig still shows its own inventory states with the remote-seats setting off", async () => {
+    // A failed local nodes read: the local rig's page names it, not an empty rig.
+    const failing: Fake = { calls: [], remoteSeatToggle: false, localNodesStatus: 500 };
+    const { text } = await page(failing, "rig kernel");
+    expect(text).toContain("Inventory unavailable for kernel · refresh to Retry");
+    // And a not-yet-loaded inventory renders Reading…, local wording, host-less.
+    const snap = emptySnapshot();
+    snap.hosts = [{ id: "local", name: "mac", reachable: true, rigs: [{ id: "r-kernel", name: "kernel", pods: [], inventoryNotLoaded: true }] }];
+    const view = createViewState({ instanceId: "local-states", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "kernel" });
+    const reading = renderScreen(view.get(), snap, { cols: 120, rows: 40, colorMode: "none" }).lines.join("\n");
+    expect(reading).toContain("Reading kernel…");
+    expect(reading).not.toContain("Reading kernel on");
+  });
+
+  it("a remote agent page is a read-only view: no local terminal action, an explicit pointer", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { text } = await page(fake, "host vps",
+      { type: "drill", resource: "rig", name: "web", target: { host: "vps" } },
+      { type: "drill", resource: "agent", name: "runner", target: { host: "vps", rig: "web", pod: "ops" } });
+    expect(text).toContain("agent runner");
+    expect(text).not.toContain("agent \"runner\" not in the current snapshot");
+    expect(text).toContain("read-only view");
+    expect(text).not.toContain("Open terminal ▸");
+    // This host's queue-derived sections never appear on a remote seat's page.
+    expect(text).not.toContain("CURRENT WORK");
+    expect(text).not.toContain("UP NEXT");
+    expect(text).not.toContain("NEEDS YOU");
+    expect(text).not.toContain("RECENTLY FINISHED");
+    expect(text).not.toContain("effort");
+  });
+
+  it("a remote agent's QUEUE shows its own inventory's counts or not served — never this host's items", async () => {
+    // This host holds pending and in-progress items for the remote session
+    // name; the remote inventory serves no counts (the REMOTE_NODES fixture).
+    const snap = emptySnapshot();
+    snap.hosts = [
+      { id: "local", name: "mac", reachable: true, rigs: [{ id: "r-kernel", name: "kernel", pods: [{ name: "ops", agents: [{ name: "k1", runtime: "claude", session: "k1@kernel", status: "running" }] }] }] },
+      { id: "vps", name: "vps", reachable: true, rigs: [{ id: "r-web", name: "web", remoteHost: "vps", pods: [{ name: "ops", agents: [{ name: "runner", runtime: "claude", session: "runner@web", status: "running" }] }] }] },
+    ];
+    const localItem = { qitemId: "q-local-1", state: "in-progress", destinationSession: "runner@web", blockedOn: null, handedOffTo: null,
+      tier: null, tags: null, summary: "host-local work under the remote name", body: "x", claimedAt: null, tsUpdated: "2026-10-25T19:00:00.000Z", sourceSession: "whoever" };
+    snap.inProgress = [localItem, { ...localItem, qitemId: "q-k-1", destinationSession: "k1@kernel", summary: "the local seat's own work" }];
+    snap.pending = [{ ...localItem, qitemId: "q-local-2", state: "pending" }];
+    const view = createViewState({ instanceId: "queue-split", getSnapshot: () => snap });
+    const screen = () => renderScreen(view.get(), snap, { cols: 140, rows: 50, colorMode: "none" }).lines.join("\n");
+    // The remote agent: not served, no local note, no local basis, no local rows.
+    view.dispatch({ type: "drill", resource: "agent", name: "runner", target: { host: "vps", rig: "web", pod: "ops" } });
+    const remote = screen();
+    expect(remote).toContain("not served by the remote inventory");
+    expect(remote).not.toContain("Queue sample");
+    expect(remote).not.toContain("rows visible");
+    expect(remote).not.toContain("host-local work");
+    // A local agent still shows its queue, counted from this host's rows.
+    view.dispatch({ type: "drill", resource: "agent", name: "k1", target: { host: "mac", rig: "kernel", pod: "ops" } });
+    const localPage = screen();
+    expect(localPage).toContain("in progress");
+    expect(localPage).toContain("the local seat's own work");
+  });
+
+  it("a filter that matches no remote agent reads differently from a rig that has none", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const filtered = await page(fake, "host vps", { type: "drill", resource: "rig", name: "web", target: { host: "vps" } }, "/no-seat-matches");
+    expect(filtered.text).toContain("no seats match the filter");
+    expect(filtered.text).not.toContain("no seats reported for this rig");
+  });
+
+  it("reads a remote rig's nodes and the toggle only while the TABLE tab is open", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { view, refresh, text } = await page(fake, "host vps",
+      { type: "drill", resource: "rig", name: "web", target: { host: "vps" } });
+    expect(fake.calls).toContain("/api/rigs/r-web/nodes?host=vps");
+    expect(fake.calls).toContain("/api/config?view=browser");
+    fake.calls.length = 0;
+    for (const tab of ["graph", "health", "recent"]) {
+      view.dispatch(parseCommand(`tab ${tab}`));
+      await refresh();
+    }
+    expect(fake.calls.filter((call) => call.includes("/nodes?host=") || call.startsWith("/api/config"))).toEqual([]);
+    expect(text).toContain("seats read through this daemon");
+  });
+
+  it("keeps the other tabs on the CLI pointer when the toggle is on", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { text } = await page(fake, "host vps", { type: "drill", resource: "rig", name: "web", target: { host: "vps" } }, "tab graph");
+    expect(text).toContain("Seats are read on the TABLE tab");
+    expect(text).toContain("rig ps --host vps --nodes --rig web");
+  });
+
+  it("reads no seats for the host page even with the toggle on", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { text } = await page(fake, "host vps");
+    expect(fake.calls.filter((call) => call.includes("/nodes"))).toEqual([]);
+    expect(text).toContain("Its seats aren't read in this view: rig ps --host vps --nodes -A");
   });
 
   it("names a failed remote rigs read instead of calling the host empty", async () => {

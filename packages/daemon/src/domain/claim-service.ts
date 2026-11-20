@@ -115,9 +115,7 @@ interface ClaimServiceDeps {
   claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
   /** Process census for the runtime proof in `reconcileSession`; defaults to the live process table. */
   listProcesses?: NativeProcessLister;
-  resumeTokenCapturer?: {
-    captureCodexThreadId(sessionName: string): Promise<string | undefined>;
-  };
+  resumeTokenCapturer?: ResumeTokenCaptureDeps["resumeTokenCapturer"];
   /** OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader for Pi resume-token capture. */
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
@@ -297,8 +295,10 @@ export class ClaimService {
       // Derivation is the shared PURE helper (OPR.0.4.3.04 B2 — reused by the
       // seat-handover discovered-mode capture); persistence + events stay here so
       // FR-3's adoption provenance/audit semantics are unchanged.
+      const cwd = input.runtime === "claude-code"
+        ? (this.db.prepare("SELECT cwd FROM nodes WHERE id=?").get(input.nodeId) as { cwd: string | null } | undefined)?.cwd ?? undefined : undefined;
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId },
+        { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId, cwd },
         { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return { outcome: derived.outcome };

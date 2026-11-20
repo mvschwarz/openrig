@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -12,7 +12,11 @@ import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summ
 import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
+import {
+  QueueTransitionLog,
+  DEFAULT_RECENT_TRANSITIONS_LIMIT,
+  MAX_RECENT_TRANSITIONS_LIMIT,
+} from "../src/domain/queue-transition-log.js";
 import { queueRoutes } from "../src/routes/queue.js";
 
 describe("RECENT queue transition projection", () => {
@@ -392,7 +396,7 @@ describe("RECENT queue transition projection", () => {
     }
   });
 
-  it("returns only the newest 20 qualifying transitions and refuses an unscoped read", async () => {
+  it("defaults to the newest 20 qualifying transitions and honors higher limits up to the cap", async () => {
     for (let index = 0; index < 24; index += 1) {
       const id = `q-${String(index).padStart(2, "0")}`;
       item(id, "rig-a", "in-progress");
@@ -400,11 +404,40 @@ describe("RECENT queue transition projection", () => {
       transition(id, "in-progress");
     }
 
+    // Default limit is 20
+    const defaultRows = repo.listRecentTransitions("rig-a");
+    expect(defaultRows).toHaveLength(DEFAULT_RECENT_TRANSITIONS_LIMIT);
+    expect(defaultRows[0]?.qitemId).toBe("q-04");
+    expect(defaultRows.at(-1)?.qitemId).toBe("q-23");
+
+    // Higher requested limit returns all 24 items
     const rows = repo.listRecentTransitions("rig-a", 999);
-    expect(rows).toHaveLength(20);
-    expect(rows[0]?.qitemId).toBe("q-04");
+    expect(rows).toHaveLength(24);
+    expect(rows[0]?.qitemId).toBe("q-00");
     expect(rows.at(-1)?.qitemId).toBe("q-23");
 
+    // HTTP route with limit query parameter
+    const responseWithLimit = await app.request("/api/queue/recent-transitions?rig=rig-a&limit=24");
+    expect(responseWithLimit.status).toBe(200);
+    expect(await responseWithLimit.json()).toHaveLength(24);
+
+    // HTTP route with default limit
+    const responseDefault = await app.request("/api/queue/recent-transitions?rig=rig-a");
+    expect(responseDefault.status).toBe(200);
+    expect(await responseDefault.json()).toHaveLength(DEFAULT_RECENT_TRANSITIONS_LIMIT);
+
+    // Limit clamping: above MAX_RECENT_TRANSITIONS_LIMIT clamps to max, non-finite falls back to default
+    const log = new QueueTransitionLog(db);
+    const spy = vi.spyOn(log as any, "newestQualifying");
+    log.listRecent({ kind: "rig", rig: "rig-a" }, MAX_RECENT_TRANSITIONS_LIMIT + 500);
+    expect(spy).toHaveBeenLastCalledWith(expect.any(Array), MAX_RECENT_TRANSITIONS_LIMIT);
+    log.listRecent({ kind: "rig", rig: "rig-a" }, -10);
+    expect(spy).toHaveBeenLastCalledWith(expect.any(Array), 1);
+    log.listRecent({ kind: "rig", rig: "rig-a" }, Number.NaN);
+    expect(spy).toHaveBeenLastCalledWith(expect.any(Array), DEFAULT_RECENT_TRANSITIONS_LIMIT);
+    spy.mockRestore();
+
+    // Unscoped read is refused
     const response = await app.request("/api/queue/recent-transitions");
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "rig_required" });

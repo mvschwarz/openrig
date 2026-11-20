@@ -25,11 +25,33 @@ before committing without the review.
 
 When the goal is done, close the operator's row with the result.
 
-**If a seat you're waiting on stops at a prompt,** for example a reviewer asking to run a command, tell the person in
-your own pane which seat is waiting, exactly what it asks and how to reach it. In
-`rig ps --nodes --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand` that seat shows `needs_input`;
-`rig capture <session>` with its `canonicalSessionName` shows the prompt, and its `tmuxAttachCommand` is the command to
-give (if it has none, give its name). Don't answer another seat's prompt yourself.
+**If a seat you're waiting on stops at a prompt,** for example a reviewer asking to run a command, look at your goal row
+first (`rig queue show <id> --full`). With a `returnRoute`, the person answers from their own conversation, not from your
+pane, so don't ask them here or give them an attach command:
+- **A permission prompt, with a route on this machine** (`<member>@<rig>`, nothing after the rig): OpenRig sends that
+  seat's prompt there as a task while the work is with that seat or your row waits on it (if that task can't be made,
+  the prompt takes its usual route). Hand the work over, or block your row on the seat or its row
+  (`rig queue block <id> --on <seat or row id>`). When more than one return route is
+  involved (another goal waiting on that seat names a different address), nothing chooses between them, so a task may
+  not come: look for one at each address first
+  (`rig queue list --destination <address> --state pending,in-progress,blocked`), and if there's none, ask as in the
+  next item, through the return address of the goal the seat is working on. One answer goes to the seat, and you pass
+  it on.
+- **A choice menu** (a list of options, such as a usage-limit dialog), **or a route that names another machine**
+  (`<member>@<rig>@<host>`): nothing brings it there, so ask the person yourself, as your goal's reply paragraph says.
+  Create a question task to the `returnRoute` exactly as written, with the seat, the prompt's own text and its choices
+  and what the seat was doing, then block your row on it (for a question on another machine,
+  `--on external:<host>/<question id> --wake-after <duration>`: a plain `--on <question id>` is refused there, because
+  that row lives on the other host). You pass their answer on to the seat, and no one else does. If
+  that create is refused because the machine isn't reachable from here, say so on your goal row
+  (`rig queue update <id> --note '<the seat, what it asks, and that the question did not reach them>'`), the record the
+  person's agent follows; your pane doesn't reach them.
+- **No route:** tell the person in your own pane which seat is waiting, exactly what it asks and how to reach it. In
+  `rig ps --nodes --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand` that seat shows `needs_input`;
+  `rig capture <session>` with its `canonicalSessionName` shows the prompt, and its `tmuxAttachCommand` is the command to
+  give (if it has none, give its name).
+
+Don't answer another seat's prompt yourself.
 
 `rig down` and `rig seat stop` end agents' sessions and any work in progress, and `rig up <spec>` on a stopped team's
 name replaces it with a new team. Don't run them unless the person asked; check `rig ps --nodes` first.

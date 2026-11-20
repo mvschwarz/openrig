@@ -116,3 +116,20 @@ describe("activity-relay prompt fingerprint at UserPromptSubmit", () => {
       .not.toHaveProperty("nativePromptId");
   });
 });
+
+describe("activity-relay reports a compaction (#3389)", () => {
+  const identity = { OPENRIG_SESSION_NAME: "dev-impl@r", OPENRIG_NODE_ID: "node-1", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1" };
+  const at = () => new Date("2026-11-17T00:00:00.000Z");
+
+  it("a Claude SessionStart hook with source compact reaches the daemon as SessionStart / compact, with the occupant's generation", () => {
+    const payload = relay.buildOpenRigPayload({ hook_event_name: "SessionStart", session_id: "s-1", source: "compact", transcript_path: "/t/s-1.jsonl" }, identity, at)!;
+    expect(payload).toMatchObject({ hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", runtime: "claude-code", occurredAt: "2026-11-17T00:00:00.000Z" });
+  });
+
+  it("the other ways a session starts do not read as a compaction", () => {
+    for (const source of ["startup", "resume", "clear"]) {
+      const payload = relay.buildOpenRigPayload({ hook_event_name: "SessionStart", session_id: "s-1", source }, identity, at)!;
+      expect(payload).toMatchObject({ hookEvent: "SessionStart", subtype: source });
+    }
+  });
+});

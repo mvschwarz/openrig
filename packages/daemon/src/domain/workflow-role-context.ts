@@ -52,6 +52,7 @@ export interface RoleResolutionContext {
 export function roleResolutionContext(
   db: Database.Database,
   boundRig: string | null | undefined,
+  boundPod?: string | null,
 ): RoleResolutionContext | undefined {
   if (!boundRig) return undefined;
   return {
@@ -62,7 +63,7 @@ export function roleResolutionContext(
         .get(boundRig) as { id: string } | undefined;
       if (!rig) return null;
       const entries = attachTerminalActivityAndWork(getNodeInventory(db, rig.id), { db });
-      return entries.map((e) => ({
+      return entries.filter((e) => !boundPod || e.podNamespace === boundPod).map((e) => ({
         logicalId: e.logicalId,
         role: e.role,
         nodeKind: e.nodeKind,
@@ -105,14 +106,16 @@ export function rigDeclaresRole(
   db: Database.Database,
   boundRig: string,
   role: string,
+  boundPod?: string | null,
 ): boolean {
   const row = db
     .prepare(
       `SELECT COUNT(*) as c FROM nodes n
          JOIN rigs r ON r.id = n.rig_id
-        WHERE r.name = ? AND n.role = ?`,
+         LEFT JOIN pods p ON p.id = n.pod_id
+        WHERE r.name = ? AND n.role = ? AND (? IS NULL OR (p.namespace = ? AND r.id = (SELECT id FROM rigs WHERE name = r.name ORDER BY archived_at IS NOT NULL, created_at LIMIT 1)))`,
     )
-    .get(boundRig, role) as { c: number };
+    .get(boundRig, role, boundPod ?? null, boundPod ?? null) as { c: number };
   return row.c > 0;
 }
 

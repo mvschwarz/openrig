@@ -1,7 +1,7 @@
 // Slice-04 (OPR.0.5.0.4) — the four-block ASSEMBLY (packet 3ffa3c22 §1, proof item 4).
 // A PURE assembler over already-collected inputs (no CLI/auth I/O — collection is a separate
-// seam). It emits real bound rows + explicit unbound rows (seat_with_no_account), computes
-// same_account_on_n_seats ONLY from repeated real account IDs, attaches anomalies
+// seam). It emits real bound rows + explicit unbound rows (no registry placement, no anomaly),
+// computes same_account_on_n_seats ONLY from repeated real account IDs, attaches anomalies
 // deterministically, preserves signals unchanged, and invents no IDs/boundAt/asOf.
 
 import type {
@@ -11,7 +11,6 @@ import type {
   ProviderBinding,
   ProviderSignal,
   SameAccountOnNSeatsAnomaly,
-  SeatWithNoAccountAnomaly,
 } from "./provider-types.js";
 
 /**
@@ -60,20 +59,15 @@ export function assembleFourBlock(input: AssembleInput): FourBlockReadModel {
 
   const bindings: ProviderBinding[] = rawBindings.map((rb) => {
     if (rb.accountId === null) {
-      const anomaly: SeatWithNoAccountAnomaly = {
-        kind: "seat_with_no_account",
-        seat: rb.seatSession,
-        evidence: `seat ${rb.seatSession} in rig ${rb.rigName} has no bound account`,
-        asOf,
-      };
-      // Non-empty tuple: the seat_with_no_account anomaly is required and always first.
+      // No applicable registry placement says nothing about the account the seat uses, so it isn't an anomaly:
+      // the null placement fields already state the measured fact.
       return {
         accountId: null,
         seatSession: rb.seatSession,
         rigName: rb.rigName,
         boundAt: null,
         bindingSource: null,
-        anomalies: [anomaly],
+        anomalies: [],
       };
     }
     const shared = sharedAnomalyByAccount.get(rb.accountId);

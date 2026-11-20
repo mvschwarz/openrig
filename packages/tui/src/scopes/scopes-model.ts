@@ -298,6 +298,8 @@ export interface ScopeContentOpts {
   narrative: boolean;
   width: number;
   executionStrip?: ContentLine[];
+  /** Suppress the local-pane key hints (N/M) in panes that don't honour them. */
+  suppressHints?: boolean;
 }
 
 /** The header's proof count. With a judgment policy actually present it counts accepted items and is ok only
@@ -420,7 +422,9 @@ export function scopesContentLines(
   if (opts.executionStrip?.length) lines.push(...opts.executionStrip);
   lines.push(...proofProvenanceLines(detail.readiness, w));
   lines.push(...scopeContractLines(detail, opts));
-  lines.push({ text: "" }, semantic([{
+  // The fleet view has no N/M keys; it suppresses the hint line rather than
+  // promising navigation the surrounding pane doesn't honour.
+  if (!opts.suppressHints) lines.push({ text: "" }, semantic([{
     text: opts.narrative ? "  esc back · N narrative · M reqs · : command bar" : "  esc back · M collapse reqs · N narrative · : command bar",
     token: "dim",
   }], w));

@@ -100,6 +100,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/missions/release-0.4.6",
       "/api/specs/library",
       "/api/specs/library/rig-spec-1/review",
+      "/api/scopes/slice", // #3093 fleet Projects: a fleet slice's detail keeps its origin host
     ];
     for (const p of positives) expect(isReadThroughPath(p), p).toBe(true);
   });
@@ -121,6 +122,10 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/rigs/x/nodes/y/focus",
       "/api/rigs/x/nodes/y/open-cmux",
       "/api/rigs/x/nodes/y/anything/deeper",
+      "/api/scopes", // the fleet list read is aggregated daemon-side (/api/scopes/fleet), not per-request read-through
+      "/api/scopes/fleet", // never re-forwarded: a forwarded request structurally cannot re-forward
+      "/api/scopes/narrative", // not part of the #3093 increment
+      "/api/scopes/slice/extra/deeper", // strict shape: exactly mission+slice, nothing deeper
     ];
     for (const p of negatives) expect(isReadThroughPath(p), p).toBe(false);
   });
@@ -148,6 +153,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/missions/:missionId",
       "/api/specs/library",
       "/api/specs/library/:id/review",
+      "/api/scopes/slice", // #3093 fleet Projects read-view
     ]);
   });
 });

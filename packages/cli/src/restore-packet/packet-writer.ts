@@ -264,12 +264,15 @@ export async function writePacket(opts: WritePacketOptions): Promise<WritePacket
   const tempDir = mkdtempSync(join(parentDir, tempPrefix));
 
   try {
-    writeFileSync(join(tempDir, "restore-instructions.md"), restoreInstructions, "utf-8");
-    writeFileSync(join(tempDir, "transcript-latest.md"), transcriptLatest, "utf-8");
-    writeFileSync(join(tempDir, "touched-files.md"), touchedFiles, "utf-8");
-    writeFileSync(join(tempDir, "restore-summary.json"), JSON.stringify(summary, null, 2), "utf-8");
+    // Owner-only: the packet holds the source seat's conversation text. mkdtemp already creates the
+    // directory 0o700 on POSIX; the files inside are created by this call, so their mode is set here.
+    const packetFileMode = 0o600;
+    writeFileSync(join(tempDir, "restore-instructions.md"), restoreInstructions, { encoding: "utf-8", mode: packetFileMode });
+    writeFileSync(join(tempDir, "transcript-latest.md"), transcriptLatest, { encoding: "utf-8", mode: packetFileMode });
+    writeFileSync(join(tempDir, "touched-files.md"), touchedFiles, { encoding: "utf-8", mode: packetFileMode });
+    writeFileSync(join(tempDir, "restore-summary.json"), JSON.stringify(summary, null, 2), { encoding: "utf-8", mode: packetFileMode });
     if (transcriptFull !== null) {
-      writeFileSync(join(tempDir, "transcript.md"), transcriptFull, "utf-8");
+      writeFileSync(join(tempDir, "transcript.md"), transcriptFull, { encoding: "utf-8", mode: packetFileMode });
     }
 
     // Re-validate by parsing the on-disk summary (round-trip self-check).

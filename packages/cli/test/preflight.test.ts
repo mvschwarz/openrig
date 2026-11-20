@@ -167,7 +167,7 @@ describe("SystemPreflight", () => {
       setTimeout: vi.fn(), destroy: vi.fn(),
       connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("blocked"), { code }))); },
     });
-    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(function () { return socket as unknown as net.Socket; });
     try {
       const result = await createPreflight().run({ port: 7433 });
       expect(result.ready).toBe(true);
@@ -188,7 +188,7 @@ describe("SystemPreflight", () => {
       daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", healthy: true },
     });
     // A regressed skip would fail at construction before it could reach any socket.
-    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => {
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(function () {
       throw new Error("same-endpoint preflight must not construct a probe socket");
     });
     try {
@@ -215,7 +215,7 @@ describe("SystemPreflight", () => {
         queueMicrotask(() => socket.emit("error", Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })));
       }),
     });
-    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(function () { return socket as unknown as net.Socket; });
     try {
       const result = await pf.run({ port: 7433, host: "10.0.0.5" });
       const portCheck = result.checks.find((c) => c.name === "port_available");

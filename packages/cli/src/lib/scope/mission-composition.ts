@@ -122,6 +122,25 @@ export function planMissionMembershipRemove(
   return renderEdit(loaded, members);
 }
 
+export function planMissionMembershipSetActive(
+  missionPath: string,
+  ref: string,
+  active: boolean,
+): MissionCompositionEdit | null {
+  const loaded = loadMissionComposition(missionPath);
+  if (!loaded) return null;
+  const normalized = path.normalize(ref);
+  const existing = loaded.members.find((member) => path.normalize(member.ref) === normalized);
+  if (!existing) {
+    fail(`Mission composition does not contain ${ref}.`);
+  }
+  if (existing.active === active) return null;
+  const members = loaded.members.map((member) =>
+    path.normalize(member.ref) === normalized ? { ...member, active } : member,
+  );
+  return renderEdit(loaded, members);
+}
+
 export function nextMissionMembershipOrder(missionPath: string): number {
   const members = loadMissionComposition(missionPath)?.members ?? [];
   return (members.at(-1)?.order ?? 0) + 10;

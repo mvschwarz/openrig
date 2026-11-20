@@ -304,11 +304,16 @@ export async function verifyChannelMembership(
   channel: string,
   fetchImpl: FetchImpl = defaultFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<{ ok: boolean; isMember: boolean; name?: string; error?: string }> {
+): Promise<{ ok: boolean; isMember: boolean; isPrivate: boolean | null; name?: string; error?: string }> {
   const r = await callWebApi("conversations.info", token, { channel }, fetchImpl, timeoutMs, "get-query");
-  if (!r.ok) return { ok: false, isMember: false, error: r.error };
-  const ch = (r.json.channel ?? {}) as { is_member?: boolean; name?: string };
-  return { ok: true, isMember: ch.is_member === true, name: ch.name };
+  if (!r.ok) return { ok: false, isMember: false, isPrivate: null, error: r.error };
+  const ch = (r.json.channel ?? {}) as { is_member?: boolean; is_private?: unknown; name?: string };
+  return {
+    ok: true,
+    isMember: ch.is_member === true,
+    isPrivate: typeof ch.is_private === "boolean" ? ch.is_private : null,
+    name: ch.name,
+  };
 }
 
 /** One page of a directory read: only the projected fields, never Slack's whole object; on failure, Slack's own result. */

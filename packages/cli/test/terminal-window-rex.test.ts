@@ -62,12 +62,29 @@ function fixture(o: Options = {}) {
 }
 
 describe("rig terminal open --window from Rex", () => {
+  it("authenticates terminal preview and status GETs with the terminal bearer", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "synthetic-terminal-rex-token");
+    try {
+      const f = fixture();
+      const result = await openTerminalWindow(f.client, "acme", undefined, f.deps);
+      expect(result.ok).toBe(true);
+      const options = { headers: { Authorization: "Bearer synthetic-terminal-rex-token" } };
+      expect(f.get).toHaveBeenCalledWith("/api/terminal/status?provider=rex", options);
+      expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=acme&provider=rex&viewportColumns=132", options);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("opens the view in the caller's own Rex server and switches the app that shows it", async () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps, "rex-plan");
     expect(result).toMatchObject({ provider: "rex", ok: true, opened: ["op@acme"], space: { id: "session:new", label: "acme" } });
     expect(result.notes).toEqual(['The Rex app "laptop" switched to session "acme".']);
-    expect(f.get.mock.calls.map(([url]) => url)).toEqual(["/api/terminal/status?provider=rex", "/api/terminal/preview?view=acme&provider=rex&viewportColumns=132"]);
+    expect(f.get.mock.calls).toEqual([
+      ["/api/terminal/status?provider=rex", { headers: {} }],
+      ["/api/terminal/preview?view=acme&provider=rex&viewportColumns=132", { headers: {} }],
+    ]);
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "acme", provider: "rex", expectedPlan: "rex-plan", viewportColumns: 132 }, { timeoutMs: 45_000 });
     expect(f.rexCalls()).toEqual([
       "whoami",
@@ -141,7 +158,7 @@ describe("rig terminal open --window from Rex", () => {
     expect(result.error).toContain("this terminal uses a different Rex server than the daemon");
     expect(result.error).toContain("rig terminal open 'acme' --window --provider herdr");
     expect(f.post).not.toHaveBeenCalled();
-    expect(f.get.mock.calls.map(([url]) => url)).toEqual(["/api/terminal/status?provider=rex"]);
+    expect(f.get.mock.calls).toEqual([["/api/terminal/status?provider=rex", { headers: {} }]]);
   });
 
   it.each([

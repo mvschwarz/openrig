@@ -455,3 +455,19 @@ it("binds authority categories and slice IDs to the finding scope", async () => 
   const unscoped = healthAuthority(workspace, t.source, { ...finding, scope: { type: "rig", rigId: "rig" } });
   expect(unscoped.filter((a) => (a as { level?: string }).level !== "project").every((a) => a.state === "unavailable")).toBe(true);
 });
+
+// A maintenance hold must not spend a representation receipt without a send.
+it("defers a drained diagnosis representation before its receipt, then resumes on END", async () => {
+  const t=setup(); const p=t.policy.read().policy;
+  t.db.prepare("INSERT OR IGNORE INTO rigs (id,name) VALUES ('drain-rig','rig')").run();
+  const send=vi.fn(async()=>({ok:true,verified:true}));t.queue.attachTransport({send});
+  t.policy.apply({...p,freshnessSeconds:86400,diagnosis:{...p.diagnosis,enabled:true,owner:"owner@rig",cooldownSeconds:60}},"actor@rig");
+  const first=await t.service.evaluate("actor@rig",true);const id=first.actions[0]!.qitemId!;
+  const jobs=new (await import("../src/domain/watchdog-jobs-repository.js")).WatchdogJobsRepository(t.db);
+  const drain=t.queue.deliveryDrains.begin("drain-rig",{drainId:"window",owner:"owner@rig",reviewAt:"2026-11-15T00:00:00Z"},jobs);
+  const receipts=t.service.show(id).receipts.filter(r=>r.action==="presented"); t.tick("2026-09-05T21:01:01Z");
+  expect((await t.service.evaluate("actor@rig",true)).actions[0]?.action).toBe("deferred");
+  expect(t.service.show(id).receipts.filter(r=>r.action==="presented")).toEqual(receipts);expect(send).toHaveBeenCalledTimes(1);
+  t.queue.deliveryDrains.end(drain.rigId,drain.drainId,jobs);expect((await t.service.evaluate("actor@rig",true)).actions[0]?.action).toBe("represent");
+  expect(send).toHaveBeenCalledTimes(2);
+});

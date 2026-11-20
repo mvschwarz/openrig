@@ -18,16 +18,22 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 
 def inject(directory, real, args):
-    """A person typing between OpenRig's last read of the input box and its paste, on purpose (issue #3076's gap).
+    """A person typing into the seat's pane at one exact point of OpenRig's write, on purpose.
 
-    A case arms it by writing <directory>/arm.json: {"pane": "%0", "text": "...", "bufferPrefix": "openrig_"}. The
-    next paste-buffer aimed at exactly that pane, from a buffer with that prefix, claims the arm (an atomic rename,
-    so it fires once), types the text into the pane as keys, waits until a capture shows it, and only then lets the
-    paste run. What happened is written to <directory>/fired.json. Any other tmux call passes untouched."""
+    A case arms it by writing <directory>/arm.json: {"pane": "%0", "text": "...", "bufferPrefix": "openrig_",
+    "at": "pre-paste" | "pre-enter"}. The next paste-buffer aimed at exactly that pane, from a buffer with that prefix,
+    claims the arm (an atomic rename, so it fires once).
+    - "pre-paste" (the default; issue #3076's gap): types the text, waits until a capture shows it, and only then lets
+      the paste run.
+    - "pre-enter" (#3176's gap): lets the paste run and finish first, then types the text and waits until it shows,
+      before OpenRig's own read of the input that precedes its Enter.
+    What happened is written to <directory>/fired.json. Any other tmux call passes untouched. Returns the exit code to
+    leave with when this call already ran the paste itself, else None."""
     target = args[args.index("-t") + 1] if "-t" in args[:-1] else None
     buffer = args[args.index("-b") + 1] if "-b" in args[:-1] else None
     arm = os.path.join(directory, "arm.json")
@@ -41,7 +47,13 @@ def inject(directory, real, args):
     if target != spec["pane"] or not (buffer or "").startswith(spec.get("bufferPrefix", "openrig_")):
         os.rename(claimed, arm)  # not the armed write: leave the arm for it
         return
-    record = {"target": target, "buffer": buffer, "text": spec["text"], "pid": os.getpid(), "claimedNs": time.time_ns()}
+    at = spec.get("at", "pre-paste")
+    record = {"at": at, "target": target, "buffer": buffer, "text": spec["text"], "pid": os.getpid(), "claimedNs": time.time_ns()}
+    paste_rc = None
+    if at == "pre-enter":
+        paste_rc = subprocess.run([real, *args], check=False).returncode
+        record.update({"pasteRc": paste_rc, "pasteDoneNs": time.time_ns(),
+                       "screenAfterPaste": subprocess.run([real, "capture-pane", "-p", "-t", target], capture_output=True, text=True).stdout})
     before = subprocess.run([real, "capture-pane", "-p", "-t", target], capture_output=True, text=True).stdout
     record["screenBeforeTyping"] = before
     subprocess.run([real, "send-keys", "-t", target, "-l", spec["text"]], check=False)
@@ -55,10 +67,17 @@ def inject(directory, real, args):
             visible = True
             break
         time.sleep(0.05)
-    record.update({"visible": visible, "visibleNs": time.time_ns(), "screenBeforePaste": screen})
-    fd = os.open(os.path.join(directory, "fired.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False)
+    record.update({"visible": visible, "visibleNs": time.time_ns(), "screenAfterTyping" if at == "pre-enter" else "screenBeforePaste": screen})
+    # Readers see either no receipt or the complete JSON; the claimed arm still fires only once.
+    fd, pending = tempfile.mkstemp(prefix=".fired-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False)
+        os.replace(pending, os.path.join(directory, "fired.json"))
+    finally:
+        if os.path.exists(pending):
+            os.unlink(pending)
+    return paste_rc
 
 real = os.environ["DELIVERY_REAL_TMUX"]
 log = os.environ["DELIVERY_TMUX_LOG"]
@@ -86,5 +105,7 @@ try:
 finally:
     os.close(fd)
 if os.environ.get("DELIVERY_INJECT_DIR") and sys.argv[1:2] == ["paste-buffer"]:
-    inject(os.environ["DELIVERY_INJECT_DIR"], real, sys.argv[1:])
+    pasted = inject(os.environ["DELIVERY_INJECT_DIR"], real, sys.argv[1:])
+    if pasted is not None:
+        sys.exit(pasted)  # the pre-enter injection ran the paste itself
 os.execv(real, [real, *sys.argv[1:]])

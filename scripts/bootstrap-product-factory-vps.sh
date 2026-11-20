@@ -92,7 +92,11 @@ node --version
 tmux -V
 
 step "6/8 OpenRig from the published artifact (no manual package patching)"
-sudo -u openrig -H bash -lc "npm install -g '$ARTIFACT' || sudo npm install -g '$ARTIFACT'"
+# The artifact travels as a POSITIONAL PARAMETER, never spliced into the command text: an apostrophe
+# in the value would otherwise close the quoting and the rest would run as shell text — as root, on a
+# host this script just gave NOPASSWD sudo. Inside the shell it stays "$1", quoted, so a path with
+# spaces or an apostrophe arrives whole.
+sudo -u openrig -H bash -lc 'npm install -g "$1" || sudo npm install -g "$1"' _ "$ARTIFACT"
 sudo -u openrig -H bash -lc "rig --version"
 
 step "7/8 daemon + kernel"
