@@ -43,7 +43,10 @@ async function counted(substantive: number, steps: Step[]): Promise<number[] | n
   const now = new Date(Date.parse(start) + (at + 1) * 1000).toISOString();
   const policy = new HealthPolicyStore(home, () => ({ warningPercent: 95, criticalPercent: 99 }));
   const projection = new HealthProjectionService(new PassiveCeremonySource(workspace, queue, policy, () => now), () => policy.read(), delegatedPostureFixture);
-  return projection.list().records[0]?.ceremony?.transitionIds ?? null;
+  const listed = projection.list();
+  const unavailable = listed.coverage?.find((c) => c.status === "unavailable");
+  if (unavailable) throw new Error(`ceremony source unavailable: ${unavailable.reason}`);
+  return listed.records[0]?.ceremony?.transitionIds ?? null;
 }
 
 const episodes = (n: number, ack: Step = park()) => Array.from({ length: n }, () => [wake, ack]).flat();
@@ -91,4 +94,14 @@ it("a different seat's park becomes the parking seat: its own later unchanged ac
   expect(await counted(18, [park(), wake, peer, wake, peer])).toHaveLength(20);
   // The owner's acknowledgement now follows the peer's park, so it counts.
   expect(await counted(18, [park(), wake, peer, wake, park()])).toHaveLength(21);
+});
+
+it("a park after the parked-owner episode closed is a new park, not an acknowledgement", async () => {
+  const closed: Step = { state: "blocked", actor: "owner@rig", note: "parked-owner episode closed: wait ended", target: BLOCKER };
+  expect(await counted(18, [park(), wake, park(), closed, park()])).toHaveLength(20);
+});
+
+it("a parked-owner wake note is a wake: the owner's unchanged acknowledgement is excluded", async () => {
+  const reminder: Step = { state: "blocked", actor: "owner@rig", note: "parked-owner wake delivered: reminder sent", target: BLOCKER };
+  expect(await counted(18, [park(), reminder, park()])).toBeNull();
 });

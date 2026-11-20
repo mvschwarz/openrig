@@ -3,6 +3,7 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { QueueRepository } from "./queue-repository.js";
 import { CONTINUATION_MARKER } from "./queue-transition-log.js";
+import { DELIVERED_PREFIX, FAILED_PREFIX, HELD_PREFIX, REFUSED_PREFIX, RESERVE_PREFIX } from "./policies/parked-owner-consumer.js";
 import type { HealthCheckpointSource } from "./health-checkpoints.js";
 import type { OperatingPostureService } from "./rig-mode/operating-posture.js";
 import { readHealthArtifact, healthSelectedContext } from "./health-context.js";
@@ -39,8 +40,9 @@ function isCoordinationTransition(t: { actorSession: string; transitionNote: str
   return !note || !DAEMON_BOOKKEEPING_NOTE_PREFIXES.some((prefix) => note.startsWith(prefix));
 }
 
-/** Wake notes the daemon writes on a parked row while the owner's wait is unchanged. */
-const WAKE_NOTE_PREFIXES = ["park wake ", "parked-owner "] as const;
+/** Wake notes the daemon writes on a parked row while the owner's wait is unchanged. The parked-owner
+ * "episode closed" note is bookkeeping but not a wake: the wait ended, so a park after it is a new one. */
+const WAKE_NOTE_PREFIXES = ["park wake ", RESERVE_PREFIX, DELIVERED_PREFIX, REFUSED_PREFIX, FAILED_PREFIX, HELD_PREFIX] as const;
 
 /**
  * The transitions seats decided, in transition order. An owner's note-only blocked -> blocked
