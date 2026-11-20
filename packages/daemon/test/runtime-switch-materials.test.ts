@@ -261,6 +261,22 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
     });
   });
 
+  // The saved startup context is what a launch actually read the spec from, so a `local:` ref must not add a second
+  // candidate beside it: two roots that pass the same name check read as ambiguous and refuse a switch that used to work.
+  it("a nested rig.yaml does not add a second candidate to a source the saved context already names", () => {
+    // The seat's cwd carries its own rig.yaml, so the ref would resolve to a copy under project/agents/impl whose spec
+    // name matches. The saved context names the real source; the copy must not be read as a second answer.
+    const project = nodePath.join(tmp, "rig", "project");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(nodePath.join(project, "rig.yaml"), "version: \"0.2\"\nname: nested\npods: []\n");
+    const nested = nodePath.join(project, "agents", "impl");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(nodePath.join(nested, "agent.yaml"), "name: impl\nversion: \"1.0.0\"\nstartup:\n  files: []\n  actions: []\n");
+    const node = seat("codex");
+    node.cwd = project;
+    expect(plan(node, "codex", "claude-code").resolvedSpec?.name).toBe("impl");
+  });
+
   // #2456: the switch's preparation writes the successor's guidance through the target adapter, as a start does. A block
   // OpenRig wrote is refreshed from its changed source, and one a person edited since is kept.
   describe("the preparation and a managed guidance block OpenRig wrote (#2456)", () => {

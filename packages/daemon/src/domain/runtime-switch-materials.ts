@@ -225,32 +225,37 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
 }
 
 function findAgentSource(node: Node, saved: ParsedStartupContext, fsOps: AgentResolverFsOps) {
-  // The rig root isn't recorded, so the agent spec is found where the saved launch read it from.
-  const candidates = new Set<string>();
-  if (node.agentRef?.startsWith("path:")) candidates.add(node.agentRef.slice("path:".length));
-  // A `local:` ref resolves against the rig root, which isn't recorded either. Its remainder is taken two ways: as an
-  // absolute path, and against each ancestor of the seat's cwd that carries a rig.yaml — the root a launch resolved it
-  // from. The walk stops at that marker, so it can't wander into an unrelated `agents/` directory higher up.
+  // The saved startup context is what the launch read the spec from, so it is read first. A ref-derived candidate is a
+  // fallback for a seat whose saved context names no owner root — never a peer of a known source, because two roots
+  // that both pass the name check read as ambiguous and would refuse a switch that used to resolve.
+  const savedRoots = new Set<string>();
+  if (node.agentRef?.startsWith("path:")) savedRoots.add(node.agentRef.slice("path:".length));
+  for (const entry of saved.plan.entries) savedRoots.add(reanchorShippedProjectionEntry(entry).sourcePath);
+  for (const file of saved.resolvedStartupFiles) savedRoots.add(reanchorBuiltinStartupFile(file).ownerRoot);
+  const sources = (roots: Set<string>) => [...roots]
+    .filter((root) => nodePath.isAbsolute(root) && fsOps.exists(nodePath.join(root, "agent.yaml")))
+    .map((root) => resolveAgentRef(`path:${root}`, root, fsOps))
+    .flatMap((result) => result.ok && result.resolved.spec.name === node.resolvedSpecName ? [result] : []);
+  const fromSaved = sources(savedRoots);
+  // A `local:` ref resolves against the rig root, which isn't recorded. Its remainder is taken two ways: as an absolute
+  // path, and against each ancestor of the seat's cwd that carries a rig.yaml — the root a launch resolved it from. The
+  // walk stops at that marker, so it can't wander into an unrelated `agents/` directory higher up.
+  const refRoots = new Set<string>();
   if (node.agentRef?.startsWith("local:")) {
     const remainder = node.agentRef.slice("local:".length);
-    if (remainder && nodePath.isAbsolute(remainder)) candidates.add(remainder);
+    if (remainder && nodePath.isAbsolute(remainder)) refRoots.add(remainder);
     if (remainder && !nodePath.isAbsolute(remainder) && node.cwd && nodePath.isAbsolute(node.cwd)) {
       for (let dir = nodePath.dirname(nodePath.join(node.cwd, "x")); ; dir = nodePath.dirname(dir)) {
         if (fsOps.exists(nodePath.join(dir, "rig.yaml"))) {
-          candidates.add(nodePath.resolve(dir, remainder));
+          refRoots.add(nodePath.resolve(dir, remainder));
           break;
         }
         if (dir === nodePath.dirname(dir)) break;
       }
     }
   }
-  for (const entry of saved.plan.entries) candidates.add(reanchorShippedProjectionEntry(entry).sourcePath);
-  for (const file of saved.resolvedStartupFiles) candidates.add(reanchorBuiltinStartupFile(file).ownerRoot);
-  const sources = [...candidates]
-    .filter((root) => nodePath.isAbsolute(root) && fsOps.exists(nodePath.join(root, "agent.yaml")))
-    .map((root) => resolveAgentRef(`path:${root}`, root, fsOps))
-    .flatMap((result) => result.ok && result.resolved.spec.name === node.resolvedSpecName ? [result] : []);
-  const unique = new Map(sources.map((source) => [source.resolved.sourcePath, source]));
+  const found = fromSaved.length ? fromSaved : sources(refRoots);
+  const unique = new Map(found.map((source) => [source.resolved.sourcePath, source]));
   if (unique.size !== 1) {
     throw new Error(unique.size === 0
       ? `The seat's agent spec (${node.resolvedSpecName ?? node.agentRef}) wasn't found where its last launch read it.`
