@@ -14,6 +14,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import { communityHarnessAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import type { EventBus } from "./event-bus.js";
@@ -156,11 +157,14 @@ interface SwitchRow {
 const NO_PANE = "it has no bound tmux pane";
 
 /** The community harness a seat was launched for, from its bound session's retained selection. Null when it has none,
- *  or when the schema predates that column. */
+ *  or when the schema predates that column.
+ *
+ *  Ordered by creation, not `updated_at`: a session row has no `updated_at` column (migration 002 creates it with
+ *  `created_at` only), so ordering by it threw and the catch below turned every community seat into "no selection". */
 function seatCommunityHarnessSelect(db: Database.Database, nodeId: string): string | null {
   try {
     const row = db.prepare(`SELECT ${sessionCommunityHarnessSelect(db)} AS app FROM sessions s
-      WHERE s.node_id = ? ORDER BY s.updated_at DESC LIMIT 1`).get(nodeId) as { app?: string | null } | undefined;
+      WHERE s.node_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`).get(nodeId) as { app?: string | null } | undefined;
     return row?.app ?? null;
   } catch { return null; }
 }
@@ -333,7 +337,11 @@ export class SeatRuntimeSwitchService {
     // A built-in target has its adapter in the map. A community target's comes from its installed preset, resolved the same
     // way a relaunch resolves a seat's own harness, so a staged successor can actually start on it.
     if (!this.deps.runtimeAdapters?.[target] && !communityHarnessAdapter(this.deps.runtimeAdapters, target)) {
-      return refuse("runtime_target_unavailable", `${target} isn't available on this daemon, so no successor can start here.`);
+      // A harness name is the common typo (`--runtime cluade`), and naming the list is what tells them it's a harness.
+      const harness = isCommunityHarnessRuntime(target);
+      return refuse("runtime_target_unavailable", harness
+        ? `no installed community harness is named ${target}, so no successor can start here. List the ones this daemon has with "rig community-harness list".`
+        : `${target} isn't available on this daemon, so no successor can start here.`);
     }
 
     // Settings: the target's explicit permission choice, else member and rig policy. Never the source's selection.
@@ -356,7 +364,7 @@ export class SeatRuntimeSwitchService {
       if (!saved.ok && node.agentRef) return refuse("runtime_target_unavailable", saved.refusal.message);
       materials = planRuntimeSwitchMaterials({ db, node, rigName: status.status.rig_name, canonicalSession: sessionName!, runtime: target,
         explicit, saved: saved.ok ? saved.context : null, claudeManagedBlockFile: rigRepo.getRigClaudeManagedBlockFile(node.rigId) ?? undefined,
-        resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
+        rigRoot: rigRepo.getRigInstallRoot(node.rigId), resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
     } catch (error) { return refuse("runtime_target_unavailable", (error as Error).message); }
 
     // An explicit Codex target mode replaces the seat's envelope, which the commit clears; inherit keeps it.
@@ -651,13 +659,24 @@ export class SeatRuntimeSwitchService {
       const successor = sessionRegistry.registerClaimedSession(node.id, ctx.sessionName, "handover", ctx.successorGeneration);
       if (sessionRegistry.currentOccupantTenure(node.id)?.generationUuid !== ctx.successorGeneration) throw new Error("the successor's generation couldn't be recorded");
       db.prepare("UPDATE sessions SET origin = 'launched', restore_policy = ? WHERE id = ?").run(ctx.restorePolicy, successor.id);
+      // A successor on a community harness keeps that fact on its session, as a fresh launch and a restore both record it:
+      // without it a relaunch or restore can't resolve the harness, and switching back is refused.
+      if (isCommunityHarnessRuntime(target)) {
+        const found = loadCommunityHarnessPreset(target);
+        sessionRegistry.recordCommunityHarnessSelection(successor.id, target,
+          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined);
+      }
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
       const hooked = db.prepare("SELECT successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_token: string | null };
       const nativeId = hooked.successor_resume_token ?? ctx.launchResume?.token;
       if (nativeId) {
-        const token = validateResumeToken(target, nativeId);
-        if (token.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hooked.successor_resume_token ? "hook" : "scrape");
+        // A community harness's launcher reports `community:<name>`; that type is the preset's own, not a built-in's, so it is
+        // accepted here when it names this target. The built-in validator still decides every built-in token.
+        const communityToken = isCommunityHarnessRuntime(target) && nativeId.startsWith(`community:${target}`)
+          ? { ok: true as const, resumeType: `community:${target}`, token: nativeId } : null;
+        const token = communityToken ?? (isCommunityHarnessRuntime(target) ? null : validateResumeToken(target, nativeId));
+        if (token?.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hooked.successor_resume_token ? "hook" : "scrape");
       }
       const observations = new AppliedLaunchObservationStore(db);
       observations.invalidateGeneration(ctx.predecessorGeneration);

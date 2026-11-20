@@ -33,19 +33,15 @@ it("retains history when a switch may name a community harness", () => {
   } finally { db.close(); }
 });
 
-it("keeps existing permission selections and lets a runtime name be stored", () => {
+it("keeps the permission table's closed list: only the built-in choices the validator writes", () => {
   const db = createDb();
   try {
-    migrate(db, ALL_MIGRATIONS.filter(migration => migration.name !== communityHarnessRuntimeSwitchesSchema.name));
-    db.exec("INSERT INTO rigs (id, name) VALUES ('rig', 'perms'); INSERT INTO nodes (id, rig_id, logical_id) VALUES ('seat', 'rig', 'dev.impl'), ('seat2', 'rig', 'dev.impl2');");
-    db.prepare("INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason) VALUES ('seat', 'codex', 'floor', 'me', 'why')").run();
-    const before = db.prepare("SELECT * FROM node_permission_selections").all();
     migrate(db, ALL_MIGRATIONS);
-    expect(db.prepare("SELECT * FROM node_permission_selections").all()).toEqual(before);
-    // The service still limits an explicit choice to two runtimes; the table only stops refusing a stored name.
-    db.prepare("INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason) VALUES ('seat2', 'cursor', 'floor', 'me', 'why')")
-      .run();
-    expect(db.prepare("SELECT runtime FROM node_permission_selections WHERE node_id = 'seat2'").get()).toEqual({ runtime: "cursor" });
+    db.exec("INSERT INTO rigs (id, name) VALUES ('rig', 'perms'); INSERT INTO nodes (id, rig_id, logical_id) VALUES ('seat', 'rig', 'dev.impl');");
+    // The native-permission validator writes only these two, so the column keeps saying exactly that.
+    db.prepare("INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason) VALUES ('seat', 'codex', 'floor', 'me', 'why')").run();
+    expect(db.prepare("SELECT runtime FROM node_permission_selections").get()).toEqual({ runtime: "codex" });
+    expect(() => db.prepare("INSERT INTO node_permission_selections (node_id, runtime, mode, actor, reason) VALUES ('seat', 'cursor', 'floor', 'me', 'why')").run()).toThrow();
     expect(db.pragma("foreign_key_check")).toEqual([]);
   } finally { db.close(); }
 });

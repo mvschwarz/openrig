@@ -8,8 +8,8 @@ import type { Migration } from "../migrate.js";
  * name the daemon could launch. The CHECK keeps a non-empty name rather than a closed list, because a preset can be
  * installed or removed without rewriting this history.
  *
- * `node_permission_selections`: an explicit choice is still limited to codex/claude-code in code, so this only keeps the
- * table from rejecting a row that a future runtime's choice would write. Existing rows are copied unchanged.
+ * `node_permission_selections` is deliberately NOT widened: the native-permission validator only ever writes `codex` or
+ * `claude-code` there, so its closed list still describes every value the code can produce.
  */
 export const communityHarnessRuntimeSwitchesSchema: Migration = {
   name: "179_community_harness_runtime_switches.sql",
@@ -51,17 +51,5 @@ export const communityHarnessRuntimeSwitchesSchema: Migration = {
       WHERE phase IN ('preparing', 'confirmed', 'committed');
     CREATE INDEX idx_seat_runtime_switches_predecessor ON seat_runtime_switches(node_id, predecessor_generation)
       WHERE committed_at IS NOT NULL;
-
-    CREATE TABLE node_permission_selections_runtime (
-      node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-      runtime TEXT NOT NULL CHECK (length(trim(runtime)) > 0),
-      mode TEXT NOT NULL,
-      actor TEXT NOT NULL,
-      reason TEXT NOT NULL,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    INSERT INTO node_permission_selections_runtime SELECT * FROM node_permission_selections;
-    DROP TABLE node_permission_selections;
-    ALTER TABLE node_permission_selections_runtime RENAME TO node_permission_selections;
   `,
 };

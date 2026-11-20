@@ -259,6 +259,35 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
       expect(() => planFrom(node, "codex"))
         .toThrow(/agent spec \(impl\) wasn't found where its last launch read it/);
     });
+
+    it("resolves against the root the rig recorded, not a project's own rig.yaml", () => {
+      // The project carries its own rig.yaml with a same-named agents/impl: only the recorded root may decide.
+      const project = nodePath.join(tmp, "project");
+      mkdirSync(nodePath.join(project, "agents", "impl"), { recursive: true });
+      writeFileSync(nodePath.join(project, "rig.yaml"), "version: \"0.2\"\nname: nested\npods: []\n");
+      writeFileSync(nodePath.join(project, "agents", "impl", "agent.yaml"), "name: impl\nversion: \"1.0.0\"\nstartup:\n  files: []\n  actions: []\n");
+      const node = seat("codex");
+      node.cwd = project;
+      const materials = planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig",
+        runtime: "claude-code", explicit: {}, saved: contextless(node, "codex"), rigRoot: nodePath.join(tmp, "rig"),
+        openrigHome: home, resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+      // The recorded root's spec wins; the project copy never stands in.
+      expect(materials.resolvedSpec?.name).toBe("impl");
+      expect(nodePath.isAbsolute(nodePath.join(tmp, "rig", "agents", "impl"))).toBe(true);
+    });
+  });
+
+  // A community harness takes no startup files, so `send_text` material must not be queued into its handover. The
+  // identity line still travels (it is what the seat needs); a seat's own role file does not.
+  it("queues no send_text startup material for a community harness target", () => {
+    const node = seat("codex");
+    const saved = savedContext(node, "codex");
+    const materials = planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig",
+      runtime: "cursor", explicit: {}, saved, openrigHome: home,
+      resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+    expect(materials.firstTurn).toContain("Identity:");
+    expect(materials.firstTurn).not.toContain("The implementer's role");
+    expect(materials.firstTurn).not.toContain("Read your queue first.");
   });
 
   // The saved startup context is what a launch actually read the spec from, so a `local:` ref must not add a second
