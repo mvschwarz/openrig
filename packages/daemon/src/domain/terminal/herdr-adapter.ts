@@ -77,7 +77,7 @@ import type {
   HerdrTransportFactory,
 } from "./herdr-transport.js";
 import { blankShellArgv } from "./login-shell.js";
-import { findLiveHerdrWorkspace, fixedSizeWorkspaceNote, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
+import { findLiveHerdrWorkspace, fixedSizeWorkspaceNote, herdrCloseCommand, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import { sameIdSet } from "./rig-viewer-records.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
@@ -898,7 +898,8 @@ export class HerdrAdapter implements TerminalProvider {
       return null;
     }
     const socket = this.deps.launch?.socketPath;
-    const close = (id: string) => `${socket ? `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(socket)} herdr` : "herdr"} workspace close ${shellQuote(id)}`;
+    // The platform the readers already use, so a fixture's Linux answers get a Linux command on any host.
+    const close = (id: string) => herdrCloseCommand(readers.platform ?? process.platform, socket, id, { posix: "herdr" });
     for (const id of found.fixedSize) notes.push(fixedSizeWorkspaceNote(id, close(id)));
     for (const id of found.stale) if (!found.fixedSize.includes(id)) notes.push(`Workspace ${id} has an older or different plan for this view and was kept.`);
     for (const id of found.unconfirmed) if (!found.fixedSize.includes(id)) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known

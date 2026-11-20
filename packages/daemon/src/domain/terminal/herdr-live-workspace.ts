@@ -43,6 +43,29 @@ export function fixedSizeWorkspaceNote(id: string, closeCommand: string): string
   return `Workspace ${id} shows this view with tiles an OpenRig before 0.7.10 opened, which keep a fixed size and attach that way again after every seat restart; it was kept. Close it to remove those tiles (its agents keep running): ${closeCommand}`;
 }
 
+/**
+ * The command that closes a kept workspace, pinned to the endpoint the inventory read.
+ *
+ * A note is something a person types, so Windows gets the environment lines PowerShell actually runs instead of the
+ * POSIX `env -u ...` form, which no native shell has. Each caller passes the two spellings of its own executable, so
+ * the POSIX text it already printed stays byte-identical.
+ */
+export function herdrCloseCommand(platform: NodeJS.Platform, socketPath: string | undefined, id: string, binary: { posix: string; native?: string }): string {
+  if (platform !== "win32") {
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
+    return `${socketPath ? `env -u HERDR_SESSION HERDR_SOCKET_PATH=${quote(socketPath)} ${binary.posix}` : binary.posix} workspace close ${quote(id)}`;
+  }
+  const powershell = (value: string) => "'" + value.replace(/'/g, "''") + "'";
+  const pinned = [
+    "Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue",
+    ...(socketPath ? [`$env:HERDR_SOCKET_PATH = ${powershell(socketPath)}`] : []),
+  ];
+  // A bare name runs directly; a path with spaces needs PowerShell's call operator, which only accepts a quoted path.
+  const native = binary.native ?? "herdr";
+  const invocation = /[\s]/.test(native) ? `& ${powershell(native)}` : native;
+  return `${pinned.join("; ")}; ${invocation} workspace close ${powershell(id)}`;
+}
+
 /** One tmux client: the attach commands it can be (compared, never executed), and whether it is a writable client that ignores its size. */
 interface Client { commands: string[]; fixedSize: boolean }
 

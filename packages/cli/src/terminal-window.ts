@@ -12,7 +12,7 @@ import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
-import { resolveHerdrSocketPath, hasLiveHerdrAttachments, findLiveHerdrWorkspace, fixedSizeWorkspaceNote, type HerdrTab, type LiveWorkspaceSearch } from "@openrig/daemon/herdr-live-workspace";
+import { resolveHerdrSocketPath, hasLiveHerdrAttachments, findLiveHerdrWorkspace, fixedSizeWorkspaceNote, herdrCloseCommand, type HerdrTab, type LiveWorkspaceSearch } from "@openrig/daemon/herdr-live-workspace";
 import type { FollowControls, OpenAllResult, OpenAllRigResult, OpenViewResult } from "./commands/terminal.js";
 
 import { readPlatformEnv, renderWindowsLaunch, renderWindowsLaunchArgv, readWindowsTileAttachArgv, execWindowsJobFile } from "@openrig/daemon/windows-launch";
@@ -761,7 +761,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         return { ...answer.data, window, notes: [...(answer.data.notes ?? []), ...windowNotes] };
       }
       // Pinned to the endpoint the inventory read, as the daemon's note is: a bare herdr follows the caller's shell, which may name another server.
-      const closeCommand = (id: string) => `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)} workspace close ${shellQuote(id)}`;
+      const closeCommand = (id: string) => herdrCloseCommand(deps.platform ?? process.platform, endpoint.socketPath, id, { posix: shellQuote(herdr) });
       let found: LiveWorkspaceSearch = { unconfirmed: [], stale: [], fixedSize: [] };
       try {
         found = await findLiveHerdrWorkspace({ id: composed.id, planId, pages: composed.pages, ...(composed.spaceLabel ? { spaceLabel: composed.spaceLabel } : {}) },

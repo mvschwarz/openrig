@@ -29,7 +29,11 @@ it("starts without a control socket when neither endpoint can be bound, and says
     HOME: root,
     OPENRIG_HOME: root,
     OPENRIG_TUI_CLI_ENTRY: cli,
-    OPENRIG_TUI_SOCKET: join(blocked, "sub", "t.sock"),
+    // Windows binds a named pipe, not a file, so a blocked parent directory cannot stop it. An explicit
+    // over-long pipe name is what Windows refuses there, and it refuses the alternate name too.
+    OPENRIG_TUI_SOCKET: process.platform === "win32"
+      ? `\\\\.\\pipe\\${"t".repeat(300)}`
+      : join(blocked, "sub", "t.sock"),
   });
   const child = spawn(process.execPath, ["--import", tsxLoader, main, "--demo", "--no-color"], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
   const ended = new Promise(resolve => child.once("exit", resolve));
