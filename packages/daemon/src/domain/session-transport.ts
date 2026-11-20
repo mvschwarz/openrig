@@ -2358,8 +2358,7 @@ interface SessionTransportDeps {
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
   agentActivityStore?: AgentActivityStore;
-  // A positive-picker override requires a working audit sink. Other explicit interaction attempts
-  // audit too, but an unavailable sink stays advisory so an already accepted send is not refused.
+  // Picker overrides and native OMP navigation keys require a working audit sink.
   eventBus?: EventBus;
   /** Slice 13: an opted-in Claude seat's hook bridge. Absent, every seat gets typed delivery as before. */
   hookBridge?: HookBridge;
@@ -3913,7 +3912,7 @@ export class SessionTransport {
       }, opts?.dangerouslyInteract === true);
 
       // Explicit interaction selects key input even when readiness cannot recognize the prompt.
-      // Only bypassing a positive picker requires a successful audit; other states already sent.
+      // A named OMP key always requires a successful audit, as does overriding a recognized prompt.
       if (opts?.dangerouslyInteract) {
         overrideAtPrompt = readiness.state === "needs_input";
         if (ompArrow && !arrowKey) {
@@ -3957,11 +3956,13 @@ export class SessionTransport {
           };
         }
         const audit = overrideBeforePaste ? { ok: true as const } : this.recordPromptOverride(auditInput);
-        if (!audit.ok && readiness.state === "needs_input") {
+        if (!audit.ok && (arrowKey || readiness.state === "needs_input")) {
           return {
             ok: false,
             sessionName,
             reason: "prompt_override_audit_unavailable",
+            sent: false,
+            inputPhase: "not_reached",
             activity: readiness,
             error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
           };
@@ -4871,8 +4872,7 @@ export class SessionTransport {
   }
 
   // Record actor/reason with the actual readiness, never a fabricated prompt classification.
-  // Report an unavailable sink to the caller: a positive-picker override still fails closed,
-  // while other readiness states keep their existing accepted-send behavior with an advisory.
+  // The caller uses this result before sending a picker override or native OMP navigation key.
   private recordPromptOverride(input: {
     sessionName: string;
     readiness: AgentActivity;

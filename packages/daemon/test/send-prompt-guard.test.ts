@@ -255,6 +255,19 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(overrideEvents()).toHaveLength(1);
   });
 
+  it("refuses a single OMP arrow at an unrecognized pane when the audit cannot be persisted", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "Unrecognized pane", sendText, sendKeys }), {
+      withBus: false, now: () => new Date(Date.now() + 10 * 60_000),
+    });
+    const result = await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" });
+    expect(result).toMatchObject({ ok: false, reason: "prompt_override_audit_unavailable", activity: { state: "unknown" },
+      sent: false, inputPhase: "not_reached" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("keeps OMP navigation out of ordinary sends, non-menu prompts and combined input", async () => {
     const seat = seedOmp();
     const { sendText, sendKeys } = spies();
