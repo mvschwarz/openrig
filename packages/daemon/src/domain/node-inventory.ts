@@ -47,7 +47,7 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
-import { shellQuote } from "../adapters/shell-quote.js";
+import { operatorShellWord, shellQuote } from "../adapters/shell-quote.js";
 import { powershellQuote } from "../adapters/windows-launch.js";
 import { providerRecoveryCommand } from "./provider-recovery-command.js";
 
@@ -289,7 +289,7 @@ const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last 
   + "add it right after `codex`, as the managed launch does.";
 
 function recoveryDirectoryCommand(cwd: string): string {
-  return process.platform === "win32" ? `Set-Location -LiteralPath ${powershellQuote(cwd)}` : `cd ${shellQuote(cwd)}`;
+  return process.platform === "win32" ? `Set-Location -LiteralPath ${powershellQuote(cwd)}` : `cd ${operatorShellWord(cwd)}`;
 }
 
 function computeRecoveryGuidance(input: {

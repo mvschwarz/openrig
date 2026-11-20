@@ -158,7 +158,10 @@ describe("Node Inventory Projection", () => {
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
-    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t =dev-impl@test-rig");
+    // Native Windows always sends the exact-match target; POSIX passes an ordinary name through
+    // tmuxSessionWord, which prefixes `=` only for a name that is already a target expression.
+    const target = process.platform === "win32" ? "=dev-impl@test-rig" : "dev-impl@test-rig";
+    expect(entry?.tmuxAttachCommand).toBe(`tmux attach -t ${target}`);
   });
 
   it("tmuxAttachCommand names the daemon's tmux server when it isn't the default one", () => {
@@ -167,7 +170,8 @@ describe("Node Inventory Projection", () => {
     setDaemonTmuxServer(["-L", "person"]);
     try {
       const entry = getNodeInventory(db, "rig-1").find((e) => e.logicalId === "dev.impl");
-      expect(entry?.tmuxAttachCommand).toBe("tmux -L person attach -t =dev-impl@test-rig");
+      const target = process.platform === "win32" ? "=dev-impl@test-rig" : "dev-impl@test-rig";
+      expect(entry?.tmuxAttachCommand).toBe(`tmux -L person attach -t ${target}`);
     } finally {
       setDaemonTmuxServer([]);
     }

@@ -32,8 +32,7 @@ function realpath(p: string): string {
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
   // tmux puts the socket path first, as is: keep any whitespace in it.
   const socket = readPlatformEnv(env, "TMUX")?.replace(/,\d+,\d+$/, "");
-  if (!socket?.trim()) return [];
-  const socketPaths = socket.startsWith("/") ? path.posix : path;
+  const socketPaths = socket?.startsWith("/") ? path.posix : path;
   const tmpdir = readPlatformEnv(env, "TMUX_TMPDIR")?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
   if (!socket?.trim()) {
@@ -133,9 +132,13 @@ export function tmuxOnDaemonServer(command: readonly string[] = daemonAttachComm
  *  `cmd_find_get_session` reads it as a session id before the exact-match flag is consulted. */
 function tmuxSessionWord(session: string): string {
   const markedTarget = session === "~" || session === "{marked}";
-  let word = /^[=@%]/.test(session) || markedTarget ? `=${session}` : session;
-  if (word.endsWith(";")) word = `${word.slice(0, -1)}\\;`;
-  return word;
+  const word = /^[=@%]/.test(session) || markedTarget ? `=${session}` : session;
+  return escapeFinalSeparator(word);
+}
+
+/** One backslash before a final `;`, which tmux would otherwise read as a command separator. */
+function escapeFinalSeparator(word: string): string {
+  return word.endsWith(";") ? `${word.slice(0, -1)}\\;` : word;
 }
 
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
@@ -150,8 +153,10 @@ export function tmuxAttachCommand(session: string, command: readonly string[] = 
     return "& " + argv.map(powershellQuote).join(" ");
   }
   // This API receives a session name, not a tmux target expression. A stale
-  // hint must not fall back to a surviving session with the same prefix.
-  const target = "=" + session;
+  // hint must not fall back to a surviving session with the same prefix. The
+  // native path still goes through tmux's own parser, so it takes the same
+  // trailing-separator escape the POSIX word does.
+  const target = escapeFinalSeparator("=" + session);
   const argv = [...command, ...daemonServerArgs, "attach", "-t", target];
   // PowerShell 5's native call operator alters embedded quotes and drops empty
   // words even after shell parsing preserved them. Use the established native
