@@ -20,6 +20,7 @@ interface EligibleSession {
   node_id: string;
   session_id: string;
   session_name: string;
+  created_at: string;
   runtime: string | null;
   resume_token: string | null;
   resume_provenance: string | null;
@@ -146,7 +147,7 @@ export class ContextMonitor {
         }
       }
 
-      await this.normalizeStartupStatus(session, pass);
+      if (session.runtime !== "pi") await this.normalizeStartupStatus(session, pass);
       await this.maybeAutoCompact(session, observed);
     }
     this.drainProviderWindowSamples();
@@ -255,6 +256,7 @@ export class ContextMonitor {
         n.id as node_id,
         s.id as session_id,
         s.session_name,
+        s.created_at,
         n.runtime,
         s.resume_token,
         s.resume_provenance,
@@ -281,6 +283,7 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
+          OR (n.runtime = 'pi' AND s.status = 'running')
           OR (n.runtime = 'stub' AND s.status = 'running')
           OR (
             n.runtime = 'codex'
@@ -298,6 +301,12 @@ export class ContextMonitor {
   }
 
   private readContextUsage(session: EligibleSession) {
+    // A Pi seat's usage arrives as persisted entries its runner posts (no sidecar to poll), so the same tick
+    // reads the store the runner already wrote — one sampler, not a second one.
+    if (session.runtime === "pi") {
+      return this.store.readPiUsageAndNormalize({ nodeId: session.node_id, seatSession: session.session_name, sessionStartedAt: session.created_at });
+    }
+
     if (session.runtime === "codex") {
       return this.store.readCodexAndNormalize({
         threadId: session.resume_token,

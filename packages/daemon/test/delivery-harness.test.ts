@@ -236,7 +236,13 @@ describe("delivery harness: D18's attempt evidence (X-F1)", () => {
   });
 
   it("reads an occurrence's own evaluation as its result: sent, retained with its held ids, or refused before input", () => {
-    expect(occurrenceResult({ deliveryStatus: "ok" })).toEqual({ ok: true, sent: true });
+    expect(occurrenceResult({ deliveryStatus: "ok" })).toEqual({
+      ok: true, sent: true,
+      recorded: {
+        actor: "watchdog@system", outcome: null, skipReason: null, deliveryStatus: "ok",
+        deliveryFact: null, deliveryCode: null, deliveryReason: null, inputPhase: null, nextAction: null,
+      },
+    });
     expect(occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["g1"] } })).toMatchObject({ outcome: "retained", sent: false, outboxIds: ["g1"] });
     expect(occurrenceResult({ deliveryStatus: "failed", evaluationNotes: { deliveryInputPhase: "not_reached", deliveryCode: "target_needs_input" } }))
       .toMatchObject({ ok: false, sent: false, reason: "target_needs_input" });
@@ -254,7 +260,7 @@ describe("delivery harness: D18's attempt evidence (X-F1)", () => {
     expect((await judge(right.ctx, args)).notRun).toBeNull();
     expect(right.verdict.result).toBe("PASS");
     const unknown = held(null);
-    expect((await judge(unknown.ctx, args)).notRun).toMatch(/reason isn't recorded/);
+    expect((await judge(unknown.ctx, args)).notRun).toMatch(/^no automatic outcome reason recorded .*typing_guard_enabled can't be confirmed$/);
     expect(unknown.verdict.result).toBe("PASS"); // the cell then reads NOT RUN, never PASS: see run()
   });
 

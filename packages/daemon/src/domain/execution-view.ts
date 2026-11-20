@@ -3,7 +3,8 @@ import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject, projectTagIds } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
-import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
+import { lifecycleObligations } from "./lifecycle-obligations.js";
+import { renderWorkflowProjectCommand } from "./workflow-projector.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
@@ -40,7 +41,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
-import { shellQuote } from "../adapters/shell-quote.js";
 import { parseFrontmatter, sliceStatusBucket } from "./slices/slice-indexer.js";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
@@ -346,19 +346,29 @@ function hasColumn(db: Database.Database, table: string, column: string): boolea
   return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => (row as { name?: string }).name === column);
 }
 
+/** The packet's own renderer, so the view and the packet's Continuation print one command. */
 function lifecycleProjectAction(input: {
   instanceId: string;
   packetId: string;
+  stepId: string;
   acceptance: Record<string, unknown> | null;
-  receiptRequired?: boolean;
+  binding: Record<string, unknown> | null;
 }): string {
-  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>${input.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
-  if (!input.acceptance) return base;
-  const verdicts = Array.isArray(input.acceptance["verdicts"])
-    ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
-    : [];
-  const verdict = verdicts.length === 1 ? verdicts[0]! : `<${verdicts.join("|")}>`;
-  return `${base} --acceptance-candidate ${shellQuote(String(input.acceptance["candidate"]))} --acceptance-verdict ${shellQuote(verdict)} --acceptance-evidence-ref ${shellQuote(String(input.acceptance["evidence_ref"]))}`;
+  const acceptance = input.acceptance
+    ? {
+        candidate: String(input.acceptance["candidate"]),
+        verdicts: Array.isArray(input.acceptance["verdicts"])
+          ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
+          : [],
+        evidence_ref: String(input.acceptance["evidence_ref"]),
+      }
+    : undefined;
+  return renderWorkflowProjectCommand({
+    instanceId: input.instanceId,
+    packetId: input.packetId,
+    step: { id: input.stepId, acceptance },
+    binding: input.binding,
+  });
 }
 
 /**
@@ -432,7 +442,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
         gate: step && isRecord(step["gate"]) ? step["gate"] : null,
         acceptance,
         targeted_action: matches.length === 1 && packet
-          ? lifecycleProjectAction({ instanceId, packetId, acceptance, receiptRequired: stepId !== null && requiredLifecycleSteps(binding).includes(stepId) })
+          ? lifecycleProjectAction({ instanceId, packetId, stepId: stepId!, acceptance, binding })
           : INDETERMINATE,
       };
     });
@@ -625,15 +635,17 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   }
 }
 
-function readWaveMap(db: Database.Database, missions: string[], projectIds?: readonly string[]): WaveMapData {
-  const missionWhere = missions.map(() => "tags LIKE ?").join(" OR ");
-  const row = db
-    .prepare(
-      `SELECT qitem_id, body, tags FROM queue_items
-        WHERE tags LIKE '%format:wave-map-v1%' AND (${missionWhere})
-        ORDER BY ts_created DESC`,
-    )
-    .all(...missions.map((mission) => `%mission:${mission}%`)) as Array<{ qitem_id: string; body: string | null; tags: string | null }>;
+/** The mission's wave-map row, chosen from the rows the candidate read already returned: those include every row whose
+ *  tags name the mission, so a second scan of the whole queue table isn't needed. Matching is case-insensitive, as LIKE
+ *  is, and the newest row wins. */
+function readWaveMap(candidates: readonly QueueRowLite[], missions: string[], projectIds?: readonly string[]): WaveMapData {
+  const needles = missions.map((mission) => `mission:${mission}`.toLowerCase());
+  const row = candidates
+    .filter((r) => {
+      const tags = r.tags?.toLowerCase() ?? "";
+      return tags.includes("format:wave-map-v1") && needles.some((needle) => tags.includes(needle));
+    })
+    .sort((a, b) => (a.ts_created < b.ts_created ? 1 : a.ts_created > b.ts_created ? -1 : 0));
   const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!projectIds || belongsToProject(r.tags, projectIds)));
   if (!selectedRow?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = selectedRow.body.match(WAVE_MAP_BLOCK);
@@ -757,6 +769,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   cataloguedProjectIds?: readonly string[];
   /** The selected project's former ids that can't apply, as the project read reports them. */
   aliasWarnings?: readonly string[];
+  /** The caller's request: once it's aborted (the client went away), the read stops at its next window. */
+  signal?: AbortSignal;
 }): Promise<Record<string, unknown>> {
   const projectionStarted = performance.now();
   const membershipIds = opts?.project ? (opts.projectIds ?? [opts.project]) : undefined;
@@ -837,11 +851,13 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   const candidateRead = cooperativeFile === null
     ? null
     : await readRowsCooperatively<QueueRowLite>(cooperativeFile, "queue_items",
-      `${candidateSelect} WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND (${missionWhere})`, candidateBinds);
+      `${candidateSelect} WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND (${missionWhere})`, candidateBinds,
+      undefined, undefined, { signal: opts?.signal });
   const candidateRows = candidateRead
     ? candidateRead.rows
     : deps.db.prepare(`${candidateSelect} WHERE (${missionWhere})`).all(...candidateBinds) as QueueRowLite[];
   const candidateMs = performance.now() - candidateStarted;
+  opts?.signal?.throwIfAborted();
 
   const missionRows = candidateRows.filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs));
   const rows = missionRows.filter(row => !membershipIds || belongsToProject(row.tags, membershipIds));
@@ -962,7 +978,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   // ---- arrangement authority: mission/slice YAML, with legacy EC-2 fallback ----
   const waveMap = mission === INDETERMINATE
     ? { rowId: INDETERMINATE as Indeterminate, waves: [] }
-    : readWaveMap(deps.db, missionReferences(missionsRoot, mission), membershipIds);
+    : readWaveMap(candidateRows, missionReferences(missionsRoot, mission), membershipIds);
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;

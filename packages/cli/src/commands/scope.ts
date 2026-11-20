@@ -65,6 +65,7 @@ import {
   splitFrontmatter,
   todayDateISO,
   updateFrontmatter,
+  editFrontmatter,
 } from "../lib/scope/scope-fs.js";
 import {
   renderCapabilityDeltaTemplate,
@@ -82,6 +83,7 @@ import {
   parseStatus,
   PROGRESS_STATUSES,
   setProgressRow,
+  setCurrentState,
 } from "../lib/scope/progress-edit.js";
 import { deriveScopeTrust } from "../lib/scope/trust.js";
 import { capabilityDeltaExpiryFindings } from "../lib/scope/capability-delta.js";
@@ -540,8 +542,8 @@ function buildSliceCreateCommand(): Command {
           const readmeOnly = Boolean(opts.readmeOnly);
           if (readmeOnly) {
             const markerBody = body.replace(
-              /^(---\n)/,
-              `---\nprogress_rail: readme-only\n`,
+              /^(---)(\r?\n)/,
+              "$1$2progress_rail: readme-only$2",
             );
             fs.writeFileSync(readmePath, markerBody, "utf8");
           } else {
@@ -1821,19 +1823,18 @@ function runProgressUpdate(
   scopeDir: string,
   level: "mission" | "slice",
   scopeName: string,
-  opts: { add?: string; set?: string; section?: string; status?: string },
+  opts: { add?: string; set?: string; currentState?: string; section?: string; status?: string },
   out: Stdout,
   json: boolean,
 ): void {
   const hasAdd = typeof opts.add === "string";
   const hasSet = typeof opts.set === "string";
-  if (hasAdd === hasSet) {
+  const hasCurrentState = typeof opts.currentState === "string";
+  if (Number(hasAdd) + Number(hasSet) + Number(hasCurrentState) !== 1) {
     throw new ScopeCliError({
-      fact: hasAdd
-        ? "Both --add and --set were given."
-        : "Neither --add nor --set was given.",
+      fact: "Choose exactly one progress operation.",
       consequence: "No progress update was made.",
-      action: 'Pass exactly one of --add "<row text>" or --set "<row text>".',
+      action: 'Pass exactly one of --add, --set, or --current-state.',
     });
   }
   const status = parseStatus(opts.status ?? "active");
@@ -1841,8 +1842,21 @@ function runProgressUpdate(
   const before = fs.readFileSync(targetPath, "utf8");
 
   let result: { content: string; changed: boolean };
-  let operation: "add" | "set";
-  if (hasAdd) {
+  let operation: "add" | "set" | "current-state";
+  if (hasCurrentState) {
+    operation = "current-state";
+    result = setCurrentState(before, opts.currentState!);
+    if (result.changed) {
+      const hasOpening = /^---[ \t]*\r?\n/.test(before);
+      const emptyHeader = /^---[ \t]*(\r?\n)---[ \t]*(?=\r?\n|$)/.test(before);
+      const hasClosing = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?=\r?\n|$)/.test(before);
+      if (hasOpening && !hasClosing && !emptyHeader) console.warn(`[warn] ${targetPath}: frontmatter is unterminated; Current state was updated without a timestamp.`);
+      else {
+        if (emptyHeader) result.content = result.content.replace(/^(---[ \t]*)(\r?\n)(---[ \t]*)(?=\r?\n|$)/, "$1$2$2$3");
+        result.content = editFrontmatter(result.content, { current_state_updated: new Date().toISOString() }, targetPath);
+      }
+    }
+  } else if (hasAdd) {
     operation = "add";
     result = addProgressRow(before, {
       section: opts.section ?? DEFAULT_PROGRESS_SECTION,
@@ -1881,6 +1895,7 @@ function buildSliceProgressCommand(): Command {
     .option("--mission <name>", "Hint mission when slice-path is just NN-slug")
     .option("--add <text>", "Append a checkbox row with this text")
     .option("--set <text>", "Set the status of the row whose trimmed text exactly matches")
+    .option("--current-state <text>", "Replace the Current state section and timestamp it")
     .option("--section <heading>", `Section heading for --add (default: ${DEFAULT_PROGRESS_SECTION})`)
     .option("--status <status>", `Row status: ${PROGRESS_STATUSES.join(" | ")}`, "active")
     .option("--json", "Machine-readable output")
@@ -1903,6 +1918,7 @@ function buildMissionProgressCommand(): Command {
     .argument("<mission>", "Mission name")
     .option("--add <text>", "Append a checkbox row with this text")
     .option("--set <text>", "Set the status of the row whose trimmed text exactly matches")
+    .option("--current-state <text>", "Replace the Current state section and timestamp it")
     .option("--section <heading>", `Section heading for --add (default: ${DEFAULT_PROGRESS_SECTION})`)
     .option("--status <status>", `Row status: ${PROGRESS_STATUSES.join(" | ")}`, "active")
     .option("--json", "Machine-readable output")
