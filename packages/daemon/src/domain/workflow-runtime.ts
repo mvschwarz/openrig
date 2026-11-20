@@ -1086,15 +1086,15 @@ export class WorkflowRuntime {
         const stepId = binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
         if (!stepId) throw new WorkflowProjectorError("frontier_binding_indeterminate", `cannot abort: packet ${packetId} has no step binding`, { instanceId: instance.instanceId, packetId });
         const step = spec?.steps.find((candidate) => candidate.id === stepId);
-        // A frontier packet the queue already closed (an ordinary `rig queue handoff`, or a plain `done`, doesn't move the
-        // workflow) has nothing left to cancel, and canceling it would reopen a terminal row. The abort records it on the
+        // A frontier packet the queue already closed (an ordinary `rig queue handoff`, or `rig queue handoff-and-complete`,
+        // doesn't move the workflow) has nothing left to cancel, and canceling it would reopen a terminal row. The abort records it on the
         // workflow without writing its queue row; a handoff successor stays as the queue left it, and the advisory names it.
         const alreadyClosed = isTerminalState(packet.state);
         if (alreadyClosed) {
-          const successors = packet.state === "handed-off"
-            ? (this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").all(packetId) as Array<{ qitem_id: string }>)
-              .map((row) => this.queueRepo.getById(row.qitem_id)).filter((row) => row !== null)
-            : [];
+          // `rig queue handoff` leaves it handed-off and `rig queue handoff-and-complete` leaves it done; both record the
+          // successor's handed_off_from.
+          const successors = (this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").all(packetId) as Array<{ qitem_id: string }>)
+            .map((row) => this.queueRepo.getById(row.qitem_id)).filter((row) => row !== null);
           // Only a live successor can still be canceled; a closed one is named for the record, with no command to run.
           const live = successors.filter((row) => isBlockerLive(row.state));
           const named = successors.length > 0

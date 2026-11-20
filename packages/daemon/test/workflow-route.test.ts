@@ -682,5 +682,26 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(runtime.instanceStore.getByIdOrThrow(instanceId).status).toBe("aborted");
       expect(queueRepo.getByIdOrThrow(successor).state).toBe("pending");
     });
+
+    // `rig queue handoff-and-complete` closes the frontier packet `done` with a live successor, outside the frontier guard.
+    // Route refuses that packet, so before this the abort was the only verb left, and it refused too.
+    it("abort ends the instance when handoff-and-complete closed the frontier packet done, naming the live successor", async () => {
+      const { instanceId, entryPacket } = await instantiate();
+      const projected = await runtime.project({ instanceId, currentPacketId: entryPacket, exit: "handoff", actorSession: "producer@rig" });
+      const reviewPacket = projected.nextQitemId!;
+      const { created } = await queueRepo.handoffAndComplete({ qitemId: reviewPacket, fromSession: "reviewer@rig", toSession: "reviewer2@rig" });
+      expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("done");
+      await expect(runtime.route({ instanceId, packetId: reviewPacket, toSession: "reviewer2@rig", actorSession: "orch@rig" }))
+        .rejects.toMatchObject({ code: "packet_already_closed" });
+
+      const aborted = await runtime.abort({ instanceId, reason: "work moved elsewhere", actorSession: "orch@rig" });
+
+      expect(aborted).toMatchObject({ status: "aborted", closedPacketIds: [], alreadyClosedPacketIds: [reviewPacket] });
+      expect(aborted.advisories).toHaveLength(1);
+      expect(aborted.advisories![0]).toContain(`rig queue update ${created.qitemId} --state canceled`);
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).status).toBe("aborted");
+      expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("done");
+      expect(queueRepo.getByIdOrThrow(created.qitemId).state).toBe("pending");
+    });
   });
 });
