@@ -248,9 +248,7 @@ export function archiveAgedTerminalTransitions(
     .every((column) => activeColumns.has(column) && archiveColumns.has(column));
   // A row's principal moves with it (migration 140 gave both tables the column).
   const carriesPrincipal = activeColumns.has("identity_principal") && archiveColumns.has("identity_principal");
-  // A row's claimed origin moves with it too (migration 162 gave both tables the column); a schema without it keeps today's move.
-  const carriesClaimedOrigin = activeColumns.has("claimed_origin") && archiveColumns.has("claimed_origin");
-  const ownerInsert = (carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "") + (carriesPrincipal ? ", identity_principal" : "") + (carriesClaimedOrigin ? ", claimed_origin" : "");
+  const ownerInsert = (carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "") + (carriesPrincipal ? ", identity_principal" : "");
   const ownerSelect = ownerInsert;
   const selectRows = db.prepare(
     `INSERT INTO queue_transitions_archive (

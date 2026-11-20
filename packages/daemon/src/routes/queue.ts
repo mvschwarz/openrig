@@ -14,7 +14,7 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, claimedOriginFor, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
 import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
@@ -112,13 +112,13 @@ export function crossHostProvenanceTags(existing: string[] | undefined): string[
 
 /**
  * #3018 — the identity a FORWARDING daemon relays to the host that keeps the record. The forwarded body
- * carries only a `sourceSession`, so the receiving daemon recorded `claimed:v1` with no origin; the CLI's
- * `rig queue update --host` calls that host directly and already carries the session-with-origin form.
+ * carries only a `sourceSession`, so the receiving daemon fell back to `claimed:v1`; the CLI's
+ * `rig queue update --host` calls that host directly and already carries the sender header.
  * The actor is re-stamped with THIS daemon's host suffix (the same value the forwarded body's
  * sourceSession carries), and the relay/provenance markers keep the receiving hop from presenting a
  * relayed actor as transport-verified (resolveRecordedProvenance records relay:v1). `Via` marks the
- * request as another hop, so a loopback receiver doesn't read it as a direct local client and drop the
- * claim. A request with no transport identity stays header-less: a body claim is never laundered.
+ * request as another hop, so a loopback receiver doesn't read it as a direct local client. A request
+ * with no transport identity stays header-less: a body claim is never laundered into a relayed one.
  */
 export function relayedSenderHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> | undefined {
   const sender = transportSenderSession(c as Context);
@@ -854,7 +854,7 @@ export function queueRoutes(): Hono {
         tags: crossHostProvenanceTags(withRouteNotCarriedTag(body.tags, routeNotCarried)),
       };
       // #3018: relay this daemon's resolved sender (relayedSenderHeaders), so the host that keeps the
-      // record writes the origin beside its identity instead of inferring a bare body claim.
+      // record writes a relayed actor instead of falling back to a bare body claim.
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody, true);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
@@ -1038,7 +1038,7 @@ export function queueRoutes(): Hono {
     { const held = switchCustody(c, destinationSession); if (held) return held; }
     try {
       const recorded = resolveRecordedIdentity(c, identity);
-      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", recorded.identityProvenance, recorded.identityPrincipal, recorded.claimedOrigin);
+      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", recorded.identityProvenance, recorded.identityPrincipal);
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -1323,7 +1323,6 @@ export function queueRoutes(): Hono {
         nudge: body.nudge,
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
-        claimedOrigin: claimedOriginFor(c), // #3018 claimed-origin evidence, never an identity or permission input
       });
       const destination = destinationAdvisory(c, result.created.destinationSession);
       const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
@@ -1890,7 +1889,6 @@ export function queueRoutes(): Hono {
         urgency: body.urgency,
         auditPointer: body.auditPointer,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 (or relay:v1 on a relayed hop) — no body sender is read, so claimed:v1 cannot arise here
-        claimedOrigin: claimedOriginFor(c), // #3018 claimed-origin evidence, never an identity or permission input
       });
       return c.json(entry, 201);
     } catch (err) {
@@ -1968,7 +1966,6 @@ export function queueRoutes(): Hono {
       urgency: body.urgency,
       auditPointer: body.auditPointer,
       identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
-      claimedOrigin: claimedOriginFor(c), // #3018 claimed-origin evidence, never an identity or permission input
     });
     return c.json(entry, 201);
   });

@@ -63,7 +63,6 @@ export interface OutboxEntry {
   retiredAt?: string | null;
   retiredBy?: string | null;
   retirementReason?: string | null;
-  claimedOrigin: string | null;
 }
 
 interface OutboxEntryRow {
@@ -81,7 +80,6 @@ interface OutboxEntryRow {
   retired_at?: string | null;
   retired_by?: string | null;
   retirement_reason?: string | null;
-  claimed_origin?: string | null;
 }
 
 export interface OutboxRecordInput {
@@ -97,8 +95,6 @@ export interface OutboxRecordInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
-  /** `#3018` claimed-origin evidence (resolveRecordedIdentity). Absent or invalid reads as unknown. */
-  claimedOrigin?: string | null;
 }
 
 /** Native protocol custody and effects share the existing delivery receipt. */
@@ -155,7 +151,6 @@ export class OutboxHandler {
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
   private readonly hasIdentityPrincipalColumn: boolean;
-  private readonly hasClaimedOriginColumn: boolean;
   private readonly hasGuardDeliveryColumn: boolean;
 
   constructor(db: Database.Database) {
@@ -163,7 +158,6 @@ export class OutboxHandler {
     const columns = (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).map((col) => col.name);
     this.hasIdentityProvenanceColumn = columns.includes("identity_provenance");
     this.hasIdentityPrincipalColumn = columns.includes("identity_principal");
-    this.hasClaimedOriginColumn = columns.includes("claimed_origin");
     this.hasGuardDeliveryColumn = columns.includes("guard_delivery");
   }
 
@@ -495,13 +489,11 @@ export class OutboxHandler {
       // A principal is kept only beside principal:v1; a schema without the column records today's stamp instead.
       const principal = input.identityProvenance === "principal:v1" && this.hasIdentityPrincipalColumn ? input.identityPrincipal ?? null : null;
       const provenance = input.identityProvenance === "principal:v1" && !principal ? "transport:v1" : input.identityProvenance ?? null;
-      // Claimed evidence rides beside the stamp and the principal: its own column, its own (unverified) meaning.
-      const claimedOrigin = this.hasClaimedOriginColumn ? input.claimedOrigin ?? null : null;
       this.db
         .prepare(
           `INSERT INTO outbox_entries (
-            outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer, identity_provenance${principal ? ", identity_principal" : ""}${claimedOrigin ? ", claimed_origin" : ""}
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${principal ? ", ?" : ""}${claimedOrigin ? ", ?" : ""})`
+            outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer, identity_provenance${principal ? ", identity_principal" : ""}
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${principal ? ", ?" : ""})`
         )
         .run(
           id,
@@ -514,7 +506,6 @@ export class OutboxHandler {
           input.auditPointer ?? null,
           provenance,
           ...(principal ? [principal] : []),
-          ...(claimedOrigin ? [claimedOrigin] : []),
         );
     } else {
       this.db
@@ -896,7 +887,6 @@ export class OutboxHandler {
       deliveryState: parseDeliveryState(row.delivery_state),
       deliveredAt: row.delivered_at,
       auditPointer: row.audit_pointer,
-      claimedOrigin: row.claimed_origin ?? null,
       ...(row.guard_binding !== undefined ? {
         guardBinding: row.guard_binding ? JSON.parse(row.guard_binding) : null,
         retiredAt: row.retired_at ?? null,

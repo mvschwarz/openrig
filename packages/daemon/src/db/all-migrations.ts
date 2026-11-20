@@ -19,7 +19,6 @@ import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.
 import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
 import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
 import { networkReceiptsSchema } from "./migrations/161_network_receipts.js";
-import { claimedOriginSchema } from "./migrations/162_claimed_origin.js";
 import { sessionAddressReadIndexesSchema } from "./migrations/162_session_address_read_indexes.js";
 import { networkInstallationsSchema } from "./migrations/163_network_installations.js";
 import { queueItemsReplyToIndexSchema } from "./migrations/164_queue_items_reply_to_index.js";
@@ -345,7 +344,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsHandedOffFromIndexSchema,
   networkBindingsSchema,
   networkReceiptsSchema,
-  claimedOriginSchema,
   sessionAddressReadIndexesSchema,
   networkInstallationsSchema,
   queueItemsReplyToIndexSchema,
