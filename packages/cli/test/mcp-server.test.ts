@@ -1674,6 +1674,35 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
+    it("rig_queue_list carries the daemon's page marker and applied limit into its result (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      // The result carries the limit the daemon says it applied, not the one asked for.
+      const page = (truncated: string) => new Headers({ "X-OpenRig-Limit": "7", "X-OpenRig-Truncated": truncated });
+      const getFn = vi.fn()
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("1") })
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("0") })
+        .mockResolvedValueOnce({ status: 200, data: [row] });
+      await setup({ get: getFn });
+      const texts = (result: Awaited<ReturnType<typeof mcpClient.callTool>>) => (result.content as Array<{ text: string }>).map((c) => c.text);
+
+      // A cut page: the items as before, the limit the daemon applied, truncated, and a line saying so.
+      const cut = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(cut.isError).toBeFalsy();
+      expect(cut.structuredContent).toEqual({ items: [row], limit: 7, truncated: true });
+      expect(texts(cut)).toEqual([JSON.stringify([row]), "This page stops at the limit of 7 and more items match; pass a larger limit to see the rest."]);
+
+      // Exactly the limit matched: a full page alone claims nothing more.
+      const exact = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(exact.structuredContent).toEqual({ items: [row], limit: 7, truncated: false });
+      expect(texts(exact)).toEqual([JSON.stringify([row])]);
+
+      // A daemon that doesn't send the marker leaves the result as it was.
+      const older = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(older.structuredContent).toEqual({ items: [row] });
+      expect(texts(older)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
     it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
       const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
       await setup({ get: getFn });
