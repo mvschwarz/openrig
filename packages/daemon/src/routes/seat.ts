@@ -63,12 +63,33 @@ seatRoutes.post("/set-input-route/:seatRef", async c => {
     });
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
     return c.json({ nodeId: target.nodeId, inputRoute: body.route, nativeInput: { input: channel?.capable(target.nodeId, "input") ?? false,
-      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: channel?.capable(target.nodeId, "cancel") ?? false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
   } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
 });
 
 seatRoutes.post("/command/:seatRef", async c => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (body?.type === "cancel") {
+    const named = body.target as { runId?: unknown; nativeTurnId?: unknown } | undefined;
+    if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 512
+      || !named || typeof named.runId !== "string" || !named.runId || named.runId.length > 1024
+      || typeof named.nativeTurnId !== "string" || !named.nativeTurnId || named.nativeTurnId.length > 1024)
+      return c.json({ error: "Supply requestId and exact target {runId,nativeTurnId}." }, 400);
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+    if (!channel || !guard) return c.json({ error: "Native cancellation unavailable." }, 503);
+    try {
+      const target = guard.target(c.req.param("seatRef"));
+      const receipt = await guard.custody([target.nodeId], async () => {
+        if (c.req.raw.signal.aborted && !channel.outbox.runnerReceipt(body.requestId as string))
+          throw Object.assign(new Error("Caller cancelled before native admission."), { code: "caller_cancelled" });
+        return channel.cancel(target.nodeId, { requestId: body.requestId as string,
+          sender: transportSenderSession(c) ?? "unknown", destination: target.session, target: { runId: named.runId as string, nativeTurnId: named.nativeTurnId as string } });
+      });
+      return c.json({ receipt }, ["completed", "rejected"].includes(receipt.stage) ? 200 : 202);
+    } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code,
+      ...((error as { code?: string; retryable?: boolean }).retryable || (error as { code?: string }).code === "runner_grant_unverified" ? { retryable: true } : {}) }, 409); }
+  }
   if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
     || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
     return c.json({ error: "Supply wake type, opaque requestId and question." }, 400);
@@ -187,12 +208,13 @@ seatRoutes.get("/status/:seatRef", async (c) => {
           ? tmux ? { ...(await tmux.readSeatProcessLimits(readTarget, limits, nodeId)),
             // A guest seat's report is not read from its pane at all.
             ...(nodeId && tmux.seatInEnvironmentGuest?.(nodeId) ? {} : { readFrom }) }
-            : { state: "unknown", requested: { tasksMax: limits.tasksMax }, reason: "this daemon has no terminal adapter to read the seat's process" }
-          : { state: "not_applied", requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next fresh launch" }
+            : { state: "unknown", requested: { ...limits }, reason: "this daemon has no terminal adapter to read the seat's process" }
+          : { state: "not_applied", requested: { ...limits }, reason: "the seat is not running; the limit applies at its next fresh launch" }
         // No limit stored: nothing is read, so a seat without process_limits is unchanged.
         : null;
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
-    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: false } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
+    const nativeTurn = channel && nodeId ? channel.currentTurn(nodeId) : null;
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: channel.capable(nodeId, "cancel"), unresolved: channel.unresolved(nodeId), recovery: "The person operating this seat or its responsible agent can inspect these request IDs and destinations. Evidence from earlier runs does not mean current input is held. A submitted Pi cancellation holds person prompts until its named run emits agent_settled; normal input/wake readiness still applies. Continue retained native words with a new plain prompt in that pane, without resending them. This is distinct from /abort or stopping the seat, is not cancellation proof, and never restores withdrawn approvals. Responsible-agent work uses its ordinary queue route; if no independent agent can act, the person operating this seat can take that step. Explicit manual choice: rig seat stop <seat> --reason <text>. No automatic restart or replay.", target: nativeTurn ? { runId: nativeTurn.runId, nativeTurnId: nativeTurn.nativeTurnId } : null } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }
@@ -472,7 +494,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
-    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
+    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy" || code === "invalid_statusline_throttle"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
     || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
     || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
@@ -481,7 +503,7 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry (409).
   if (code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_invalid") return 422;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
+    || code === "effort_unavailable" || code === "statusline_throttle_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
     || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
@@ -607,6 +629,28 @@ const setEffortHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
 seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
+
+// #3416 (3): save (or, with clear: true, remove) a Claude seat's status line throttle for its next launch.
+const setStatuslineThrottleHandler = async (c: Context) => {
+  // A body that isn't a JSON object (null, an array, a number) reads as an empty one: the check below answers 400.
+  const parsed: unknown = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown> : {};
+  const clear = body["clear"] === true;
+  if (clear === (body["seconds"] !== undefined)) {
+    return c.json({ ok: false, code: "invalid_statusline_throttle", message: "Pass seconds or clear, exactly one." }, 400);
+  }
+  const result = seatLifecycleService(c).setStatuslineThrottle({
+    ...settingTarget(c),
+    seconds: clear ? null : typeof body["seconds"] === "number" ? body["seconds"] : Number.NaN,
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+};
+seatRoutes.post("/set-statusline-throttle/:seatRef", setStatuslineThrottleHandler);
+seatRoutes.post("/set-statusline-throttle/node/:nodeId", setStatuslineThrottleHandler);
 
 // Choose (or, with clear: true, remove) the registered person who answers this seat's runner permission requests.
 // Audited; like set-permissions, the actor is required.

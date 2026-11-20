@@ -9,8 +9,10 @@ import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydra
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
+import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
+import { folderPresent, insideMissingFolder } from "./cwd-resolution.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -24,7 +26,7 @@ import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
 import { NO_TERMINAL_LAUNCH_CODES, NOTHING_STOPPED_LAUNCH_CODES, type NodeLauncher } from "./node-launcher.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import { seatRuntimeHome } from "./seat-runtime-home.js";
@@ -260,9 +262,13 @@ export interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. #3253: the restore passes "recovery", so a
-   *  process limit that can't be applied doesn't stop the seat; the notice comes back in `processLimits`. */
-  freshLaunch?: (rigId: string, nodeId: string, opts?: { processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode }) => Promise<{
+  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe (in `opts.cwdOverride` when this run has one).
+   *  #3253: the restore passes "recovery", so a process limit that can't be applied doesn't stop the seat; the notice
+   *  comes back in `processLimits`. */
+  freshLaunch?: (rigId: string, nodeId: string, opts?: {
+    processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode;
+    cwdOverride?: string;
+  }) => Promise<{
     status: "launched" | "failed" | "attention_required";
     error?: string;
     warnings?: string[];
@@ -282,6 +288,15 @@ export interface RestoreOrchestratorDeps {
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
   /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
   harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
+}
+
+/** A restored seat's checkpoint file in its working directory, named for the seat, so seats restored into one folder (a
+ *  run's `--cwd`, or a saved folder they share) each keep their own: the session name made safe for a file name, then the
+ *  first 8 hex of the SHA-256 of the exact name. Names that become the same safe text (`alpha beta`, `alpha-beta`) or
+ *  differ only in case (on a case-insensitive filesystem) still get different files; no name is refused. */
+function checkpointFileName(sessionName: string): string {
+  const digest = createHash("sha256").update(sessionName).digest("hex").slice(0, 8);
+  return `.rigged-checkpoint-${sessionName.replace(/[^A-Za-z0-9._@-]/g, "-")}-${digest}.md`;
 }
 
 export class RestoreOrchestrator {
@@ -388,6 +403,9 @@ export class RestoreOrchestrator {
     automaticReplacements?: AutomaticSeatReplacement[];
     /** Explicit rig launch choice; persisted only after restore preconditions pass. */
     nonInterruptive?: boolean;
+    /** `rig up <rig> --existing --cwd <dir>`: every seat this restore launches starts there, for this run only (the
+     *  seats' saved directories stay as they are), as `--cwd` does for a new launch. */
+    cwdOverride?: string;
     /** Selection evidence from an automatic caller. Direct restore defaults
      * to explicit because its public door names the snapshot id. */
     snapshotSelection?: RestoreSnapshotSelection;
@@ -469,6 +487,7 @@ export class RestoreOrchestrator {
         currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
           .filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
         currentStatuses: observed.currentStatuses,
         attachedLogicalIds: observed.attachedLogicalIds,
       });
@@ -481,11 +500,13 @@ export class RestoreOrchestrator {
       const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
       const liveNodeIds = new Set(liveNodes.map((current) => current.id));
       const snapshotNodeIds = new Set(snapshot.data.nodes.map((node) => node.id));
+      const intendedLiveIds = new Set(liveNodes.filter(current => topology.intendedRoster.some(intended => intended.logicalId === current.logicalId))
+        .map(current => current.id));
       const narrowedRoster = snapshot.data.topologyRoster?.source === "operator_explicit";
       const excludedNodes: RestoreExcludedNode[] = [
         ...topology.excludedNodes.map((excluded) => !narrowedRoster && liveNodeIds.has(excluded.nodeId)
           ? { ...excluded, reason: "current_seat_not_in_intended_roster" as const } : excluded),
-        ...(narrowedRoster ? [] : liveNodes.filter((current) => !snapshotNodeIds.has(current.id)).map((current) => ({
+        ...(narrowedRoster ? [] : liveNodes.filter((current) => !snapshotNodeIds.has(current.id) && !intendedLiveIds.has(current.id)).map((current) => ({
           nodeId: current.id, logicalId: current.logicalId, reason: "current_seat_not_in_intended_roster" as const,
         }))),
       ];
@@ -1256,10 +1277,12 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
+    // `--cwd`: the seat launches, resumes and gets its guidance and checkpoint in the given directory, for this run only.
+    if (opts?.cwdOverride) entry = { ...entry, node: { ...entry.node, cwd: opts.cwdOverride } };
     // Compare against the live logical target without changing saved post-launch inputs.
     const node = entry.node;
     // Activity-hook restore gaps (#1530) are collected out-of-band: postLaunchRestore
@@ -1279,6 +1302,16 @@ export class RestoreOrchestrator {
     const external = this.sessionRegistry.getBindingForNode(nodeId);
     if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId), ...notStarted };
+    }
+    // A seat's saved directory that isn't on this machine (a workspace restored onto another home) is named plainly, with
+    // the way to launch elsewhere; nothing is refused here, and the launch below goes on as before.
+    const savedCwd = node.cwd ?? liveNode?.cwd;
+    const launchElsewhere = `To launch this rig's seats in another directory for this run: rig up ${data.rig?.name ?? rigId} --existing --cwd <dir>.`;
+    // Where the line is, so that once the launch below has run it can also name the folder the seat started in.
+    let missingCwdAt = -1;
+    // Only a confirmed absence is named missing (folderPresent): a folder that can't be looked into isn't.
+    if (!opts?.cwdOverride && savedCwd && isAbsolute(savedCwd) && opts?.fsOps && !folderPresent(savedCwd) && warnings) {
+      missingCwdAt = warnings.push(`Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine. ${launchElsewhere}`) - 1;
     }
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -1605,12 +1638,34 @@ export class RestoreOrchestrator {
     if (launchResult.warnings?.length) {
       warnings?.push(...launchResult.warnings);
     }
+    // Where the seat started, from its own bound pane only (boundPaneFolder): unread, the line names no folder.
+    if (missingCwdAt >= 0 && warnings) {
+      const startedIn = await this.boundPaneFolder(launchResult.sessionName, launchResult.binding.tmuxPane);
+      if (startedIn && startedIn !== savedCwd) {
+        warnings[missingCwdAt] = `Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine, so it started in `
+          + `${startedIn}. ${launchElsewhere}`;
+      }
+    }
+
+    // A folder given with `--cwd` that isn't on this machine is named the same way. Where the seat started is read now,
+    // before the harness and its startup are replayed, which can change the pane's folder.
+    const givenMissing = opts?.cwdOverride && isAbsolute(opts.cwdOverride) && opts.fsOps && warnings && !folderPresent(opts.cwdOverride)
+      ? opts.cwdOverride : null;
+    const givenStartedIn = givenMissing ? await this.boundPaneFolder(launchResult.sessionName, launchResult.binding.tmuxPane) : null;
 
     // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
     const compensation = { ran: false };
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
-    const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
+    // Whether it's still missing is decided once the launch has run: a fresh launch creates it, and a restore doesn't, so the
+    // seat's terminal started in tmux's fallback folder.
+    if (givenMissing && warnings && !folderPresent(givenMissing)) {
+      warnings.push(`Restore: ${node.logicalId}'s working directory ${givenMissing}, given with --cwd, doesn't exist on this machine`
+        + (givenStartedIn && givenStartedIn !== givenMissing ? `, so it started in ${givenStartedIn}. ` : ". ") + launchElsewhere);
+    }
+    // Saved inputs stay keyed by the snapshot; the result names the seat that the launcher actually registered.
+    const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings), nodeId: launchResult.session.nodeId,
+      ...(launchResult.session.nodeId !== node.id ? { intendedNodeId: node.id } : {}),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}),
       // #3253: the provisional shell's notice, unless a replacement retired it and reported its own (the key is set).
@@ -1761,6 +1816,7 @@ export class RestoreOrchestrator {
     // Every status with a live session; attention_required keeps its status and gains the disclosure.
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
+    let guidanceCwd: string | null | undefined;
     try {
       // The seat was launched in the snapshot node's cwd when set, else the
       // live node's cwd — the same resolved launch directory the hook
@@ -1768,7 +1824,7 @@ export class RestoreOrchestrator {
       // no guidance at all when the snapshot node has no cwd. No "." fallback:
       // when neither cwd exists the old skip is kept, so no guidance file is
       // written into the daemon's own working directory.
-      const guidanceCwd = node.cwd
+      guidanceCwd = node.cwd
         ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId)?.cwd;
       guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, guidanceCwd,
         this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
@@ -1791,7 +1847,9 @@ export class RestoreOrchestrator {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
     if (missing.length === 0) return noted;
-    const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}.`;
+    // A saved folder this machine doesn't have got nothing put back (see postLaunchRestore): say why the blocks are missing.
+    const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}`
+      + (insideMissingFolder(guidance.targetPath, guidanceCwd, folderPresent) ? `, because ${guidanceCwd} doesn't exist on this machine.` : ".");
     warnings?.push(`Restore: ${gap}`);
     return { ...noted, guidanceGaps: missing };
   }
@@ -1877,6 +1935,15 @@ export class RestoreOrchestrator {
     this.eventBus.emit({ type: "node.startup_failed", rigId, nodeId, error, sessionId, stage: "harness_not_started" });
   }
 
+  /** tmux starts a terminal whose folder is missing in a fallback folder of its own (its server's HOME), which the launch's
+   *  record doesn't hold, so the folder a seat started in is read from the seat's own bound pane, in any window. Another
+   *  pane's folder is never named: when that pane isn't listed or can't be read, this is null. */
+  private async boundPaneFolder(sessionName: string, pane: string | null | undefined): Promise<string | null> {
+    if (!pane) return null;
+    try { return (await this.tmuxAdapter.listPanes(sessionName, true)).find((listed) => listed.id === pane)?.cwd ?? null; }
+    catch { return null; }
+  }
+
   /** Retire only the provisional session created by this restore attempt. The prior
    * binding must stay cleared while a replacement launch is handed off. */
   private async retireProvisionalSession(nodeId: string, sessionName: string, launchedSessionId: string | undefined): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -1918,8 +1985,9 @@ export class RestoreOrchestrator {
     rigId: string,
     data: SnapshotData,
     sessionName: string,
-    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
+    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding;
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -2070,9 +2138,14 @@ export class RestoreOrchestrator {
         warnings?.push(...(result.warnings ?? []));
         for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
         for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
+        // Saved hooks that couldn't be reapplied are a restore gap, as for the current selection (restoreCurrentActivityHooks),
+        // so the rig doesn't read fully restored. Hooks already in the seat's settings may remain: a failed check writes nothing.
+        const detail = [...result.skipped.map((skipped) => `skipped ${skipped}`), ...result.failed.map((failure) => failure.error)].join("; ");
+        if (detail) activityHookGaps?.push(`claude_activity_hooks: the saved hooks could not be reapplied: ${detail}.`);
       } catch (error) {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
+        activityHookGaps?.push(`claude_activity_hooks: the saved hooks could not be reapplied: ${(error as Error).message}.`);
       } else if (entries.length === 0) {
         await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps, launchCwd);
       }
@@ -2097,11 +2170,12 @@ export class RestoreOrchestrator {
     // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
     if (resumeRequested && resumeToken && launchResult) {
       let guidance: ReturnType<typeof seatGuidance> = null;
+      let guidanceCwd: string | null | undefined;
       try {
         // Same resolved directory as launchCwd, without its "." fallback:
         // when neither the snapshot nor the live node has a cwd, keep the
         // old skip instead of writing guidance into the daemon's folder.
-        const guidanceCwd = node.cwd
+        guidanceCwd = node.cwd
           ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
             && (!selected || current.id === node.id))?.cwd;
         guidance = seatGuidance(startupCtx, guidanceCwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
@@ -2141,6 +2215,10 @@ export class RestoreOrchestrator {
           deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
         guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
+      // A saved folder this machine doesn't have isn't created just to hold the file (insideMissingFolder); a file outside
+      // it, such as a Pi agent folder's own AGENTS.md, is read wherever the seat runs. The check after the launch reports
+      // the blocks the seat lacks.
+      if (guidance && insideMissingFolder(guidance.targetPath, guidanceCwd, folderPresent)) guidance = null;
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
         // left as it is and named (the check after the launch carries the names onto the seat's result).
@@ -2249,7 +2327,7 @@ export class RestoreOrchestrator {
       if (!node.cwd) {
         return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "Checkpoint available but node has no cwd" };
       }
-      const written = this.writeCheckpointFile(node.cwd, checkpoint);
+      const written = this.writeCheckpointFile(node.cwd, sessionName, checkpoint);
       if (written) {
         baseStatus = "rebuilt";
       } else {
@@ -2324,14 +2402,22 @@ export class RestoreOrchestrator {
           warnings?.push(`Restore: ${retired.error}`);
           return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: retired.error };
         }
+        // The retired provisional shell's process-limits line no longer describes the seat: the replacement reports its
+        // own (or none, when it applied the limit), and a replacement that fails to launch runs nothing, so the line
+        // goes before the launch is awaited and the same notice is never printed twice.
+        const staleLimits = launchResult.processLimits ? noticeLine(launchResult.processLimits) : undefined;
+        const stale = staleLimits && warnings ? warnings.lastIndexOf(staleLimits) : -1;
+        if (stale >= 0) warnings!.splice(stale, 1);
         const replacementExists = () => this.sessionRegistry.getSessionsForRig(rigId)
           .some((candidate) => candidate.nodeId === node.id
             && candidate.status === "running"
             && candidate.id !== launchResult.session.id);
         try {
           // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
-          // applied doesn't stop the seat, and its notice is the node's.
-          const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
+          // applied doesn't stop the seat, and its notice is the node's. The replacement launches where the provisional
+          // shell did: this run's `--cwd`, else the saved folder.
+          const fresh = await this.freshLaunch(rigId, node.id,
+            { processLimitsMode: "recovery", ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}) });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
           // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).
@@ -2916,6 +3002,7 @@ export class RestoreOrchestrator {
     if (this.ompResume?.canResume(resumeType, resumeToken)) {
       const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
+        for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }
@@ -3128,9 +3215,9 @@ export class RestoreOrchestrator {
     return { attemptId: started.seq, status: completed ? nodeStatusIn(completed.payload) : null };
   }
 
-  private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {
+  private writeCheckpointFile(cwd: string, sessionName: string, checkpoint: Checkpoint): boolean {
     try {
-      const filePath = join(cwd, ".rigged-checkpoint.md");
+      const filePath = join(cwd, checkpointFileName(sessionName));
       const content = [
         "# OpenRig Checkpoint",
         "",

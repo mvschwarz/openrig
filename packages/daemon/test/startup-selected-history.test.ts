@@ -84,6 +84,34 @@ describe("selected-history startup", () => {
     expect(JSON.stringify(await response.json())).not.toContain(tokenA);
   });
 
+  it("says the seat's conversation changed since it was saved, not to refresh, when its history moved on", async () => {
+    const f = fixture();
+    // A /clear, /resume or new conversation records a new native id for the seat.
+    db.prepare("UPDATE sessions SET resume_token='after-clear' WHERE id=?").run(f.old.id);
+    const { response, body } = await review(f);
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({ code: "selection_changed" });
+    expect(body.message).toContain("changed since it was saved");
+    expect(body.message).toContain(`rig snapshot ${f.rig.name}`);
+    expect(body.message).not.toContain("Refresh the history list");
+  });
+
+  it("gives the same next step when the seat's current conversation moved on, so no saved source matches it", async () => {
+    const f = fixture();
+    // A /clear on the running seat records a new native id on its CURRENT session: the list and the review both find no
+    // compatible source, before the branch above is reached.
+    db.prepare("UPDATE sessions SET resume_token='after-clear' WHERE id=?").run(f.active.id);
+    const list = await request(`${f.path}/history`);
+    const listed = await list.json() as Record<string, unknown>;
+    const { response, body } = await review(f);
+    for (const [res, json] of [[list, listed], [response, body]] as const) {
+      expect(res.status).toBe(409);
+      expect(json).toMatchObject({ code: "source_unavailable" });
+      expect(json.message).toContain(`rig snapshot ${f.rig.name}`);
+      expect(json.message).toContain("rig seat launch <seat> --fresh --reason <why>");
+    }
+  });
+
   it.each(["token", "type", "provenance", "policy", "harness", "removed"] as const)("refuses a captured history whose live %s already disagrees before review", async change => {
     const f = fixture();
     if (change === "token") db.prepare("UPDATE sessions SET resume_token='other-native-id' WHERE id=?").run(f.old.id);

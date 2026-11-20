@@ -110,4 +110,28 @@ describe("deriveRestoreAttemptReceipt", () => {
       expect.objectContaining({ nodeId: "n1", logicalId: "lead", status: "failed" }),
     ]);
   });
+  it.each(["missing correspondence", "wrong logical seat", "unknown intended id", "duplicate intended", "duplicate launched"])(
+    "does not infer a recreated seat from an unbound outcome: %s", (mode) => {
+      const events = new EventBus(db);
+      const started = events.emit({ type: "restore.started", rigId: "rig-1", snapshotId: "s1",
+        intendedRoster: [{ nodeId: "saved", logicalId: "worker" }, { nodeId: "other", logicalId: "other" }] });
+      const mapped = { nodeId: "live", logicalId: "worker", status: "attention_required" as const,
+        ...(mode === "missing correspondence" ? {} : { intendedNodeId: mode === "unknown intended id" ? "unknown" : "saved" }) };
+      const nodes = mode === "duplicate intended" ? [mapped, { ...mapped, nodeId: "second-live" }]
+        : mode === "duplicate launched" ? [mapped, { ...mapped, intendedNodeId: "other", logicalId: "other" }]
+        : [{ ...mapped, ...(mode === "wrong logical seat" ? { logicalId: "other" } : {}) }];
+      events.emit({ type: "restore.completed", rigId: "rig-1", snapshotId: "s1",
+        result: { snapshotId: "s1", preRestoreSnapshotId: null, rigResult: "partially_restored", nodes, warnings: [] } });
+      events.emit({ type: "restore.outcome_reconciled", rigId: "rig-1", nodeId: "live", attemptId: started.seq,
+        from: "attention_required", to: "operator_recovered", evidence: { tmux: true, fgProcess: "claude", resumeTokenUsed: true, paneState: "usable" } });
+      const receipt = deriveRestoreAttemptReceipt(db, "rig-1", started.seq);
+      expect(receipt.ok).toBe(true);
+      if (!receipt.ok) return;
+      expect(receipt.reconciliations).toEqual([]);
+      expect(receipt.currentNodes).toEqual([
+        expect.objectContaining({ nodeId: "saved", status: "failed" }), expect.objectContaining({ nodeId: "other", status: "failed" }),
+      ]);
+    },
+  );
+
 });

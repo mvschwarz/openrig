@@ -6,6 +6,7 @@ import { renderLanes } from "../src/pulse/render-pulse.js";
 import { renderScreen } from "../src/render.js";
 import { scopeIdentityLines, type SliceScopeSnap } from "../src/scopes/scopes-model.js";
 import { createViewState } from "../src/state.js";
+import { columns } from "../src/visual-layout.js";
 import type { FleetSnapshot } from "../src/types.js";
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
@@ -53,6 +54,18 @@ describe("TUI truncation keeps emoji whole", () => {
     }
     expect(texts.some((text) => text.includes("…"))).toBe(true);
     expect(texts.filter((text) => LONE_SURROGATE.test(text))).toEqual([]);
+  });
+
+  it("keeps health summaries and findings within their terminal columns", () => {
+    const scope = { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true } as const;
+    const snapshot = healthSnapshot("作業状況".repeat(15));
+    const width = 72;
+    const lines = healthListLines(snapshot, scope, width);
+    const heading = lines.find((line) => line.text.includes("SCOPE"))!.text;
+    const finding = lines.find((line) => line.action?.type === "health-open")!.text;
+    expect(columns(healthSummaryLine(snapshot, scope, width).text)).toBeLessThanOrEqual(width);
+    expect(columns(finding)).toBeLessThanOrEqual(width);
+    expect(columns(finding.slice(0, finding.indexOf("dev50.guard")))).toBe(heading.indexOf("SCOPE"));
   });
 
   it("cuts a config value before an emoji instead of through it", () => {

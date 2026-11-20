@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { HerdrViewer, createHerdrViewerRun } from "./herdr-viewer.js";
 import path from "node:path";
 import { HerdrAdapter } from "./herdr-adapter.js";
@@ -29,7 +30,7 @@ export function createHerdrProviders(env: NodeJS.ProcessEnv = process.env, input
     viewer: viewer(endpoint),
     // The same Herdr CLI and tmux clients the daemon already uses, for an open that may reuse a live view.
     liveWorkspace: { herdr: createHerdrViewerRun(endpoint, env), exec: (file, args) => execArgvCommand([file, ...args]) },
-    newLaunchToken: () => `l${++launch}`,
+    newLaunchToken: () => `l${++launch}-${randomUUID().slice(0, 8)}`,
   }); };
   const sessions = new Map<string, HerdrAdapter>();
   return {

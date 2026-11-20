@@ -304,6 +304,69 @@ describe("persisted pod-aware launch recipes", () => {
     }
   });
 
+  // A never-occupied seat restored through the recipe's fresh launch keeps a saved folder missing on this machine missing,
+  // as the restore's own launch does: only a spec entry point, or a --cwd the person gives this run, creates a folder.
+  it.each([false, true])("a restore's fresh launch of a never-occupied seat creates its folder only for a --cwd the person gave (%s)", async (withCwd) => {
+    db = createFullTestDb();
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-missing-folder-"));
+    const saved = path.join(tmp, "old-home", "project");
+    const given = path.join(tmp, "new-home", "project");
+    try {
+      let setup!: ReturnType<typeof createTestApp>;
+      const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery"; cwdOverride?: string }) =>
+        setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
+      const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
+      const createFolder = vi.fn((dir: string) => { fs.mkdirSync(dir, { recursive: true }); });
+      const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
+      const tmux = mockTmuxAdapter();
+      setup = createTestApp(db, { tmux, freshLaunch, freshLaunchAvailable, createFolder,
+        podInstantiatorFsOps: { exists: (file) => file.replaceAll("\\", "/").endsWith("/agents/impl/agent.yaml"), readFile: () => agentYaml } });
+      const runtimeAdapter = {
+        runtime: "codex",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true as const })),
+      };
+      const rig = setup.rigRepo.createRig("moved-recipe-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-moved", rig.id, "dev", "Development");
+      const rigRoot = process.cwd();
+      const rigSpec: RigSpec = { version: "0.2", name: "moved-recipe-rig", edges: [], pods: [{ id: "dev", label: "Development",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." }], edges: [] }] };
+      const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", agentRef: "local:agents/impl", profile: "default",
+        cwd: saved, podId: "pod-moved", launchRecipe: { version: 1, rigRoot, rigSpec } });
+      const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@moved-recipe-rig");
+      setup.sessionRegistry.updateStatus(session.id, "running");
+      setup.sessionRegistry.updateBinding(node.id, { tmuxPane: "%7" });
+      const snapshot = setup.snapshotCapture.captureSnapshot(rig.id, "recipe-moved");
+      setup.sessionRegistry.updateStatus(session.id, "exited");
+
+      const result = await setup.restoreOrchestrator.restore(snapshot.id, {
+        adapters: { codex: runtimeAdapter }, freshLogicalIds: [node.logicalId], fsOps: { exists: (file: string) => fs.existsSync(file) },
+        ...(withCwd ? { cwdOverride: given } : {}) });
+
+      expect(result.ok).toBe(true);
+      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id, { processLimitsMode: "recovery", ...(withCwd ? { cwdOverride: given } : {}) });
+      expect(fs.existsSync(saved), "the saved folder stays missing").toBe(false);
+      // The fresh launch's terminal starts in the person's --cwd, or else the saved folder (tmux then falls back).
+      expect(vi.mocked(tmux.createSession).mock.calls.at(-1)?.[1]).toBe(withCwd ? given : saved);
+      if (withCwd) {
+        expect(createFolder).toHaveBeenCalledWith(given);
+        expect(fs.existsSync(given)).toBe(true);
+        // The fresh launch created it, so the restore doesn't name it missing.
+        expect(result.ok ? result.result.warnings.join("\n") : "").not.toContain("given with --cwd");
+      } else {
+        expect(createFolder).not.toHaveBeenCalled();
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("#3253: a restore's fresh fallback is a recovery: a limit it can't apply leaves a notice, not a failed seat", async () => {
     db = createFullTestDb();
     let setup!: ReturnType<typeof createTestApp>;

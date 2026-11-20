@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -707,5 +707,131 @@ describe("AgentActivityStore — generation identity (W2a-1)", () => {
       stale: true,
       generationProvenance: "unresolved",
     });
+  });
+});
+
+// #3389: the seat's own report of a compaction (SessionStart, source compact), read back from the persisted events.
+describe("AgentActivityStore.findCompactSessionStart", () => {
+  let db: Database.Database;
+  let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
+  let eventBus: EventBus;
+  let rigId: string | null;
+
+  beforeEach(() => {
+    rigId = null;
+    db = createFullTestDb();
+    rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+    eventBus = new EventBus(db);
+  });
+  afterEach(() => { db.close(); });
+
+  function seedSession(runtime: "claude-code" | "codex" = "claude-code") {
+    rigId ??= rigRepo.createRig("test-rig").id;
+    const rig = { id: rigId };
+    const node = rigRepo.addNode(rig.id, runtime === "codex" ? "dev.qa" : "dev.impl", { runtime });
+    const sessionName = runtime === "codex" ? "dev-qa@test-rig" : "dev-impl@test-rig";
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName, attachmentType: "tmux" });
+    return { rig, node, session, sessionName };
+  }
+
+  // Hook times are offsets from NOW.
+  const at = (offsetMs: number) => new Date(NOW.getTime() + offsetMs).toISOString();
+
+  it("returns the earliest compact SessionStart of the asked generation at or after the given time, and ignores everything else", () => {
+    const { sessionName } = seedSession("claude-code");
+    const other = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "startup", generation: "gen-1", occurredAt: at(-5_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-0", occurredAt: at(-4_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "UserPromptSubmit", occurredAt: at(1_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(2_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(2_003) });
+    store.recordHookEvent({ runtime: "codex", sessionName: other.sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-x", occurredAt: at(100) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "Stop", occurredAt: at(3_000) });
+    // Later events of other kinds never hide it, and the earlier compact or startup one is not counted.
+    const ask = (sinceMs: number, generation = "gen-1") => store.findCompactSessionStart({ sessionName, sinceMs, generation });
+    expect(ask(NOW.getTime())).toEqual({ observedAt: NOW.getTime() + 2_000, generation: "gen-1" });
+    expect(ask(NOW.getTime() + 2_001)).toEqual({ observedAt: NOW.getTime() + 2_003, generation: "gen-1" });
+    expect(ask(NOW.getTime() + 2_004)).toBeNull();
+    expect(ask(NOW.getTime() - 10_000, "gen-0")).toEqual({ observedAt: NOW.getTime() - 4_000, generation: "gen-0" });
+    expect(store.findCompactSessionStart({ sessionName: other.sessionName, sinceMs: NOW.getTime(), generation: "gen-x" })).toEqual({ observedAt: NOW.getTime() + 100, generation: "gen-x" });
+  });
+
+  it("a report with no generation, or another occupant's, is never returned and never stands in front of this occupant's later one", () => {
+    const { sessionName } = seedSession("claude-code");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", occurredAt: at(10) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-retired", occurredAt: at(11) });
+    const ask = (generation: string) => store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation });
+    expect(ask("gen-1")).toBeNull();
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(12) });
+    expect(ask("gen-1")).toEqual({ observedAt: NOW.getTime() + 12, generation: "gen-1" });
+    expect(ask("gen-retired")).toEqual({ observedAt: NOW.getTime() + 11, generation: "gen-retired" });
+    expect(ask("")).toBeNull();
+  });
+
+  it("a report that carries the launch generation counts for the adopted occupant, and not once a later launch replaced it", () => {
+    const { sessionName } = seedSession("claude-code");
+    // Generations as the registry would say: launch -> adopted (no-launch) -> relaunched (a launch).
+    const continued = new Set(["gen-launch", "gen-adopted"]);
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW,
+      isRegisteredOccupantGeneration: () => true,
+      isOccupantContinuedByAdoption: (_node, generation) => continued.has(generation) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-launch", occurredAt: at(5) });
+    const ask = (generation: string) => store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation });
+    expect(ask("gen-adopted")).toEqual({ observedAt: NOW.getTime() + 5, generation: "gen-launch" });
+    continued.delete("gen-launch"); // a later launch followed it: its reports are a retired occupant's
+    expect(ask("gen-relaunched")).toBeNull();
+    // A generation the registry does not know is never the same process.
+    const unregistered = new AgentActivityStore({ db, eventBus, now: () => NOW, isRegisteredOccupantGeneration: () => false, isOccupantContinuedByAdoption: () => true });
+    expect(unregistered.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-adopted" })).toBeNull();
+  });
+
+  it("the scan stops at the write: events recorded before it are not read, and the query rides the index range", () => {
+    const { sessionName } = seedSession("claude-code");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    const record = (hookEvent: string, subtype: string | undefined, occurredAt: string) =>
+      store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent, ...(subtype ? { subtype } : {}), generation: "gen-1", occurredAt });
+    // Old history, recorded a minute before the write: a lot of ordinary activity, and one compact report whose hook time
+    // reads as after the write (a hook clock ahead of the daemon's). It cannot be the report of a compaction not yet asked for.
+    for (let i = 0; i < 150; i++) record("UserPromptSubmit", undefined, at(-60_000 + i));
+    record("SessionStart", "compact", at(5));
+    db.prepare("UPDATE events SET created_at = '2026-04-24 11:59:00'").run();
+    const afterWrite = record("SessionStart", "compact", at(2_000));
+    expect(afterWrite.ok).toBe(true);
+
+    // The test database leaves out the events index migration (047); the daemon has it.
+    db.exec("CREATE INDEX IF NOT EXISTS idx_events_node_type_seq ON events(node_id, type, seq)");
+    const real = db.prepare.bind(db);
+    const seen: Array<{ sql: string; args: unknown[] }> = [];
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      const statement = real(sql);
+      if (sql.includes("rawSubtype")) {
+        const all = statement.all.bind(statement);
+        statement.all = ((...args: unknown[]) => { seen.push({ sql, args }); return all(...args); }) as typeof statement.all;
+      }
+      return statement;
+    }) as typeof db.prepare);
+    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-1" }))
+      .toEqual({ observedAt: NOW.getTime() + 2_000, generation: "gen-1" });
+    expect(seen).toHaveLength(1);
+    const plan = (real(`EXPLAIN QUERY PLAN ${seen[0]!.sql}`).all(...seen[0]!.args) as Array<{ detail: string }>).map((row) => row.detail);
+    expect(plan).toEqual(expect.arrayContaining([expect.stringMatching(/idx_events_node_type_seq \(node_id=\? AND type=\? AND seq>\?\)/)]));
+    expect(plan.filter((detail) => /^SCAN events\b/.test(detail))).toEqual([]);
+    // Taking the bound is itself a walk down from the newest record, which ends at the first one recorded before the write.
+    expect(plan).toEqual(expect.arrayContaining([expect.stringMatching(/idx_events_node_type_seq \(node_id=\? AND type=\?\)/)]));
+  });
+
+  it("finds nothing for an unknown seat, and survives a new store over the same events", () => {
+    const { sessionName } = seedSession("claude-code");
+    new AgentActivityStore({ db, eventBus, now: () => NOW })
+      .recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(10) });
+    const reopened = new AgentActivityStore({ db, eventBus, now: () => new Date(NOW.getTime() + 3_600_000) });
+    expect(reopened.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-1" })).toEqual({ observedAt: NOW.getTime() + 10, generation: "gen-1" });
+    expect(reopened.findCompactSessionStart({ sessionName: "nobody@test-rig", sinceMs: 0, generation: "gen-1" })).toBeNull();
   });
 });

@@ -360,7 +360,10 @@ export class CodexInPlaceRestart {
     if (!respawned.ok) {
       return this.afterFailedStop(target, report, observed, held, recoveryCommand, `the pane could not be respawned: ${respawned.message}`, progress);
     }
-    if (respawned.warnings) report.warnings.push(...respawned.warnings);
+    // The respawn returns its process-limits notice both as processLimits and as a warning line; the report keeps it
+    // once, as processLimits, which the CLI prints as its own line.
+    const limitsLine = respawned.processLimits ? noticeLine(respawned.processLimits) : undefined;
+    if (respawned.warnings) report.warnings.push(...respawned.warnings.filter((line) => line !== limitsLine));
     // The respawn logs its own notice (a kept scope that failed late, or a start it can't tell); the plan's is logged here.
     if (respawned.processLimits) this.noteProcessLimits(report, respawned.processLimits);
     else this.logProcessLimits(report);

@@ -100,10 +100,11 @@ export interface OutboxRecordInput {
 /** Native protocol custody and effects share the existing delivery receipt. */
 export interface RunnerReceipt {
   version: 1; requestId: string; nodeId: string; runId: string; sequence: number;
-  kind: "input" | "wake"; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown>;
+  kind: "input" | "wake" | "cancel"; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown>;
   stage: "pending" | "offered" | "accepted" | "submitted" | "completed" | "rejected";
   bindingHash?: string; erasedAt?: string; acceptedAt?: string; submittedAt?: string; completedAt?: string;
   acceptedTurnId?: string; nativeTurnId?: string; result?: Record<string, unknown>;
+  withdrawal?: { stage: "pending" | "confirmed"; startedAt: string; confirmedAt?: string; pendingSubmissions: number; withdrawn: number };
   reconciliation?: "receiver_state_lost" | "native_ownership_unknown";
 }
 export type RunnerAdmission = OutboxRecordInput & { outboxId: string; nodeId: string; runId: string;
@@ -235,12 +236,59 @@ export class OutboxHandler {
     return receipt && receipt.requestId === saved.nativeRequestId && receipt.memberIds?.includes(id) ? receipt : null;
   }
 
-  runnerReceipts(nodeId: string, runId: string): RunnerReceipt[] {
+  runnerReceipts(nodeId: string, runId?: string): RunnerReceipt[] {
     if (!this.hasGuardDeliveryColumn) return [];
     return (this.db.prepare(`SELECT guard_delivery FROM outbox_entries
-      WHERE json_extract(guard_delivery,'$.runner.nodeId')=? AND json_extract(guard_delivery,'$.runner.runId')=?
-      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER)`).all(nodeId, runId) as { guard_delivery: string }[])
+      WHERE json_extract(guard_delivery,'$.runner.nodeId')=? ${runId === undefined ? '' : "AND json_extract(guard_delivery,'$.runner.runId')=?"}
+      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER)`).all(...(runId === undefined ? [nodeId] : [nodeId, runId])) as { guard_delivery: string }[])
       .map(row => JSON.parse(row.guard_delivery).runner as RunnerReceipt);
+  }
+
+  /** Status-only metadata: SQLite filters JSON internally; prompt payloads never enter application memory. */
+  runnerRecovery(nodeId: string): Record<string, unknown>[] {
+    if (!this.hasGuardDeliveryColumn) return [];
+    const rows = this.db.prepare(`SELECT
+      json_extract(guard_delivery,'$.runner.requestId') AS requestId,
+      json_extract(guard_delivery,'$.runner.runId') AS runId,
+      json_extract(guard_delivery,'$.runner.kind') AS kind,
+      json_extract(guard_delivery,'$.runner.stage') AS stage, json_type(guard_delivery,'$.runner.stage') AS stageType,
+      json_extract(guard_delivery,'$.runner.erasedAt') AS erasedAt,
+      json_extract(guard_delivery,'$.runner.memberIds') AS memberIds,
+      CASE WHEN json_extract(guard_delivery,'$.runner.kind')='cancel' THEN json_quote(json_extract(guard_delivery,'$.runner.payload.target')) END AS target,
+      json_type(guard_delivery,'$.runner.payload.target') AS targetType,
+      json_type(guard_delivery,'$.runner.withdrawal') AS withdrawalType,
+      json_extract(guard_delivery,'$.runner.withdrawal.stage') AS withdrawalStage,
+      json_extract(guard_delivery,'$.runner.withdrawal.startedAt') AS startedAt,
+      json_extract(guard_delivery,'$.runner.withdrawal.confirmedAt') AS confirmedAt,
+      json_extract(guard_delivery,'$.runner.withdrawal.pendingSubmissions') AS pendingSubmissions,
+      json_extract(guard_delivery,'$.runner.reconciliation') AS reconciliation,
+      json_extract(guard_delivery,'$.runner.result.outcome') AS outcome,
+      json_type(guard_delivery,'$.runner.result.confirmed') AS confirmedType,
+      CASE json_type(guard_delivery,'$.runner.result.confirmed') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false'
+        ELSE json_quote(json_extract(guard_delivery,'$.runner.result.confirmed')) END AS confirmed,
+      sender_session AS sender, destination_session AS destination
+      FROM outbox_entries WHERE json_extract(guard_delivery,'$.runner.nodeId')=? AND (
+        COALESCE(json_extract(guard_delivery,'$.runner.reconciliation'),'') <> ''
+        OR COALESCE(json_extract(guard_delivery,'$.runner.stage'),'') NOT IN ('completed','rejected')
+        OR (json_extract(guard_delivery,'$.runner.kind')='cancel' AND json_extract(guard_delivery,'$.runner.result.outcome')='requested'
+          AND json_type(guard_delivery,'$.runner.result.confirmed') IS NOT 'true'))
+      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER), rowid`).all(nodeId) as Record<string, unknown>[];
+    return rows.map(row => ({ requestId: row.requestId, runId: row.runId, kind: row.kind, stage: row.stageType === null ? undefined : row.stage,
+      ...(row.erasedAt ? { erasedAt: row.erasedAt } : {}), sender: row.sender, destination: row.destination,
+      ...(row.memberIds ? { memberIds: JSON.parse(String(row.memberIds)) } : {}),
+      ...(row.kind === "cancel" ? { target: row.targetType === null ? undefined : JSON.parse(String(row.target)) } : {}),
+      ...(row.withdrawalType === "object" ? { withdrawal: { stage: row.withdrawalStage ?? undefined, startedAt: row.startedAt ?? undefined,
+        ...(row.confirmedAt ? { confirmedAt: row.confirmedAt } : {}), pendingSubmissions: row.pendingSubmissions ?? undefined } } : {}),
+      ...(row.reconciliation ? { reconciliation: row.reconciliation } : {}),
+      ...(row.outcome ? { outcome: row.outcome, confirmed: row.confirmedType === null ? undefined : JSON.parse(String(row.confirmed)) } : {}) }));
+  }
+
+  /** Run-local uncertainty guard; unlike recovery status, cancellation and historical runs do not block input. */
+  hasRunnerReconciliation(nodeId: string, runId: string): boolean {
+    if (!this.hasGuardDeliveryColumn) return false;
+    return !!this.db.prepare(`SELECT 1 FROM outbox_entries WHERE json_extract(guard_delivery,'$.runner.nodeId')=?
+      AND json_extract(guard_delivery,'$.runner.runId')=? AND json_extract(guard_delivery,'$.runner.kind') IS NOT 'cancel'
+      AND COALESCE(json_extract(guard_delivery,'$.runner.reconciliation'),'') <> '' LIMIT 1`).get(nodeId, runId);
   }
 
   admitRunner(input: RunnerAdmission): RunnerReceipt {
@@ -298,7 +346,9 @@ export class OutboxHandler {
       if (receipt.erasedAt) throw new OutboxHandlerError("runner_receipt_erased", "This native receipt was erased; no result recorded.");
       if (receipt.reconciliation) throw new OutboxHandlerError("runner_state_lost", "Native custody or execution ownership is uncertain; effect remains indeterminate.");
       for (const key of ["acceptedTurnId", "nativeTurnId", "result"] as const) {
-        if (receipt[key] !== undefined && evidence[key] !== undefined && stable(receipt[key]) !== stable(evidence[key]))
+        if (receipt[key] !== undefined && evidence[key] !== undefined && stable(receipt[key]) !== stable(evidence[key])
+          && !(key === "result" && receipt.kind === "cancel" && receipt.stage !== "completed" && receipt.result?.outcome === "requested"
+            && ["requested", "cancelled"].includes(String(evidence.result?.outcome))))
           throw new OutboxHandlerError("runner_result_conflict", "A different native result is already retained.");
       }
       const stages = ["pending", "offered", "accepted", "submitted", "completed"];
@@ -310,10 +360,13 @@ export class OutboxHandler {
       if (stage !== "rejected" && stages.indexOf(stage) <= stages.indexOf(receipt.stage)) return receipt;
       const unknownSubmission = stage === "completed" && receipt.stage === "accepted" && evidence.result?.submissionUnknown === true
         && evidence.result?.completion === "unknown";
-      if (stage !== "rejected" && !unknownSubmission && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
+      const noCancelEffect = receipt.kind === "cancel" && receipt.stage === "accepted" && stage === "completed"
+        && ["not-this-turn", "not-supported"].includes(String(evidence.result?.outcome));
+      if (stage !== "rejected" && !unknownSubmission && !noCancelEffect && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
         throw new OutboxHandlerError("runner_stage_conflict", "Native receipt skipped a required custody stage.");
       if (stage === "rejected" && ["submitted", "completed"].includes(receipt.stage))
         throw new OutboxHandlerError("runner_stage_conflict", "Submitted effects cannot become pre-effect rejection.");
+      const unknownCancellation = receipt.kind === "cancel" && evidence.result?.outcome === "requested" && evidence.result.operationAccepted !== true;
       const at = new Date().toISOString();
       const updated: RunnerReceipt = { ...receipt, ...evidence, stage,
         ...(evidence.result?.ownershipUnknown === true ? { reconciliation: "native_ownership_unknown" as const } : {}),
@@ -322,7 +375,7 @@ export class OutboxHandler {
       this.writeRunner(updated);
       if (stage === "submitted" || stage === "completed" || stage === "rejected") for (const memberId of receipt.memberIds ?? [id])
         this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=? WHERE outbox_id=?")
-          .run(unknownSubmission || updated.reconciliation ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || updated.reconciliation || stage === "rejected" ? null : at, memberId);
+          .run(unknownSubmission || unknownCancellation || updated.reconciliation ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || unknownCancellation || updated.reconciliation || stage === "rejected" ? null : at, memberId);
       return updated;
     })();
   }
@@ -348,6 +401,20 @@ export class OutboxHandler {
     })();
   }
 
+  recordRunnerWithdrawal(nodeId: string, runId: string, id: string, sequence: number,
+    evidence: { confirmed: boolean; pendingSubmissions: number; withdrawn: number }): RunnerReceipt {
+    const receipt = this.runnerReceipt(id);
+    if (!receipt || receipt.kind !== "cancel" || receipt.nodeId !== nodeId || receipt.runId !== runId || receipt.sequence !== sequence
+      || receipt.erasedAt || receipt.reconciliation || receipt.stage !== "accepted")
+      throw new OutboxHandlerError("runner_request_mismatch", "Cancellation preparation does not match retained accepted custody.");
+    const at = new Date().toISOString();
+    const withdrawal: NonNullable<RunnerReceipt["withdrawal"]> = { stage: evidence.confirmed ? "confirmed" : "pending",
+      startedAt: receipt.withdrawal?.startedAt ?? at, ...(evidence.confirmed ? { confirmedAt: receipt.withdrawal?.confirmedAt ?? at } : {}),
+      pendingSubmissions: evidence.pendingSubmissions, withdrawn: evidence.withdrawn };
+    if (receipt.withdrawal?.stage === "confirmed" && !evidence.confirmed) throw new OutboxHandlerError("runner_result_conflict", "Withdrawal confirmation cannot regress.");
+    const updated = { ...receipt, withdrawal }; this.writeRunner(updated); return updated;
+  }
+
   forgetRunnerMap(nodeId: string, runId: string): void {
     this.db.transaction(() => {
       for (const receipt of this.runnerReceipts(nodeId, runId)) {
@@ -369,8 +436,15 @@ export class OutboxHandler {
     const source = this.getById(id)!;
     const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null };
     const retained = row.guard_delivery ? JSON.parse(row.guard_delivery) : {};
+    const target = receipt?.kind === "cancel" ? receipt.payload.target as { runId?: unknown; nativeTurnId?: unknown } | undefined : undefined;
+    const cancellationTarget = target && typeof target.runId === "string" && typeof target.nativeTurnId === "string"
+      ? { runId: target.runId, nativeTurnId: target.nativeTurnId } : null;
     const tombstone: RunnerReceipt | null = receipt ? { version: 1, requestId: receipt.requestId, nodeId: receipt.nodeId, runId: receipt.runId,
-      sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: {},
+      sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: cancellationTarget ? { target: cancellationTarget } : {},
+      ...(cancellationTarget && receipt.withdrawal ? { withdrawal: { stage: receipt.withdrawal.stage, startedAt: receipt.withdrawal.startedAt,
+        ...(receipt.withdrawal.confirmedAt ? { confirmedAt: receipt.withdrawal.confirmedAt } : {}), pendingSubmissions: receipt.withdrawal.pendingSubmissions, withdrawn: receipt.withdrawal.withdrawn } } : {}),
+      ...(cancellationTarget && receipt.result ? { result: { kind: "cancel", outcome: receipt.result.outcome, confirmed: receipt.result.confirmed,
+        ...(typeof receipt.result.operationAccepted === "boolean" ? { operationAccepted: receipt.result.operationAccepted } : {}) } } : {}),
       ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}),
       bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at } : null;
     this.db.transaction(() => {
@@ -771,13 +845,19 @@ export class OutboxHandler {
    * ambiguous (the external send may or may not have landed after the claim), so
    * it records `indeterminate`, never a forever-transient claim and never a blind
    * re-send. EXACT-CASE prefix, matching the executable selector. Returns the
-   * count reconciled.
+   * count reconciled. A row the seat's hook bridge (slice 13) still owns stays as it is: one only queued is delivered or
+   * typed by the bridge's sweep, and one its waiter claimed is named uncertain by the bridge, never resent. Every other
+   * receipt, including none, an ordinary one and one that isn't JSON, is reconciled as before.
    */
   reconcileAbandonedSending(idPrefix: string): number {
+    // A CASE, not NOT(...): a receipt without these fields reads NULL there, and NOT NULL would skip the row.
     const result = this.db
       .prepare(
         `UPDATE outbox_entries SET delivery_state = 'indeterminate'
-          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?`
+          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?
+            AND CASE WHEN guard_delivery IS NOT NULL AND json_valid(guard_delivery)
+              THEN COALESCE(json_extract(guard_delivery, '$.channel') = 'hook-bridge' AND json_extract(guard_delivery, '$.state') IN ('queued', 'claimed'), 0)
+              ELSE 0 END = 0`
       )
       .run(idPrefix.length, idPrefix);
     return result.changes;

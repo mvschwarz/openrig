@@ -8,6 +8,228 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.7.19]
+
+OpenRig 0.7.19 improves how a team brings permission prompts to a person, reports interrupted recovery, and starts again after a failed launch. It also adds optional Claude hook delivery, per-seat Linux memory limits, and a versioned interface for apps answering human questions.
+
+### Before you upgrade
+
+Run the upgrade in the environment that owns your daemon, keeping the same `OPENRIG_HOME` (legacy `RIGGED_HOME`) if you set it. Stop the daemon, back up its database, install the patch, then restart it. Your agents keep running; do not use `rig down` for this upgrade.
+
+If the daemon was started with `--db`, or with `OPENRIG_DB` (legacy `RIGGED_DB`) set differently from this shell, replace the `DB=` line below with that actual database path. Pass the same `--db "$DB"` to every `rig daemon start`, including recovery; `rig config get db.path` reads this shell's configuration, not the running daemon's launch arguments or environment.
+
+```sh
+DB="$(rig config get db.path)" &&
+STOP="$(rig daemon stop)" && printf '%s\n' "$STOP" &&
+{ printf '%s\n' "$STOP" | grep -qx 'Daemon stopped' || { echo "The stop wasn't confirmed clean; see below before continuing." >&2; false; }; } &&
+BACKUP="$DB.before-0.7.19-$(date -u +%Y%m%dT%H%M%SZ)" &&
+{ [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists; keep it and run again." >&2; false; }; } &&
+cp "$DB" "$BACKUP" &&
+{ [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+npm install -g @openrig/cli@0.7.19 &&
+rig daemon start --db "$DB"
+```
+
+A failure stops the following commands; fix it before continuing. Back up and install only after `rig daemon stop` prints the line `Daemon stopped`: that is the stop outcome that confirms a clean shutdown. Its other success line, “No daemon target recorded; listener refused. Nothing to stop; prior drain not certified.”, means this stop has no recorded target. It does not prove that no daemon exists or that the last one shut down cleanly. A `Daemon stopped` from `rig daemon status` does not confirm a clean shutdown either.
+
+If the stop failed or had no recorded target, make sure the daemon is running on its original home and database (start it with `rig daemon start --db "$DB"` if `rig daemon status` does not say it is running), then run the whole block again. If the stop is still unconfirmed, use `daemon-shutdown.json` and `daemon.log` in your OpenRig home, together with `rig context get help`, to resolve the reported problem before retrying. Do not continue to the backup or install on an unconfirmed stop.
+
+Three additive migrations record the hook bridge, each session's launched folder, and app access. Keep the backup: downgrading the migrated database to 0.7.18 is not established. Bundled `openrig` is 0.7.19; `openrig-core` is 0.1.33.
+
+### Questions and consent
+
+A permission prompt can reach the existing alert route even when its seat has no open work. A recovery waiting directly on that prompted seat or row no longer hides the prompt. Clears from an earlier occupant do not clear the current occupant's alert. ([#3425](https://github.com/mvschwarz/openrig/pull/3425), [#3446](https://github.com/mvschwarz/openrig/pull/3446))
+
+The installer guidance keeps your conversation unless you choose the operator's pane, and teaches reloading a skill added during the session. The guidance says an answer covers that prompt, rather than permission to answer unrelated prompts later. ([#3423](https://github.com/mvschwarz/openrig/pull/3423), [#3431](https://github.com/mvschwarz/openrig/pull/3431), [#3454](https://github.com/mvschwarz/openrig/pull/3454))
+
+### Recovery and delivery
+
+Restore now reports skipped saved hooks and missing working folders as gaps. Restore's working-folder projection skips a folder confirmed absent; adapter home/state setup is separate. A fresh launch from a spec can still create its declared folder. Recreated seats' notices and receipts agree about which seat launched, and a delivered sequence can close its notice. Closure is best-effort if bookkeeping fails; a later sequence can still owe work. ([#3430](https://github.com/mvschwarz/openrig/pull/3430), [#3436](https://github.com/mvschwarz/openrig/pull/3436), [#3450](https://github.com/mvschwarz/openrig/pull/3450), [#3350](https://github.com/mvschwarz/openrig/pull/3350), [#3415](https://github.com/mvschwarz/openrig/pull/3415))
+
+`launch --fresh` can replace the shell left by a failed start without `--stop`. Fresh launch can reopen a terminal server after a host restart when the old process is confirmed gone. A missing tmux server is reported as a detached session, with guidance to restore or relaunch the seat; unavailable readings remain uncertain. Duplicate automatic watchdog registration no longer aborts startup. ([#3392](https://github.com/mvschwarz/openrig/pull/3392), [#3435](https://github.com/mvschwarz/openrig/pull/3435), [#3429](https://github.com/mvschwarz/openrig/pull/3429), [#3443](https://github.com/mvschwarz/openrig/pull/3443))
+
+For a seat you type in, `rig seat set-typing-guard <seat> --mode queue-only --reason <text>` keeps ordinary automatic notices out of its input. Watchdog reminders can be noted on a matching row or recorded in a new queue row without a nudge; parked-owner reminders remain retained. Interrupted reminders survive daemon restart. Other delivery modes keep their own behavior. ([#3418](https://github.com/mvschwarz/openrig/pull/3418), [#3461](https://github.com/mvschwarz/openrig/pull/3461))
+
+Claude hook delivery is opt-in: `rig seat set-hook-bridge <seat> --enabled true --reason <text>`, then inspect `rig seat hook-bridge <seat>`. On supported Claude versions, launch or restore installs the bridge; it takes messages only after this occupant's waiter has armed. Until then, ordinary typed delivery applies. If an already-routed bridge becomes unavailable, fallback follows the existing delivery checks and names why. The help's 20 seconds is not an arrival deadline: queued work, waiter state and the existing delivery checks determine waiting and fallback. A hook handoff is not proof the agent read or acted on it. ([#3270](https://github.com/mvschwarz/openrig/pull/3270), [#3445](https://github.com/mvschwarz/openrig/pull/3445))
+
+### Settings and connected tools
+
+On Linux with systemd, `process_limits: { memory_max: "512M" }` requests a per-seat memory limit alongside `tasks_max`; swap is separate. `rig seat status` shows the observed limit and counters. A limit that cannot be verified is reported, not silently claimed effective. Recovery may attempt a launch without a process limit, with a warning; that attempt can fail. An uncertain or already-started command is not repeated merely to obtain the limit. ([#3417](https://github.com/mvschwarz/openrig/pull/3417))
+
+Apps can use the versioned [human-answer interface](https://github.com/mvschwarz/openrig/blob/v0.7.19/docs/reference/core-app.md) to read questions, submit answers and recover receipts. Credentials identify an app and permitted actors; they are not private per-person logins. Other improvements bind external input to its run, add optional webhook signatures, and pass advisory participant fields through `rig_team`. ([#3426](https://github.com/mvschwarz/openrig/pull/3426), [#3420](https://github.com/mvschwarz/openrig/pull/3420), [#3364](https://github.com/mvschwarz/openrig/pull/3364), [#3396](https://github.com/mvschwarz/openrig/pull/3396), [#3410](https://github.com/mvschwarz/openrig/pull/3410))
+
+Capable runners offer `rig seat cancel <seat> --run-id <run> --native-turn-id <turn> --request-id <id>` for the exact target from `rig seat status <seat> --json`. Inspect its `requested`, `cancelled`, `not-this-turn` or `not-supported` result. Neither permission withdrawal nor an accepted cancellation request proves the operation stopped; raw Claude/Codex TUI seats do not gain this runner capability. ([#3364](https://github.com/mvschwarz/openrig/pull/3364))
+
+### Known limits
+
+- A later unreadable tmux sample can show recorded running again after an earlier stopped reading. “Liveness unconfirmed” is not evidence of a live process; inspect the seat before relying on that label.
+- Linked Codex configuration files retain version-specific hook-trust limits. This release does not migrate existing noncanonical state or include the linked-path alias change wholesale. Review any hook prompt yourself; do not treat this upgrade as prior consent.
+- Queue-only reminders are not exactly-once: a lost note receipt can repeat a note. Check the row before acting twice.
+- Downgrading past the Claude hook `exec` change can leave generated settings unrecognized by the older daemon. Keep your settings backup and inspect them before restarting an older release. ([#3427](https://github.com/mvschwarz/openrig/pull/3427))
+- Manual compaction preparation can be held at queue-only. Inspect `rig compact <seat> --state` and `rig seat held-messages <seat>` before deliberately choosing an existing delivery route or level; changing the level does not replay retained messages.
+- A return route records where questions should go; it does not guarantee arrival. Choice prompts, foreign or conflicting routes, existing delivery custody, and a relay that cannot be made keep their existing paths. Tasks at a conversation's address are read on its next turn. When checking open routed tasks, include blocked rows: `OPENRIG_SESSION_NAME='<recorded address>' rig queue list --owned --state pending,in-progress,blocked`.
+
+### Credits
+
+Thanks to Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Evgeny Zotov, James B. Shields, Mike Schwarz, NIKHIL, Roberto Campos, Samuel, Samuel Smith, Wu Shuwen, billbenetti, and dependabot[bot]. Their contributions also improve terminal column sizing, JSON errors, transcript searches, workflow ownership, account-label display, scope links, cleanup and documentation.
+
+## [0.7.18]
+
+OpenRig 0.7.18 can send a team's seat prompts to the conversation you handed
+the work over from, restore says more truthfully what it left running, and
+three settings can be chosen per seat: native input, Claude's auto mode and, on
+Linux, a task limit. Many fixes come from people using OpenRig.
+
+### Before you upgrade
+
+- **Stop the daemon, back up the database, install 0.7.18, then start the
+  daemon.** Your agents keep running through a daemon restart; don't use
+  `rig down`, which ends them. Each step runs only if the one before it
+  succeeded. The backup goes to a new, dated file, with its `-wal` file beside
+  it when there is one, so running the block again never overwrites an earlier
+  backup. If you installed OpenRig another way, use that in place of the
+  `npm install` line.
+
+  Before running the block or any recovery command, use the same OpenRig home (`OPENRIG_HOME`, or legacy `RIGGED_HOME`) as the daemon you are upgrading.
+
+  If that daemon was started with `--db`, or with `OPENRIG_DB` (legacy `RIGGED_DB`) set differently from this shell, replace the block's `DB=` line with its actual database path instead of using `rig config get db.path`, and pass that path with `--db` to every `rig daemon start` below, including recovery. The config command reads this shell's configuration, not the running daemon's launch settings.
+
+  ```sh
+  rig daemon stop &&
+  DB="$(rig config get db.path)" &&
+  BACKUP="$DB.before-0.7.18-$(date -u +%Y%m%dT%H%M%SZ)" &&
+  { [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists and is kept; run the block again." >&2; false; }; } &&
+  cp "$DB" "$BACKUP" &&
+  { [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+  echo "Database backed up to $BACKUP" &&
+  npm install -g @openrig/cli@0.7.18 &&
+  rig daemon start
+  ```
+
+  If a step fails, nothing after it runs: fix what it reports, then run the
+  whole block again. If `rig daemon stop` fails and `rig daemon status` then
+  says "Daemon stopped", run the block from the `DB=` line. If it says
+  "Daemon PID is absent", run `rig daemon start`, then the whole block again.
+  Keep the backup, and its `-wal` file, until 0.7.18 is running well.
+
+- **Four migrations run before the daemon listens** (two numbered 171, then 172
+  and 173), each adding columns or indexes. Going back to 0.7.17 after them
+  isn't established; keep the backup. ([#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3318](https://github.com/mvschwarz/openrig/pull/3318), [#3332](https://github.com/mvschwarz/openrig/pull/3332))
+- **The plugins:** `openrig` carries 0.7.18, and openrig-core moves to 0.1.32
+  because its skills and refocus hook changed.
+
+### Your team's questions, in your own conversation
+
+- **Hand a goal over with a return route:** `rig queue create --return-route
+  auto` gives your conversation an address, and every handoff carries it
+  (`--return-route self` from a session that joined the team). When routed work
+  is held at a seat's prompt, or waits on it, a prompt that isn't a choice
+  dialog is sent to that address as a task. Choice prompts, a prompt already
+  with the gateway, and a route that can't be used (another host's, two that
+  disagree, or a relay that couldn't be made) keep their existing path. The
+  `rigs` skill teaches this; without `--return-route`, nothing changes. ([#3318](https://github.com/mvschwarz/openrig/pull/3318))
+- **Guidance:** the kernel operator is instructed to answer a registered person
+  where they wrote, without the terminal user's leave (guidance, not proof an
+  answer is delivered), and `messaging-the-human` says how to close the ask an
+  answer settles. ([#3370](https://github.com/mvschwarz/openrig/pull/3370), [#3305](https://github.com/mvschwarz/openrig/pull/3305))
+- **Slack:** a button answer keeps each option's history and who gave it; a
+  click that fails to record enters the existing retry path, which fills only a
+  still-unanswered question. Settled cards drop the raw closure code ("Denied"
+  for a refusal), and the opt-in `rig slack manifest --private-channel` sets up
+  a private channel. An answer through MCP's `rig_question_answer` is accepted
+  when the daemon requires an operator token. ([#3353](https://github.com/mvschwarz/openrig/pull/3353), [#3359](https://github.com/mvschwarz/openrig/pull/3359), [#3324](https://github.com/mvschwarz/openrig/pull/3324), [#3344](https://github.com/mvschwarz/openrig/pull/3344), [#3257](https://github.com/mvschwarz/openrig/pull/3257))
+
+### Recovering the same work
+
+- **A seat that restore leaves as a bare shell no longer counts as running** in
+  `rig ps`, including a recreated seat, and a seat with a delegation parent or
+  escalation destination gets that owner one queue item per restore listing
+  each cause and the next step. Launching over a live session no longer says
+  "Already running". ([#3185](https://github.com/mvschwarz/openrig/pull/3185), [#3216](https://github.com/mvschwarz/openrig/pull/3216), [#3366](https://github.com/mvschwarz/openrig/pull/3366), [#3215](https://github.com/mvschwarz/openrig/pull/3215))
+- **Restoring after OpenRig's home moved:** `rig up --existing --cwd` honors
+  `--cwd`, names a missing saved folder and leaves a folder with a declared
+  project unscaffolded, and Claude seats keep OpenRig's core plugin. ([#3347](https://github.com/mvschwarz/openrig/pull/3347), [#3352](https://github.com/mvschwarz/openrig/pull/3352))
+- **Restore and `restore-check` name agents that share a recorded
+  conversation** and leave the choice to you; `--plan` shows each seat's
+  restore permission and its source. ([#3250](https://github.com/mvschwarz/openrig/pull/3250), [#3186](https://github.com/mvschwarz/openrig/pull/3186))
+- **`rig seat handover --recover`** reads an interrupted Claude handover more
+  truthfully and accepts a successor alone in its session's current window. ([#3246](https://github.com/mvschwarz/openrig/pull/3246), [#3369](https://github.com/mvschwarz/openrig/pull/3369))
+- **Also:** a later `rig down` no longer exits 2 over a released session's kept
+  skills (a plain `down` of a stopped rig still exits 1); Codex 0.167.1 and
+  0.167.2 seats read their real activity; an adopted, still-running seat's
+  hooks read as its own; and refocus orients from the seat's selected project
+  when no task is in progress. ([#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182), [#3365](https://github.com/mvschwarz/openrig/pull/3365), [#3351](https://github.com/mvschwarz/openrig/pull/3351))
+
+### Queue, delivery and settings
+
+- **Per-seat choices, all opt-in:** native input instead of terminal typing
+  (`rig seat set-input-route <seat> --route native --reason <text>`); Claude's
+  `autoMode` block (`claude_auto_mode`, or `rig seat set-permissions
+  --auto-mode`); and, on Linux with systemd, a requested task limit
+  (`process_limits: { tasks_max: N }`). A fresh start whose limit isn't seen to
+  take effect is refused; a recovery that can't apply it may try without the
+  limit, with a warning; and an uncertain start is reported and not retried.
+  An export names a stored limit it can't read instead of refusing the rig. ([#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3332](https://github.com/mvschwarz/openrig/pull/3332), [#3390](https://github.com/mvschwarz/openrig/pull/3390))
+- **`rig compact` on a Pi seat** requests Pi's own compaction, and `--state`
+  reports the attempt. ([#3013](https://github.com/mvschwarz/openrig/pull/3013))
+- **Queue and workflows:** `rig queue tag` adds tags to an existing row;
+  `rig queue list` names a handed-off row's successors; a handoff advises on a
+  mission or slice tag that resolves to nothing; a hold blocked on a custom-ID
+  row records its wake; a wake that failed before any input gets one retry on
+  the same seat; and `rig workflow route` adopts a second handoff to the same
+  target. ([#3281](https://github.com/mvschwarz/openrig/pull/3281), [#3302](https://github.com/mvschwarz/openrig/pull/3302), [#3178](https://github.com/mvschwarz/openrig/pull/3178), [#3152](https://github.com/mvschwarz/openrig/pull/3152), [#3243](https://github.com/mvschwarz/openrig/pull/3243), [#3311](https://github.com/mvschwarz/openrig/pull/3311), [#3363](https://github.com/mvschwarz/openrig/pull/3363))
+- **Terminals and assistants:** CLI terminal reads send the configured terminal
+  bearer; a custom `TMUX_TMPDIR` is named in the attach command; with tmux 3.2
+  or later, a herdr-app cell at herdr's default hidden size (200x120) no longer
+  resizes the seat; tmux credential cleanup can't fall back to a server-wide
+  value; `rig acp run`'s log keeps multibyte characters split across reads; and
+  network assistants learn the retry rule and pickup timing. ([#3360](https://github.com/mvschwarz/openrig/pull/3360), [#3165](https://github.com/mvschwarz/openrig/pull/3165), [#3358](https://github.com/mvschwarz/openrig/pull/3358), [#3342](https://github.com/mvschwarz/openrig/pull/3342), [#3343](https://github.com/mvschwarz/openrig/pull/3343), [#3329](https://github.com/mvschwarz/openrig/pull/3329))
+- **Also:** runner reports stay bound to their run, recent transitions honour a
+  limit up to 1,000, and the stuck sweep makes fewer reads. This release makes
+  no speed claim. ([#3150](https://github.com/mvschwarz/openrig/pull/3150), [#3211](https://github.com/mvschwarz/openrig/pull/3211), [#3301](https://github.com/mvschwarz/openrig/pull/3301), [#3340](https://github.com/mvschwarz/openrig/pull/3340))
+
+### Behaviour that changed
+
+- **Each restored seat's checkpoint is its own file,**
+  `.rigged-checkpoint-<session>-<digest>.md`; anything that reads
+  `.rigged-checkpoint.md` won't find it. ([#3347](https://github.com/mvschwarz/openrig/pull/3347))
+
+### Known limits
+
+- **Prompts in your own conversation wait for you:** a routed prompt arrives on
+  that conversation's next turn, nothing wakes an idle one, and arrival isn't
+  guaranteed. A prompt can still change between OpenRig reading it and sending
+  your key. In two measured Claude first-user runs, one agent set no return route. The other completed reviewed, committed work with the route set, but read prompt relays only after the prompts had been answered and approved later prompts beyond the person's one-time consent. Neither run met all first-user criteria.
+- **Adding `rigs` during a running Claude Code session:** If installation creates a top-level skills directory that was absent when the session started, Claude Code's [documentation](https://code.claude.com/docs/en/skills#edit-a-skill-during-a-session) says to use `/reload-skills` (available from Claude Code 2.1.152) to discover it. Starting a new session is an alternative. Neither recovery was exercised in this release's first-user test.
+- **Restore:** a seat isn't told where its checkpoint file is, and a written
+  checkpoint isn't proof it was read. After a `--cwd` restore, `rig down`
+  doesn't clean OpenRig's Claude settings, hooks and collector from that
+  folder. When a full restore recreates a seat, its result can still list it
+  as not started, and the attempt's record can miss its actual outcome.
+- **Native input route:** withdrawing a permission doesn't cancel a native
+  seat's work in progress.
+- **Queue help** says a human seat such as `human@host` asks no one; that holds
+  only for an unregistered one.
+- **Linked Codex config files:** when a Codex seat's `config.toml` or
+  `hooks.json` is a symbolic link, OpenRig records its hook trust under the
+  link's target, as in 0.7.14. A change to key it by the file's own name isn't
+  in this release, and such a seat may be asked to review hooks again. With a
+  linked `config.toml`, OpenRig can also miss a setting stored for it that
+  turns OpenRig's hooks off, and set those hooks up anyway when it moves them
+  into `hooks.json`. ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
+- OpenRig 0.7.17 rejects teams whose exported `rig.yaml` contains `claude_auto_mode` or `process_limits`. Upgrade the receiving install to 0.7.18, or remove those fields from a copy only if you intend to share without those per-seat settings.
+- **From 0.7.17:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.17)
+  still apply, except the bare-shell count, the second `rig down`'s exit 2 and
+  Codex 0.167.1 and 0.167.2's `unknown` ([#3185](https://github.com/mvschwarz/openrig/pull/3185), [#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182)).
+
+### Credits
+
+Thanks to @Aummadour, @billbenetti, @cavalcanticampos, @dajiaohuang,
+@DeryFerd, @EZotoff, @oodadoudou, @pr0xc3nt4ur1, @shravansumanthanan, @smota,
+@Temikus and @w4rc0n for merged contributions. Thanks also for the reports
+behind these fixes: @billbenetti ([#2725](https://github.com/mvschwarz/openrig/issues/2725), [#3218](https://github.com/mvschwarz/openrig/issues/3218), [#3316](https://github.com/mvschwarz/openrig/issues/3316)), @Kayhusk ([#3320](https://github.com/mvschwarz/openrig/issues/3320)),
+@parkingmeter ([#1933](https://github.com/mvschwarz/openrig/issues/1933)), @z4cc ([#313](https://github.com/mvschwarz/openrig/issues/313)) and @ziadeh ([#2487](https://github.com/mvschwarz/openrig/issues/2487)).
+
 ## [0.7.17]
 
 OpenRig 0.7.17 teaches a team to bring its questions to the Claude Code
@@ -23,14 +245,31 @@ including contributions from people using OpenRig.
 
 - **Stop the daemon, back up the database, install 0.7.17, then start the
   daemon.** Your agents keep running through a daemon restart; don't use
-  `rig down`, which ends them.
+  `rig down`, which ends them. Each step runs only if the one before it
+  succeeded. The backup goes to a new, dated file, with its `-wal` file beside
+  it when there is one, so running the block again never overwrites an earlier
+  backup. If you installed OpenRig another way, use that in place of the
+  `npm install` line.
+
+  If you started the daemon with `--db`, set `DB` to that same path instead of using `rig config get db.path`, and pass that path with `--db` to each `rig daemon start` below, including recovery.
 
   ```sh
-  rig daemon stop
-  cp "$(rig config get db.path)" "$(rig config get db.path).before-0.7.17"
-  npm install -g @openrig/cli@0.7.17   # or your existing installation method
+  rig daemon stop &&
+  DB="$(rig config get db.path)" &&
+  BACKUP="$DB.before-0.7.17-$(date -u +%Y%m%dT%H%M%SZ)" &&
+  { [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists and is kept; run the block again." >&2; false; }; } &&
+  cp "$DB" "$BACKUP" &&
+  { [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+  echo "Database backed up to $BACKUP" &&
+  npm install -g @openrig/cli@0.7.17 &&
   rig daemon start
   ```
+
+  If a step fails, nothing after it runs: fix what it reports, then run the
+  whole block again. If `rig daemon stop` fails and `rig daemon status` then
+  says "Daemon stopped", run the block from the `DB=` line. If it says
+  "Daemon PID is absent", run `rig daemon start`, then the whole block again.
+  Keep the backup, and its `-wal` file, until 0.7.17 is running well.
 
 - **Two migrations run before the daemon listens** (168 and 170). Going back to
   0.7.16 after them isn't established; keep the backup. ([#3260](https://github.com/mvschwarz/openrig/pull/3260))

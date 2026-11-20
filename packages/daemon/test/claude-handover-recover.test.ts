@@ -59,6 +59,8 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   let panes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
   /** Panes of the seat's session in its other windows: tmux lists them only with `-s` (listPanes(target, true)). */
   let otherWindowPanes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
+  /** The other window is the session's current one: a listing by the session's name answers with its panes. */
+  let otherWindowCurrent: boolean;
   const calls = { respawnPane: vi.fn(), sendText: vi.fn(), sendKeys: vi.fn(), killSession: vi.fn(), signalPaneProcess: vi.fn() };
   const startedAtMs = Date.parse("2026-11-10T16:21:00Z");
   const startedAt = "Tue Nov 10 16:21:00 2026";
@@ -75,7 +77,13 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     return {
       hasSession: vi.fn(async () => true),
       createSession: vi.fn(async () => ({ ok: true })),
-      listPanes: vi.fn(async (_target: string, allWindows = false) => (allWindows ? [...panes(), ...otherWindowPanes()] : panes())),
+      // By target, as tmux answers: -s lists every window of the session; a pane id, that pane's own window; the session
+      // name alone, its current window.
+      listPanes: vi.fn(async (target: string, allWindows = false) => {
+        if (allWindows) return [...panes(), ...otherWindowPanes()];
+        if (target.startsWith("%")) return [panes(), otherWindowPanes()].find((window) => window.some((pane) => pane.id === target)) ?? [];
+        return otherWindowCurrent ? otherWindowPanes() : panes();
+      }),
       killSession: vi.fn(async (...a: unknown[]) => { calls.killSession(...a); return { ok: true }; }),
       respawnPane: vi.fn(async (...a: unknown[]) => { calls.respawnPane(...a); return { ok: true }; }),
       setRemainOnExit: vi.fn(async () => ({ ok: true })),
@@ -185,6 +193,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     managedLaunch = null;
     panes = () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     otherWindowPanes = () => [];
+    otherWindowCurrent = false;
     paneProcesses = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 102 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
       ...(running() ? [claudeIn(successorToken)] : []),
@@ -340,10 +349,34 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(state()).toEqual(before);
   });
 
-  // CodeRabbit on the merge head (:1003): a pane in another window of the seat's session is a second pane too.
-  it("refuses when the seat's session has a second window, its pane the only one of the active window", async () => {
+  // #3218 item 5: the launch and its readiness check read the session's active window, so another window of the seat's
+  // session isn't a second pane of this seat. The recorded pane is found anywhere in the session, alone in its window.
+  it("adopts when the seat's session has a second window, the recorded pane alone in its own window", async () => {
+    await failedHandover();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+  });
+
+  // The launch's own rule: the successor is the only pane of the session's current window, the one a send to the session's
+  // name reaches and its readiness check reads. One alone in another window, not the current one, isn't adopted: the
+  // person selects that window and runs the recovery again. Nothing changes their tmux layout.
+  it("refuses a successor alone in a window that isn't the session's current one, and says to select that window", async () => {
     await failedHandover();
     const before = state();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    otherWindowCurrent = true;
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("isn't the session's current window");
+    expect(result.message).toContain("select the successor's window");
+    expect(state()).toEqual(before);
+  });
+
+  it("refuses when the recorded pane isn't in the seat's session any more, even with a pane alone in another window", async () => {
+    await failedHandover();
+    const before = state();
+    panes = () => [{ id: "%12", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "successor_identity_unproven" });
     expect(state()).toEqual(before);
@@ -369,8 +402,11 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
 
   it("refuses when the pane changes while the successor is being proven", async () => {
     await failedHandover();
-    let listed = 0;
-    panes = () => ++listed === 1 ? [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
+    // A second pane appears once the proof has read the pane's processes: the check before it sees one, the recheck two.
+    let proven = false;
+    const processes = paneProcesses;
+    paneProcesses = () => { proven = true; return processes(); };
+    panes = () => !proven ? [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
       : [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }, { id: "%10", index: 1, cwd: "/project", width: 80, height: 24, active: false }];
     const before = state();
     const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
@@ -583,13 +619,15 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     };
     const resumeTarget = () => (db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeId) as { resume_token: string }).resume_token;
 
-    it("adopts the successor with the conversation it holds now (T2), not the launch's", async () => {
+    it.each([{ name: "Renamed conversation" }, {}])("adopts the successor's current conversation with title %j", async (title) => {
       const generation = await failedHandover();
       expect(await sessionStart(generation, successorToken, "startup")).toMatchObject({ code: "generation_uncommitted" });
       expect(await sessionStart(generation, T2, "clear")).toMatchObject({ code: "generation_uncommitted" });
-      pidFile({ name: SEAT, sessionId: T2 });
+      pidFile({ ...title, sessionId: T2 });
       const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
       expect(result).toMatchObject({ ok: true });
+      if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+      expect(result.result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("couldn't be read")]));
       expect(resumeTarget()).toBe(T2);
     });
 
@@ -639,6 +677,9 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         sessionRegistry.updateBinding(parentNodeId, { tmuxSession: PARENT, tmuxPane: "%5" });
         sessionRegistry.updateResumeToken(parent.id, "claude_id", parentToken, "hook");
         parentSessionId = parent.id;
+        const list = (tmuxRef.listPanes as ReturnType<typeof vi.fn>).getMockImplementation()!;
+        (tmuxRef.listPanes as ReturnType<typeof vi.fn>).mockImplementation(async (target: string, allWindows = false) =>
+          target === PARENT ? [{ id: "%5", index: 0, cwd: "/project", width: 80, height: 24, active: true }] : list(target, allWindows));
         // The parent's recorded pane (%5, its binding): no process unless a case runs one there (parentRuns), never the
         // successor's pane; the parent's session (its active pane) has none either.
         (tmuxRef.getPanePid as ReturnType<typeof vi.fn>).mockImplementation(async (target: string) =>
@@ -998,6 +1039,53 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
           expect(parentState()).toEqual(parentBefore);
         });
 
+        it.each([{ name: "Renamed conversation" }, {}])("reads the fork parent's current conversation with title %j", async (title) => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          const file = path.join(configDir, "sessions", "202.json");
+          writeFileSync(file, JSON.stringify({ ...title, sessionId: Q }));
+          const mtime = new Date(Date.parse(startedAt) + 60_000);
+          utimesSync(file, mtime, mtime);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          expect((result.result.sourceOutcome as { limit: string }).limit).not.toContain("its process could not be read");
+          expect((result.result.sourceOutcome as { limit: string }).limit).toContain("its telemetry names another conversation than its process");
+        });
+
+        it.each(["stale renamed file", "malformed file"])("does not read a fork parent's %s", async (kind) => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          const file = path.join(configDir, "sessions", "202.json");
+          writeFileSync(file, kind === "malformed file" ? "{" : JSON.stringify({ name: "Renamed conversation", sessionId: Q }));
+          const mtime = new Date(Date.parse(startedAt) + (kind === "malformed file" ? 60_000 : -86_400_000));
+          utimesSync(file, mtime, mtime);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+          expect((result.result.sourceOutcome as { limit: string }).limit).toContain("its process could not be read");
+        });
+
+        it.each(["before", "after"])("treats the parent process as unread when its pane moves %s the read", async (when) => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: Q });
+          const list = (tmuxRef.listPanes as ReturnType<typeof vi.fn>).getMockImplementation()!;
+          let parentLooks = 0;
+          (tmuxRef.listPanes as ReturnType<typeof vi.fn>).mockImplementation(async (target: string, allWindows = false) => {
+            if (target !== PARENT) return list(target, allWindows);
+            parentLooks++;
+            return when === "before" || parentLooks > 1 ? [] : [{ id: "%5", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+          });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+          expect((result.result.sourceOutcome as { limit: string }).limit).toContain("its process could not be read");
+        });
+
         it("the parent's process unread, its telemetry and resume token disagree, the successor on one of them: no distinct fork, neither picked", async () => {
           await failedFork();
           parentRecords(parentToken, Q);
@@ -1227,7 +1315,6 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
 
     it.each([
       ["a file older than the process (a reused pid)", () => pidFile({ name: SEAT, sessionId: T2 }, new Date(Date.parse(startedAt) - 86_400_000))],
-      ["a file of another session", () => pidFile({ name: "someone@else", sessionId: T2 })],
       ["no file", () => {}],
     ])("keeps the launch's conversation with %s, said as unconfirmed", async (_name, write) => {
       await failedHandover();

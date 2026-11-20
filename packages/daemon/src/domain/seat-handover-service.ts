@@ -1045,9 +1045,9 @@ export class SeatHandoverService {
   }
 
   /** #2985: the pane's one foreground Claude is the attempt's launch: it names exactly the session id the daemon
-   *  generated for it, the same process in two samples, in the seat session's only pane, with an unchanged PID (as
-   *  `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt, never from the
-   *  process. Reads only. */
+   *  generated for it, the same process in two samples, in the only pane of the seat session's current window, with an
+   *  unchanged PID (as `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt,
+   *  never from the process. Reads only. */
   private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true; onLaunchConversation?: true } | { ok: false; message: string; unprovable?: true }> {
     const first = await this.proveAttemptSuccessorOnce(attempt, cwd);
     if (first.ok || !first.unprovable) return first;
@@ -1068,10 +1068,19 @@ export class SeatHandoverService {
   private async proveAttemptSuccessorOnce(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true; onLaunchConversation?: true } | { ok: false; message: string; unprovable?: undefined } | { ok: false; message: string; unprovable: true; foreground: string }> {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
+    // The launch's own rule: the successor is the only pane of the session's current window (tmux list-panes without -s),
+    // the window a send to the session's name reaches and the readiness check reads. Other windows don't count.
     const onlyPane = async () => {
-      // Every window of the session (tmux list-panes -s): a pane in another window is a second pane too.
-      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession, true);
+      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession);
       return panes.length === 1 && panes[0]?.id === attempt.pane;
+    };
+    // Why not: a successor alone in a window that isn't the current one is still there, and selecting it is the person's.
+    const notOnlyPane = async () => {
+      const inSession = (await this.tmuxAdapter.listPanes(attempt.canonicalSession, true)).some((pane) => pane.id === attempt.pane);
+      const ownWindow = inSession ? await this.tmuxAdapter.listPanes(attempt.pane) : [];
+      return ownWindow.length === 1 && ownWindow[0]?.id === attempt.pane
+        ? `Pane "${attempt.pane}" of ${attempt.canonicalSession} is alone in its window, but that window isn't the session's current window, where sends to the seat and the readiness check go. In tmux, select the successor's window, then run the recovery again.`
+        : `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}'s current window, where the failed handover launched its successor.`;
     };
     // #3044 review S1: proven as the adapter's readiness proves the launch (claude-code-adapter assessManagedProbe): with
     // its frozen executable and, for a #! wrapper that starts Claude without exec (#2341), as the script's child.
@@ -1081,9 +1090,7 @@ export class SeatHandoverService {
       ?? (() => listNativeProcesses({ claudeLaunchPaths: scriptLaunch, frozenExecutable: selectedExecutable }));
     const proofInput = { target: attempt.pane, tmux: this.tmuxAdapter, listProcesses: list, expectedToken: token, selectedExecutable, scriptLaunch };
     try {
-      if (!await onlyPane()) {
-        return { ok: false, message: `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}, where the failed handover launched its successor.` };
-      }
+      if (!await onlyPane()) return { ok: false, message: await notOnlyPane() };
       const native = await verifyClaudePaneProcess(proofInput);
       if (!native) {
         const panePid = await this.tmuxAdapter.getPanePid(attempt.pane);
@@ -1116,9 +1123,9 @@ export class SeatHandoverService {
       // proven process says the current one (read only, as the resume refresher reads it), bracketed by a third equal
       // observation of the same process.
       const configDir = nodePath.resolve(cwd ?? process.cwd(), claudeConfigRootFor(this.db, attempt.nodeId));
-      const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt, sessionName: attempt.canonicalSession });
+      const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt });
       // #3044 review (:1050): a file that confirms the launch's conversation changes nothing; one that can't be read (missing,
-      // older than the process, of another session, or a Claude that writes none) leaves the launch's conversation as the
+      // older than the process, or a Claude that writes none) leaves the launch's conversation as the
       // record, said as unconfirmed, never a refusal. The fork parent its launch named comes from the proven argv either
       // way: only the session file is unread (#3246 review).
       const launched = claudeCommandForkParent(native.process.command ?? "");
@@ -1251,13 +1258,15 @@ export class SeatHandoverService {
       { tmux_pane: string | null } | undefined)?.tmux_pane?.trim() || null;
     let processNow: string | null = null;
     if (pane) try {
+      const belongsToParent = async () => (await this.tmuxAdapter.listPanes(records.sessionName, true)).some(candidate => candidate.id === pane);
+      if (!(await belongsToParent())) return { process: null, telemetry: records.telemetry, resumeToken: records.resumeToken };
       const input = { target: pane, tmux: this.tmuxAdapter, listProcesses: this.injectedListProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (first) {
         const configDir = nodePath.resolve(records.nodeCwd ?? process.cwd(), claudeConfigRootFor(this.db, records.nodeId));
-        const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt, sessionName: records.sessionName });
+        const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt });
         const again = read ? await observeClaudePaneRuntime(input) : null;
-        if (read && again?.fingerprint === first.fingerprint) processNow = read;
+        if (read && again?.fingerprint === first.fingerprint && await belongsToParent()) processNow = read;
       }
     } catch { processNow = null; }
     return { process: processNow, telemetry: records.telemetry, resumeToken: records.resumeToken };
@@ -1932,6 +1941,8 @@ export class SeatHandoverService {
       // Keep the handover tenure/ready registration; only discovered successors are adopted.
       if (input.reportedSource.mode !== "discovered") {
         this.db.prepare("UPDATE sessions SET origin = 'launched' WHERE id = ?").run(newSession.id);
+        // It was launched in the seat's saved folder (the successor launch's node.cwd).
+        this.sessionRegistry.recordLaunchedCwd(newSession.id, input.node.cwd);
       }
       // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.
       const tenure = this.readOccupantTenure(input.node.id);

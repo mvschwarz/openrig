@@ -176,6 +176,39 @@ session names on the selected server.
 Dedicated selection requires POSIX tmux. On native Windows (not a supported platform;
 the [README](../../README.md) covers WSL2), psmux retains its existing server behavior; requesting `isolated` produces a status note and a pending choice.
 
+## When the server stops answering
+
+The tmux server can go away while the daemon keeps running: something kills it, or
+its socket is removed. The daemon records that once, when it happens (the
+`tmux.server_gone` event and a log line), and again once when the server answers
+(`tmux.server_back`). The record is kept in memory, so "once" holds per daemon
+run: a daemon restarted during a loss records it again. In between:
+
+- Automatic delivery to the seats on that server is held. Watchdog reminders, park wakes,
+  queue wakes, the wake ladder and the stuck sweep keep the work owed without
+  spending retries or escalating it, and send it when the server answers again.
+  An explicit `rig send` is still attempted and says the server could not be
+  reached.
+- Holding is not a verdict on the seats: `rig ps` still reads each seat from its
+  own evidence (a seat whose process went with the server reads stopped). Seats
+  on another tmux server, and seats that are not on tmux, are not held, and the
+  hook bridge, which reaches a live agent without tmux, keeps delivering.
+- Only a server that a running seat depends on counts. tmux exits with its last
+  session, so no server while no seat runs is the normal idle state, not a loss.
+- The daemon checks for the return with a read-only probe, every few seconds at
+  first and at most once a minute. It does not restart the server or the seats;
+  `rig up <rig>` (or whatever brought the server back) does. When the server
+  answers, held wakes go out to the seats that run on it.
+- A return probe that can't be read (a permission error, for example) is not
+  evidence the server is still gone: the daemon reads it as `unknown`, keeps the
+  loss as history, and stops holding, so ordinary delivery resumes. It does not
+  record a return. The next delivery's own probe records the loss again or the
+  return.
+- `rig status` and `rig ps` print a `Terminals:` line naming the socket and since
+  when it has not answered, `rig doctor` fails the `terminal_server` check, and
+  healthz carries the state in `terminals` while `status` stays `ok`, because the
+  daemon itself is up.
+
 ## Two instances on one machine
 
 Isolation selects only a tmux server. Give each daemon its own OpenRig home,

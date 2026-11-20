@@ -5,10 +5,11 @@ import type { AttentionRead, AttentionItem } from "../attention-surface.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { isHumanSeatSessionRef } from "../domain/session-name.js";
+import { humanAskAttention } from "../domain/human-ask-attention.js";
 import { unansweredQuestions } from "../domain/human-questions.js";
 import type { HealthProjectionService } from "../domain/health-detectors.js";
 import type { OperatingPostureService } from "../domain/rig-mode/operating-posture.js";
-import { listProjects, insideProject, projectMission, type ProjectRead } from "../domain/workspace/project-read.js";
+import { listProjects, insideProject, namesProject, projectMission, type ProjectRead } from "../domain/workspace/project-read.js";
 import { readMissionReadiness } from "../domain/proof/judgments.js";
 import { WorkflowInstanceStore } from "../domain/workflow-instance-store.js";
 import { WorkflowStepTrailLog } from "../domain/workflow-step-trail-log.js";
@@ -23,8 +24,22 @@ export function attentionRoutes(): Hono {
     const result: AttentionRead = { scope: "instance", readAt: new Date().toISOString(), items: [], sources: [], detail: null, detailError: null };
     const eventBus = c.get("eventBus" as never) as EventBus | undefined;
     if (eventBus) result.watermark = eventBus.maxSeq();
+    const queue = c.get("queueRepo" as never) as QueueRepository | undefined;
+    const posture = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
+    // The Feed's perspective, whose queue it shows (`view`). With no person registered the Feed is as before.
+    const view = feedPerspective(queue, c.req.query("view"));
+    if (view.perspective) result.perspective = view.perspective;
     // Whether an item is in the queue this Feed shows; an item opened by id is shown in full whatever the view.
-    let inView = (_recipient: string | null | undefined): boolean => true;
+    const inView = view.inView;
+    // A view naming no registered person shows nothing, so with no item opened there's nothing to read for it.
+    if (view.perspective?.basis === "unknown" && !wanted) {
+      result.sources.push({ source: "view", state: "available", detail: `No registered person matches view "${view.perspective.requested}", so no item is in it; no other source was read.` });
+      return c.json(result);
+    }
+    // `kind` reads one kind of item: `action`, the queue's asks and parks (what a needs-you badge counts), or `update`.
+    // Any other value, like none, reads both.
+    const kind = c.req.query("kind");
+    const reads = (k: AttentionItem["kind"]) => (kind !== "action" && kind !== "update") || kind === k;
     const add = (item: AttentionItem, lines: () => string[], files: () => Array<{ label: string; path: string }> = () => []) => {
       if (!result.items.some(i => i.id === item.id) && inView(item.recipient)) result.items.push(item);
       if (wanted === item.id) result.detail = { item, lines: lines(), files: files() };
@@ -35,21 +50,14 @@ export function attentionRoutes(): Hono {
       projects = listProjects(c).projects;
       result.sources.push({ source: "project catalog", state: "available", detail: "Exact catalog identities; unscoped requests remain instance facts." });
     } catch (e) { unavailable("project catalog", e); }
-    const queue = c.get("queueRepo" as never) as QueueRepository | undefined;
-    const posture = c.get("operatingPosture" as never) as OperatingPostureService | undefined;
-    // The Feed's perspective, whose queue it shows (`view`). With no person registered the Feed is as before.
-    const view = feedPerspective(queue, c.req.query("view"));
-    if (view.perspective) result.perspective = view.perspective;
-    inView = view.inView;
-    try {
+    if (kind === "action") result.sources.push({ source: "kind", state: "partial", detail: "kind=action: only the queue's asks and parks were read; open updates, proof judgments, mission outcomes and health weren't." });
+    if (kind === "update") result.sources.push({ source: "kind", state: "partial", detail: "kind=update: the queue's asks and parks weren't read." });
+    if (reads("action")) try {
       if (!queue) throw new Error("Queue repository unavailable");
-      const rows = queue.listAttention({ limit: 1001 });
-      result.sources.push({ source: "queue", state: rows.length >= 1001 ? "partial" : "available", detail: rows.length >= 1001 ? "Attention query reached 1001 rows; showing at most 1000." : "Open human-addressed requests and explicit human blockers; a human-gate tier alone is insufficient." });
-      // An ask to a person counts by its classification, the membership every attention reader shares (a registered person
-      // may be addressed as a seat or an alias), whatever happened to its Slack post.
-      const asked = new Set(rows.slice(0, 1000).filter(q => queue.isCurrentHumanAsk(q.qitemId)).map(q => q.qitemId));
-      const quiet = new Set(rows.slice(0, 1000).filter(q => asked.has(q.qitemId) && queue.humanAskWithoutAlert(q.qitemId)).map(q => q.qitemId));
-      const current = rows.slice(0, 1000).filter(q => isHumanSeatSessionRef(q.destinationSession) || asked.has(q.qitemId) || q.state === "blocked" && isHumanSeatSessionRef(q.blockedOn ?? ""));
+      // The Feed shows no row's waiting view, which would be most of this read's cost. Membership is the one shared definition.
+      const { current, asked, partial } = humanAskAttention(queue);
+      result.sources.push({ source: "queue", state: partial ? "partial" : "available", detail: partial ? "Attention query reached 1001 rows; showing at most 1000." : "Open human-addressed requests and explicit human blockers; a human-gate tier alone is insufficient." });
+      const quiet = (qitemId: string) => asked.has(qitemId) && queue.humanAskWithoutAlert(qitemId);
       // A person with no connector binding is asked on Steering and in the Feed only: nothing is posted to them in Slack.
       const people = queue.humanRegistry();
       const noConnector = (address: string | null | undefined): boolean => {
@@ -62,18 +70,20 @@ export function attentionRoutes(): Hono {
         const delivery = queue.deliveryOutcomeFor(qitemId);
         if (delivery) return delivery.outcome === "posted" ? "posted (posted isn't read)" : `${delivery.outcome}: ${delivery.detail}`;
         return unbound ? "not sent: this person has no connector binding, so they're asked on Steering and in the Feed only"
-          : quiet.has(qitemId) ? "not sent: created without --alert, and this person's Slack subscription is urgent-only" : "no receipt yet";
+          : quiet(qitemId) ? "not sent: created without --alert, and this person's Slack subscription is urgent-only" : "no receipt yet";
       };
       // Keep an opened request inspectable after its source is resolved, without
       // retaining it in the current Action required feed or inventing an inbox.
       const opened = wanted?.startsWith("queue:") ? queue.getById(wanted.slice(6)) : null;
       const detailOnly = opened && !current.some(q => q.qitemId === opened.qitemId) ? opened : null;
       for (const q of [...current, ...(detailOnly ? [detailOnly] : [])]) {
+        const toPerson = isHumanSeatSessionRef(q.destinationSession) || asked.has(q.qitemId);
+        // A row outside this view is read no further, unless it's the one opened.
+        if (!inView(toPerson ? q.destinationSession : q.blockedOn) && wanted !== `queue:${q.qitemId}`) continue;
         const tags = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
-        const p = tags.length === 1 ? projects.find(p => p.id === tags[0] && !p.error) : undefined;
+        const p = tags.length === 1 ? projects.find(p => namesProject(p, tags[0]) && !p.error) : undefined;
         const deps = queue.db.prepare("SELECT summary, qitem_id FROM queue_items WHERE blocked_on = ? AND state IN ('pending','in-progress','blocked') ORDER BY ts_created DESC LIMIT 101").all(q.qitemId) as Array<{ summary: string | null; qitem_id: string }>;
         const unblocks = isHumanSeatSessionRef(q.blockedOn ?? "") ? q.summary || "The blocked task (inspect the request)" : deps.length ? deps.slice(0, 100).map(d => d.summary || "An unnamed dependent task").join("; ") + (deps.length > 100 ? "; more dependents omitted" : "") : "No dependent task recorded; inspect the request for its intended outcome.";
-        const toPerson = isHumanSeatSessionRef(q.destinationSession) || asked.has(q.qitemId);
         // A shared channel never acts: on its ask or park the person at the terminal does, as the daemon records it.
         const actorFor = (address: string) => queue.isSharedChannel(address) ? UNNAMED_PRIMARY_USER : address;
         const questions = q.humanQuestions?.length ? q.humanQuestions : null;
@@ -93,7 +103,7 @@ export function attentionRoutes(): Hono {
           revision: queue.decisionRevision(q), about: toPerson ? deps.slice(0, 100).map(d => d.qitem_id) : [q.qitemId],
           ...(toPerson && deps.length > 100 ? { aboutTruncated: true as const } : {}) };
         const unbound = noConnector(toPerson ? q.destinationSession : q.blockedOn);
-        const notSent = unbound || quiet.has(q.qitemId);
+        const notSent = unbound || quiet(q.qitemId);
         const route = unanswered
           ? `Decision route: answer its questions here, choosing an option or typing a reply${notSent ? "; it wasn't sent to Slack" : ", or in the correlated Slack message"}.`
           : questions && q.state === "pending" ? "Decision route: its questions are all answered, but the answers haven't gone back to the asker yet: send them from here."
@@ -112,7 +122,7 @@ export function attentionRoutes(): Hono {
         if (q === detailOnly) result.items = result.items.filter(i => i.id !== item.id);
       }
     } catch (e) { unavailable("queue", e); }
-    try {
+    if (reads("update")) try {
       if (!queue) throw new Error("Queue repository unavailable");
       const rows = queue.listOpenHumanUpdates({ limit: 1001 });
       result.sources.push({ source: "queue updates", state: rows.length >= 1001 ? "partial" : "available",
@@ -123,7 +133,7 @@ export function attentionRoutes(): Hono {
         && !current.some(q => q.qitemId === opened.qitemId) ? opened : null;
       for (const q of [...current, ...(detailOnly ? [detailOnly] : [])]) {
         const tags = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
-        const p = tags.length === 1 ? projects.find(p => p.id === tags[0] && !p.error) : undefined;
+        const p = tags.length === 1 ? projects.find(p => namesProject(p, tags[0]) && !p.error) : undefined;
         const item: AttentionItem = { id: `queue-update:${q.qitemId}`, kind: "update", recipient: q.destinationSession,
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Update summary unavailable",
           urgency: q.priority, unblocks: null, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown",
@@ -143,7 +153,7 @@ export function attentionRoutes(): Hono {
         if (q === detailOnly) result.items = result.items.filter(i => i.id !== item.id);
       }
     } catch (e) { unavailable("queue updates", e); }
-    for (const p of projects) {
+    for (const p of reads("update") ? projects : []) {
       const source = `proof: project ${p.id}`;
       try {
         if (p.error) throw new Error(p.error);
@@ -168,26 +178,28 @@ export function attentionRoutes(): Hono {
         }
       } catch (e) { unavailable(source, e); }
     }
-    try {
+    if (reads("update")) try {
       if (!queue) throw new Error("Workflow repository unavailable");
       const ids = queue.db.prepare("SELECT instance_id FROM workflow_instances WHERE lifecycle_binding_json IS NOT NULL ORDER BY created_at DESC LIMIT 201").all() as Array<{ instance_id: string }>;
       const instances = new WorkflowInstanceStore(queue.db), trails = new WorkflowStepTrailLog(queue.db);
       result.sources.push({ source: "mission outcomes", state: ids.length > 200 ? "partial" : "available", detail: "At most 200 manifest-bound workflows; attributed terminal receipts, with current workflow state. Unbound historical workflows are excluded." });
       for (const { instance_id: id } of ids.slice(0, 200)) {
-        const instance = instances.getByIdOrThrow(id), binding = instance.lifecycleBinding!;
-        const identity = binding.identity as { project?: string; mission?: string } | undefined;
-        const p = projects.find(p => p.id === identity?.project && !p.error);
-        if (!p || !identity?.mission) continue;
-        const sources = binding.sources as Array<{ kind: string; path: string }> | undefined;
-        const mission = projectMission(p, identity.mission);
-        if (!sources?.some(s => s.kind === "project" && s.path === path.join(p.root, "project.yaml")) || !sources.some(s => s.kind === "mission" && s.path === path.join(mission, "mission.yaml"))) continue;
-        const history = trails.listForInstance(id, 201), receipt = history.find(t => t.closureReason === "done" || t.closureReason === "failed");
-        if (!receipt) continue;
-        const item: AttentionItem = { id: `workflow:${id}`, kind: "update", summary: `${identity.mission}: ${receipt.stepId} ${receipt.closureReason} · workflow ${instance.status}`, urgency: "outcome", unblocks: null, at: receipt.closedAt, scope: `project ${p.id} · mission ${identity.mission}`, project: { id: p.id, root: p.root }, source: `/api/workflow/${encodeURIComponent(id)}/trace` };
-        add(item, () => [`Current workflow state: ${instance.status}; a step receipt alone does not complete the mission.`, `Posture: ${posture?.resolve({ projectId: p.id, missionId: identity.mission }).posture ?? "unknown"}`, `Actor: ${receipt.actorSession}`, `Outcome evidence: ${JSON.stringify(receipt.closureEvidence)}`, `Workflow history${history.length > 200 ? " (partial: 200 retained entries shown)" : ""}:`, ...history.slice(0, 200).map(t => JSON.stringify(t))], () => [{ label: "Mission authority", path: path.join(mission, "mission.yaml") }]);
+        try {
+          const instance = instances.getByIdOrThrow(id), binding = instance.lifecycleBinding!;
+          const identity = binding.identity as { project?: string; mission?: string } | undefined;
+          const p = projects.find(p => namesProject(p, identity?.project) && !p.error);
+          if (!p || !identity?.mission) continue;
+          const sources = binding.sources as Array<{ kind: string; path: string }> | undefined;
+          const mission = projectMission(p, identity.mission);
+          if (!sources?.some(s => s.kind === "project" && s.path === path.join(p.root, "project.yaml")) || !sources.some(s => s.kind === "mission" && s.path === path.join(mission, "mission.yaml"))) continue;
+          const history = trails.listForInstance(id, 201), receipt = history.find(t => t.closureReason === "done" || t.closureReason === "failed");
+          if (!receipt) continue;
+          const item: AttentionItem = { id: `workflow:${id}`, kind: "update", summary: `${identity.mission}: ${receipt.stepId} ${receipt.closureReason} · workflow ${instance.status}`, urgency: "outcome", unblocks: null, at: receipt.closedAt, scope: `project ${p.id} · mission ${identity.mission}`, project: { id: p.id, root: p.root }, source: `/api/workflow/${encodeURIComponent(id)}/trace` };
+          add(item, () => [`Current workflow state: ${instance.status}; a step receipt alone does not complete the mission.`, `Posture: ${posture?.resolve({ projectId: p.id, missionId: identity.mission }).posture ?? "unknown"}`, `Actor: ${receipt.actorSession}`, `Outcome evidence: ${JSON.stringify(receipt.closureEvidence)}`, `Workflow history${history.length > 200 ? " (partial: 200 retained entries shown)" : ""}:`, ...history.slice(0, 200).map(t => JSON.stringify(t))], () => [{ label: "Mission authority", path: path.join(mission, "mission.yaml") }]);
+        } catch (e) { unavailable(`mission outcomes/${id}`, e); }
       }
     } catch (e) { unavailable("mission outcomes", e); }
-    try {
+    if (reads("update")) try {
       const service = c.get("healthProjection" as never) as HealthProjectionService | undefined;
       if (!service) throw new Error("Health projection unavailable");
       // Canonical episodes supply status and observation time, including retained
@@ -202,7 +214,7 @@ export function attentionRoutes(): Hono {
             : `${s.source}: partial — evaluated ${s.evaluated} of ${s.total} ${s.unit}; ${s.omitted} omitted (limit ${s.limit}, ${s.order}).`)].join(" ") });
       for (const r of records.slice(0, 200)) {
         const projectId = "projectId" in r.scope ? r.scope.projectId : undefined;
-        const p = projects.find(p => p.id === projectId && !p.error);
+        const p = projects.find(p => namesProject(p, projectId) && !p.error);
         const item: AttentionItem = { id: `health:${r.id}`, kind: "update", summary: `${r.summary} · ${r.status}`, urgency: r.severity, unblocks: null, at: r.lastObservedAt, scope: `instance health · ${Object.values(r.scope).join(" / ")}`, project: p ? { id: p.id, root: p.root } : null, source: `/api/health/${encodeURIComponent(r.id)}` };
         add(item, () => [`Status: ${r.status}; first observed ${r.startedAt ?? "unknown"}; last observed ${r.lastObservedAt ?? "unknown"}`, `Freshness: ${r.freshness.state}; ${r.indeterminateReason ?? ""}`, `Posture: ${r.operatingPosture?.posture ?? "unknown"} · ${r.operatingPosture?.reason ?? "not supplied by source"}`, r.explanation, r.suggestedInspection, `Threshold: ${r.threshold}`, "Canonical source and bounded evidence:", JSON.stringify(r, null, 2)]);
       }

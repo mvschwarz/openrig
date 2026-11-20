@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
+import { fixedSizeWorkspaceNote } from "../src/domain/terminal/herdr-live-workspace.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import { terminalRoutes } from "../src/routes/terminal.js";
@@ -28,13 +29,14 @@ const leafLabels = (node: any): string[] => !node || typeof node !== "object" ? 
   : node.type === "pane" ? [String(node.label ?? "")] : [...leafLabels(node.first), ...leafLabels(node.second)];
 
 /** One Herdr: the socket the adapter drives, the CLI the reuse check reads, and the tmux clients attached to seats. */
-function herdr() {
+function herdr(launch?: { socketPath: string }) {
   const workspaces: Array<{ workspace_id: string; label: string }> = [];
   const tabs: Tab[] = [];
   const panes: Pane[] = [];
   const socket: string[] = [];
   const cli: string[][] = [];
-  const state: { attached: boolean; focus: "ok" | "throws" | "other-tab" } = { attached: true, focus: "ok" };
+  const state: { attached: boolean; focus: "ok" | "throws" | "other-tab"; flags: string; readOnly: "0" | "1"; flagsFor: Record<string, string> } =
+    { attached: true, focus: "ok", flags: "attached,focused", readOnly: "0", flagsFor: {} };
   const transport: HerdrTransport = {
     probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }),
     request: async (method, raw): Promise<HerdrResult> => {
@@ -65,7 +67,8 @@ function herdr() {
       return { type: "ok" };
     },
   };
-  const pid = (paneId: string) => 101 + SEATS.findIndex(seat => paneId.endsWith(`-${seat}`));
+  // One tmux client per seat tile, numbered by workspace: w1's are 101 and 102, w2's 201 and 202.
+  const pid = (paneId: string) => 100 * Number(paneId.slice(1, paneId.indexOf(":"))) + 1 + SEATS.findIndex(seat => paneId.endsWith(`-${seat}`));
   const liveWorkspace = {
     herdr: async (args: string[]) => {
       cli.push(args);
@@ -78,14 +81,15 @@ function herdr() {
     },
     exec: async (file: string, args: string[]) => {
       if (file === "/bin/sh" && args[1] === "command -v tmux") return `${TMUX}\n`;
-      if (file === TMUX && args.join(" ") === [...SERVER, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"].join(" ")) {
-        return state.attached ? SEATS.map((seat, i) => `${101 + i}\tfixture-${seat}\t0`).join("\n") : "";
+      if (file === TMUX && args.join(" ") === [...SERVER, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_flags}"].join(" ")) {
+        return state.attached ? panes.filter(pane => SEATS.includes(pane.label))
+          .map(pane => `${pid(pane.pane_id)}\tfixture-${pane.label}\t${state.readOnly}\t${state.flagsFor[pane.workspace_id] ?? state.flags}`).join("\n") : "";
       }
       throw new Error(`unexpected exec ${file} ${args.join(" ")}`);
     },
   };
   let token = 0;
-  const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => `l${++token}`, liveWorkspace });
+  const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => `l${++token}`, liveWorkspace, ...(launch ? { launch } : {}) });
   return { adapter, workspaces, socket, cli, state };
 }
 
@@ -130,6 +134,59 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
       "Workspace w1 has this view, but its tiles' live attachments could not be confirmed, so it was kept.",
       'A view named "demo" is already open, so this one is "demo (2)".',
     ]);
+  });
+
+  // Kept Herdr tiles: a tile OpenRig 0.7.5-0.7.9 opened attaches with `-f ignore-size` again after every
+  // seat restart, and Herdr saved that script as the pane's restart command. Such a workspace is never reused as current.
+  it("does not reuse a workspace whose writable tiles ignore their size, and says how to remove it", async () => {
+    const h = herdr();
+    await h.adapter.openView(demoView(), { reuseLive: true });
+    h.state.flags = "attached,focused,ignore-size";
+
+    const second = await h.adapter.openView(demoView(), { reuseLive: true });
+    expect(second.reusedWorkspace).toBeUndefined();
+    expect(second).toMatchObject({ ok: true, opened: SEATS, pages: 1 });
+    expect(h.workspaces.map(ws => ws.label)).toEqual(["demo", "demo (2)"]);
+    expect(second.notes).toEqual([
+      "Workspace w1 shows this view with tiles an OpenRig before 0.7.10 opened, which keep a fixed size and attach that way again after every seat restart; it was kept. Close it to remove those tiles (its agents keep running): herdr workspace close 'w1'",
+      'A view named "demo" is already open, so this one is "demo (2)".',
+    ]);
+    expect(h.socket).not.toContain("workspace.close");
+  });
+
+  it.each([["ignore-size", true], ["attached,focused", false]] as const)("an older plan's workspace with clients flagged %s gets the matching note", async (flags, fixed) => {
+    const h = herdr({ socketPath: "/daemon home/herdr.sock" });
+    await h.adapter.openView({ ...demoView(), planId: "fedcba9876543210".repeat(4) }, { reuseLive: true });
+    h.state.flags = flags;
+
+    const second = await h.adapter.openView(demoView(), { reuseLive: true });
+    expect(second).toMatchObject({ ok: true, opened: SEATS, pages: 1 });
+    expect(second.notes?.[0]).toBe(fixed
+      ? fixedSizeWorkspaceNote("w1", "env -u HERDR_SESSION HERDR_SOCKET_PATH='/daemon home/herdr.sock' herdr workspace close 'w1'")
+      : "Workspace w1 has an older or different plan for this view and was kept.");
+    expect(second.notes?.filter(note => note.startsWith("Workspace w1"))).toHaveLength(1);
+  });
+
+  it("names an older plan's fixed-size workspace beside the current copy it reuses", async () => {
+    const h = herdr();
+    await h.adapter.openView({ ...demoView(), planId: "fedcba9876543210".repeat(4) }, { reuseLive: true });
+    await h.adapter.openView(demoView(), { reuseLive: true }); // main's numbered current copy, w2
+    h.state.flagsFor = { w1: "attached,ignore-size" };
+
+    const third = await h.adapter.openView(demoView(), { reuseLive: true });
+    expect(third.reusedWorkspace).toEqual({ id: "w2", tabId: "w2:t1", view: "demo" });
+    expect(third.notes).toEqual([
+      fixedSizeWorkspaceNote("w1", "herdr workspace close 'w1'"),
+      "Workspace w2 already shows this view with live attachments, so it was reused; its contents were kept and no new tiles were opened.",
+    ]);
+  });
+
+  it("a read-only tile's client is not a fixed-size tile", async () => {
+    const h = herdr();
+    await h.adapter.openView({ ...demoView(), planId: "fedcba9876543210".repeat(4) }, { reuseLive: true });
+    Object.assign(h.state, { flags: "ignore-size,read-only", readOnly: "1" });
+    const second = await h.adapter.openView(demoView(), { reuseLive: true });
+    expect(second.notes?.[0]).toBe("Workspace w1 has an older or different plan for this view and was kept.");
   });
 
   it("an unreadable Herdr inventory opens a new workspace and says why", async () => {

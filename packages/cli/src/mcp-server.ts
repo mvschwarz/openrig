@@ -154,12 +154,21 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
 type HostedMember = { session: string; label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string;
-  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence } & TakesRequests;
+  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence } & TakesRequests & Participant;
 
 /** A node seat's authored roster entry, merged into its own rig_team entry: how the person knows it, what it's good at,
  *  its limits, and what OpenRig last saw of it, so an assistant can tell a disconnected seat from its own history. */
 type SeatRosterEntry = { label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null;
-  presence?: HostedPresence } & TakesRequests;
+  presence?: HostedPresence } & TakesRequests & Participant;
+
+/** Which client a roster entry's participant uses and what kind it is, as its access's issuing service recorded them, or
+ *  why an authored value isn't used. Apart from a seat's `kind` (its node kind); absent is unknown. */
+type Participant = { participant?: { app?: string; kind?: string }; participantProblem?: string };
+
+function participantOf(member: RosterMember): Participant {
+  return { ...(member.participant ? { participant: member.participant } : {}),
+    ...(member.participant_problem ? { participantProblem: member.participant_problem } : {}) };
+}
 
 /** A roster entry whose owner says it takes no requests, with the owner's reason, or why an authored value isn't used. */
 type TakesRequests = { takesRequests?: false; takesRequestsNote?: string; takesRequestsProblem?: string };
@@ -236,7 +245,7 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
     // A label that can't be used says why, so it doesn't read as absent.
     const named = !external ? {} : member.label ? { label: member.label } : member.label_problem ? { label_problem: member.label_problem } : {};
     const entry = { ...named, roster, capabilities: member.capabilities, useWhen: member.use_when, caveat: member.caveat ?? null,
-      ...takesRequestsOf(member) };
+      ...takesRequestsOf(member), ...participantOf(member) };
     const presence = await presenceOf(member.seat);
     if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
     else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
@@ -492,10 +501,10 @@ const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|
 
 /** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
  *  only caller. It may hand tasks to its rigs' other seats (never a person or another host's seat, and without team/list
- *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats (never team-internal
- *  items or other callers' items between themselves), change only the items addressed to its own seat (with the claim and
- *  update pairs), follow a handed-on item only where it came back to it, and read the artifacts of its own items under
- *  its named roots. */
+ *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats or from an external
+ *  address (never team-internal items, other callers' items between themselves, or an external address's items to
+ *  another seat), change only the items addressed to its own seat (with the claim and update pairs), follow a handed-on
+ *  item only where it came back to it, and read the artifacts of its own items under its named roots. */
 function externalScope(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
   // team/list makes the caller one of its rigs' participants: it may reach another connected assistant's seat.
@@ -508,9 +517,15 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
     return parts.length === 2 && parts[0] !== "" && parts[1] !== "external" && rigs.has(parts[1]!);
   };
   const team = (value: unknown): boolean => member(value) && !caller(value) && (participant || !CALLER_SHAPED.test(value as string));
+  // An external address as a source (<local>@external), matched by its shape, not a registry check: a registered person's
+  // id, a scheme-prefixed ref and a shared channel's address (which its unregistered writers post under) all match. The
+  // boundary is the exact destination: only an item addressed to the caller's own seat is reached this way, and show and
+  // list then read it, a person's answer row (createHumanAnswer) included. withoutDaemonLinkedRows still drops the linked
+  // rows a read returns without their own scope check.
+  const person = (value: unknown): boolean => typeof value === "string" && /^[^@]+@external$/.test(value);
   const field = (row: unknown, name: "sourceSession" | "destinationSession"): unknown => ((row ?? {}) as Record<string, unknown>)[name];
   const item = (row: unknown): boolean => caller(field(row, "sourceSession"))
-    || (caller(field(row, "destinationSession")) && team(field(row, "sourceSession")));
+    || (caller(field(row, "destinationSession")) && (team(field(row, "sourceSession")) || person(field(row, "sourceSession"))));
   return {
     session: (value) => caller(value) || team(value),
     item,
@@ -793,13 +808,14 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v3";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v4";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
+  "The team's questions are the person's, and an answer covers only the question it answered: a later one, even one like it, goes back to them, unless they told you outright to decide that kind of question. Approving a plan, a task or 'go ahead' isn't an answer to the questions that work raises. Never tell the team they approved something, or will answer a question, unless they said so, and don't send them to a seat's terminal to answer the team's questions: those come to this seat as items.",
   askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
-  "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
-  "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
+  "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them unless they told you outright to decide that kind of question: then answer only what's clearly inside it, and say in resolution that you decided under their instruction, not that they answered, and tell them you did. Don't claim an item you can't close with their words or under such an instruction.",
+  "Nothing wakes this conversation when the team finishes, and it has no wake of its own: tell the person you'll check when they ask, then check your work and your items when they ask or come back. Offer a wake only where their app actually has one, such as Claude Desktop's scheduled tasks.",
 ].join(" ");
 const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
 // An external caller's first paragraph says what the connection is for, on its own: a client may show the model only the
@@ -2112,7 +2128,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_team")) server.registerTool(
     "rig_team",
     {
-      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up.", READ_ONLY),
+      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up. An entry's participant.app and participant.kind, where a roster records them, are which client it uses (such as chatgpt or claude-code) and what kind of participant it is, as the service that gave it access recorded them; absent is unknown, and a seat's own kind is its node kind.", READ_ONLY),
       inputSchema: z.object({
         rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
@@ -2222,7 +2238,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       description: "List the work tree's slices, most recently active first: name, mission, status, description and how many queue items name it. Paths and readiness detail are left out.",
       inputSchema: z.object({
         missionId: z.string().optional().describe("Only this mission's slices"),
-        filter: z.enum(["all", "active", "done", "blocked"]).optional().describe("Only slices with this status (default all)"),
+        filter: z.enum(["all", "active", "done", "closed", "blocked"]).optional().describe("Only slices with this status (default all)"),
         limit: z.number().int().positive().max(200).optional().describe("Most slices to return (default 50)"),
       }),
       annotations: READ_ONLY,

@@ -464,7 +464,7 @@ describe("TranscriptStore", () => {
   });
 
   describe("grep", () => {
-    it.each(["\n", ""])("preserves long matching lines across chunks (ending %j)", (ending) => {
+    it.each(["\n", ""])("preserves long matching lines across chunks (ending %j)", async (ending) => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
       // Numbered sections catch lost or reordered chunks; multibyte characters
@@ -474,24 +474,24 @@ describe("TranscriptStore", () => {
       const last = `MATCH last ${long}`;
       writeFileSync(store.getTranscriptPath("my-rig", "dev@my-rig"),
         `ignored\n\x1b[32m${first}\x1b[0m\nignored ${long}\nMATCH short\n${last}${ending}`);
-      expect(store.grep("my-rig", "dev@my-rig", "^MATCH")).toEqual([first, "MATCH short", last]);
-      expect(store.grep("my-rig", "dev@my-rig", "not present")).toEqual([]);
+      expect(await store.grep("my-rig", "dev@my-rig", "^MATCH")).toEqual([first, "MATCH short", last]);
+      expect(await store.grep("my-rig", "dev@my-rig", "not present")).toEqual([]);
     });
 
-    it("returns matching lines with ANSI stripped", () => {
+    it("returns matching lines with ANSI stripped", async () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
       const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
       writeFileSync(filePath, "hello world\n\x1b[1mdecision made\x1b[0m\nfoo bar\ndecision final\n");
 
-      const result = store.grep("my-rig", "dev@my-rig", "decision");
+      const result = await store.grep("my-rig", "dev@my-rig", "decision");
       expect(result).not.toBeNull();
       expect(result).toHaveLength(2);
       expect(result![0]).toBe("decision made"); // ANSI stripped
       expect(result![1]).toBe("decision final");
     });
 
-    it("matches against stripped logical lines from noisy shell capture", () => {
+    it("matches against stripped logical lines from noisy shell capture", async () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
       const filePath = store.getTranscriptPath("my-rig", "dev@my-rig");
@@ -500,13 +500,13 @@ describe("TranscriptStore", () => {
         "printf 'TRACK_A_SMOKE_LINE\\nPNS-T06 marker\\n'\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m                                                                                \r  \r\r\x1b[0m\x1b[27m\x1b[24m\x1b[Juser@example.test rigged % \x1b[K\x1b[?2004hprintf 'TRACK_A_GROWTH_LINE\\\\n'\n",
       );
 
-      const result = store.grep("my-rig", "dev@my-rig", "TRACK_A_GROWTH_LINE");
+      const result = await store.grep("my-rig", "dev@my-rig", "TRACK_A_GROWTH_LINE");
       expect(result).toEqual(["printf 'TRACK_A_GROWTH_LINE\\\\n'"]);
     });
 
-    it("returns null on missing file without throwing", () => {
+    it("returns null on missing file without throwing", async () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
-      const result = store.grep("my-rig", "nonexistent", "pattern");
+      const result = await store.grep("my-rig", "nonexistent", "pattern");
       expect(result).toBeNull();
     });
   });
@@ -582,13 +582,13 @@ describe("TranscriptStore", () => {
       expect(result).toContain("last line");
     });
 
-    it("grep matches multibyte UTF-8 characters correctly", () => {
+    it("grep matches multibyte UTF-8 characters correctly", async () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("utf8-rig");
       const filePath = store.getTranscriptPath("utf8-rig", "dev@utf8-rig");
       // Write lines with multibyte characters
       writeFileSync(filePath, "hello world\ncafé résumé\nnormal line\nüber important\n");
-      const result = store.grep("utf8-rig", "dev@utf8-rig", "é");
+      const result = await store.grep("utf8-rig", "dev@utf8-rig", "é");
       expect(result).not.toBeNull();
       expect(result!.length).toBe(1);
       expect(result![0]).toContain("café");
@@ -609,13 +609,13 @@ describe("TranscriptStore", () => {
       expect(lines[lines.length - 1]).toContain("49999");
     });
 
-    it("grep on large file returns only matching lines without loading entire file", () => {
+    it("grep on large file returns only matching lines without loading entire file", async () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("big-rig");
       const filePath = store.getTranscriptPath("big-rig", "dev@big-rig");
       writeLargeTranscript(filePath, 50000, 10000);
 
-      const result = store.grep("big-rig", "dev@big-rig", "MARKER_LINE");
+      const result = await store.grep("big-rig", "dev@big-rig", "MARKER_LINE");
       expect(result).not.toBeNull();
       // Should find markers at 10000, 20000, 30000, 40000
       expect(result!.length).toBe(4);

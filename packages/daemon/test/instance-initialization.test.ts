@@ -101,6 +101,54 @@ describe("canonical OpenRig instance initialization", () => {
     expect(readFileSync(join(home, "workspace", "SPEC.md"), "utf8")).toBe("# Mine\n");
   });
 
+  // The lost-host exercise: a restored config sets workspace.root to the person's own project folder. A catalog written
+  // there would name it `default` against its project.yaml id (work-install then refuses project_identity_conflict).
+  it("leaves a workspace.root that already holds a project of its own as it is, and says so", () => {
+    const home = join(freshRoot(), "home");
+    const project = join(freshRoot(), "customer-project");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, "project.yaml"), "id: losthost-check\n");
+    writeFileSync(join(project, "exhaust"), "a file of the project's own, where the scaffold would put a folder\n");
+    const before = readdirSync(project).sort();
+
+    const result = ensureOpenRigInstance({ home, workspaceRoot: project });
+
+    expect(result.ok).toBe(true);
+    expect(result.workspaceExistingProject).toBe(join(project, "project.yaml"));
+    expect(readdirSync(project).sort()).toEqual(before);
+    expect(readFileSync(join(project, "project.yaml"), "utf8")).toBe("id: losthost-check\n");
+    expect(result.createdPaths.filter((path) => path.startsWith(project))).toEqual([]);
+  });
+
+  it("still completes its own workspace, which has a workspace.yaml beside its project.yaml", () => {
+    const home = join(freshRoot(), "home");
+    expect(ensureOpenRigInstance({ home }).ok).toBe(true);
+    rmSync(join(home, "workspace", "exhaust"), { recursive: true });
+
+    const again = ensureOpenRigInstance({ home });
+
+    expect(again.workspaceExistingProject).toBeUndefined();
+    expect(statSync(join(home, "workspace", "exhaust")).isDirectory()).toBe(true);
+  });
+
+  // 0.5.7 and 0.5.8 wrote SPEC.md and a project.yaml with no id, and no catalog (it came in 0.5.9); a first scaffold
+  // stopped between its writes leaves the same shape. Neither declares an id of its own, so it's completed as `default`.
+  it("completes a workspace whose project.yaml declares no id, as 0.5.8 left it, with the default catalog", () => {
+    const home = join(freshRoot(), "home");
+    const workspace = join(home, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, "project.yaml"), "schema: openrig.project/v0alpha1\nkind: project\nmissions:\n  root: missions\n");
+    writeFileSync(join(workspace, "SPEC.md"), "# Project\n");
+
+    const result = ensureOpenRigInstance({ home });
+
+    expect(result.ok).toBe(true);
+    expect(result.workspaceExistingProject).toBeUndefined();
+    expect(readFileSync(join(workspace, "workspace.yaml"), "utf8")).toContain("- id: default");
+    expect(statSync(join(workspace, "exhaust")).isDirectory()).toBe(true);
+    expect(readFileSync(join(workspace, "SPEC.md"), "utf8")).toBe("# Project\n");
+  });
+
   it("reports exact type conflicts and performs no partial writes", () => {
     const home = join(freshRoot(), "home");
     mkdirSync(home, { recursive: true });

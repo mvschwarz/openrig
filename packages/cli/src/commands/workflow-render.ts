@@ -30,6 +30,7 @@ export interface RenderInstance {
   hopCount?: number;
   /** OPR.0.4.6.FAC1: the instance's bound rig (API-carried; null/absent = unbound, renders nothing). */
   boundRig?: string | null;
+  boundPod?: string | null;
   /** #2730: what the run is for, as its `--root-objective` gave it; null for an instance from before it was kept. */
   rootObjective?: string | null;
   /**
@@ -182,7 +183,7 @@ export function renderTraceTree(
 ): string[] {
   const lines: string[] = [];
   const name = instance.workflowName ? `${instance.workflowName}${instance.workflowVersion ? ` v${instance.workflowVersion}` : ""}` : "";
-  lines.push(`${statusGlyph(instance.status)} ${instance.instanceId}  ${name}  status=${instance.status}${instance.hopCount !== undefined ? `  hops=${instance.hopCount}` : ""}${instance.boundRig ? `  rig=${instance.boundRig}` : ""}`);
+  lines.push(`${statusGlyph(instance.status)} ${instance.instanceId}  ${name}  status=${instance.status}${instance.hopCount !== undefined ? `  hops=${instance.hopCount}` : ""}${instance.boundRig ? `  rig=${instance.boundRig}` : ""}${instance.boundPod ? `  pod=${instance.boundPod}` : ""}`);
   if (instance.rootObjective) lines.push(`  objective: ${instance.rootObjective}`);
   if (instance.createdAt) {
     lines.push(`  created ${instance.createdAt}${instance.createdBySession ? ` by ${instance.createdBySession}` : ""}  age ${humanAge(instance.createdAt, nowIso)}`);
@@ -193,10 +194,14 @@ export function renderTraceTree(
   for (let i = 0; i < trail.length; i++) {
     const row = trail[i];
     if (!row) continue;
-    const glyph = row.closureReason === "failed" ? "✖" : "✔";
+    const glyph = row.closureReason === "failed" ? "✖" : row.closureReason === "resumed" ? "↻" : "✔";
     const bar = i === trail.length - 1 && !instance.currentStepId ? "└─" : "├─";
     const duration = humanDuration(prevClosed, row.closedAt);
     lines.push(`  ${bar} ${glyph} ${fitCell(row.stepId, 20)}${fitCell(row.actorSession, 28)}${fitCell(row.closureReason, 10)}${duration}`);
+    const resume = row.closureEvidence?.["resume"] as { ownerSession?: unknown; ownerSource?: unknown } | undefined;
+    if (row.closureReason === "resumed" && typeof resume?.ownerSession === "string") {
+      lines.push(`  │    ↳ owner: ${resume.ownerSession} (${resume.ownerSource === "named" ? "named" : "resolved"})`);
+    }
     const branchTaken = row.closureEvidence?.["branch_taken"];
     if (typeof branchTaken === "string" && branchTaken.length > 0) {
       lines.push(`  │    ↳ branch: ${branchTaken}`);
@@ -384,6 +389,7 @@ export function renderInstanceShow(
   if (instance.rootObjective) lines.push(`  objective: ${instance.rootObjective}`);
   // OPR.0.4.6.FAC1: the bound rig renders when present (unbound rows unchanged).
   if (instance.boundRig) lines.push(`  rig:      ${instance.boundRig}`);
+  if (instance.boundPod) lines.push(`  pod:      ${instance.boundPod}`);
   if (instance.createdAt) lines.push(`  created:  ${instance.createdAt}${instance.createdBySession ? ` by ${instance.createdBySession}` : ""}  (age ${humanAge(instance.createdAt, nowIso)})`);
   if ((instance.frontierPackets ?? []).length > 0) {
     lines.push("  frontier:");

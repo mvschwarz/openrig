@@ -218,9 +218,10 @@ export function resolveRecordedProvenance(
  */
 export const IDENTITY_PRINCIPAL_HEADER = "x-openrig-principal";
 
-/** `principal:v1` is recorded only on the four stores migration 140 gives an identity_principal column; every other row
- *  keeps the IdentityProvenance alphabet, so no other reader meets it. */
-export type RecordedProvenance = IdentityProvenance | "principal:v1";
+/** `principal:v1` records an MCP caller on the four stores with an identity_principal column. Queue transitions also
+ *  record `gateway:slack:v1` with the registered person mapped from a Socket Mode user. Neither is a wire identity:
+ *  gateway attribution grants no permission, and a relay degrades this unfamiliar wire value to claimed:v1. */
+export type RecordedProvenance = IdentityProvenance | "principal:v1" | "gateway:slack:v1";
 
 const MAX_PRINCIPAL_HEADER_BYTES = 512;
 
