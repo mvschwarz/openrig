@@ -106,8 +106,8 @@ describe("a roster entry's participant app and kind", () => {
   });
 });
 
-// A roster entry can declare lead_of, the team it's the entry point for. rig_team shows it as the lead only where the rig
-// has no delegation root and exactly one entry declares one; it's context, so nothing escalates or routes to it.
+// A roster entry can declare lead_of, the team it's the entry point for. rig_team shows it as the lead only where the daemon
+// names no single lead and exactly one entry declares one; it's context, so nothing escalates or routes to it.
 describe("a roster entry's declared lead_of", () => {
   const at = (name: string) => [name, "team"].join("@");
 
@@ -140,6 +140,23 @@ describe("a roster entry's declared lead_of", () => {
       expect(team.lead).toBeNull();
       expect(team.leadNote).toContain(`Several roster entries declare lead_of (${at("net-chatgpt")} for Sam's team, ${at("hermes")} for Ops), so none is shown as the lead.`);
     } finally { await s.close(); }
+  });
+
+  it("keeps the one declared entry point when a roster can't be read, and says another may be declared", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const external of [false, true]) {
+      const folder = rosters([member(at("net-chatgpt"), { lead_of: "Sam's team" })]);
+      // An unreadable roster is skipped, and it could hold a second declaration.
+      fs.writeFileSync(path.join(folder, "other.json"), "{ not json");
+      const s = await connect(folder, external);
+      try {
+        const team = await s.team();
+        expect(team.hostedMembersNote).toEqual(expect.any(String));
+        expect(team.lead).toEqual({ session: at("net-chatgpt"), logicalId: "net.chatgpt", declared: true, team: "Sam's team" });
+        expect(team.leadNote).toBe("Sam's team's entry point: send work for that team here. It doesn't manage this network or its other participants."
+          + " Some rosters couldn't be read, so another entry point may be declared.");
+      } finally { await s.close(); }
+    }
   });
 
   it("keeps a real delegation root as the lead, undeclared", async () => {
