@@ -214,7 +214,9 @@ export class PassiveCeremonySource implements HealthObservationSource {
           productStateChanges: null, boundedAuthority: false, reviewReturns: 0, candidateChanges: 0, newRiskClasses: 0, ceremony,
           sourceDescription: `Passively read ${rows.length} declared handoff members. Normal evidence paths and workflow closure receipts are starting points, not proof counts or acceptance judgments. This source performs no writes or agent calls.`,
           source: boundHealthEvidence(segment.map(adaptQueueTransitionEvidence), { source: "mixed", startedAt: start > episodeStartedAt ? start : episodeStartedAt, endedAt: measuredEnd, limit: 10000, retentionSeconds: p.observationWindowSeconds },
-            deriveHealthSourceFreshness({ evaluatedAt: now, newestSourceAt: latest, maxAgeSeconds: p.freshnessSeconds, available: true })) });
+            // Freshness is the successful read of the queue, not the lineage's last activity: `lastObservedAt` carries
+            // activity and the detector gates confirmation and wake on it. Activity dated after the read stays contradictory.
+            deriveHealthSourceFreshness({ evaluatedAt: now, newestSourceAt: now, maxAgeSeconds: p.freshnessSeconds, available: true, contradictory: Date.parse(latest) > Date.parse(now) })) });
       }
     }
     return observations;

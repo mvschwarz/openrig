@@ -421,8 +421,11 @@ function evaluatePassiveCeremony(o: Extract<HealthDetectorObservation, { kind: "
   const c = structuredClone(o.ceremony!);
   const result = c.assessment?.result;
   const current = o.source.freshness.state === "fresh";
+  // Quiet lineages (no activity within freshnessSeconds) may be cleared or assessed but never confirmed: a warning
+  // needs recent activity, a clearing needs only a current read of complete, unchanged evidence.
+  const recent = current && o.lastObservedAt !== null && Date.parse(o.source.freshness.evaluatedAt) - Date.parse(o.lastObservedAt) <= policy.freshnessSeconds * 1000;
   const complete = c.missingFacts.length === 0 && !result?.missingFacts.length;
-  const known = current && complete && result?.conclusion === "established" && result.boundedAuthority !== null;
+  const known = recent && complete && result?.conclusion === "established" && result.boundedAuthority !== null;
   const ratio = known ? o.coordinationTransitions / Math.max(result.outcomes.length, 1) : null;
   const cleared = current && complete && (result?.conclusion === "false-positive" || (known && (result.boundedAuthority || ratio! < policy.thresholds.ceremonyRatio)));
   c.stage = cleared ? "cleared" : known ? "confirmed" : !current || c.assessment || c.missingFacts.length ? "indeterminate" : "needs-diagnosis";
