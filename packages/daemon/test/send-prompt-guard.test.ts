@@ -202,23 +202,40 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(await transport.send(seat, "hello")).toMatchObject({ ok: true });
   });
 
-  it.each([15_001, 84_903])("navigates the framed OMP menu with a %d ms old permission event", async (age) => {
+  // Stock OMP 18.22 draws its running timer and empty composer gutter below an open approval.
+  const ompApprovalFrame = [...ompApprovalChoices, "├────────────────────────┤", ompApprovalFooter, "╰────────────────────────╯"];
+  const ompStatusBand = "⠇ 1m > ◔ example-model > 📁 /project > $0.00 ▶─2%────────1M─";
+  it.each([
+    [15_000, [ompStatusBand, "╰─"], "runtime_hook"],
+    [15_001, [ompStatusBand, "╰─"], "pane_heuristic"],
+    [100_845, [ompStatusBand, "╰─"], "pane_heuristic"],
+    [84_903, [], "pane_heuristic"],
+  ] as const)("guards the OMP approval at hook age %d ms with trailer %j", async (age, trailer, evidenceSource) => {
     const seat = seedOmp();
     const occurredAt = new Date();
     agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification",
       subtype: "permission_prompt", occurredAt: occurredAt.toISOString() });
-    const menu = [...ompApprovalChoices, "├────────────────────────┤", ompApprovalFooter, "╰────────────────────────╯"].join("\n");
+    const menu = [...ompApprovalFrame, ...trailer].join("\n");
     const { sendText, sendKeys } = spies();
     const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
       { now: () => new Date(occurredAt.getTime() + age) });
     expect(await transport.send(seat, "ordinary message")).toMatchObject({
-      ok: false, reason: "target_needs_input", activity: { reason: "permission_prompt", evidenceSource: "pane_heuristic" },
+      ok: false, reason: "target_needs_input", activity: { reason: "permission_prompt", evidenceSource },
     });
     expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
       .toMatchObject({ ok: true, sent: true, promptInteraction: "unverified" });
     expect(overrideEvents()).toHaveLength(1);
     expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Down"], expect.any(Function), expect.any(Object));
     expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["new output", "The tool finished.", ompStatusBand, "╰─"],
+    ["operator draft", ompStatusBand, "╰─ working on this"],
+    ["ordinary text above the gutter", "The tool finished.", "╰─"],
+  ])("does not read an old OMP approval as current with %s below it", (_label, ...tail) => {
+    const pane = [...ompApprovalFrame, ...tail].join("\n");
+    expect(classifyPaneActivity(pane, { runtime: "omp-tui" }).reason).not.toBe("permission_prompt");
   });
 
   it.each([

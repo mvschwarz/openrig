@@ -806,6 +806,16 @@ function currentOmpModelPicker(lines: string[]): boolean {
     || /\bmodels\s*·[^·│]*use for (?:this session|Task subagents)\b|\broles\s*·[^·│]*apply role model\b/i.test(lines.at(-2) ?? "");
 }
 
+function endsAtOmpApproval(linesBelowHints: string[]): boolean {
+  const frameBottom = /^╰─+╯$/u;
+  if (linesBelowHints.every(line => frameBottom.test(line))) return true;
+  // Stock OMP can keep its running timer and empty composer gutter below the modal.
+  // Require the complete layout so menu text quoted above later output cannot trigger this fallback.
+  const [border = "", status = "", gutter] = linesBelowHints;
+  return linesBelowHints.length === 3 && frameBottom.test(border) && gutter === "╰─"
+    && /^\p{Script=Braille}(?:-\S+)?\s+\d+[smh](?:\s|$)/u.test(status);
+}
+
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   if (options.composerSnapshot) {
     const snapshot = options.composerSnapshot;
@@ -833,7 +843,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     const choiceLabel = (row: string) => row.replace(/^[^\p{L}\p{N}]+|[\s│┃║]+$/gu, "");
     let lastChoice = footer - 1;
     if (/^├─+┤$/u.test(rows[lastChoice] ?? "")) lastChoice--;
-    if (footer >= 0 && rows.slice(footer + 1).every(row => /^╰─+╯$/u.test(row)) && lastChoice >= 1 && choiceLabel(rows[lastChoice]!) === "Deny" &&
+    if (footer >= 0 && endsAtOmpApproval(rows.slice(footer + 1)) && lastChoice >= 1 && choiceLabel(rows[lastChoice]!) === "Deny" &&
         rows.slice(Math.max(0, lastChoice - 11), lastChoice).some(row => /^Approve(?: Once)?$/.test(choiceLabel(row)))) {
       return { state: "attention", reason: "permission_prompt", evidence: "OMP approval menu" };
     }
