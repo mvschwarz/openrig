@@ -130,7 +130,8 @@ export function viewsRoutes(): Hono {
         // Every id a catalogued project claims, current or former, so the view can count the rows none of them claims.
         if (project) cataloguedProjectIds = listProjects(c).projects.flatMap(projectIds);
       } catch (err) { return projectReadResponse(err); }
-      const result = await getProjector(c).show(viewName, { rig, limit, mission, project, cataloguedProjectIds });
+      // The request's signal aborts when the client closes the connection first, so an abandoned execution read stops.
+      const result = await getProjector(c).show(viewName, { rig, limit, mission, project, cataloguedProjectIds, signal: c.req.raw.signal });
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);
