@@ -1410,7 +1410,7 @@ export class QueueRepository {
     // Queued for the seat's hook bridge: it reaches the seat's context at the next turn boundary, which isn't a claim.
     // The bridge owns the row now (handed to the hook, typed by its fallback, or named uncertain), so it isn't finalized.
     if (res.outcome === "bridged") return { classified: "bridged", nudgeResult: "bridged:queued" };
-    // The nudge result keeps its words; a wake that reached a seat at its usage limit also gets a note on the row.
+    // The nudge result keeps its words; a wake that reached a seat at its usage limit, or may have, also gets a note on the row.
     const usageLimit = res.usageLimit ? { usageLimit: { asOf: res.usageLimit.asOf, resetsAt: res.usageLimit.resetsAt,
       ...(res.sessionName ? { sessionName: res.sessionName } : {}) } } : {};
     if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified", ...usageLimit } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending", ...usageLimit };
@@ -6089,7 +6089,7 @@ export class QueueRepository {
       // It names the session the wake was sent to, which a reroute during the send can't change, and an in-progress row
       // keeps its retained claim blocker, as every other non-state receipt does.
       if (row) this.transitionLog.append({ qitemId, state: row.state, actorSession: "daemon@system",
-        transitionNote: `wake reached ${usageLimit.sessionName ?? row.destinationSession} at its usage limit (recorded ${usageLimit.asOf}; resets ${usageLimit.resetsAt}); delivery=${result}. Its agent isn't expected to read it before the reset.`,
+        transitionNote: `wake reached ${usageLimit.sessionName ?? row.destinationSession}, or may have, at its usage limit (recorded ${usageLimit.asOf}; resets ${usageLimit.resetsAt}); delivery=${result}. Its agent isn't expected to read it before the reset.`,
         closureTarget: row.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined });
     }
     // The transport's definite no-write refusal establishes the episode even when a

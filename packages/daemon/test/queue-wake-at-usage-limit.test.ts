@@ -45,7 +45,7 @@ describe("a queue wake at a seat's usage limit", () => {
     const { row, notes } = await wake();
     expect(row.lastNudgeResult).toBe(word);
     expect(row.state).toBe("pending");
-    expect(notes).toEqual([`wake reached ${SEAT} at its usage limit (recorded ${LIMIT.asOf}; resets ${LIMIT.resetsAt}); delivery=${word}. Its agent isn't expected to read it before the reset.`]);
+    expect(notes).toEqual([`wake reached ${SEAT}, or may have, at its usage limit (recorded ${LIMIT.asOf}; resets ${LIMIT.resetsAt}); delivery=${word}. Its agent isn't expected to read it before the reset.`]);
   });
 
   it("the note is bookkeeping: the row's last meaningful change and the ladder's attempts after it are kept", async () => {
@@ -63,7 +63,7 @@ describe("a queue wake at a seat's usage limit", () => {
 
     reply = { ok: true, verified: false, usageLimit: { ...LIMIT, notice: "context" } };
     await repo.maybeNudge(row.qitemId, SEAT, undefined, "pm@demo");
-    expect(repo.listTransitions(row.qitemId).some((t) => t.transitionNote?.startsWith(`wake reached ${SEAT} at its usage limit`))).toBe(true);
+    expect(repo.listTransitions(row.qitemId).some((t) => t.transitionNote?.startsWith(`wake reached ${SEAT}, or may have, at its usage limit`))).toBe(true);
     expect(lastMeaningfulTransition(db, row.qitemId)).toEqual(before);
     expect(attempts()).toBe(1);
   });
@@ -83,7 +83,7 @@ describe("a queue wake at a seat's usage limit", () => {
   it("the note names the session the wake was sent to", async () => {
     reply = { ok: true, verified: true, sessionName: "writer-replacement@demo", usageLimit: { ...LIMIT, notice: "context" } };
     const { notes } = await wake();
-    expect(notes).toEqual([`wake reached writer-replacement@demo at its usage limit (recorded ${LIMIT.asOf}; resets ${LIMIT.resetsAt}); delivery=verified. Its agent isn't expected to read it before the reset.`]);
+    expect(notes).toEqual([`wake reached writer-replacement@demo, or may have, at its usage limit (recorded ${LIMIT.asOf}; resets ${LIMIT.resetsAt}); delivery=verified. Its agent isn't expected to read it before the reset.`]);
   });
 
   it("control: a wake with no usage-limit reading adds no note", async () => {
