@@ -627,15 +627,17 @@ function appendMarker(repo: QueueRepository, row: QueueItem, note: string, admit
 }
 
 /** #48: a held row's sender is told once per held episode, beside the recovery row to its owner, that the row is held
- *  and not lost. Nothing is typed into the held seat; a sender that is OpenRig, a person or the destination itself is skipped. */
-async function noticeHeldSender(deps: WakeLadderDeps, m: { row: QueueItem; view: LadderView }, owner: string): Promise<void> {
+ *  and not lost. Nothing is typed into the held seat. A sender that is OpenRig, a person (or one the human registry can't
+ *  classify) or the destination itself is skipped. */
+async function noticeHeldSender(deps: WakeLadderDeps, m: { row: QueueItem; view: LadderView }, owner: string, now: Date): Promise<void> {
   const { row } = m, dest = row.destinationSession, sender = row.sourceSession;
   const held = readWakeOutcome(row.lastNudgeResult);
   if (m.view.senderNoticed || held?.fact !== "held" || !sender || sender === dest || isOpenRigSender(sender)
     || /@(system|external)$/.test(sender)) return;
+  try { if (deps.queueRepo.isHumanDestination(sender)) return; } catch { return; }
   const body = held.heldBy === "typing-guard"
     ? `Your queue row ${row.qitemId} to ${dest} is held, not lost: ${dest}'s typing guard holds its wakes, so nothing was typed there. It's readable with rig seat held-messages ${dest}, and a recovery row went to ${owner}.`
-    : `Your queue row ${row.qitemId} to ${dest} is still held after ${m.view.attempts} tries: ${dest}'s input had a draft or couldn't be read each time, so nothing was typed there. The row stays pending, not lost, and a recovery row went to ${owner}.`;
+    : `Your queue row ${row.qitemId} to ${dest} is still held after ${minutesSince(row.tsCreated, now)} min (${m.view.attempts} retries): ${dest}'s draft-aware guard stopped each try before typing anything (a draft, a prompt, a seat that wasn't ready, or input it couldn't read or reach). The row stays pending, not lost, and a recovery row went to ${owner}.`;
   const outcome = await deps.queueRepo.noticeHeldSender(sender, body);
   appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${sender} outcome=${outcome}`, true);
 }
@@ -837,6 +839,11 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || deliveryHeld(deps.queueRepo, row) || recoversEscalationNotice(deps, row)) continue;
+      // #48: a created row is here only for its held escalation, so anything else, and correspondence or a decision for a
+      // person (as in the stuck sweep), keeps its own path before any park or wake.
+      const createdHeld = heldCreatedRow(row);
+      if (row.state === "pending" && !row.handedOffFrom && (!createdHeld
+        || deps.queueRepo.isRegisteredHumanUpdate(row) || deps.queueRepo.isLocalHumanDecisionWithoutGateway(row))) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
       // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
       // batons — a claimed in-progress row is someone's live work and is never
@@ -869,9 +876,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (disposition && !["pending", "in-progress", "blocked"].includes(disposition.state)) continue;
       const view = readLadder(deps.db, row.qitemId);
       if (view.exhausted) continue; // finite: an exhausted ladder never re-fires
-      // #48: a created row's draft-aware hold is retried on its seat's idle report (retryDraftHeldWakesOnIdle), not on
-      // this timer; the ladder takes it once those tries reach the cap.
-      if (heldCreatedRow(row) && mode === "failed" && view.attempts < cap) continue;
+      // #48: a created row's draft-aware hold is retried on its seat's idle report (retryDraftHeldWakesOnIdle), never on
+      // this timer. The ladder takes it once those tries reach the cap, or once the unconfirmed window passes, since a
+      // draft left in the box gives no idle report.
+      if (createdHeld && mode === "failed" && view.attempts < cap && minutesSince(row.tsCreated, now) < windowMin) continue;
 
       // F1 gates for the unconfirmed class: never re-nudge; enter only past the window
       // with zero pickup evidence.
@@ -886,9 +894,6 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
       // An ask handed to a person without an alert waits on them on Steering by design; escalating it would alert them.
       if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
-      // #48's held created rows are agents' work: correspondence or a decision for a person keeps its own path, as in the
-      // stuck sweep.
-      if (heldCreatedRow(row) && (deps.queueRepo.isRegisteredHumanUpdate(row) || deps.queueRepo.isLocalHumanDecisionWithoutGateway(row))) continue;
       activeLadders += 1;
 
       // Due-ness: the latest ladder marker (or the original nudge attempt) is older than
@@ -908,8 +913,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (recoveryRow?.tags?.includes(PROMPT_ALERT_TAG)
         && ["pending", "in-progress", "blocked"].includes(recoveryRow.state)) continue;
 
-      // Retry rung — failed outcomes only, under the cap, inside the destination budget.
-      if (mode === "failed" && view.attempts < cap) {
+      // Retry rung — failed outcomes only, under the cap, inside the destination budget. A held created row's retries
+      // are its idle report's (#48).
+      if (mode === "failed" && view.attempts < cap && !createdHeld) {
         if (!due) continue;
         // F2 — derived suspension, checked only when the ladder would otherwise act.
         if (suspended) {
@@ -944,10 +950,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
       // Escalation phase (past the cap, or the F1 direct path). Grouped per destination
       // regardless of due-ness so the aggregate refresh rides every detection pass.
-      const draftHeld = mode === "failed" && readWakeOutcome(row.lastNudgeResult)?.fact === "held";
       const reason =
-        draftHeld
-          ? `held by ${row.destinationSession}'s draft-aware guard after ${view.attempts} tries over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min: its input had a draft or couldn't be read, so nothing was typed`
+        createdHeld && mode === "failed"
+          ? `held by ${row.destinationSession}'s draft-aware guard for ${minutesSince(row.tsCreated, now)} min (${view.attempts} retries): each try stopped before typing anything (a draft, a prompt, a seat that wasn't ready, or input it couldn't read or reach)`
           : mode === "failed"
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`
           : mode === "held"
@@ -1020,7 +1025,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator self-skip (resolves to ${orch === null ? "no orchestrator" : "destination"}) reason=${m.reason}`,
             );
-            await noticeHeldSender(deps, m, floorDest);
+            await noticeHeldSender(deps, m, floorDest, now);
             if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, carrierDeferred)) {
               appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
               exhaustedThisTick += 1;
@@ -1041,7 +1046,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               true,
             );
             actions.push({ qitemId: m.row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
-            await noticeHeldSender(deps, m, recoveryOwner);
+            await noticeHeldSender(deps, m, recoveryOwner, now);
             if (!outcome.startsWith("failed:")) {
               // Delivered (or durable-unconfirmed — the aggregate row itself is now the
               // orchestrator's durable obligation; S02 nets it if it sits unclaimed).

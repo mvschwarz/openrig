@@ -806,6 +806,37 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
 
   // ── S16 — PROVIDER LIMITS PARK ON ONE SHARED TIMER ─────────────────────────
 
+  it("#48: a held created row that isn't an agent's held wake keeps its own path at a usage limit: it isn't parked", async () => {
+    const now = new Date();
+    const jobs = new WatchdogJobsRepository(db, () => now);
+    repo.attachWatchdogJobsRepository(jobs);
+    const raised = await repo.create({ sourceSession: "daemon@kernel", destinationSession: "dev-a@r", body: "an OpenRig notice", nudge: false });
+    setNudgeResult(raised.qitemId, "retained:typing_guard", 45);
+    ageCreated(raised.qitemId, 45);
+    await tick({
+      now,
+      usageLimitJitterSeconds: 0,
+      getProviderReadModel: async () => ({
+        bindings: [],
+        signals: [{
+          provider: "claude" as const,
+          seatSession: "dev-a@r",
+          sourceClass: "provider_statusline" as const,
+          authority: "account_cross_device" as const,
+          window: "five_hour",
+          usedPercent: 100,
+          resetsAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
+          asOf: now.toISOString(),
+          staleAfter: new Date(now.getTime() + 30 * 60_000).toISOString(),
+          supportsNotification: false,
+          automationUse: "allow_switch_decision" as const,
+        }],
+      }),
+    });
+    expect(repo.getById(raised.qitemId)!.state).toBe("pending");
+    expect(markersOf(raised.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(0);
+  });
+
   it("USAGE LIMIT SUPPRESSES WRONG RUNGS: three Claude seats share one blocker timer and zero retry/escalation attempts", async () => {
     const now = new Date();
     const reset = new Date(now.getTime() + 15 * 60_000).toISOString();

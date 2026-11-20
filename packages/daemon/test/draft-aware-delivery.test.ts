@@ -1189,15 +1189,15 @@ describe("supported seat and queue integration", () => {
     f.db.prepare("UPDATE nodes SET runtime='claude-code' WHERE id='b'").run();
     const item = await f.repo.create({ sourceSession: "sibling@test", destinationSession: "worker@test", body: "queued work" });
     await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
-    const tick = await heldLadder(f, 0);
+    const tick = await heldLadder(f, 30);
     await tick();
     expect(notes(f, item.qitemId, "escalation-rung:")).toEqual([]);
     for (let i = 0; i < 3; i++) await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
     await tick(); await tick();
     expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
-    expect(notes(f, item.qitemId, "escalation-rung:")[0]).toContain("held by worker@test's draft-aware guard after 3 tries");
+    expect(notes(f, item.qitemId, "escalation-rung:")[0]).toMatch(/held by worker@test's draft-aware guard for \d+ min \(3 retries\): each try stopped before typing anything/);
     expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toHaveLength(1);
-    expect(f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId} to worker@test is still held after 3 tries`))).toHaveLength(1);
+    expect(f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId} to worker@test is still held after`) && s.includes("(3 retries)"))).toHaveLength(1);
     expect(typedInto(f, "a")).toEqual([]);
     expect(f.repo.getById(item.qitemId)).toMatchObject({ state: "pending", lastNudgeResult: "retained:draft_aware" });
   });
@@ -1220,6 +1220,59 @@ describe("supported seat and queue integration", () => {
     expect(told[0]).toContain("rig seat held-messages worker@test");
     expect(typedInto(f, "a")).toEqual([]);
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("retained");
+  });
+
+  it("tells the owner and the sender once when a draft left in the box gives no idle report, once the window passes", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    f.db.prepare("UPDATE nodes SET runtime='claude-code' WHERE id='b'").run();
+    const item = await f.repo.create({ sourceSession: "sibling@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    const tick = await heldLadder(f, 30);
+    await tick();
+    expect(notes(f, item.qitemId, "escalation-rung:")).toEqual([]);
+    f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 45 * 60_000).toISOString(), item.qitemId);
+    await tick(); await tick();
+    expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
+    expect(notes(f, item.qitemId, "escalation-rung:")[0]).toContain("held by worker@test's draft-aware guard for 45 min (0 retries)");
+    expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toHaveLength(1);
+    expect(f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId} to worker@test is still held after 45 min (0 retries)`))).toHaveLength(1);
+    expect(notes(f, item.qitemId, "wake-attempt:")).toEqual([]);
+    expect(typedInto(f, "a")).toEqual([]);
+  });
+
+  it("never retries a draft-held wake once the seat has left draft-aware mode: switching modes replays nothing", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    await f.guard.set("a", { mode: "off" }, "human@test", "guard off");
+    f.bodies.a = "";
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("retained");
+    expect(notes(f, item.qitemId, "wake-attempt:")).toEqual([]);
+    expect(typedInto(f, "a")).toEqual([]);
+  });
+
+  it("leaves a handed-off row's draft-held wake to the wake ladder's own retries", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const src = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "queued work", nudge: false });
+    const { created } = await f.repo.handoff({ qitemId: src.qitemId, fromSession: "sibling@test", toSession: "worker@test" });
+    await vi.waitFor(() => expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    f.bodies.a = "";
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    expect(notes(f, created.qitemId, "wake-attempt:")).toEqual([]);
+    expect(typedInto(f, "a")).toEqual([]);
+  });
+
+  it("sends no typed notice to a sender who is a person; the owner's escalation still goes out", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    const item = await f.repo.create({ sourceSession: "human@kernel", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 45 * 60_000).toISOString(), item.qitemId);
+    const tick = await heldLadder(f, 30);
+    await tick(); await tick();
+    expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
+    expect(notes(f, item.qitemId, "held-sender-notice:")).toEqual([]);
+    expect(f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId}`))).toEqual([]);
   });
 
   it("rechecks queue applicability before paste", async () => {

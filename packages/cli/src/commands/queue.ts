@@ -168,7 +168,9 @@ function terminalDeliveryResult(
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
-    "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
+    "retained": wakeResult === "retained:draft_aware"
+      ? `The wake is held (${wakeResult}): nothing was typed into the pane. It's tried again when the seat next reports idle while it's still in draft-aware mode, within the wake retry cap; if it's still held past that cap or the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`
+      : `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; if it's still held past the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`,
     // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
     "failed": wakeResult?.startsWith("awaiting-pickup:")
       ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`

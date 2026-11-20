@@ -2220,19 +2220,20 @@ export class QueueRepository {
     }
   }
 
-  /** #48: a queue wake the draft-aware guard held (a draft, or an input it couldn't read) is tried again when its seat
-   *  reports idle, through the same guarded delivery, which re-checks the input and holds it again if it still can't go.
-   *  A hold-mode wake is never retried. Each try is one of the wake ladder's attempts, so the existing wake retry cap
-   *  bounds them together; past it, the ladder's one held notice takes over. */
+  /** #48: a queue wake the draft-aware guard held is tried again when its seat reports idle, through the same guarded
+   *  delivery, which re-checks the input and holds it again if it still can't go. Only while the seat is still in
+   *  draft-aware mode: switching modes replays nothing. Only rows created straight to the seat: a handed-off row's
+   *  retries are the wake ladder's. A hold-mode wake is never retried. Each try is one of the ladder's attempts, so the
+   *  existing wake retry cap bounds them; the ladder's one held notice comes past that cap or the unconfirmed window. */
   async retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
-    if (state !== "idle" || !this.outbox) return;
+    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return;
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length || addresses.some(address => this.deliveryDrains.holds(address))) return;
     // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
     if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
     const rows = this.db.prepare(`SELECT qitem_id FROM queue_items WHERE state = 'pending' AND claimed_at IS NULL
-      AND destination_session IN (${addresses.map(() => "?").join(",")}) AND last_nudge_result = 'retained:draft_aware'
-      ORDER BY ts_created, qitem_id`).all(...addresses) as Array<{ qitem_id: string }>;
+      AND handed_off_from IS NULL AND destination_session IN (${addresses.map(() => "?").join(",")})
+      AND last_nudge_result = 'retained:draft_aware' ORDER BY ts_created, qitem_id`).all(...addresses) as Array<{ qitem_id: string }>;
     const cap = resolveWakeRetryCap();
     for (const { qitem_id } of rows) {
       const intent = `${WAKE_INTENT_PREFIX}${qitem_id}`;
