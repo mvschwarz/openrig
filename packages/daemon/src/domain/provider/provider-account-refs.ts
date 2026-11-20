@@ -81,7 +81,8 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
     const fileProblem = claudeSeatTokenFileProblem(ref);
     if (fileProblem) return unusable(fileProblem);
     // A subscription token gets the API key's rule too: only its owner may read it.
-    const mode = fs.statSync(ref.tokenFile).mode & 0o777;
+    let mode: number;
+    try { mode = fs.statSync(ref.tokenFile).mode & 0o777; } catch { return unusable(`the token file ${ref.tokenFile} doesn't exist`); }
     if (mode !== 0o600 && mode !== 0o400) {
       return unusable(`the token file ${ref.tokenFile} must be private (0600 or 0400), and it is ${mode.toString(8).padStart(4, "0")}`);
     }
@@ -95,6 +96,12 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
   if (!authList(resolveCodexHome({ CODEX_HOME: input.codexHome })).includes(input.login)) {
     return unusable(`no login named ${input.login} is saved in ${input.codexHome} (rig auth list --codex-home ${input.codexHome} lists them)`);
   }
+  // rig auth switch copies only a 0600 saved login, so a looser one would be refused when it's used. authList has already
+  // refused a symlink or hard link here, so this looks at the saved file itself, without reading it.
+  const saved = path.join(resolveCodexHome({ CODEX_HOME: input.codexHome }).profileDir, `${input.login}.json`);
+  let savedMode: number;
+  try { savedMode = fs.lstatSync(saved).mode & 0o777; } catch { return unusable(`the saved login ${saved} doesn't exist`); }
+  if (savedMode !== 0o600) return unusable(`the saved login ${saved} must be private (0600), and it is ${savedMode.toString(8).padStart(4, "0")}`);
   return null;
 }
 

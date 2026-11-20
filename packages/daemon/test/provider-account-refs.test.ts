@@ -65,7 +65,8 @@ describe("provider account references", () => {
   });
 
   it("refuses an unusable reference with the reason and stores nothing", () => {
-    const home = codexHome(["work"]);
+    const home = codexHome(["work", "open"]);
+    fs.chmodSync(path.join(home, "auth-profiles", "open.json"), 0o644);
     const refusals = [
       repo.add({ provider: "claude", label: "open", tokenFile: file("open", 0o644) }),
       repo.add({ provider: "claude", label: "open-key", apiKeyFile: file("open-key", 0o644) }),
@@ -74,8 +75,9 @@ describe("provider account references", () => {
       repo.add({ provider: "claude", label: "dir", tokenFile: dir }),
       repo.add({ provider: "codex", label: "gone", codexHome: home, login: "personal" }),
       repo.add({ provider: "codex", label: "nohome", codexHome: path.join(dir, "nohome"), login: "work" }),
+      repo.add({ provider: "codex", label: "open-login", codexHome: home, login: "open" }),
     ];
-    expect(refusals.map((r) => r.ok ? "ok" : r.code)).toEqual(Array(7).fill("reference_unusable"));
+    expect(refusals.map((r) => r.ok ? "ok" : r.code)).toEqual(Array(8).fill("reference_unusable"));
     const messages = refusals.map((r) => r.ok ? "" : r.message);
     expect(messages[0]).toMatch(/must be private \(0600 or 0400\), and it is 0644\. Nothing was stored\.$/);
     expect(messages[1]).toContain("the API-key file must be private (0600 or 0400)");
@@ -84,8 +86,26 @@ describe("provider account references", () => {
     expect(messages[4]).toContain("isn't a regular file");
     expect(messages[5]).toContain(`no login named personal is saved in ${home} (rig auth list --codex-home ${home} lists them)`);
     expect(messages[6]).toContain("doesn't exist");
+    // The switch only copies a 0600 saved login (rig auth switch), so a looser one is refused here too.
+    expect(messages[7]).toContain(`the saved login ${path.join(home, "auth-profiles", "open.json")} must be private (0600), and it is 0644`);
     expect(rows().n).toBe(0);
     expect(JSON.stringify(refusals)).not.toContain(CONTENT);
+  });
+
+  it("follows a symlinked Claude file to a private regular file, as the launch does; a symlinked Codex login isn't one", () => {
+    const target = file("real-token", 0o600);
+    const link = path.join(dir, "token-link");
+    fs.symlinkSync(target, link);
+    expect(repo.add({ provider: "claude", label: "linked", tokenFile: link })).toMatchObject({ ok: true, account: { file: link } });
+    const keyLink = path.join(dir, "key-link");
+    fs.symlinkSync(file("real-key", 0o400), keyLink);
+    expect(repo.add({ provider: "claude", label: "linked-key", apiKeyFile: keyLink }).ok).toBe(true);
+
+    // rig auth list and rig auth switch never follow a symlinked saved login, so it isn't one here either.
+    const home = codexHome([]);
+    fs.symlinkSync(file("elsewhere.json", 0o600), path.join(home, "auth-profiles", "linked.json"));
+    expect(repo.add({ provider: "codex", label: "linked", codexHome: home, login: "linked" })).toMatchObject({
+      ok: false, code: "reference_unusable", message: expect.stringContaining("no login named linked is saved in") });
   });
 
   it("refuses a malformed label, path or login name before looking at the filesystem", () => {
