@@ -39,6 +39,14 @@ describe("bin-wrapper", () => {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
     });
     fs.writeFileSync(wrapper, outputText);
+    // The wrapper imports its sibling helpers statically; an install ships them beside it.
+    for (const helper of ["root-help.ts"]) {
+      const helperSource = fs.readFileSync(new URL(`../src/${helper}`, import.meta.url), "utf8");
+      const { outputText: helperOutput } = ts.transpileModule(helperSource, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+      });
+      fs.writeFileSync(path.join(dist, helper.replace(/\.ts$/, ".js")), helperOutput);
+    }
     const report = `import { getCompileCacheDir } from "node:module";
 export async function runProgram() { console.log(JSON.stringify({ enabled: !!getCompileCacheDir() })); }
 `;

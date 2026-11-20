@@ -16,8 +16,12 @@ describe("tmux attachment", () => {
     const [file, args] = vi.mocked(spawn).mock.calls[0]!;
     if (process.platform === "win32" && session.includes("|")) {
       expect(readWindowsTileAttachArgv([String(file), ...args as string[]])).toMatchObject({ tmux: command[0], server: [command[1], "-L", "owned"], attachOnly: true });
-    } else {
+    } else if (process.platform === "win32") {
       expect(file).toBe(command[0]); expect(args).toEqual([command[1], "-L", "owned", "attach-session", "-r", "-t", "=" + session]);
+    } else {
+      // POSIX runs a server-starting tmux through the open-file-limit wrapper: the same argv, after the exec line.
+      expect(file).toBe("/bin/sh");
+      expect(args!.slice(2)).toEqual([command[0], command[1], "-L", "owned", "attach-session", "-r", "-t", "=" + session]);
     }
     child.emit("exit", 0); await expect(result).resolves.toBe(0);
   });

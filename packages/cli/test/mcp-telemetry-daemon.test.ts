@@ -8,16 +8,16 @@ import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type Database from "better-sqlite3";
-import { Hono } from "hono";
 import { createDb } from "../../daemon/src/db/connection.js";
-import { eventsSchema } from "../../daemon/src/db/migrations/003_events.js";
-import { telemetryRoutes } from "../../daemon/src/routes/telemetry.js";
+import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { DaemonClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
-import { allowFetchTarget } from "./fetch-guard.js";
 
 describe("rig_telemetry_events on the daemon's telemetry route", () => {
   let db: Database.Database;
+  let fixture: ReturnType<typeof createTestApp>;
   let server: ServerType;
   let call: (args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>;
   let close: () => Promise<void>;
@@ -25,6 +25,9 @@ describe("rig_telemetry_events on the daemon's telemetry route", () => {
   beforeEach(async () => {
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
+    // The tool resolves a rig name to its id through the daemon's own rig list, so the fixture owns the rows.
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("alpha-id", "alpha");
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("beta-id", "beta");
     fixture = createTestApp(db, { appDeps: { daemonBootEpoch: "fixture-boot" } });
     server = await serveOwnedHonoFixture(fixture.app.fetch);
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

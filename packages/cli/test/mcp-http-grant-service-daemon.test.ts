@@ -746,12 +746,11 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     const serveGatedDaemon = async (token: string): Promise<Array<[string, string, boolean]>> => {
       const gated = createTestApp(db, { appDeps: { ...appDeps, missionControlBearerToken: token } });
       const carried: Array<[string, string, boolean]> = [];
-      const gatedDaemon = await new Promise<ServerType>((resolve) => {
-        const s = serve({ fetch: (...args: Parameters<typeof gated.app.fetch>) => {
-          carried.push([args[0].method, new URL(args[0].url).pathname, args[0].headers.has("authorization")]);
-          return gated.app.fetch(...args);
-        }, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
+      const gatedDaemon = await serveOwnedHonoFixture((...args: Parameters<typeof gated.app.fetch>) => {
+        carried.push([args[0].method, new URL(args[0].url).pathname, args[0].headers.has("authorization")]);
+        return gated.app.fetch(...args);
       });
+      allowOwnedHttpFixture(gatedDaemon);
       closers.push(() => new Promise<void>((resolve) => gatedDaemon.close(() => resolve())));
       daemonUrl = `http://127.0.0.1:${(gatedDaemon.address() as AddressInfo).port}`;
       return carried;

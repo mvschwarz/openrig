@@ -23,7 +23,10 @@ it.runIf(process.platform==="win32")("refuses case-colliding local copies before
   }finally{await rm(root,{recursive:true,force:true});}
 });
 
-it("copies between distinct case-sensitive entries without treating them as overlapping", async context => {
+// Case-distinct sibling entries need a case-sensitive directory: Windows enables that per directory
+// with fsutil, and Linux filesystems are case-sensitive, but a default macOS volume cannot hold this
+// shape at all.
+it.runIf(process.platform !== "darwin")("copies between distinct case-sensitive entries without treating them as overlapping", async context => {
   const root=await mkdtemp(path.join(os.tmpdir(),"copy-case-identity-"));
   try {
     if(process.platform==="win32"){
