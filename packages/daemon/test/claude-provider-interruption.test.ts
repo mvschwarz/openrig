@@ -515,6 +515,22 @@ describe("Claude provider interruptions (#99)", () => {
       expect(served).toMatchObject({ state: "unknown", reason: "provider_auth_error", evidenceSource: "runtime_hook" });
     });
 
+    it("keeps the failure over a prompt whose capture began before it, though the capture completed after", async () => {
+      vi.setSystemTime(Date.parse(T0) - 1000);
+      report({ hook_event_name: "StopFailure", error: "authentication_failed" });
+      vi.setSystemTime(T0);
+      let clock = new Date(Date.parse(T0) - 2000);
+      const capturePaneContent = vi.fn(async () => { clock = new Date(T0); return "Do you want to proceed?"; });
+      const structural = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
+      const observed = await structural.pollSeat(SESSION, null, "claude-code");
+      expect(observed).toMatchObject({ state: "attention", captureStartedAt: new Date(Date.parse(T0) - 2000).toISOString(), observedAt: T0 });
+      const [entry] = await attachAgentActivity([{
+        canonicalSessionName: SESSION, runtime: "claude-code", attachmentType: "tmux", logicalId: "dev.worker",
+      }] as Parameters<typeof attachAgentActivity>[0], { tmuxAdapter: { capturePaneContent } as never, activityStore: store,
+        structuralActivity: structural, now: new Date(T0) });
+      expect(entry!.agentActivity).toMatchObject({ state: "unknown", reason: "provider_auth_error", evidenceSource: "runtime_hook" });
+    });
+
     it("ends when Claude's idle notification follows it, as any newer hook does", () => {
       report({ hook_event_name: "StopFailure", error: "billing_error" }, identity, "2025-01-01T11:58:00.000Z");
       expect(seatNeedsAttention(seat, latest(), null)).toBe(true);

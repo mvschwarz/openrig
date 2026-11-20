@@ -1604,8 +1604,9 @@ const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", 
 
 /**
  * The served activity for a seat whose newest hook is a current Claude authentication or billing failure: that hook,
- * ahead of the cached pane reading, so the row shows the reason it counts for attention. Only a native prompt the pane
- * observed strictly later outranks it; a draft in the input box doesn't. Kept out of `hookOrPaneActivity`, whose
+ * ahead of the cached pane reading, so the row shows the reason it counts for attention. Only a native prompt from a
+ * capture that began strictly after the failure outranks it (a capture's completion can lag the bytes it read, and
+ * without a start time the failure stays); a draft in the input box doesn't. Kept out of `hookOrPaneActivity`, whose
  * other readers (prompt-clear and reachable wake recovery, the usage-limit watchdog) keep the pane's reading: the
  * report holds no send or wake.
  */
@@ -1616,7 +1617,7 @@ export function providerFailureActivity(
 ): AgentActivity | null {
   if (!hookActivity || !providerFailureNeedsAttention(hookActivity, runtime)) return null;
   if (structural?.state === "attention" && NATIVE_PROMPT_REASONS.has(structural.reason)
-    && Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")) return null;
+    && Date.parse(structural.captureStartedAt ?? "") > Date.parse(hookActivity.eventAt ?? "")) return null;
   return hookActivity;
 }
 
