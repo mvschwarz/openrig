@@ -218,7 +218,9 @@ recorded answer and linked work". The steps below add no route and no promise; e
    name, its IP addresses and its Tailscale name are recognised already.
 2. **Get the app its own credential.** The owner issues it for the registered people the app answers as:
    `POST /api/apps/v1/credentials` with `{"appId", "actors": ["<person>@external"], "job": "human-answer",
-   "attribution": "app-attributed"}`, through the same owner gate as `/api/mission-control/action`. Store the one-time
+   "attribution": "app-attributed"}`, through the same owner gate as `/api/mission-control/action`. With no owner
+   bearer configured, that gate admits any request the daemon accepts, so on a tailnet bind any peer that passes
+   Host/Origin can issue one ([Access and identity](core-app.md#access-and-identity)). Store the one-time
    `orapp_…` token as [Access and identity](core-app.md#access-and-identity) says. The credential "is not human login":
    Core's claim is "person attributed by authenticated app X, never independent human authentication", and any
    credential can read any person's questions and their linked results. Every read and write names one of the
@@ -265,7 +267,7 @@ recorded answer and linked work". The steps below add no route and no promise; e
 **Read only, without an app credential:** `GET /api/attention?view=<person-id>&kind=action`
 ([above](#what-needs-a-person-and-how-their-answers-link-back-team-operationsv1)) shows that person's asks with `revision`
 and `about`. It's a view, not proof of who's using the client, and it doesn't answer: `needs-me.answer` reads
-`not-supported` there.
+`not-supported` in `GET /api/team-operations/capabilities`.
 
 ### What a connection supports, and what happened to a delivery (`member-connection.v1`)
 
