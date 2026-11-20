@@ -880,11 +880,13 @@ describe("MCP Server", () => {
     // The inbox, the claim before work, and keeping an item blocked while a person is asked.
     for (const part of ["rig_queue_list with owned set", "rig_queue_claim", "blockedOn that person", "blockedOn that new qitemId"]) expect(MEMBER_WORKFLOW).toContain(part);
     // v2: the closure reason a finished item takes, and scope described from the grant, not the tool list.
-    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v2");
     for (const part of ["closure reason no-follow-on", "a listed tool isn't access", "names the shared roots you may read"]) expect(MEMBER_WORKFLOW).toContain(part);
+    // v3: a lead rig_team marks declared is only a team's entry point, not who answers for a shared channel's item.
+    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v3");
+    expect(MEMBER_WORKFLOW).toContain("a lead marked declared is only a team's entry point, so ask the seat the item came from instead");
     const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
     expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
-    expect(doc).not.toContain("member-workflow/v1");
+    for (const old of ["member-workflow/v1", "member-workflow/v2"]) expect(doc).not.toContain(old);
     await cleanup();
   });
 

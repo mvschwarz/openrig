@@ -126,6 +126,14 @@ values. `rig_team` shows them as `participant: { app, kind }` on that member's e
 (its node kind). Absent or empty is unknown; neither is inferred from a name or label. A value that isn't a token is
 dropped on its own, `participant_problem` (`participantProblem` in `rig_team`) says why, and the roster still loads.
 
+A member can also declare `lead_of`, the team it's the entry point for, as a plain name of up to 40 characters. On a
+network with no delegation root (`delegates_to`), where exactly one entry of the rig declares it, `rig_team` shows that
+entry as `lead: { session, logicalId, declared: true, team }`, with the note "`<team>`'s entry point: send work for that
+team here. It doesn't manage this network or its other participants." A delegation root always stays the lead. With
+several declarations there's no lead, and the note names them. It's context only: nothing escalates or routes to a
+declared lead, and agents aren't told to take others' questions to it. A value that isn't a plain name is dropped,
+`lead_of_problem` says why, and the roster still loads.
+
 The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
 rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
 external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the
