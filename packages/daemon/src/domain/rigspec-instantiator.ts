@@ -1,6 +1,7 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import { effectiveProcessLimits } from "./process-limits.js";
+import { memberPoolBlock } from "./seat-pool-spec.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -328,7 +329,7 @@ export class RigInstantiator {
 // -- Pod-aware instantiator (AgentSpec reboot) --
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
+import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS, poolAdvisories } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
@@ -657,19 +658,21 @@ export class PodRigInstantiator {
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
+    // #3395: the pool advisories join this launch path's warnings once (the structured preflight does not add them)
+    const warnings = [...preflight.warnings, ...poolAdvisories(raw)];
     if (!preflight.ready) {
-      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
+      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings };
     }
     // A pod added to a running rig inherits the rig's layers; stop before it exists if a required one is gone,
     // when at least one added member reads startup files.
     if (opts?.targetRigId && targetRig && rigSpec.pods.some((pod) => pod.members.some((m) => this.runtimeTakesStartupFiles(m.runtime)))) {
       const missingInherited = this.inheritedStartupFileErrors(opts.targetRigId, targetRig.rig.name);
       if (missingInherited.length > 0) {
-        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings: preflight.warnings };
+        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings };
       }
     }
 
-    return this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, opts);
+    return this.materializeValidatedSpec(rigSpec, rigRoot, warnings, opts);
   }
 
   /**
@@ -962,6 +965,8 @@ export class PodRigInstantiator {
           processLimits: live.processLimitsError ? undefined : live.processLimits ? { ...live.processLimits } : {},
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
+          // #3395: the first start keeps the stored pool block, as an ordinary launch does.
+          pool: undefined, unusablePool: undefined,
           permissionPolicy: undefined },
         effortChoice: live.effortChoice ?? null, env: this.deps.rigRepo.getRigEnv(rigId),
         policyRef: live.permissionPolicy ?? null, rigPolicyRef: this.deps.rigRepo.getRigPermissionPolicy(rigId),
@@ -1031,7 +1036,11 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
-    return this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+    const launched = await this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+    // #3395: the pool advisories join this launch path's warnings once (the shared launch core does not add them)
+    const pool = poolAdvisories(raw);
+    if (!launched.ok || pool.length === 0) return launched;
+    return { ...launched, result: { ...launched.result, warnings: [...(launched.result.warnings ?? []), ...pool] } };
   }
 
   /**
@@ -1214,6 +1223,8 @@ export class PodRigInstantiator {
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
     });
+    // #3395: the pool advisories join this launch path's warnings once, here; the launch half below does not add them
+    preflight.warnings.push(...poolAdvisories(rawSpec));
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -1753,6 +1764,7 @@ export class PodRigInstantiator {
             launchWrapper: member.launchWrapper,
             processLimits: effectiveProcessLimits(member.processLimits),
             statuslineThrottle: member.statuslineThrottle || null,
+            pool: memberPoolBlock(member),
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2059,6 +2071,7 @@ export class PodRigInstantiator {
           label: member.label,
           // #3253: stored with the node, as for agent members, so a seat that never launches still shows its request.
           processLimits: effectiveProcessLimits(member.processLimits),
+          pool: memberPoolBlock(member),
         });
         recordCreated?.(rigId, node.id);
         return node.id;
@@ -2155,6 +2168,7 @@ export class PodRigInstantiator {
       launchWrapper: input.member.launchWrapper,
       processLimits: effectiveProcessLimits(input.member.processLimits),
       statuslineThrottle: input.member.statuslineThrottle || null,
+      pool: memberPoolBlock(input.member),
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2305,6 +2319,9 @@ export class PodRigInstantiator {
       // #3253: an unreadable stored value stays as stored (undefined keeps it, {} would clear it).
       processLimits: node.processLimitsError ? undefined : node.processLimits ? { ...node.processLimits } : {},
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
+      // #3395: a launch from the recipe never re-applies the recipe's pool block over the one stored since.
+      pool: undefined,
+      unusablePool: undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
       ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
@@ -2670,6 +2687,10 @@ export class PodRigInstantiator {
     if (input.member.statuslineThrottle !== undefined) {
       this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
     }
+    // #3395: the pool block is stored where re-applied settings are; `{}` clears it, a block that can't be used is kept
+    // as authored (it holds that pool), and an absent key leaves it unchanged.
+    const pool = memberPoolBlock(input.member);
+    if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
       ...(input.createCwd ? { createCwd: true } : {}),
@@ -3039,6 +3060,10 @@ export class PodRigInstantiator {
     if (input.member.statuslineThrottle !== undefined) {
       this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
     }
+    // #3395: the pool block is stored where re-applied settings are; `{}` clears it, a block that can't be used is kept
+    // as authored (it holds that pool), and an absent key leaves it unchanged.
+    const pool = memberPoolBlock(input.member);
+    if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, ...(input.createCwd ? { createCwd: true } : {}),
       ...(input.launchCwd ? { cwd: input.launchCwd } : {}), env: input.envOverride,
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });

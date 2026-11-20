@@ -1326,6 +1326,30 @@ describe("rig queue CLI", () => {
     });
   });
 
+  it.each([
+    { label: "note only", flags: ["--note", "checked the source"], expected: "checked the source" },
+    { label: "note and continuation", flags: ["--note", "checked the source", "--continuation", "resume the review"], expected: "continuation: resume the review\n\nchecked the source" },
+    { label: "multiline note and continuation", flags: ["--note", "checked the source\nkept the evidence", "--continuation", "resume the review"], expected: "continuation: resume the review\n\nchecked the source\nkept the evidence" },
+    { label: "empty continuation", flags: ["--note", "checked the source", "--continuation", ""], expected: "checked the source" },
+    { label: "whitespace-only continuation with note", flags: ["--note", "checked the source", "--continuation", " \t\n "], expected: "checked the source" },
+    { label: "whitespace-only continuation without note", flags: ["--continuation", " \t\n "], expected: "parked on external:cooldown" },
+    { label: "neither flag", flags: [], expected: "parked on external:cooldown" },
+  ])("block preserves the audit note: $label", async ({ flags, expected }) => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "block", "qitem-park",
+      "--on", "external:cooldown", "--wake-after", "90s", ...flags, "--json",
+    ]);
+    expect(calls.find((c) => c.path === "/api/queue/qitem-park/update")?.body).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:cooldown",
+      transitionNote: expected,
+      wakeAfterSeconds: 90,
+    });
+  });
+
   it("S03: block help teaches all wake paths and the workspace rule", () => {
     const { deps } = makeDeps();
     const program = createProgram({ queueDeps: deps });

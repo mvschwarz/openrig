@@ -511,6 +511,22 @@ export function isSettingsValidKey(key: string): key is SettingsValidKey {
   return (SETTINGS_VALID_KEYS as readonly string[]).includes(key);
 }
 
+/**
+ * The keys that define what this daemon may reach, and so are worth recording when a caller changes
+ * them over HTTP.
+ *
+ * `files.allowlist` is the allowlist the /api/files routes enforce (domain/files/path-safety.ts) and
+ * `progress.scan_roots` is the tree the progress scan walks. Both are ordinary settings: the Settings
+ * page saves and resets them through `POST`/`DELETE /api/config/:key`, and that stays. What a reader
+ * of the event stream could not see before is that they changed at all, so a change is published as
+ * `settings.changed`. Recording it is the point; refusing it would take away a path people use.
+ */
+export const BOUNDARY_SETTING_KEYS: readonly SettingsValidKey[] = ["files.allowlist", "progress.scan_roots"];
+
+export function isBoundarySettingKey(key: string): boolean {
+  return (BOUNDARY_SETTING_KEYS as readonly string[]).includes(key);
+}
+
 const REMOVED_CONTEXT_KEY = "context.packs_root";
 const REMOVED_CONTEXT_ENV = "OPENRIG_CONTEXT_PACKS_ROOT";
 

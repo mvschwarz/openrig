@@ -191,6 +191,8 @@ export interface SliceListEntry {
 
 export interface SliceIndexerOpts {
   projectId?: string;
+  /** Former ids the project declares (#3261): rows tagged with one still belong to `projectId`. */
+  projectAliases?: readonly string[];
   missionId?: string;
   /** Root directory containing slice folders. */
   slicesRoot: string;
@@ -367,6 +369,8 @@ export function sliceStatusBucket(raw: string | undefined): SliceStatus {
 
 export class SliceIndexer {
   readonly projectId?: string;
+  /** `projectId` and its declared former ids: the tags this indexer's project membership accepts. */
+  readonly projectIds: readonly string[];
   readonly missionId?: string;
   readonly slicesRoot: string;
   readonly additionalSliceRoots: string[];
@@ -396,6 +400,7 @@ export class SliceIndexer {
 
   constructor(opts: SliceIndexerOpts) {
     this.projectId = opts.projectId;
+    this.projectIds = opts.projectId ? [opts.projectId, ...(opts.projectAliases ?? [])] : [];
     this.missionId = opts.missionId;
     this.slicesRoot = opts.slicesRoot;
     this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
@@ -617,7 +622,7 @@ export class SliceIndexer {
   observedQueueCounts(
     entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
     resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
-    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean } = {},
+    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean; canonicalProjectId?: (id: string) => string } = {},
   ): Map<string, SliceQueueCounts | null> {
     const result = new Map<string, SliceQueueCounts | null>();
     interface TargetScope {
@@ -775,7 +780,9 @@ export class SliceIndexer {
       if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
       const scope = parseTypedQueueScope(row.tags);
       if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
-      const rowProject = scope.projects.values().next().value;
+      const taggedProject = scope.projects.values().next().value;
+      // A former id a catalogued project declares counts as that project (#3261).
+      const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
       const firstSlice = scope.slices.values().next().value!;
       const candidates = targetsBySliceToken.get(firstSlice);
       if (!candidates) continue;
@@ -1406,7 +1413,7 @@ export class SliceIndexer {
       );
       const scanOrder = new Map<string, number>();
       for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectId)) continue;
+        if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
         scanOrder.set(r.qitem_id, scanOrder.size);
         for (const tagged of parseScopeTags(r.tags).slices) {
           const bucket = typedBySlice.get(tagged);
@@ -1510,7 +1517,7 @@ export class SliceIndexer {
         : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
       let stamp = 0;
       for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectId)) continue;
+        if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
         // A non-TEXT value (a BLOB) failed the build here before this matcher:
         // asciiFold/sqliteVisiblePrefix threw on it. The literal pass reads
         // code units and would skip it silently, so fail it the same way.

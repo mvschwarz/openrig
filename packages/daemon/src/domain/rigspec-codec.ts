@@ -1,5 +1,6 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { processLimitsToSpec } from "./process-limits.js";
+import { serializePoolBlock } from "./seat-pool-spec.js";
 import type {
   RigSpec,
   LegacyRigSpec,
@@ -174,6 +175,8 @@ export class RigSpecCodec {
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
         if (m.processLimits !== undefined) member["process_limits"] = processLimitsToSpec(m.processLimits);
         if (m.statuslineThrottle !== undefined) member["statusline_throttle"] = m.statuslineThrottle;
+        // #3395: a usable block, or `{}` (the clear); a block that can't be used is never written back.
+        if (m.pool !== undefined) member["pool"] = m.pool === null ? {} : serializePoolBlock(m.pool);
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;

@@ -38,6 +38,7 @@ import { inspectBundleBehaviour } from "../domain/bundle-behaviour-inspect.js";
 import type { BundleBehaviour } from "../domain/bundle-behaviour.js";
 import { normalizePreconditionsBlock, type BundlePrecondition } from "../domain/bundle-types.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
+import { SeatPoolSlotsRepository } from "../domain/seat-pool-slots.js";
 
 /**
  * Compare two dotted numeric version strings (semver-ish). Returns -1 if
@@ -298,9 +299,12 @@ export function assessSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository |
   const rig = rigRepo.listRigs().find((r) => r.name === rigName);
   if (!rig) return null;
   const rows = rigRepo.db
-    .prepare("SELECT logical_id FROM nodes WHERE rig_id = ?")
-    .all(rig.id) as Array<{ logical_id: string | null }>;
-  const liveIds = rows.map((r) => r.logical_id);
+    .prepare("SELECT id, logical_id FROM nodes WHERE rig_id = ?")
+    .all(rig.id) as Array<{ id: string; logical_id: string | null }>;
+  // #3395: a seat pool's agents are added and drained by the pool, not declared, so they are left out of the live list
+  // as the export leaves them out (every phase, `drained` included); a failed read of the slots propagates like any other.
+  const poolAgents = new Set(new SeatPoolSlotsRepository(rigRepo.db).poolAgentNodeIds(rig.id));
+  const liveIds = rows.filter((r) => !poolAgents.has(r.id)).map((r) => r.logical_id);
   return isPodAware
     ? compareSpecToLive(topologyFromRigSpec(spec as never), topologyFromLiveLogicalIds(liveIds))
     : compareSpecToLive(topologyFromLegacyRigSpec(spec as never), topologyFromLiveNodeIds(liveIds));

@@ -1,7 +1,7 @@
 import nodePath from "node:path";
 import { createHash } from "node:crypto";
 import { RigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema } from "./rigspec-schema.js";
+import { RigSpecSchema, poolAdvisories } from "./rigspec-schema.js";
 import { assertShippableSubstance, resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgentEntry, type PodBundleAgentImportEntry, type BundleProvenance, type BundleCompatibility } from "./bundle-types.js";
 import type { RigSpec, StartupBlock } from "./types.js";
@@ -226,7 +226,8 @@ export class PodBundleAssembler {
         createdAt: opts.provenance.createdAt ?? createdAt,
       };
     }
-    const warnings = [...unresolvedSkills];
+    // #3395: a malformed pool block is not carried (the rig.yaml is written from the normalized spec) and is listed here
+    const warnings = [...unresolvedSkills, ...poolAdvisories(raw)];
     if (warnings.length > 0) {
       // Reuse durable provenance notes so inspect and recovery see the same caveat.
       const warning = warnings.join("; ");

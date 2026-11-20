@@ -12,6 +12,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { LegacyBundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
 import * as tar from "tar";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 import { createHash } from "node:crypto";
 
 
@@ -608,6 +609,43 @@ describe("Bundle API routes", () => {
     expect(body.bundleName).toBe("pod-test");
     expect(body.archiveHash).toMatch(/^[a-f0-9]{64}$/);
     expect(fs.existsSync(outputPath)).toBe(true);
+  });
+
+  it("A bundle of a pooled rig is not refused for drift without --allow-drift, because pool agents are left out of the live list", async () => {
+    const agentsDir = path.join(tmpDir, "agents", "impl");
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, "agent.yaml"), [
+      'name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []', 'profiles:', '  default:', '    uses:', '      skills: []',
+    ].join("\n"));
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"', 'name: pooled-rig', 'pods:', '  - id: dev', '    label: Dev', '    members:', '      - id: impl',
+      '        agent_ref: "local:agents/impl"', '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '        pool: { max: 2 }', '    edges: []', 'edges: []',
+    ].join("\n"));
+    // the rig on record: the model and one pool agent in each phase
+    const rig = setup.rigRepo.createRig("pooled-rig");
+    const model = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const slots = new SeatPoolSlotsRepository(db);
+    const phases = ["adding", "live", "draining", "drained"] as const;
+    const agents = phases.map((phase, i) => {
+      const agent = setup.rigRepo.addNode(rig.id, `dev.impl-s${i + 1}`, { runtime: "claude-code" });
+      slots.insert({ modelNodeId: model.id, slotNumber: i + 1, nodeId: agent.id, phase, at: "2026-11-18T00:00:00.000Z" });
+      return agent;
+    });
+    const create = (name: string) => app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: name, bundleVersion: "0.1.0", outputPath: path.join(tmpDir, `${name}.rigbundle`) }),
+    });
+    const res = await create("pooled");
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { warning?: string }).warning ?? "").not.toMatch(/drift|does not describe/i);
+    // the same seats without slot rows are ordinary members the spec doesn't declare, and the bundle refuses
+    db.prepare("DELETE FROM seat_pool_slots WHERE node_id = ?").run(agents[1]!.id);
+    const refused = await create("drifted");
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toContain("Refusing to bundle");
   });
 
   it("POST /api/bundles/create accepts builtin terminal pod members", async () => {

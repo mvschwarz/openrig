@@ -28,6 +28,23 @@ describe("createDb", () => {
     db.close();
     fs.rmSync(tmpDir, { recursive: true });
   });
+
+  // #3479: SQLite picks its temp directory from the host (/var/tmp, /usr/tmp,
+  // /tmp) when SQLITE_TMPDIR/TMPDIR are unset. In a sandbox that write-denies
+  // that directory, any statement needing a temp file (e.g. the statement
+  // journal of a nested write inside a transaction) failed with
+  // SQLITE_CANTOPEN. The daemon's connection keeps temp data in memory.
+  it("keeps SQLite temp storage in memory on a file-backed database", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    const db = createDb(path.join(tmpDir, "test.sqlite"));
+    try {
+      // 2 = MEMORY
+      expect(db.pragma("temp_store", { simple: true })).toBe(2);
+    } finally {
+      db.close();
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
 });
 
 describe("migrate", () => {
