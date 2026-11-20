@@ -65,19 +65,20 @@ async function* readJsonLines(file) {
 }
 
 // The reconstructed transcript and narrative go to their files as they're built, joined with newlines as before, so
-// neither becomes one string either. close() returns the text's length, which sizes the read budget.
+// neither becomes one string either. close() returns the text's length, which sizes the read budget. writeFileSync on
+// the descriptor appends at its position and retries until every byte is written; one writeSync can write fewer.
 function createTextSink(file) {
   const fd = fs.openSync(file, "w");
   let count = 0;
   let length = 0;
   return {
     push(text) {
-      fs.writeSync(fd, count ? `\n${text}` : text);
+      fs.writeFileSync(fd, count ? `\n${text}` : text);
       length += text.length + (count ? 1 : 0);
       count += 1;
     },
     close(placeholder) {
-      if (!count) fs.writeSync(fd, placeholder);
+      if (!count) fs.writeFileSync(fd, placeholder);
       fs.closeSync(fd);
       return length;
     },

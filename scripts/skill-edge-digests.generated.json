@@ -72,7 +72,7 @@
       "claude-compaction-restore/SKILL.md": "e1a6ee501ae97d6de0a8df8dae01c088953f56907e76f10089908d7a8c5691a7",
       "claude-compaction-restore/reference/SKILL-v1.md": "6af2a889c9c38227fb186897c6e29185f81b215822070b469a6ceeb47734e133",
       "claude-compaction-restore/scripts/precompact-hook.mjs": "712e97c8beb02eb6c2815884a960778a225d8f6238dfe04a9b0547c34eaa131d",
-      "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "c89736bf870eaae682de7af0a5bcd50c5c52ea94850b64fe91a3b5f196723b35",
+      "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "2a6adc09fea3d8b6d02f45e16578d0ea4186a9752fba824b3af432d43fd8241c",
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
       "delegating-work/SKILL.md": "fc5638949ce7600446a04e59dbe94996ea910e94beef1fa71cb7a31fa140fce6",
