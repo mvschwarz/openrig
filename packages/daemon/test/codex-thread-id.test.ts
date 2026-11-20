@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexThreadIdResolver, lstartToMinTs, readCodexThreadIdFromCandidateHomes } from "../src/domain/codex-thread-id.js";
+import { CodexThreadIdResolver, defaultOpenCodexDatabaseHomeByPid, lstartToMinTs, readCodexThreadIdFromCandidateHomes } from "../src/domain/codex-thread-id.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -27,6 +27,34 @@ function fixture() {
     finish: () => { logs.close(); state.close(); return new CodexThreadIdResolver({ defaultHome: home, resolveHomeDirByPid: () => home }); },
   };
 }
+
+// The OS names the databases a process holds open; this one reads this test's own process.
+it("names the one directory whose Codex databases a process holds open, and none when there are two", async () => {
+  const open = (dir: string, name: string) => { fs.mkdirSync(dir, { recursive: true }); return new Database(path.join(dir, name)); };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-open-home-")); roots.push(root);
+  const logs = open(path.join(root, "a"), "logs_2.sqlite"), state = open(path.join(root, "a"), "state_5.sqlite");
+  logs.exec("CREATE TABLE t (x)"); state.exec("CREATE TABLE t (x)");
+  try {
+    expect(await defaultOpenCodexDatabaseHomeByPid(process.pid)).toBe(fs.realpathSync(path.join(root, "a")));
+    const other = open(path.join(root, "b"), "logs_2.sqlite"); other.exec("CREATE TABLE t (x)");
+    try { expect(await defaultOpenCodexDatabaseHomeByPid(process.pid)).toBeUndefined(); } finally { other.close(); }
+  } finally { logs.close(); state.close(); }
+});
+
+it("reads a verified process's open database home only on a miss and only when asked", async () => {
+  const declared = fixture(), actual = fixture();
+  actual.thread("moved-thread"); actual.log("moved-thread"); actual.finish(); declared.finish();
+  const actualHome = path.join(actual.home, ".codex");
+  const openDatabaseHomeByPid = vi.fn(() => actualHome);
+  const resolver = new CodexThreadIdResolver({ codexHome: path.join(declared.home, ".codex"), openDatabaseHomeByPid });
+  expect(await resolver.resolveWithHome(60422, identity)).toEqual({});
+  expect(openDatabaseHomeByPid).not.toHaveBeenCalled();
+  expect(await resolver.resolveWithHome(60422, identity, true)).toEqual({ thread: "moved-thread", codexHome: actualHome });
+  const hit = vi.fn(() => actualHome);
+  expect(await new CodexThreadIdResolver({ codexHome: actualHome, openDatabaseHomeByPid: hit }).resolveWithHome(60422, identity, true))
+    .toEqual({ thread: "moved-thread", codexHome: actualHome });
+  expect(hit).not.toHaveBeenCalled();
+});
 
 describe("Codex home discovery respects an explicit HOME", () => {
   it("reads the default home before resolving a process home and never consults passwd", async () => {

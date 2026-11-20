@@ -864,7 +864,7 @@ const generationRecord = async (c: Context) => {
         listProcesses: () => generationCensus.list(),
         readThreadIdByPid: async (nativePid, startedAt) => {
           if (!startedAt) return undefined;
-          const read = await threads.resolveWithHome(nativePid, startedAt);
+          const read = await threads.resolveWithHome(nativePid, startedAt, nativePid === identity.evidence.observedPid);
           if (read.thread && read.codexHome) homes.add(read.codexHome);
           if (nativePid === identity.evidence.observedPid) { verifiedNativeThreadId = read.thread; verifiedHome = read.codexHome; }
           return read.thread;

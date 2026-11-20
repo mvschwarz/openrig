@@ -76,7 +76,7 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
       const homes = new Set<string>();
       const selected = await resolveLiveCodexThreadId(pane, { ...deps, readThreadIdByPid: async (pid, startedAt) => {
         if (!startedAt) return undefined;
-        const read = await threads.resolveWithHome(pid, startedAt);
+        const read = await threads.resolveWithHome(pid, startedAt, pid === proof.evidence.observedPid);
         if (read.thread && read.codexHome) homes.add(read.codexHome);
         if (pid === proof.evidence.observedPid) { verifiedThread = read.thread; verifiedHome = read.codexHome; }
         return read.thread;
