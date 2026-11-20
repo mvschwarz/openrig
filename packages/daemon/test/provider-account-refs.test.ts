@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -106,6 +106,26 @@ describe("provider account references", () => {
     fs.symlinkSync(file("elsewhere.json", 0o600), path.join(home, "auth-profiles", "linked.json"));
     expect(repo.add({ provider: "codex", label: "linked", codexHome: home, login: "linked" })).toMatchObject({
       ok: false, code: "reference_unusable", message: expect.stringContaining("no login named linked is saved in") });
+  });
+
+  it("a file that goes away between the checks is refused, naming its kind", () => {
+    const realStat = fs.statSync;
+    for (const [kind, input] of [
+      ["API-key file", (f: string) => ({ provider: "claude" as const, label: "gone-key", apiKeyFile: f })],
+      ["token file", (f: string) => ({ provider: "claude" as const, label: "gone-token", tokenFile: f })],
+    ] as const) {
+      const f = file(`vanishing-${kind.length}`, 0o600);
+      let calls = 0;
+      // The first stat is the shared file check; the second, the privacy check, finds the file gone.
+      const spy = vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, o?: fs.StatSyncOptions) => {
+        if (p === f && ++calls === 2) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return realStat(p, o);
+      }) as typeof fs.statSync);
+      try {
+        expect(repo.add(input(f))).toEqual({ ok: false, code: "reference_unusable", message: `the ${kind} ${f} doesn't exist. Nothing was stored.` });
+      } finally { spy.mockRestore(); }
+    }
+    expect(rows().n).toBe(0);
   });
 
   it("refuses a malformed label, path or login name before looking at the filesystem", () => {

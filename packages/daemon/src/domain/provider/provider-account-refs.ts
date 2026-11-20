@@ -81,10 +81,11 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
     const fileProblem = claudeSeatTokenFileProblem(ref);
     if (fileProblem) return unusable(fileProblem);
     // A subscription token gets the API key's rule too: only its owner may read it.
+    const kind = apiKey ? "API-key file" : "token file";
     let mode: number;
-    try { mode = fs.statSync(ref.tokenFile).mode & 0o777; } catch { return unusable(`the token file ${ref.tokenFile} doesn't exist`); }
+    try { mode = fs.statSync(ref.tokenFile).mode & 0o777; } catch { return unusable(`the ${kind} ${ref.tokenFile} doesn't exist`); }
     if (mode !== 0o600 && mode !== 0o400) {
-      return unusable(`the token file ${ref.tokenFile} must be private (0600 or 0400), and it is ${mode.toString(8).padStart(4, "0")}`);
+      return unusable(`the ${kind} ${ref.tokenFile} must be private (0600 or 0400), and it is ${mode.toString(8).padStart(4, "0")}`);
     }
     return null;
   }
@@ -124,6 +125,12 @@ const fromRow = (row: AccountRefRow): AccountRef => ({
   login: row.login_name,
   createdAt: row.created_at,
 });
+
+/** What uses an account label: the rigs assigned to it. Nothing stores an assignment yet (that arrives with applying
+ *  one), so no label is in use; this is the one place that answers it. */
+export function accountRefUses(_db: Database.Database): (provider: AccountRefProvider, label: string) => string[] {
+  return () => [];
+}
 
 export interface ProviderAccountRefsOptions {
   /** What uses a label, so it can't be removed: slice 02's assignments. None until then. */

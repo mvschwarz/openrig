@@ -781,11 +781,31 @@ describe("provider account --host (runs on that machine's SSH entry)", () => {
 
   it("a lost connection during add or remove is an unknown outcome naming the list to check; during list, a failure", async () => {
     const lost = { ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect to host: Connection refused" } as CrossHostResult;
-    await account(["remove", "max-1", "--provider", "claude", "--host", "vm-a"], lost);
-    expect(captured.stderrLines.join("\n")).toContain("remote-outcome-unknown");
-    expect(captured.stderrLines.join("\n")).toContain("rig provider account list --host vm-a --provider claude");
-    captured.stderrLines.length = 0;
+    for (const verb of [["add", "max-1", "--provider", "claude", "--token-file", "/keys/max-1"], ["remove", "max-1", "--provider", "claude"]]) {
+      await account([...verb, "--host", "vm-a"], lost);
+      expect(captured.stderrLines.join("\n")).toContain("remote-outcome-unknown");
+      expect(captured.stderrLines.join("\n")).toContain("rig provider account list --host vm-a --provider claude");
+      captured.stderrLines.length = 0;
+    }
     await account(["list", "--host", "vm-a"], lost);
+    expect(captured.stderrLines.join("\n")).not.toContain("remote-outcome-unknown");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("assign plans on that machine with the same options; a lost connection is a plain failure, since it changes nothing", async () => {
+    ran = [];
+    const plan = (args: string[], reply?: CrossHostResult) => providerCommand({ lifecycleDeps: { exists: () => false } as never, clientFactory: vi.fn() as never }, {
+      env: { OPENRIG_SESSION_NAME: "dev-core@fleet" },
+      host: { hostRegistryLoader: () => SSH_AND_HTTP, selfHostId: async () => "host-a",
+        crossHostRun: async (entry, argv, opts) => { ran.push({ host: entry.id, argv, origin: opts?.originTriple });
+          return reply ?? { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 }; } },
+    }).parseAsync(args, { from: "user" });
+    await plan(["assign", "fleet", "--provider", "codex", "--account", "team", "--include-overrides", "--account-home", "/prepared", "--json", "--host", "vm-a"]);
+    expect(ran).toEqual([{ host: "vm-a", origin: "dev-core@fleet@host-a",
+      argv: ["rig", "provider", "assign", "fleet", "--provider", "codex", "--account", "team", "--include-overrides", "--account-home", "/prepared", "--json"] }]);
+    captured.stderrLines.length = 0;
+    await plan(["assign", "fleet", "--provider", "claude", "--account", "max-2", "--host", "vm-a"],
+      { ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect to host: Connection refused" } as CrossHostResult);
     expect(captured.stderrLines.join("\n")).not.toContain("remote-outcome-unknown");
     expect(process.exitCode).toBe(1);
   });

@@ -533,3 +533,83 @@ describe("rig provider account add|list|remove (#3625)", () => {
     expect(text).toMatch(/add \[options\] <label>/);
   });
 });
+
+describe("rig provider assign (#3625 slice 2: the plan)", () => {
+  let server: http.Server;
+  let port: number;
+  const seen: string[] = [];
+  const PLAN = {
+    daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", kind: "codex_saved_login", reference: "the login team saved in /homes/a" },
+    includeOverrides: false,
+    rows: [
+      { seat: "c1@fleet", runtime: "codex", current: "the login in /homes/a", effect: "change", precheck: { safe: true, reasons: [] },
+        continuity: "in place: the seat restarts on the same conversation", activity: "running", notes: ["busy (working): a switch interrupts work in flight"] },
+      { seat: "c2@fleet", runtime: "codex", current: "saved login other (seat registry)", effect: "kept_override", override: "the saved login other (seat registry)", activity: "idle" },
+      { seat: "c3@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "idle" },
+      { seat: "cl@fleet", runtime: "claude-code", current: "the login in /h/.claude", effect: "not_affected", activity: "idle", notes: ["a claude-code seat: a codex assignment doesn't touch it"] },
+    ],
+    codexHomes: [{ home: "/homes/a", seats: [{ seat: "c1@fleet", rig: "fleet", effect: "would restart" }, { seat: "p@other", rig: "other", effect: "not restarted; needs rig seat restart p@other" }] }],
+    note: "A plan only: nothing was changed. Applying it arrives in a later change.",
+  };
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      const reply = (status: number, data: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+      if (req.url?.includes("account=nope")) return reply(404, { ok: false, code: "unknown_account", message: "There's no codex account labelled nope on this daemon (rig provider account list --provider codex lists them)." });
+      if (req.url?.startsWith("/api/provider/assignment-plan")) return reply(200, { ok: true, plan: PLAN });
+      reply(404, { error: "not found" });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as { port: number }).port;
+  });
+  afterAll(() => server.close());
+
+  it("asks the daemon for the plan and prints each seat, the shared home's peers and that nothing changed", async () => {
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--include-overrides", "--account-home", "/prepared"], runningDeps(port));
+    expect(result.exitCode).toBeFalsy();
+    expect(seen.at(-1)).toBe("GET /api/provider/assignment-plan?rig=fleet&provider=codex&account=team&includeOverrides=1&accountHome=%2Fprepared");
+    expect(result.logs).toEqual([
+      "Plan on host-a: rig fleet's codex seats to team (the login team saved in /homes/a).",
+      "c1@fleet: from the login in /homes/a; precheck safe; in place: the seat restarts on the same conversation; activity running",
+      "  busy (working): a switch interrupts work in flight",
+      "c2@fleet: kept (seat override): the saved login other (seat registry); --include-overrides moves it too",
+      "c3@fleet: unchanged, already on team",
+      "cl@fleet: not affected (a claude-code seat: a codex assignment doesn't touch it)",
+      "Codex home /homes/a: one switch; every seat on it:",
+      "  c1@fleet (rig fleet): would restart",
+      "  p@other (rig other): not restarted; needs rig seat restart p@other",
+      "A plan only: nothing was changed. Applying it arrives in a later change.",
+    ]);
+  });
+
+  it("--json is the daemon's answer; an unknown label exits 1 with the reason", async () => {
+    const json = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--json"], runningDeps(port));
+    expect(JSON.parse(json.logs[0]!)).toEqual({ ok: true, plan: PLAN });
+    const unknown = await run(["assign", "fleet", "--provider", "codex", "--account", "nope"], runningDeps(port));
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.logs).toEqual(["There's no codex account labelled nope on this daemon (rig provider account list --provider codex lists them)."]);
+  });
+
+  it.each([
+    [["--account", "team"], "Name the provider"],
+    [["--provider", "codex"], "Name the account"],
+    [["--provider", "claude", "--account", "a", "--account-home", "/h"], "--account-home is for Codex seats"],
+  ])("checks its own options before asking: %j", async (flags, message) => {
+    const before = seen.length;
+    const result = await run(["assign", "fleet", ...flags], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain(message);
+    expect(seen.length).toBe(before);
+  });
+
+  it("has no --apply yet: applying arrives in a later change", async () => {
+    const before = seen.length;
+    const errors: string[] = [];
+    const cmd = providerCommand(runningDeps(port));
+    cmd.exitOverride().configureOutput({ writeErr: (s) => errors.push(s) });
+    for (const sub of cmd.commands) sub.exitOverride().configureOutput({ writeErr: (s) => errors.push(s) });
+    await expect(cmd.parseAsync(["node", "rig", "assign", "fleet", "--provider", "codex", "--account", "team", "--apply"])).rejects.toThrow(/unknown option/);
+    expect(seen.length).toBe(before);
+  });
+});

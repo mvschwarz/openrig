@@ -1,0 +1,174 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type Database from "better-sqlite3";
+import { Hono } from "hono";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { providerRoutes } from "../src/routes/provider.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
+import type { SeatRestart } from "../src/domain/provider/provider-service.js";
+
+// #3625 slice 2: the daemon gathers each seat's facts for the plan, refuses an unknown label or rig and a reference that
+// no longer checks out, and changes nothing.
+
+const CONTENT = "synthetic-content-never-echoed";
+let dir: string;
+let codexHome: string;
+let db: Database.Database;
+
+function seat(rig: string, id: string, runtime: string, session: string, status = "running") {
+  db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, ?)").run(`rig-${rig}`, rig);
+  db.prepare("INSERT OR IGNORE INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run(`pod-${rig}`, `rig-${rig}`, "dev", "Dev");
+  db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, `rig-${rig}`, `dev.${id}`, runtime, "/w", `pod-${rig}`);
+  db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, ?, ?)").run(`sess-${id}`, id, session, status, "ready");
+}
+
+function privateFile(name: string): string {
+  const p = path.join(dir, name);
+  fs.writeFileSync(p, CONTENT, { mode: 0o600 });
+  return p;
+}
+
+function service(platform: NodeJS.Platform = "linux") {
+  return new ProviderServiceImpl({
+    db, listRigs: () => (db.prepare("SELECT id FROM rigs ORDER BY id").all() as Array<{ id: string }>),
+    env: { HOME: dir, CODEX_HOME: codexHome }, platform,
+    claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }),
+  });
+}
+
+// Every table's rows, to compare before and after a plan.
+function everything(): string {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>;
+  return JSON.stringify(tables.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]));
+}
+
+beforeEach(() => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "assignment-plan-"));
+  codexHome = path.join(dir, "codex");
+  fs.mkdirSync(path.join(codexHome, "auth-profiles"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(codexHome, "auth-profiles", "team.json"), CONTENT, { mode: 0o600 });
+  db = createFullTestDb();
+});
+afterEach(() => {
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe("the daemon's assignment plan", () => {
+  it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    seat("fleet", "c1", "codex", "c1@fleet");
+    seat("fleet", "c2", "codex", "c2@fleet");
+    seat("fleet", "cl", "claude-code", "cl@fleet");
+    seat("other", "p1", "codex", "p1@other");
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'c2'").run(path.join(dir, "own-home"));
+    const plan = vi.fn<SeatRestart["plan"]>(async () => ({ ok: false, code: "settings_unverified", message: "read on Linux only" }) as never);
+
+    const result = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" },
+      { plan, run: vi.fn() });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.rows.map((r) => [r.seat, r.effect])).toEqual([["c1@fleet", "change"], ["c2@fleet", "kept_override"], ["cl@fleet", "not_affected"]]);
+    expect(result.plan.rows[1]!.override).toBe(`its account home ${path.join(dir, "own-home")}`);
+    // The existing precheck ran for the seat that would change, and only for it.
+    expect(plan.mock.calls.map(([s]) => s)).toEqual(["c1@fleet"]);
+    expect(result.plan.rows[0]!.precheck).toMatchObject({ safe: false, reasons: ["seat_restart_refused"] });
+    expect(result.plan.codexHomes).toEqual([{ home: codexHome, seats: [
+      { seat: "c1@fleet", rig: "fleet", effect: "would restart" },
+      { seat: "p1@other", rig: "other", effect: "not restarted; needs rig seat restart p1@other" },
+    ] }]);
+  });
+
+  it("refuses an unknown label, naming the list, and an unknown rig", async () => {
+    seat("fleet", "c1", "codex", "c1@fleet");
+    expect(await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "nope", includeOverrides: false, daemon: "h" })).toEqual({
+      ok: false, code: "unknown_account", message: "There's no codex account labelled nope on this daemon (rig provider account list --provider codex lists them)." });
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
+    expect(await service().assignmentPlan({ rig: "elsewhere", provider: "codex", label: "team", includeOverrides: false, daemon: "h" }))
+      .toMatchObject({ ok: false, code: "unknown_rig" });
+  });
+
+  it("checks the reference again: a link that now points at a non-private file is refused", async () => {
+    seat("fleet", "cl", "claude-code", "cl@fleet");
+    const link = path.join(dir, "token-link");
+    fs.symlinkSync(privateFile("token"), link);
+    expect(new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: link }).ok).toBe(true);
+    const open = path.join(dir, "open");
+    fs.writeFileSync(open, CONTENT, { mode: 0o644 });
+    fs.chmodSync(open, 0o644);
+    fs.rmSync(link);
+    fs.symlinkSync(open, link);
+    const result = await service().assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "h" });
+    expect(result).toEqual({ ok: false, code: "reference_unusable",
+      message: `max-2's reference no longer checks out: the token file ${link} must be private (0600 or 0400), and it is 0644.` });
+    expect(JSON.stringify(result)).not.toContain(CONTENT);
+  });
+});
+
+describe("GET /api/provider/assignment-plan", () => {
+  function app(): Hono {
+    const a = new Hono();
+    a.use("*", async (c, next) => {
+      c.set("rigRepo" as never, new RigRepository(db));
+      c.set("providerService" as never, service());
+      await next();
+    });
+    a.route("/api/provider", providerRoutes());
+    return a;
+  }
+
+  it("answers the plan for a rig, and changes nothing: no seat, reference or other row, and no file", async () => {
+    const token = privateFile("token");
+    const other = privateFile("other-token");
+    new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: token });
+    seat("fleet", "a", "claude-code", "a@fleet");
+    seat("fleet", "b", "claude-code", "b@fleet");
+    seat("fleet", "x", "codex", "x@fleet");
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = 'b'").run(JSON.stringify({ label: "max-1", tokenFile: other }));
+    const before = everything();
+    const stat = fs.statSync(token);
+
+    const res = await app().request("/api/provider/assignment-plan?rig=fleet&provider=claude&account=max-2");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: true, plan: { daemon: "local", rig: "fleet", provider: "claude", account: { label: "max-2" } } });
+    expect(body.plan.rows.map((r: { seat: string; effect: string }) => [r.seat, r.effect])).toEqual([
+      ["a@fleet", "change"], ["b@fleet", "kept_override"], ["x@fleet", "not_affected"]]);
+    expect(body.plan.rows[0]).toMatchObject({ precheck: { safe: true }, continuity: "in place: the seat is relaunched in its own pane and keeps its conversation" });
+
+    const included = await (await app().request("/api/provider/assignment-plan?rig=fleet&provider=claude&account=max-2&includeOverrides=1")).json();
+    expect(included.plan.rows[1].effect).toBe("change");
+    expect(everything()).toBe(before);
+    expect(fs.statSync(token).mtimeMs).toBe(stat.mtimeMs);
+    expect(JSON.stringify(body)).not.toContain(CONTENT);
+  });
+
+  it("refuses a malformed request (400), an unknown label or rig (404) and a stale reference (409)", async () => {
+    seat("fleet", "a", "claude-code", "a@fleet");
+    const request = (q: string) => app().request(`/api/provider/assignment-plan?${q}`);
+    expect((await request("provider=claude&account=x")).status).toBe(400);
+    expect((await request("rig=fleet&provider=pi&account=x")).status).toBe(400);
+    expect((await request("rig=fleet&provider=claude&account=x&accountHome=/h")).status).toBe(400);
+    expect((await request("rig=fleet&provider=codex&account=x&accountHome=relative")).status).toBe(400);
+    const unknown = await request("rig=fleet&provider=claude&account=x");
+    expect(unknown.status).toBe(404);
+    expect((await unknown.json()).message).toContain("rig provider account list --provider claude");
+    const token = privateFile("token");
+    new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: token });
+    expect((await request("rig=nowhere&provider=claude&account=max-2")).status).toBe(404);
+    fs.rmSync(token);
+    expect((await request("rig=fleet&provider=claude&account=max-2")).status).toBe(409);
+  });
+
+  it("is 503 when the service has no plan", async () => {
+    const a = new Hono();
+    a.use("*", async (c, next) => { c.set("providerService" as never, { getReadModel: vi.fn(), precheck: vi.fn(), switchAccount: vi.fn() }); await next(); });
+    a.route("/api/provider", providerRoutes());
+    expect((await a.request("/api/provider/assignment-plan?rig=r&provider=claude&account=a")).status).toBe(503);
+  });
+});

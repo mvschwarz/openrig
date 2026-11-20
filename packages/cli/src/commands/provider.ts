@@ -980,5 +980,73 @@ that machine. Only the command and its output cross the connection.`);
       console.log(`Removed the ${opts.provider} account ${label}. Its ${res.data.account?.kind === "codex_saved_login" ? "saved login" : "file"} is left as it is, and seats already switched to it keep their own reference.`);
     });
 
+  // #3625 slice 2: the plan for moving a rig's seats of one provider to an account, computed by the daemon that runs the
+  // rig. It changes nothing.
+  type PlanRow = { seat: string; runtime: string; current: string; effect: "change" | "unchanged" | "kept_override" | "not_affected";
+    override?: string; precheck?: { safe: boolean; reasons: string[]; message?: string }; continuity?: string; activity: string; notes?: string[] };
+  type Plan = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; includeOverrides: boolean;
+    accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; effect: string }> }>; note: string };
+  const printPlan = (plan: Plan) => {
+    console.log(`Plan on ${plan.daemon}: rig ${plan.rig}'s ${plan.provider} seats to ${plan.account.label} (${plan.account.reference})`
+      + `${plan.accountHome ? `, as fresh successors on ${plan.accountHome}` : ""}.`);
+    for (const row of plan.rows) {
+      if (row.effect === "not_affected") { console.log(`${row.seat}: not affected (${(row.notes ?? []).join("; ")})`); continue; }
+      if (row.effect === "unchanged") { console.log(`${row.seat}: unchanged, already on ${plan.account.label}`); continue; }
+      if (row.effect === "kept_override") { console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`); continue; }
+      const check = row.precheck?.safe ? "precheck safe" : `precheck UNSAFE: ${(row.precheck?.reasons ?? []).join(", ")}`;
+      console.log(`${row.seat}: from ${row.current}; ${check}; ${row.continuity}; activity ${row.activity}`);
+      if (row.override) console.log(`  overrides ${row.override}`);
+      if (row.precheck?.message) console.log(`  ${row.precheck.message}`);
+      for (const note of row.notes ?? []) console.log(`  ${note}`);
+    }
+    for (const group of plan.codexHomes) {
+      console.log(`Codex home ${group.home}: one switch; every seat on it:`);
+      for (const peer of group.seats) console.log(`  ${peer.seat} (rig ${peer.rig}): ${peer.effect}`);
+    }
+    console.log(plan.note);
+  };
+
+  cmd
+    .command("assign <rig>")
+    .description("The plan for moving a rig's seats of one provider to an account this daemon knows by label; nothing changes")
+    .option("--provider <p>", "claude or codex: a mixed rig gets one assignment per provider")
+    .option("--account <label>", "The account's label (rig provider account list)")
+    .option("--include-overrides", "Also move seats with their own choice of account; by default they're kept and shown")
+    .option("--account-home <dir>", "Codex: move the seats to this prepared home as fresh successors with a handover, instead of in place")
+    .option("--host <id>", "Plan on that registered machine instead, over its SSH entry; the rig and account are that daemon's")
+    .option("--json", "Output as parseable JSON")
+    .addHelpText("after", `
+The daemon that runs the rig computes the plan from what it already has, and changes nothing: one row per seat, with its
+configured account, whether it has its own choice of account (kept unless --include-overrides), the switch's precheck
+verdict, whether it keeps its conversation, and what it's doing now. A busy seat is noted, not refused.
+A Claude seat is relaunched in place on the same conversation; a stopped one picks the account up at its next launch.
+A Codex seat switches in place only on Linux, by changing its Codex home's active login, so every seat on that home moves
+with it: the plan lists each one, in this rig ("would restart") or not ("not restarted; needs rig seat restart <seat>").
+Elsewhere it reads "unsupported in place"; name a prepared home with --account-home to move it as a fresh successor
+with a handover instead. Nothing falls back to that by itself.
+A configured account is what a seat's next launch uses, not proof of the login a running session uses.`)
+    .action(async (rig: string, opts: { provider?: string; account?: string; includeOverrides?: boolean; accountHome?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, true) ?? (opts.account ? null : "Name the account: --account <label> (rig provider account list).")
+        ?? (opts.accountHome !== undefined && opts.provider !== "codex" ? "--account-home is for Codex seats." : null);
+      if (problem) return refusal(`${problem} Nothing changed.`);
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "assign", rig, "--provider", opts.provider!, "--account", opts.account!,
+          ...(opts.includeOverrides ? ["--include-overrides"] : []), ...(opts.accountHome !== undefined ? ["--account-home", opts.accountHome] : []),
+          ...(opts.json ? ["--json"] : [])], { json: opts.json });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const qs = new URLSearchParams({ rig, provider: opts.provider!, account: opts.account!,
+        ...(opts.includeOverrides ? { includeOverrides: "1" } : {}), ...(opts.accountHome !== undefined ? { accountHome: opts.accountHome } : {}) });
+      const res = await client.get<{ ok: boolean; plan?: Plan; code?: string; message?: string }>(`/api/provider/assignment-plan?${qs.toString()}`);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (handleHttpError(res, "assignment plan")) return;
+      printPlan(res.data.plan!);
+    });
+
   return cmd;
 }

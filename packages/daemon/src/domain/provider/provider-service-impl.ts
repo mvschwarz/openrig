@@ -24,6 +24,8 @@ import type { CodexUsageWindows } from "./codex-usage-windows.js";
 import type { ClaudeUsageWindows } from "./claude-usage-windows.js";
 import type { UsageRefreshResult } from "./usage-windows.js";
 import type {
+  AssignmentPlanRequest,
+  AssignmentPlanResult,
   ProviderService,
   ProviderPrecheckInput,
   ProviderSwitchInput,
@@ -34,6 +36,8 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
+import { planAssignment, type PlanSeatFacts } from "./assignment-plan.js";
+import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef } from "./provider-account-refs.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
@@ -91,6 +95,13 @@ function withRestartSteps(peers: PeerReport[], account: string): SeatSwitchRepor
     ? { ...peer, step: `rig seat restart ${peer.sessionName} --keep-conversation ${movedReason(account)}` } : peer);
 }
 
+/** The per-seat precheck input for moving a seat to this account. */
+function precheckFor(seat: string, account: AccountRef): ProviderPrecheckInput {
+  if (account.provider === "codex") return { seat, toAccount: account.login! };
+  return account.kind === "claude_api_key_file" ? { seat, toAccount: account.label, apiKeyFile: account.file! }
+    : { seat, toAccount: account.label, tokenFile: account.file! };
+}
+
 export interface ProviderServiceImplDeps {
   db: Database.Database;
   /** The rig universe (rigRepo.listRigs()) — each rig's node-inventory contributes seats. */
@@ -109,10 +120,22 @@ export interface ProviderServiceImplDeps {
   codexLogins?: CodexHomeLogins;
   /** What would outrank a Claude seat's own token; without it, Claude seats aren't moved. */
   claudePrecedence?: ClaudeCredentialPrecedence;
+  /** Where a Codex seat can switch in place (Linux); tests pin it. */
+  platform?: NodeJS.Platform;
 }
 
 export class ProviderServiceImpl implements ProviderService {
   constructor(private readonly deps: ProviderServiceImplDeps) {}
+
+  /** The daemon's own homes: the CODEX_HOME and Claude config dir a seat launches with when it declares none. */
+  private homes() {
+    const env = this.deps.env ?? process.env;
+    return {
+      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
+      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
+      home: env.HOME ?? os.homedir(),
+    };
+  }
 
   async getReadModel(): Promise<FourBlockReadModel> {
     const env = this.deps.env ?? process.env;
@@ -121,11 +144,7 @@ export class ProviderServiceImpl implements ProviderService {
     let seats: ProviderSeat[] | undefined;
     const readAuth = () => auth ??= readCodexAuthMetadata(env);
     const listSeats = () => seats ??= this.listSeats();
-    const homes = {
-      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
-      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
-      home: env.HOME ?? os.homedir(),
-    };
+    const homes = this.homes();
     const collectReactiveSignals = (): ProviderSignal[] => {
       if (!this.deps.agentActivityStore) return [];
       const result = collectReactiveEventSignals({
@@ -193,7 +212,12 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   private listSeats(): ProviderSeat[] {
-    const seats: ProviderSeat[] = [];
+    return this.seatEntries().map(({ seat }) => seat);
+  }
+
+  /** Every seat on this daemon with its node, as the read model lists them. */
+  private seatEntries(): Array<{ nodeId: string; seat: ProviderSeat }> {
+    const seats: Array<{ nodeId: string; seat: ProviderSeat }> = [];
     for (const rig of this.deps.listRigs()) {
       for (const entry of getNodeInventory(this.deps.db, rig.id)) {
         if (!entry.canonicalSessionName) continue;
@@ -203,17 +227,58 @@ export class ProviderServiceImpl implements ProviderService {
           : {};
         // The launch's own reader says whether the seat has a token reference; #3148's resolver names its label.
         const tokenRef = runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, entry.nodeId) : null;
-        seats.push({
+        seats.push({ nodeId: entry.nodeId, seat: {
           seatSession: entry.canonicalSessionName,
           rigName: entry.rigName ?? "",
           runtime,
           lifecycleState: entry.lifecycleState,
           ...(runtimeHome.home || runtimeHome.ignored ? { runtimeHome } : {}),
           ...(tokenRef && entry.configuredAccount ? { claudeToken: { label: entry.configuredAccount, ...(tokenRef.kind ? { kind: tokenRef.kind } : {}) } } : {}),
-        });
+        } });
       }
     }
     return seats;
+  }
+
+  /** #3625: the plan for moving a rig's seats of one provider to an account this daemon knows by label. Read only: the
+   *  per-seat precheck it runs reads the seat (a Codex seat's restart plan stops nothing). */
+  async assignmentPlan(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<AssignmentPlanResult> {
+    const account = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
+    if (!account) {
+      return { ok: false, code: "unknown_account", message: `There's no ${input.provider} account labelled ${input.label} on this daemon (rig provider account list --provider ${input.provider} lists them).` };
+    }
+    // Checked again now, not only when it was added: a file may have changed or gone, or a link may point elsewhere.
+    const problem = accountRefProblem(account.provider === "codex"
+      ? { provider: "codex", label: account.label, codexHome: account.codexHome!, login: account.login! }
+      : account.kind === "claude_api_key_file" ? { provider: "claude", label: account.label, apiKeyFile: account.file! }
+      : { provider: "claude", label: account.label, tokenFile: account.file! });
+    if (problem) return { ok: false, code: "reference_unusable", message: `${input.label}'s reference no longer checks out: ${problem.message.replace(/ Nothing was stored\.$/, "")}` };
+    const entries = this.seatEntries();
+    if (!entries.some(({ seat }) => seat.rigName === input.rig)) {
+      return { ok: false, code: "unknown_rig", message: `There's no rig named ${input.rig} with seats on this daemon (rig ps lists them).` };
+    }
+    const homes = this.homes();
+    const configured = configuredSeatAccounts({ seats: entries.map(({ seat }) => seat), auth: readCodexAuthMetadata(this.deps.env ?? process.env),
+      usage: [], claudeSamples: null, ...homes });
+    const now = new Date();
+    const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => {
+      const own = Object.hasOwn(RUNTIME_HOME_VAR, seat.runtime) ? seatRuntimeHome(this.deps.db, nodeId, seat.runtime as HomeRuntime) : {};
+      const activity = this.deps.agentActivityStore?.getLatestForNode({ nodeId, sessionName: seat.seatSession, now,
+        order: seat.runtime === "claude-code" ? "source" : "arrival" })?.state ?? "unknown";
+      return {
+        session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
+        configured: configured[index]?.configured ?? null,
+        claudeRef: seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null,
+        ownHome: own.home && own.source ? { home: own.home, source: own.source } : null,
+        codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
+        running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
+        activity,
+      };
+    });
+    const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
+      ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform },
+    (seat) => this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat));
+    return { ok: true, plan };
   }
 
   async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {

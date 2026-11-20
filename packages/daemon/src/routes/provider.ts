@@ -18,7 +18,7 @@ import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
 import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
-import { ProviderAccountRefsRepository, readAccountRefInput, type AccountRefProvider } from "../domain/provider/provider-account-refs.js";
+import { accountRefUses, ProviderAccountRefsRepository, readAccountRefInput, type AccountRefProvider } from "../domain/provider/provider-account-refs.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance, transportSenderSession } from "./require-sender-identity.js";
@@ -323,7 +323,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   // the operator's name for a reference, not proof of any login.
   const accountRefsOf = (c: Context): ProviderAccountRefsRepository | null => {
     const rigRepo = c.get("rigRepo" as never) as RigRepository | undefined;
-    return rigRepo ? new ProviderAccountRefsRepository(rigRepo.db) : null;
+    return rigRepo ? new ProviderAccountRefsRepository(rigRepo.db, { uses: accountRefUses(rigRepo.db) }) : null;
   };
 
   router.get("/account-refs", (c) => {
@@ -357,6 +357,21 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if (!VALID_PROVIDERS.has(provider)) return c.json({ error: `invalid provider: ${provider}` }, 400);
     const result = refs.remove(provider as AccountRefProvider, c.req.param("label"));
     return c.json(result, result.ok ? 200 : result.code === "not_found" ? 404 : 409);
+  });
+
+  // #3625: the plan for moving a rig's seats of one provider to an account by label. Read only; applying arrives later.
+  router.get("/assignment-plan", async (c) => {
+    const svc = svcOf(c);
+    if (!svc?.assignmentPlan) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const rig = c.req.query("rig"), provider = c.req.query("provider"), label = c.req.query("account"), accountHome = c.req.query("accountHome");
+    if (!rig?.trim() || !label?.trim()) return c.json({ error: "rig and account are required" }, 400);
+    if (provider === undefined || !VALID_PROVIDERS.has(provider)) return c.json({ error: "provider must be claude or codex" }, 400);
+    if (accountHome !== undefined && (provider !== "codex" || !path.isAbsolute(accountHome) || /[\0\n\r]/.test(accountHome))) {
+      return c.json({ error: "accountHome is a prepared Codex home: an absolute path, with provider codex" }, 400);
+    }
+    const result = await svc.assignmentPlan({ rig, provider: provider as AccountRefProvider, label, includeOverrides: c.req.query("includeOverrides") === "1",
+      ...(accountHome !== undefined ? { accountHome } : {}), daemon: getSelfHostId() ?? LOCAL_HOST_ID }, seatRestartOf(c), claudeSeatOf(c));
+    return c.json(result, result.ok ? 200 : result.code === "reference_unusable" ? 409 : 404);
   });
 
   router.get("/bindings", async (c) => {
