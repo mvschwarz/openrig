@@ -97,15 +97,39 @@ interface ControlSocketOptions {
   fallbackOnCollision?: boolean;
 }
 
+/**
+ * Bind failures an independent path can survive.
+ *
+ * EADDRINUSE is the collision this fallback was written for. The rest are the same decision made for
+ * other reasons: the directory refuses a create (EACCES/EPERM/EROFS), the path is longer than the
+ * platform allows (ENAMETOOLONG), or the path itself is unusable (ENOTDIR). A shorter name in the same
+ * directory fixes the length case and often the permission case; when nothing helps, the caller hears
+ * why rather than losing the socket silently.
+ */
+const RECOVERABLE_BIND_CODES = new Set(["EADDRINUSE", "EACCES", "EPERM", "EROFS", "ENAMETOOLONG", "ENOTDIR", "ENOENT"]);
+
 export async function createControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
   const endpoint = controlEndpoint(options.socketPath);
   options = { ...options, socketPath: endpoint };
   try {
     return await createReservedControlSocket(options);
   } catch (error) {
-    if (!options.fallbackOnCollision || (error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!options.fallbackOnCollision || !code || !RECOVERABLE_BIND_CODES.has(code)) throw error;
+    // A Windows pipe has a flat namespace with no path length to shorten, so the independent endpoint is the same
+    // name plus this process's unique suffix, and a second failure is reported the same way as a POSIX one.
     if (process.platform === "win32") {
-      return createReservedControlSocket({ ...options, socketPath: `${endpoint}-${process.pid}-${randomUUID()}` });
+      const alternate = `${endpoint}-${process.pid}-${randomUUID()}`;
+      try {
+        return await createReservedControlSocket({ ...options, socketPath: alternate });
+      } catch (alternateError) {
+        const alternateCode = (alternateError as NodeJS.ErrnoException).code;
+        throw new Error(
+          `could not bind a TUI control socket: ${options.socketPath} failed with ${code}, and the independent ` +
+          `endpoint ${alternate} failed with ${alternateCode ?? "no code"}: ` +
+          `${alternateError instanceof Error ? alternateError.message : String(alternateError)}`,
+        );
+      }
     }
     const directory = path.dirname(options.socketPath);
     const suffix = `-${process.pid}-${randomUUID().slice(0, 8)}.sock`;
@@ -117,7 +141,16 @@ export async function createControlSocket(options: ControlSocketOptions): Promis
     while (Buffer.byteLength(stem.join("")) > budget) stem.pop();
     const alternate = path.join(directory, stem.join("") + suffix);
     // Use ordinary exclusive bind/recovery checks for the new path as well.
-    return createReservedControlSocket({ ...options, socketPath: alternate });
+    try {
+      return await createReservedControlSocket({ ...options, socketPath: alternate });
+    } catch (alternateError) {
+      const alternateCode = (alternateError as NodeJS.ErrnoException).code;
+      throw new Error(
+        `could not bind a TUI control socket: ${options.socketPath} failed with ${code}, and the independent ` +
+        `endpoint ${alternate} failed with ${alternateCode ?? "no code"}: ` +
+        `${alternateError instanceof Error ? alternateError.message : String(alternateError)}`,
+      );
+    }
   }
 }
 
@@ -196,9 +229,13 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
   const { socketPath, view, onMutation } = options;
   const currentContext = options.currentContext ?? (() => "standard");
   const bytes = Buffer.byteLength(socketPath);
+  // A Windows pipe name is a hash of the requested path, so no filesystem length limit applies there.
   if (process.platform !== "win32" && bytes > MAX_SOCKET_PATH_BYTES) {
-    throw new Error(
-      `socket path too long (${bytes} bytes; unix sun_path caps ~104): ${socketPath} — use a short runtime dir (default: $OPENRIG_HOME/run)`,
+    // Coded like a bind failure, so createControlSocket can try the shorter independent endpoint
+    // instead of rethrowing: length is exactly what a shorter name in the same directory fixes.
+    throw Object.assign(
+      new Error(`socket path too long (${bytes} bytes; unix sun_path caps ~104): ${socketPath} — use a short runtime dir (default: $OPENRIG_HOME/run)`),
+      { code: "ENAMETOOLONG" },
     );
   }
   if (process.platform !== "win32") fs.mkdirSync(path.dirname(socketPath), { recursive: true });

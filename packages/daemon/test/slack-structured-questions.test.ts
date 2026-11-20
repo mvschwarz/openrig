@@ -23,7 +23,7 @@ import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { DeadLetterStore, InboundReceiptStore, SeenStore } from "../src/domain/gateway/slack/state-store.js";
-import { formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
+import { chosenAnswers, formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
 
 const human = "human-founder@external";
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: human, connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
@@ -787,5 +787,21 @@ describe("a click reply with nothing to post it", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// C8: what a settled card names, in question order: a clicked option's label (its id if the label is gone), null for a
+// typed reply, nothing for an unanswered question or an inherited key.
+describe("chosenAnswers", () => {
+  const asked = [
+    { id: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres" }, { id: "lite", label: "SQLite" }] },
+    { id: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+    { id: "constructor", question: "Owner?", options: [{ id: "me", label: "Me" }, { id: "you", label: "You" }] },
+  ];
+  it("labels clicks, marks a typed reply, and skips the unanswered", () => {
+    const typed = { kind: "typed-reply" as const, text: "Not yet", placement: "first-unanswered" as const, unansweredCount: 1 };
+    expect(chosenAnswers(asked, { ship: "yes", db: "pg" })).toEqual(["Postgres", "Yes"]);
+    expect(chosenAnswers(asked, { db: "gone", ship: typed })).toEqual(["gone", null]);
+    expect(chosenAnswers(asked, {})).toEqual([]);
   });
 });

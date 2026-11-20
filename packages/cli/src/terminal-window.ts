@@ -12,7 +12,7 @@ import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
-import { resolveHerdrSocketPath, hasLiveHerdrAttachments, findLiveHerdrWorkspace, type HerdrTab, type LiveWorkspaceSearch } from "@openrig/daemon/herdr-live-workspace";
+import { resolveHerdrSocketPath, hasLiveHerdrAttachments, findLiveHerdrWorkspace, fixedSizeWorkspaceNote, type HerdrTab, type LiveWorkspaceSearch } from "@openrig/daemon/herdr-live-workspace";
 import type { FollowControls, OpenAllResult, OpenAllRigResult, OpenViewResult } from "./commands/terminal.js";
 
 import { readPlatformEnv, renderWindowsLaunch, renderWindowsLaunchArgv, readWindowsTileAttachArgv, execWindowsJobFile } from "@openrig/daemon/windows-launch";
@@ -760,8 +760,9 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         if (focused?.result?.tab?.tab_id !== tab.tab_id || focused.result.tab.workspace_id !== tab.workspace_id) throw new Error("Following tab selection was not confirmed.");
         return { ...answer.data, window, notes: [...(answer.data.notes ?? []), ...windowNotes] };
       }
-      const closeCommand = (id: string) => `${session === undefined ? "herdr" : `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`} workspace close ${shellQuote(id)}`;
-      let found: LiveWorkspaceSearch = { unconfirmed: [], stale: [] };
+      // Pinned to the endpoint the inventory read, as the daemon's note is: a bare herdr follows the caller's shell, which may name another server.
+      const closeCommand = (id: string) => `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)} workspace close ${shellQuote(id)}`;
+      let found: LiveWorkspaceSearch = { unconfirmed: [], stale: [], fixedSize: [] };
       try {
         found = await findLiveHerdrWorkspace({ id: composed.id, planId, pages: composed.pages, ...(composed.spaceLabel ? { spaceLabel: composed.spaceLabel } : {}) },
           { platform: deps.platform, herdr: args => deps.exec("/usr/bin/env", [...herdrArgs, ...args]), exec: (file, args) => deps.exec(file, args), serverArgs: tmuxServer });
@@ -779,10 +780,13 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         } catch { /* Unconfirmed: say so below. */ }
         return currentHerdr ? "Herdr did not confirm the view's space is focused; ask the person whether they see it." : "Check the new terminal shows the intended view; window creation alone is not visual confirmation.";
       };
+      for (const id of found.fixedSize) windowNotes.push(fixedSizeWorkspaceNote(id, closeCommand(id)));
       for (const id of found.stale) {
+        if (found.fixedSize.includes(id)) continue;
         windowNotes.push(`Workspace ${id} has an older or different plan for this view and was kept. After inspecting it, close it if no longer needed: ${closeCommand(id)}`);
       }
       for (const id of found.unconfirmed) {
+        if (found.fixedSize.includes(id)) continue;
         windowNotes.push(`Could not confirm live attachments in workspace ${id}. Its contents were kept. After inspecting it, close it if no longer needed: ${closeCommand(id)}`);
       }
       const existing = found.live;
