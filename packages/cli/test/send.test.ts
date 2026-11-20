@@ -200,6 +200,10 @@ describe("Send CLI", () => {
             res.writeHead(failed ? 502 : 200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(failed ? { ok: false, sessionName: parsed.session, error: "paste failed", managedCompaction }
               : { ok: true, sessionName: parsed.session, managedCompaction }));
+          } else if (parsed.session === "limited-seat") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "limited-seat", outcome: "delivered",
+              usageLimit: { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z", notice: "limited-seat was at its usage limit when this send started." } }));
           } else if (parsed.session === "unknown-advisory") {
             // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -825,6 +829,12 @@ describe("Send CLI", () => {
     expect(failed.logs.join("\n")).toContain("Notice: restoring-seat was mid-restore");
     expect(failed.logs.join("\n")).not.toContain("Sent to");
     expect(failed.exitCode).toBe(2);
+  });
+
+  it("prints the usage-limit record beside a delivered send's own result", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "limited-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to limited-seat\nNotice: limited-seat was at its usage limit when this send started.");
+    expect(sent.exitCode ?? 0).toBe(0);
   });
 
   it("prints the Advisory on an unknown-proceed send (human output)", async () => {

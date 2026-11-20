@@ -243,7 +243,10 @@ export type RigEvent =
       /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
        *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
        *  named by `transport.hook_bridge_fallback` instead. */
-      hookBridgeUnavailable?: string }
+      hookBridgeUnavailable?: string;
+      /** The seat's current usage-limit reading when the send started, for a send whose text reached the input: its
+       *  agent isn't expected to read the text before the stated reset. */
+      usageLimit?: { asOf: string; resetsAt: string } }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
