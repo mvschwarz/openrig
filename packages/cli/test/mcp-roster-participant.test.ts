@@ -178,6 +178,15 @@ describe("a roster entry's declared lead_of", () => {
   const secondRoster = (folder: string, members: unknown[]) =>
     fs.writeFileSync(path.join(folder, "ops.json"), JSON.stringify({ ...roster(members), id: "ops" }));
 
+  it("shows the lead when one seat declares the same team in two rosters", async () => {
+    const folder = rosters([member(at("net-chatgpt"), { lead_of: "Sam's team" })]);
+    secondRoster(folder, [member(at("net-chatgpt"), { lead_of: "Sam's team" })]);
+    const s = await connect(folder, false);
+    try {
+      expect((await s.team()).lead).toEqual({ session: at("net-chatgpt"), logicalId: "net.chatgpt", declared: true, team: "Sam's team" });
+    } finally { await s.close(); }
+  });
+
   it("shows no lead when one seat declares a different team in another roster, and the note names both", async () => {
     const folder = rosters([member(at("net-chatgpt"), { lead_of: "Sam's team" })]);
     secondRoster(folder, [member(at("net-chatgpt"), { lead_of: "Ops" })]);
