@@ -739,12 +739,12 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 
 const isClaudeTrustHeading = (row: string) => row.trim().startsWith("Accessing workspace:");
 
-/** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and none of
- *  the prompt's options is drawn below it yet. */
+/** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and fewer than
+ *  its two options are drawn below it, so claudeTrustPromptFocus can't read the focus yet. */
 export function claudeTrustPromptDrawing(paneContent: string): boolean {
   const current = claudeCurrentRows(paneContent);
   const heading = current.findIndex(isClaudeTrustHeading);
-  return heading >= 0 && !current.slice(heading + 1).some(row => CLAUDE_TRUST_OPTION_ROW.test(row));
+  return heading >= 0 && current.slice(heading + 1).filter(row => CLAUDE_TRUST_OPTION_ROW.test(row)).length < 2;
 }
 
 // Claude's resume-selection prompt appears when `claude --resume` finds multiple

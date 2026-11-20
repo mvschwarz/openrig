@@ -901,7 +901,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
     const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
 
-    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
+    // A gate Claude draws once its process is up (workspace trust, project MCP approval) waits on a person, as the resume
+    // adapter reads it. A different occupant keeps main's result, as below.
+    const gate = finalProbe.code === "trust_gate" || finalProbe.code === "mcp_gate";
+    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required"
+      || (gate && await this.paneOccupant(binding, false) !== "another")) {
       return {
         ok: false,
         probe: probeEvidence,
