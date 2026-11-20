@@ -4513,6 +4513,12 @@ export class SessionTransport {
     if (hookActivity && permissionPending && this.hookFreshForSend(hookActivity, now)) {
       return { ...hookActivity, state: "needs_input" };
     }
+    // A permission or elicitation request this occupant's main session made after the latest hook means that hook may
+    // no longer describe the screen. It isn't evidence of a dialog (a hook or host can decide one with nothing shown),
+    // so it only stops the fresh hook from narrowing the current-prompt read below; the screen still decides.
+    const requestAt = input.runtime === "claude-code" && binding?.nodeId && hookActivity?.eventAt
+      ? this.agentActivityStore?.getUnsettledInputRequestForNode?.(binding.nodeId, input.sessionName) ?? null : null;
+    const requestAfterHook = requestAt !== null && Date.parse(requestAt) > Date.parse(hookActivity!.eventAt!);
     // Pane-only readiness never lets a hook authorise a send, but a fresh hook showing work or a
     // waiting person still refuses one, as it does for every other send.
     if (
@@ -4549,7 +4555,9 @@ export class SessionTransport {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
-            currentClaudeDialogueOnly: true,
+            // After a newer request, the full prompt read (its numbered-row scan included) can refuse, as it does
+            // past the send window. Only a dialog it positively reads refuses; an unreadable pane doesn't.
+            currentClaudeDialogueOnly: !requestAfterHook,
             sessionName: input.sessionName,
             runtime: input.runtime,
             attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,

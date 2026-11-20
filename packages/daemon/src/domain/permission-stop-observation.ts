@@ -88,7 +88,8 @@ interface ActorObservation {
  * No raw input, timers, disk records or inferred request IDs. Restart loses evidence honestly. */
 export class PermissionStopObservations {
   private readonly seats = new Map<string, { generation: string; actors: Map<string | null, ActorObservation> }>();
-  constructor(private readonly now: () => Date, private readonly lifetimeMs = 5 * 60_000) {}
+  constructor(private readonly now: () => Date, private readonly lifetimeMs = 5 * 60_000,
+    private readonly descriptors: ReadonlySet<string> = DESCRIPTORS) {}
 
   observe(input: { nodeId: string; generation: string; actor: unknown; at: unknown; command?: unknown;
     ruleSuggestions?: unknown; completed: boolean }): void {
@@ -97,7 +98,7 @@ export class PermissionStopObservations {
     // Actor omission/invalid data is not a claim about the main session. Wire null explicitly means main.
     if (!(input.actor === null || (typeof input.actor === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(input.actor)))
       || !Number.isFinite(at) || at > now || now - at >= this.lifetimeMs) return;
-    if (!input.completed && (typeof input.command !== "string" || !DESCRIPTORS.has(input.command))) return;
+    if (!input.completed && (typeof input.command !== "string" || !this.descriptors.has(input.command))) return;
     for (const [key, value] of this.seats) {
       for (const [actor, observation] of value.actors) {
         if (now - observation.observedAt >= this.lifetimeMs) observation.suggestedRules = undefined;
@@ -151,5 +152,20 @@ export class PermissionStopObservations {
       ...(latest.value.suggestedRules ? { suggested_rules: structuredClone(latest.value.suggestedRules) } : {}) };
   }
 
+  /** This occupant's actor request newer than any settlement of it, still inside the lifetime: its time, else null.
+   *  It says the request reached the permission or elicitation path, never that a dialog is open (a hook or host can
+   *  decide one with nothing displayed). An equal-time settlement doesn't settle it. */
+  unsettledRequestAt(nodeId: string, generation: string, actor: string | null): number | null {
+    const seat = this.seats.get(nodeId);
+    if (seat?.generation !== generation) return null;
+    const observation = seat.actors.get(actor);
+    const now = this.now().getTime();
+    if (!observation?.command || now < observation.observedAt || now - observation.observedAt >= this.lifetimeMs) return null;
+    return observation.completedAt > observation.observedAt ? null : observation.observedAt;
+  }
+
   forget(nodeId: string): void { this.seats.delete(nodeId); }
 }
+
+/** The one descriptor an elicitation observation carries: no server message, form field or response is kept. */
+export const ELICITATION_DESCRIPTOR = "Elicitation: details withheld";

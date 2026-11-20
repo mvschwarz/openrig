@@ -114,6 +114,16 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
       relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed" };
   }
 
+  if (runtime === "claude-code" && (hookEvent === "Elicitation" || hookEvent === "ElicitationResult")) {
+    // Observation and settlement only: the server's message, schema, form fields and the person's response never leave
+    // the relay, and nothing is returned to answer, cancel or change the request.
+    const actor = providerPayload.agent_id;
+    return { sessionName, nodeId, runtime, generation, hookEvent,
+      ...(actor == null ? { hookAgentId: null }
+        : typeof actor === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(actor) ? { hookAgentId: actor } : {}),
+      occurredAt: now().toISOString(), relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed" };
+  }
+
   // StopFailure has a typed error field. Never infer it from rendered error text,
   // a tool name, or another event's subtype; those are not provider failures.
   const subtype = runtime === "claude-code" && hookEvent === "StopFailure"
