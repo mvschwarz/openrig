@@ -325,15 +325,11 @@ describe("queue write receipt (output.compact)", () => {
       const out = await run(["create", "--destination", "worker@r", "--host", "far", "--body", "b", "--summary", "s", "--id", "qitem-fixed", "--json"],
         { "POST /api/queue/create": { status: 502, data } });
       const printed = JSON.parse(out) as Row;
-      expect(printed).toMatchObject({
-        error: "queue_create_outcome_unknown",
-        outcome: "unknown",
-        createOutcome: "unknown",
-        qitemId: "qitem-fixed",
-      });
+      expect(printed).toMatchObject({ ...data, qitemId: "qitem-fixed" });
       expect(printed.recovery).toEqual(expect.stringContaining("--id 'qitem-fixed'"));
       expect(errors.join("\n")).toContain("could not establish the queue for requested host");
-      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE");
+      expect(process.exitCode).toBe(2);
     });
 
     it("a missing row prints whole with the host hint", async () => {
@@ -375,6 +371,7 @@ describe("queue write receipt (output.compact)", () => {
       const json = JSON.parse(await create(["--id", id, "--wake-after", "15m", "--json"], data)) as Row;
       expect(json).toMatchObject({ qitemId: id, persisted: true });
       expect(json).not.toHaveProperty("parkReceipt");
+      expect((json.receipt as { omitted: string[] }).omitted).toContain("parkReceipt");
       expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
       expect(json.parkWarning.message).toBe(message);
       expect(json.wake).toMatchObject({
@@ -383,7 +380,7 @@ describe("queue write receipt (output.compact)", () => {
       });
     });
 
-    it("unknown create output keeps the standard receipt and existing park warning", async () => {
+    it("unknown create uses the typed indeterminate error and keeps the park warning", async () => {
       const id = "qitem-20261010180000-aaaa";
       const rawBody = "RAW-RECEIVED-BODY-MUST-NOT-PRINT";
       const rawRowMarker = "RAW-ROW-FIELD-MUST-NOT-PRINT";
@@ -395,20 +392,15 @@ describe("queue write receipt (output.compact)", () => {
         parkWarning: { code: "raw-warning", message: "raw park warning" },
       });
 
-      const out = await create(["--id", id, "--wake-after", "15m", "--json"], data);
-      const result = JSON.parse(out) as Row;
-      expect(Object.keys(result)).toEqual(["error", "outcome", "createOutcome", "qitemId", "parkWarning", "recovery"]);
-      expect(result).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: id, createOutcome: "unknown" });
-      expect(result).not.toHaveProperty("parkReceipt");
-      expect(result.recovery).toContain(id);
-      expect(result.parkWarning).toEqual({ code: "raw-warning", message: "raw park warning" });
-      expect(result).not.toHaveProperty("createWarning");
-      expect(out).not.toContain(rawBody);
-      expect(out).not.toContain(rawRowMarker);
-      expect(out).not.toContain(BODY);
-      expect(result).not.toHaveProperty("body");
-      expect(result).not.toHaveProperty("summary");
-      expect(process.exitCode).toBe(1);
+      await expect(create(["--id", id, "--wake-after", "15m", "--json"], data))
+        .rejects.toMatchObject({ name: "DaemonResponseError", message: expect.stringContaining(id) });
+      const allOutput = [...logs, ...errors, ...stderr].join("\n");
+      expect(errors.join("\n")).toContain("Warning: raw park warning");
+      expect(allOutput).not.toContain("queue_create_outcome_unknown");
+      expect(allOutput).not.toContain(rawBody);
+      expect(allOutput).not.toContain(rawRowMarker);
+      expect(allOutput).not.toContain(BODY);
+      expect(logs).toEqual([]);
     });
 
     it("staging failed: the row saved, the wake did not", async () => {
@@ -416,7 +408,7 @@ describe("queue write receipt (output.compact)", () => {
       expect(out).toContain("wake: failed:wake not retained: outbox locked at 2026-10-10T18:00:00.500Z — the row saved but its wake was NOT staged");
     });
 
-    it("an idempotent create that returned an existing row says no new wake, and its warning stays on stderr", async () => {
+    it("an idempotent create uses the ordinary wake receipt, and its warning stays on stderr", async () => {
       const createWarning = { code: "qitem_body_not_saved", message: "qitem q already exists with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created." };
       const out = await create(["--id", "qitem-20261010180000-aaaa"], { ...row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" }), createWarning });
       expect(out).toContain("wake: an existing row was returned; this write started no new wake (the row's earlier wake result: verified at 2026-10-09T00:00:00.000Z)");

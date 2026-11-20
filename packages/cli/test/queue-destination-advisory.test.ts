@@ -1416,7 +1416,7 @@ describe("queue create scope advisories preserve admission and output", () => {
   );
 
   it.each(["--host", "qualified destination"] as const)(
-    "keeps an unregistered own-host %s outcome unknown without an identity lookup", async form => {
+    "uses the daemon self-ID to read back an unregistered own-host %s create", async form => {
       expect(source.hostId).toEqual(expect.any(String));
       expect(getSelfHostId()).toBe(source.hostId);
       const home = path.join(scratch, "cli-home-unregistered-own-host");
@@ -1424,14 +1424,11 @@ describe("queue create scope advisories preserve admission and output", () => {
       vi.stubEnv("OPENRIG_HOME", home);
       vi.stubEnv("OPENRIG_URL", "http://selected-own-host.invalid:39001");
       const unchanged = preserveAuthored(source);
-      const { factory, calls } = recoveredClient(source.app, source, true, () => {
-        throw new Error("fixture health unreadable while matching the stored source");
-      });
+      const { factory, calls } = recoveredClient(source.app, source, true, () => source.hostId);
       const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
       if (form === "--host") args.push("--host", source.hostId!);
       const destination = form === "qualified destination" ? "worker@scope@" + source.hostId : "worker@scope";
-      await expect(create(source.app, args, true, "qitem-create-contract", factory, destination))
-        .rejects.toMatchObject({ name: "DaemonResponseError", status: 201 });
+      await create(source.app, args, true, "qitem-create-contract", factory, destination);
       const stored = source.daemon.deps.queueRepo.getById("qitem-create-contract");
       expect(stored).toMatchObject({ qitemId: "qitem-create-contract", sourceSession: "writer@scope",
         destinationSession: "worker@scope", body: "scope contract body", summary: "scope contract", state: "pending",
@@ -1441,16 +1438,14 @@ describe("queue create scope advisories preserve admission and output", () => {
       expect(calls.committedBeforeLoss).toEqual([stored]);
       expect(calls.posts).toEqual(["/api/queue/create"]);
       expect(calls.postStatuses).toEqual([201]);
-      expect(calls.healthReads).toBe(0);
-      expect(calls.healthResults).toEqual([]);
-      expect(calls.readbacks.map(call => call.url)).toEqual([]);
+      expect(calls.healthReads).toBe(1);
+      expect(calls.healthResults).toEqual([source.hostId]);
+      expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
       expect(stderr.join("\n")).toContain("Queue create request ID: qitem-create-contract");
-      expect(stdout).toEqual([]);
-      expect(stderr.join("\n")).toContain("could not establish the queue for requested host");
-      expect(stderr.join("\n")).toContain("outcome is still unknown");
-      expect(stderr.join("\n")).toContain("Keep this ID for recovery");
-      expect(stderr.join("\n")).not.toContain("committed after all");
-      expect(scopeLines()).not.toMatch(/scope check|\bforwarded\b/i);
+      expect(JSON.parse(stdout[0]!)).toMatchObject({ qitemId: "qitem-create-contract", state: "pending" });
+      expect(stderr.join("\n")).toContain("The create committed after all: row qitem-create-contract");
+      expect(scopeLines()).toMatch(/scope check outcome unavailable after response recovery/i);
+      expect(scopeLines()).not.toMatch(/\bforwarded\b/i);
       unchanged();
     },
   );

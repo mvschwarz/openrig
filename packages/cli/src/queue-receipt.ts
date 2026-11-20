@@ -63,7 +63,7 @@ const ALWAYS = ["qitemId", "state", "destinationSession", "sourceSession", "tsCr
 const WHEN_SET = ["tier", "blockedOn", "closureReason", "closureTarget", "closureRequiredAt", "claimedAt", "handedOffTo",
   "handedOffFrom", "targetRepo", "expiresAt", "advisories", "handoffAdvisory", "createWarning", "parkWarning", "persisted", "delivery"] as const;
 const SHOWN_WAITING = ["blocker", "nextBackstop"] as const;
-const ROW_KEYS_CONSUMED_ELSEWHERE = new Set<string>(["body", "waiting", "parkReceipt"]);
+const ROW_KEYS_CONSUMED_ELSEWHERE = new Set<string>(["body", "waiting"]);
 
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const isRow = (v: unknown): v is Row => typeof v === "object" && v !== null && !Array.isArray(v);

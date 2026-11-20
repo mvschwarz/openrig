@@ -450,12 +450,14 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     const { calls, error } = await run("dev@rig-b", [{ status: 201, data: directResponse }], {
       [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: noIdRow },
     });
-    expect(error).toBeNull();
+    expect(error).toMatchObject({
+      name: "DaemonResponseError",
+      status: 201,
+      message: expect.stringContaining(`--id '${ID}'`),
+    });
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
-    const output = JSON.parse(stdout.join("\n")) as Record<string, any>;
-    expect(output).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: ID });
-    expect(output).not.toHaveProperty("createWarning");
+    expect(stdout).toHaveLength(0);
     expect(stderr.join("\n")).toContain("did not include a valid ID");
     expect(stderr.join("\n")).not.toContain("returned a different ID");
   });
@@ -467,12 +469,14 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     const { calls, error } = await run("dev@rig-b", [{ status: 201, data: directResponse }], {
       [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: noIdRow },
     });
-    expect(error).toBeNull();
+    expect(error).toMatchObject({
+      name: "DaemonResponseError",
+      status: 201,
+      message: expect.stringContaining(`--id '${ID}'`),
+    });
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
-    const output = JSON.parse(stdout.join("\n")) as Record<string, any>;
-    expect(output).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: ID });
-    expect(output).not.toHaveProperty("createWarning");
+    expect(stdout).toHaveLength(0);
     expect(stderr.join("\n")).toContain("did not include a valid ID");
     expect(stderr.join("\n")).not.toMatch(/differ(?:ent|ed)/);
   });

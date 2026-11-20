@@ -171,15 +171,6 @@ function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
   return { outcome: "still-pending", connectorAccepted: null };
 }
 
-function isAbsorbedCreateRetry(row: QueueRow): boolean {
-  const createWarning = isQueueRow(row.createWarning) ? row.createWarning : undefined;
-  if (createWarning?.code === "qitem_body_not_saved") return true;
-  const parkWarning = isQueueRow(row.parkWarning) ? row.parkWarning : undefined;
-  return parkWarning?.code === "qitem_park_not_confirmed"
-    && typeof parkWarning.message === "string"
-    && parkWarning.message.includes("already exists. The existing row is returned unchanged; this retry cannot confirm");
-}
-
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
   if (wakeResult === null) return "still-pending";
   if (wakeResult === "verified" || wakeResult === "delivered-ack-pending" || wakeResult === "claimed") return wakeResult;
@@ -207,9 +198,6 @@ function terminalDeliveryResult(
   const pickupState = typeof row.pickup === "object" && row.pickup !== null ? stringField(row.pickup as QueueRow, "state") : null;
   const claim = { observed: claimedAt !== null, claimedAt, pickup: pickupState };
   const currentOutcome = parked ? "not-requested" : outcome;
-  const bodyNotSaved = isQueueRow(row.createWarning) && row.createWarning.code === "qitem_body_not_saved";
-  const terminalHistoryOnly = parked || bodyNotSaved;
-  const gatewayHistoryOnly = bodyNotSaved;
   const seat = destination ?? "<destination>";
   const receipt: Record<TerminalDeliveryResult["outcome"], string> = {
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
@@ -226,30 +214,22 @@ function terminalDeliveryResult(
     "still-pending": waitedMs === null ? "No terminal receipt was recorded before the claim." : `No terminal receipt was recorded within ${waitedMs}ms.`,
     "not-requested": parked
       ? "This request sent no immediate terminal wake. Earlier wake and claim details are row history. Check the row's blocker and live timer."
-      : bodyNotSaved
-        ? "This request sent no new work. Earlier wake and claim details are row history."
-        : "No terminal wake was requested (--no-nudge).",
+      : "No terminal wake was requested (--no-nudge).",
   };
-  const claimPrefix = terminalHistoryOnly ? "Row history: this item was claimed at " : "Claimed at ";
+  const claimPrefix = parked ? "Row history: this item was claimed at " : "Claimed at ";
   const claimText = claim.observed
     ? claimPrefix + claimedAt + (pickupState ? " (pickup " + pickupState + ")" : "") + ". A claim shows the seat took the item; it does not prove the body was read."
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
   const gatewaySide = gatewayAlsoPosts(row);
   const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
-  const gatewayHistory = gatewayHistoryOnly ? gateway : null;
-  const currentGateway = gatewayHistoryOnly ? null : gateway;
-  const slackText = gatewayHistory !== null
-    ? gatewayHistory.outcome === "posted" ? " Prior row history: Slack receipt was posted."
-      : ` Prior row history: Slack delivery ${gatewayHistory.outcome}${gatewayHistory.detail ? `: ${gatewayHistory.detail}` : ""}.`
-    : currentGateway === null ? ""
-      : currentGateway.outcome === "posted" ? " Slack receipt: posted."
-        : currentGateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
-          : ` Slack delivery ${currentGateway.outcome}${currentGateway.detail ? `: ${currentGateway.detail}` : ""}.`;
-  const gatewayFailed = currentGateway !== null && currentGateway.connectorAccepted === false;
-  const gatewayHistoryFailed = gatewayHistory !== null && gatewayHistory.connectorAccepted === false;
-  const notFailed = !claim.observed && !gatewayFailed && !gatewayHistoryFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
+  const slackText = gateway === null ? ""
+    : gateway.outcome === "posted" ? " Slack receipt: posted."
+      : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
+        : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
+  const gatewayFailed = gateway !== null && gateway.connectorAccepted === false;
+  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
   const destinationKind = terminalDestinationKind(destination, gatewaySide);
-  const settled = !terminalHistoryOnly && claim.observed && (currentGateway === null || currentGateway.outcome === "posted");
+  const settled = !parked && claim.observed && (gateway === null || gateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
@@ -257,54 +237,10 @@ function terminalDeliveryResult(
     outcome: currentOutcome,
     wakeResult,
     claim,
-    ...(currentGateway ? { gateway: currentGateway } : {}),
+    ...(gateway ? { gateway } : {}),
     detail: `The qitem is saved. ${receipt[currentOutcome]}${slackText} ${claimText}${notFailed}`,
     nextAction: settled ? null : currentOutcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
   };
-}
-
-/** A same-ID retry that did not save its supplied body started no new delivery. Keep a gateway-only row
- *  in the gateway receipt class, while showing its prior connector result as history. */
-function absorbedCreateRetryDeliveryResult(
-  qitemId: string,
-  destination: string | null,
-  row: QueueRow,
-  parked: boolean,
-  hostId?: string,
-): VerifiedDeliveryResult {
-  if (receiptSourceOf(destination, row) !== "gateway") {
-    return terminalDeliveryResult(qitemId, destination, row, "not-requested", null, parked);
-  }
-  const previous = gatewayReceiptOf(row);
-  const history = previous.outcome === "posted"
-    ? "Prior row history: Slack receipt was posted."
-    : previous.outcome === "not-alerted"
-      ? "Prior row history: Slack delivery not-alerted."
-      : `Prior row history: Slack delivery ${previous.outcome}${previous.detail ? `: ${previous.detail}` : ""}.`;
-  const remote = remoteHostOf(hostId);
-  return {
-    receiptSource: "gateway",
-    destinationKind: "human",
-    humanReadership: "unknown",
-    outcome: "not-requested",
-    connectorAccepted: null,
-    detail: `This request sent no new work. ${history}${parked ? " The requested park is reported separately." : ""}`,
-    nextAction: `rig queue show ${qitemId}${remote ? ` --host ${shellQuote(remote)}` : ""} --json`,
-  };
-}
-
-function keepAbsorbedRetryDeliveryAsHistory(
-  row: QueueRow,
-  qitemId: string,
-  destination: string | null,
-  parked: boolean,
-  hostId?: string,
-): QueueRow {
-  if (!isAbsorbedCreateRetry(row)) return row;
-  if (receiptSourceOf(destination, row) !== "gateway" && !gatewayAlsoPosts(row)) return row;
-  const delivery = absorbedCreateRetryDeliveryResult(qitemId, destination, row, parked, hostId);
-  row.delivery = delivery;
-  return row;
 }
 
 /** The receipt could not be read or correlated: say which part is unknown, nothing more. */
@@ -1751,7 +1687,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt);
               return;
             }
-            keepAbsorbedRetryDeliveryAsHistory(outputCreated, qitemId, hostResolved.destination, parkRequested, hostResolved.hostId);
             await printWriteResult(client, opts.json ?? false, receipt ? { ...outputCreated, persisted: true } : outputCreated, status, resultReceipt);
             return;
           }
@@ -1779,28 +1714,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, resultReceipt);
             return;
           }
-          keepAbsorbedRetryDeliveryAsHistory(outputCreated, qitemId, hostResolved.destination, parkRequested, hostResolved.hostId);
           await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
         };
         const usableCreateRow = (value: unknown): value is QueueRow =>
           isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state) && value.createOutcome !== "unknown";
-        const unknownCreate = (envelope?: unknown) => {
-          const received = isQueueRow(envelope) ? envelope : {};
-          for (const key of ["createWarning", "parkWarning"] as const) {
-            const warning = received[key];
-            if (isQueueRow(warning) && typeof warning.message === "string") console.error(`Warning: ${warning.message}`);
-          }
-          printResult(opts.json ?? false, {
-            error: "queue_create_outcome_unknown",
-            outcome: "unknown",
-            createOutcome: "unknown",
-            qitemId,
-            ...(Object.prototype.hasOwnProperty.call(received, "createWarning") ? { createWarning: received.createWarning } : {}),
-            ...(Object.prototype.hasOwnProperty.call(received, "parkWarning") ? { parkWarning: received.parkWarning } : {}),
-            recovery,
-          }, 502);
-          process.exitCode = 1;
-        };
         if (res instanceof Error) {
           // A pre-header disconnect can follow a committed create. Preserve the typed error,
           // but do not let the shared renderer assert nondelivery.
@@ -1840,8 +1757,14 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             await finish(late.row, 200, late.remote ? "remote" : "neutral");
             return;
           }
-          unknownCreate(res.data);
-          return;
+          const received = isQueueRow(res.data) ? res.data : {};
+          for (const key of ["createWarning", "parkWarning"] as const) {
+            const warning = received[key];
+            if (isQueueRow(warning) && typeof warning.message === "string") console.error(`Warning: ${warning.message}`);
+          }
+          const error = new DaemonResponseError(res.status, "", res.headers);
+          error.message += ` ${recovery}`;
+          throw error;
         }
         const refusal = res.status >= 400 ? provenCreateRefusal(res.status, res.data) : null;
         if (refusal) console.error(`No row was created: ${refusal}`);

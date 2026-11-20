@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { PassThrough } from "node:stream";
 import { DaemonConnectionError, type DaemonClient } from "../src/client.js";
+import { runProgram } from "../src/cli-error.js";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { resolveQueueBody, previewBody, previewCutMarker, waitForDeliveryOutcome } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
@@ -134,6 +135,18 @@ async function runQueueCreate(deps: QueueDeps, args: string[]): Promise<void> {
   await program.parseAsync(["node", "rig", "queue", "create", ...args]);
 }
 
+async function runQueueCreateWithRenderer(deps: QueueDeps, args: string[]) {
+  const program = createProgram({ queueDeps: deps });
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const exitCode = await runProgram(program, ["node", "rig", "queue", "create", ...args], {
+    out: (line) => stdout.push(line),
+    err: (line) => stderr.push(line),
+    exit: () => {},
+  });
+  return { stdout, stderr, exitCode };
+}
+
 describe("rig queue CLI", () => {
   let logs: string[];
   let errors: string[];
@@ -176,9 +189,7 @@ describe("rig queue CLI", () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "alice@rig"; // the seat env == the X-OpenRig-Session the DaemonClient stamps
     try {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "qitem-x", state: "pending" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -327,7 +338,6 @@ describe("rig queue CLI", () => {
     const { deps, calls } = makeDeps({
       routes: {
         "GET /api/context-packs/library/by-ref/pieces?ref=packs%2Fbrief": { status: 200, data: { ref: "packs/brief", text: "BRIEF-BODY", bytes: 10, missingFiles: [] } },
-        "POST /api/queue/create": { status: 201, data: { qitemId: "qitem-y", state: "pending" } },
       },
     });
     const program = createProgram({ queueDeps: deps });
@@ -1042,9 +1052,7 @@ describe("rig queue CLI", () => {
       const content = "Per-commit handoff for OPR.X.Y.Z\n\n```bash\nrig queue handoff qitem-1 --to next@rig\n```\n\nDone.";
       fs.writeFileSync(bodyPath, content, "utf8");
       try {
-        const { deps, calls } = makeDeps({
-          routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "qitem-fr4a-1", state: "pending" } } },
-        });
+        const { deps, calls } = makeDeps();
         const program = createProgram({ queueDeps: deps });
         program.exitOverride();
         await program.parseAsync([
@@ -1353,7 +1361,7 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
-    it("routes a forwarder unknown envelope through the existing indeterminate receipt", async () => {
+    it("routes a forwarder unknown envelope through the existing typed indeterminate receipt in both modes", async () => {
       const id = "qitem-forwarder-unknown-envelope";
       const createWarning = {
         code: "qitem_create_outcome_unknown",
@@ -1372,53 +1380,70 @@ describe("rig queue CLI", () => {
         sourceSession: STUB_SENDER,
         body: { byteLength: 17, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" },
       };
-      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
-        qitemId: id,
-        createOutcome: "unknown",
-        createWarning,
-        parkWarning,
-        existingRow,
-      } }, [`GET /api/queue/${id}`]: { status: 404, data: { error: "qitem_not_found" } } } });
-
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify", "--json"]);
-
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({
-        qitemId: id,
-        createOutcome: "unknown",
-        createWarning,
-        parkWarning,
-      });
-      expect(result).not.toHaveProperty("existingRow");
-      expect(result).not.toHaveProperty("persisted");
-      expect(JSON.stringify(result)).toContain("private-body-text");
-      expect(process.exitCode).toBe(1);
-      expect(errors.join("\n")).toContain(createWarning.message);
-      expect(errors.join("\n")).toContain(parkWarning.message);
-      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+      for (const json of [false, true]) {
+        errors = [];
+        const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
+          qitemId: id,
+          createOutcome: "unknown",
+          createWarning,
+          parkWarning,
+          existingRow,
+        } }, [`GET /api/queue/${id}`]: { status: 404, data: { error: "qitem_not_found" } } } });
+        const args = ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify"];
+        if (json) args.push("--json");
+        const rendered = await runQueueCreateWithRenderer(deps, args);
+        const allOutput = [...rendered.stdout, ...rendered.stderr, ...errors].join("\n");
+        expect(rendered.exitCode).toBe(1);
+        expect(allOutput).toContain(id);
+        expect(allOutput).toContain("The write outcome is INDETERMINATE");
+        expect(allOutput).toContain(createWarning.message);
+        expect(allOutput).toContain(parkWarning.message);
+        expect(allOutput).not.toContain("private-body-text");
+        expect(allOutput).not.toContain("queue_create_outcome_unknown");
+        if (json) {
+          const result = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string; action: string } };
+          expect(result.error.fact).toContain(id);
+          expect(result.error.consequence).toContain("UNKNOWN");
+          expect(result.error.action).toContain("Re-check current state");
+        } else {
+          expect(rendered.stdout).toEqual([]);
+          expect(rendered.stderr.join("\n")).toContain("UNKNOWN");
+          expect(rendered.stderr.join("\n")).toContain(id);
+        }
+        expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+        expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+      }
     });
 
-    it("keeps an unusable 2xx create reply indeterminate after one read-back", async () => {
+    it("renders an unusable 2xx create reply through the typed indeterminate path in both modes", async () => {
       const id = "qitem-unusable-create-reply";
-      const { deps, calls } = makeDeps({ routes: {
-        "POST /api/queue/create": { status: 201, data: { surprise: true } },
-        ["GET /api/queue/" + id]: { status: 404, data: { error: "qitem_not_found" } },
-      } });
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait",
-        "--blocked-on", "external:condition", "--json"]);
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({
-        error: "queue_create_outcome_unknown",
-        outcome: "unknown",
-        createOutcome: "unknown",
-        qitemId: id,
-      });
-      expect(result.recovery).toContain(id);
-      expect(result).not.toHaveProperty("surprise");
-      expect(process.exitCode).toBe(1);
-      expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
-      expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
-      expect(calls.filter((call) => call.method === "GET" && call.path === "/healthz")).toHaveLength(0);
+      for (const json of [false, true]) {
+        errors = [];
+        const { deps, calls } = makeDeps({ routes: {
+          "POST /api/queue/create": { status: 201, data: { surprise: true } },
+          ["GET /api/queue/" + id]: { status: 404, data: { error: "qitem_not_found" } },
+        } });
+        const args = ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition"];
+        if (json) args.push("--json");
+        const rendered = await runQueueCreateWithRenderer(deps, args);
+        const allOutput = [...rendered.stdout, ...rendered.stderr, ...errors].join("\n");
+        expect(rendered.exitCode).toBe(1);
+        expect(allOutput).toContain(id);
+        expect(allOutput).toContain("UNKNOWN");
+        expect(allOutput).not.toContain("queue_create_outcome_unknown");
+        expect(allOutput).not.toContain("surprise");
+        if (json) {
+          const result = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string; action: string } };
+          expect(result.error.fact).toContain(id);
+          expect(result.error.consequence).toContain("UNKNOWN");
+        } else {
+          expect(rendered.stdout).toEqual([]);
+          expect(rendered.stderr.join("\n")).toContain(id);
+          expect(rendered.stderr.join("\n")).toContain("Re-check current state");
+        }
+        expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+        expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
+      }
     });
 
     it.each([
@@ -1463,13 +1488,13 @@ describe("rig queue CLI", () => {
       } });
       deps.deliveryVerify = { timeoutMs: 0, intervalMs: 0, sleep: async () => {} };
 
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
+      const rendered = await runQueueCreateWithRenderer(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
 
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
-      expect(result).not.toHaveProperty("state");
-      expect(result).not.toHaveProperty("persisted");
-      expect(process.exitCode).toBe(1);
+      const output = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string } };
+      expect(rendered.exitCode).toBe(1);
+      expect(output.error.fact).toContain(id);
+      expect(output.error.consequence).toContain("UNKNOWN");
+      expect(rendered.stdout.join("\n")).not.toContain("queue_create_outcome_unknown");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
@@ -1489,10 +1514,17 @@ describe("rig queue CLI", () => {
         parkWarning: { code: "qitem_park_not_confirmed", message: "The park is not confirmed." },
       } }, [`GET /api/queue/${id}`]: { status: 404, data: { error: "qitem_not_found" } } } });
 
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+      const rendered = await runQueueCreateWithRenderer(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
 
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result.createWarning).toEqual(createWarning);
+      const output = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string } };
+      const allOutput = [...rendered.stdout, ...rendered.stderr, ...errors].join("\n");
+      expect(rendered.exitCode).toBe(1);
+      expect(output.error.fact).toContain(id);
+      expect(output.error.consequence).toContain("UNKNOWN");
+      expect(allOutput).toContain("The create outcome is unknown.");
+      expect(allOutput).toContain("The park is not confirmed.");
+      expect(allOutput).not.toContain("queue_create_outcome_unknown");
+      expect(allOutput).not.toContain("private-digest-text");
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
@@ -1665,7 +1697,7 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
-    it("reports an earlier Slack failure as history on a same-ID retry without verify", async () => {
+    it("does not synthesize a Slack delivery receipt for a same-ID retry without verify", async () => {
       const id = "qitem-same-id-slack-history-no-verify";
       const row = validParkCreateResponse(id, {
         deliveryOutcome: "transport-failed",
@@ -1677,14 +1709,12 @@ describe("rig queue CLI", () => {
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result.deliveryOutcome).toBe("transport-failed");
       expect(result.deliveryFailureDetail).toBe("old connector failure");
-      expect(result.delivery).toMatchObject({
-        outcome: "not-requested",
-        detail: expect.stringContaining("Prior row history: Slack delivery transport-failed: old connector failure."),
-      });
+      expect(result).not.toHaveProperty("delivery");
+      expect(JSON.stringify(result)).not.toContain("Prior row history: Slack");
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
-    it("reports a recorded-only Slack row as not alerted in same-ID retry history", async () => {
+    it("reports the current recorded-only Slack receipt on a verified same-ID retry", async () => {
       const id = "qitem-same-id-record-only-history";
       const row = validParkCreateResponse(id, {
         destinationClass: "gateway-routable",
@@ -1711,14 +1741,12 @@ describe("rig queue CLI", () => {
       {
         label: "a previous Slack transport failure",
         extra: { deliveryOutcome: "transport-failed", deliveryFailureDetail: "old connector failure" },
-        history: "Prior row history: Slack delivery transport-failed: old connector failure.",
       },
       {
         label: "a recorded-only Slack row",
         extra: { ownerNotificationLevel: "RECORD", deliveryOutcome: null },
-        history: "Prior row history: Slack delivery not-alerted.",
       },
-    ])("keeps $label as history for an exact same-body parked retry without verify", async ({ extra, history }) => {
+    ])("does not synthesize a Slack receipt from $label for an exact same-body parked retry", async ({ extra }) => {
       const id = "qitem-same-body-parked-slack-history";
       const row = validParkCreateResponse(id, {
         destinationClass: "gateway-routable",
@@ -1733,10 +1761,8 @@ describe("rig queue CLI", () => {
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result.deliveryOutcome).toBe(extra.deliveryOutcome ?? null);
       expect(result.deliveryFailureDetail).toBe(extra.deliveryFailureDetail);
-      expect(result.delivery).toMatchObject({
-        outcome: "not-requested",
-        detail: expect.stringContaining(history),
-      });
+      expect(result).not.toHaveProperty("delivery");
+      expect(JSON.stringify(result)).not.toContain("Prior row history: Slack");
       expect(result.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
@@ -1799,14 +1825,13 @@ describe("rig queue CLI", () => {
         },
       });
 
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+      const rendered = await runQueueCreateWithRenderer(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
 
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
-      expect(result).not.toHaveProperty("createWarning");
-      expect(result).not.toHaveProperty("contradiction");
-      expect(result).not.toHaveProperty("state");
-      expect(process.exitCode).toBe(1);
+      const output = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string } };
+      expect(rendered.exitCode).toBe(1);
+      expect(output.error.fact).toContain(id);
+      expect(output.error.consequence).toContain("UNKNOWN");
+      expect(rendered.stdout.join("\n")).not.toContain("queue_create_outcome_unknown");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
@@ -1818,13 +1843,13 @@ describe("rig queue CLI", () => {
         [`GET /api/queue/${id}`]: { status: 200, data: { qitemId: "another-id", state: "pending" } },
       } });
 
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+      const rendered = await runQueueCreateWithRenderer(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
 
-      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
-      expect(result).not.toHaveProperty("createWarning");
-      expect(result).not.toHaveProperty("contradiction");
-      expect(process.exitCode).toBe(1);
+      const output = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string } };
+      expect(rendered.exitCode).toBe(1);
+      expect(output.error.fact).toContain(id);
+      expect(output.error.consequence).toContain("UNKNOWN");
+      expect(rendered.stdout.join("\n")).not.toContain("queue_create_outcome_unknown");
     });
 
     it("does not treat a matching watchdog backstop as this request's live one-shot timer after readback", async () => {
@@ -1934,9 +1959,7 @@ describe("rig queue CLI", () => {
   // stores tags as a flat list.
   describe("FR-4(b) — --mission / --slice first-class flag-formalization", () => {
     it("--mission translates to a mission:<id> tag", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-1" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -1952,9 +1975,7 @@ describe("rig queue CLI", () => {
     });
 
     it("--slice translates to a slice:<id> tag", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-2" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -1970,9 +1991,7 @@ describe("rig queue CLI", () => {
     });
 
     it("--mission + --slice + --tags merges all three sets (mission/slice first, --tags appended) and de-duplicates", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-3" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -1995,9 +2014,7 @@ describe("rig queue CLI", () => {
     });
 
     it("--mission release-0.3.2 + --tags mission:release-0.3.2 de-duplicates the redundant tag (one mission:X kept)", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-4" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -2016,9 +2033,7 @@ describe("rig queue CLI", () => {
     });
 
     it("no --mission/--slice/--tags → tags is undefined on the wire (legacy behavior preserved)", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-fr4b-5" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -2037,9 +2052,7 @@ describe("rig queue CLI", () => {
   // the producer the idle-gate watchdog's centralized predicate reads.
   describe("OPR.0.4.3.16 — --gate <role> gate-predicate producer", () => {
     it("create --gate guard translates to a gate:guard tag", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-gate-1" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -2055,9 +2068,7 @@ describe("rig queue CLI", () => {
     });
 
     it("create --gate composes with --slice/--tags and de-duplicates", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-gate-2" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync([
@@ -3272,9 +3283,7 @@ describe("rig queue CLI", () => {
     // ── STEP 1: harness calibration on EXISTING create --body - (GREEN today).
     // Proves the process.stdin swap technique works before it carries any RED.
     it("CALIBRATION (green): create --body - consumes the stdin PassThrough as the exact POST body", async () => {
-      const { deps, calls } = makeDeps({
-        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-cal", state: "pending" } } },
-      });
+      const { deps, calls } = makeDeps();
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await withStdin(DISCRIMINATOR, async () => {
@@ -3485,9 +3494,7 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
   });
 
   it("create without --summary teaches the same truthful bounded-preview fallback and does NOT hard-break", async () => {
-    const { deps, calls } = makeDeps({
-      routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q1", state: "pending" } } },
-    });
+    const { deps, calls } = makeDeps();
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
     await program.parseAsync([
@@ -3559,9 +3566,7 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
   );
 
   it("the missing-summary warning names every surface that shows the row's subject", async () => {
-    const { deps } = makeDeps({
-      routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q1", state: "pending" } } },
-    });
+    const { deps } = makeDeps();
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
     await program.parseAsync([
