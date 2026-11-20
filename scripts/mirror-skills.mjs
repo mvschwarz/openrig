@@ -561,15 +561,6 @@ export function applyMode(exec = execFileSync) {
 }
 
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
-  if (Object.keys(dependencies).length === 0) {
-    const source = new URL("./npm-command.mjs", import.meta.url);
-    const target = new URL("../packages/daemon/specs/agents/shared/skills/process/systematic-debugging/npm-command.mjs", import.meta.url);
-    const expected = readFileSync(source, "utf8");
-    if (!existsSync(target) || readFileSync(target, "utf8") !== expected) {
-      if (argv.includes("--check")) throw new Error("Shipped npm locator differs from scripts/npm-command.mjs; run npm run mirror-skills");
-      writeFileSync(target, expected);
-    }
-  }
   const isCheck = argv.includes("--check");
 
   if (isCheck) {
@@ -583,6 +574,16 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       process.exitCode = 1;
     }
     return;
+  }
+
+  // Write the shipped skill's copy from the repo's own helper. --check above needs no equivalent: the
+  // recorded spec and canonical edge digests already cover these exact bytes, so a drift is reported
+  // there instead of short-circuiting before the generated inputs are read.
+  const npmHelper = new URL("./npm-command.mjs", import.meta.url);
+  if (Object.keys(dependencies).length === 0 && existsSync(npmHelper)) {
+    const target = new URL("../packages/daemon/specs/agents/shared/skills/process/systematic-debugging/npm-command.mjs", import.meta.url);
+    const expected = readFileSync(npmHelper, "utf8");
+    if (!existsSync(target) || readFileSync(target, "utf8") !== expected) writeFileSync(target, expected);
   }
 
   const apply = dependencies.authoringApplyMode ?? authoringApplyMode;
