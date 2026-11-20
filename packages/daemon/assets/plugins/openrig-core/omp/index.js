@@ -9,7 +9,8 @@ const HERE = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url))
 export const REFOCUS_SCRIPT = path.resolve(HERE, "../hooks/scripts/refocus.cjs");
 /** OMP gives an event handler 30 seconds; the hook's own lookups stay inside its budget well before that. */
 const HOOK_TIMEOUT_MS = 25_000;
-const MAX_LOOKUP_BUDGET_MS = HOOK_TIMEOUT_MS - 1000;
+// refocus.cjs gives a failure report 1.5 s after its last lookup. Allow another 0.5 s for process overhead.
+const MAX_LOOKUP_BUDGET_MS = HOOK_TIMEOUT_MS - 2_000;
 export const REFOCUS_MESSAGE_TYPE = "openrig-refocus";
 
 const text = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
@@ -27,7 +28,7 @@ export function hookInput(event, ctx, extra = {}) {
 }
 
 /**
- * Run the refocus hook once. Resolves with the context it wants delivered, or null: nothing due, the feature off,
+ * Run the refocus hook once. Resolves with its pending revision and custom message, or null: nothing due, the feature off,
  * a failure, or a timeout. It never rejects, so a refocus problem can't fail a prompt.
  */
 export function runRefocus(input, options = {}) {
@@ -56,7 +57,13 @@ export function runRefocus(input, options = {}) {
     clearTimeout(timer);
     if (code !== 0) { resolve(null); return; }
     try {
-      resolve(text(JSON.parse((stdout + decoder.end()) || "{}")?.hookSpecificOutput?.additionalContext));
+      const output = JSON.parse((stdout + decoder.end()) || "{}");
+      const content = text(output?.hookSpecificOutput?.additionalContext);
+      const revision = text(output?.ompRevision);
+      if (!content) { resolve(null); return; }
+      const message = { customType: REFOCUS_MESSAGE_TYPE, content, display: true };
+      if (revision && output.ompComplete === true) message.details = { openrigRefocusId: revision };
+      resolve({ revision, message });
     } catch {
       resolve(null);
     }
@@ -79,6 +86,22 @@ export default function openrigCore(pi, options = {}) {
   const refocus = options.runRefocus ?? runRefocus;
   pi.setLabel?.("OpenRig Core");
 
+  const acknowledge = (ctx, deliveryId) =>
+    refocus(hookInput("OmpRefocusAccepted", ctx, { omp_delivery_id: deliveryId }), { env });
+
+  async function prepare(ctx, prompt, now = false) {
+    const input = hookInput("UserPromptSubmit", ctx, { prompt, omp_prepare: true });
+    const prepared = await refocus(input, { env, now });
+    if (!prepared || (input.session_id && input.session_id !== text(ctx?.sessionManager?.getSessionId?.()))) return;
+    // A restart can interrupt the acknowledgement after the accepted message reached the transcript.
+    if (prepared.revision && ctx.sessionManager?.getBranch?.().some(entry =>
+      entry.type === "custom_message" && entry.customType === REFOCUS_MESSAGE_TYPE && entry.details?.openrigRefocusId === prepared.revision)) {
+      await acknowledge(ctx, prepared.revision);
+      return;
+    }
+    return prepared.message;
+  }
+
   pi.on("session_start", (_event, ctx) => {
     const requested = Number(env.OPENRIG_REFOCUS_BUDGET_MS);
     if (isSeat(env) && isMainSession(ctx) && requested > MAX_LOOKUP_BUDGET_MS) {
@@ -95,9 +118,16 @@ export default function openrigCore(pi, options = {}) {
   pi.on("before_agent_start", async (event, ctx) => {
     // A revived subagent replays this event with an empty prompt; only a real prompt is a delivery boundary.
     if (!isSeat(env) || !isMainSession(ctx) || event?.reason === "revive") return;
-    const context = await refocus(hookInput("UserPromptSubmit", ctx, { prompt: typeof event?.prompt === "string" ? event.prompt : "" }), { env });
-    if (!context) return;
-    return { message: { customType: REFOCUS_MESSAGE_TYPE, content: context, display: true } };
+    const message = await prepare(ctx, typeof event?.prompt === "string" ? event.prompt : "");
+    if (message) return { message };
+  });
+
+  pi.on("message_end", async (event, ctx) => {
+    if (!isSeat(env) || !isMainSession(ctx)) return;
+    const message = event.message;
+    if (message?.role !== "custom" || message.customType !== REFOCUS_MESSAGE_TYPE) return;
+    const deliveryId = text(message.details?.openrigRefocusId);
+    if (deliveryId) await acknowledge(ctx, deliveryId);
   });
 
   pi.registerCommand?.("refocus", {
@@ -108,12 +138,12 @@ export default function openrigCore(pi, options = {}) {
         return;
       }
       if (!isMainSession(ctx)) return;
-      const context = await refocus(hookInput("UserPromptSubmit", ctx, { prompt: "" }), { env, now: true });
-      if (!context) {
+      const message = await prepare(ctx, "", true);
+      if (!message) {
         ctx?.ui?.notify?.("Refocus had nothing to deliver (it may be turned off with OPENRIG_REFOCUS_ENABLED=0).", "warning");
         return;
       }
-      pi.sendMessage({ customType: REFOCUS_MESSAGE_TYPE, content: context, display: true }, { triggerTurn: true });
+      pi.sendMessage(message, { triggerTurn: true });
     },
   });
 }

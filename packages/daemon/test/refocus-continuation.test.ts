@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -30,9 +31,11 @@ process.stdout.write("{}");
 ` : '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
   chmodSync(trace, 0o755);
   chmodSync(rig, 0o755);
-  const run = (event: string, prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant", timeout = 10_000) => {
+  const run = (event: string | { hook_event_name: string; omp_prepare?: boolean; omp_delivery_id?: string },
+    prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant", timeout = 10_000) => {
     const result = spawnSync(process.execPath, [hook, "--runtime", runtime], {
-      input: JSON.stringify({ hook_event_name: event, session_id: identity, prompt, transcript_path: transcript }),
+      input: JSON.stringify({ ...(typeof event === "string" ? { hook_event_name: event } : event),
+        session_id: identity, prompt, transcript_path: transcript }),
       encoding: "utf8", timeout, killSignal: "SIGKILL",
       env: { ...process.env, PATH: nodeRig ? bin : `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
         OPENRIG_SESSION_NAME: "seat@test", OPENRIG_REFOCUS_ENABLED: "1", OPENRIG_REFOCUS_NOW: "",
@@ -44,13 +47,73 @@ process.stdout.write("{}");
     expect(result.status, result.error?.message || result.stderr).toBe(0);
     return result.stdout;
   };
-  return { root, run, transcript, calls: () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
-    state: () => JSON.parse(readFileSync(join(root, "refocus", "seat@test__occupant.json"), "utf8")) };
+  const stateFile = join(root, "refocus", "seat@test__occupant.json");
+  return { root, run, transcript, stateFile, calls: () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
+    state: () => JSON.parse(readFileSync(stateFile, "utf8")) };
 }
 
 describe("refocus continuation", () => {
-  it("OMP ignores growth thresholds and does not unwrap Claude pasted content", () => {
+  it("keeps OMP context pending through discarded preparations, then completes it once for its occupant and revision", () => {
     const f = fixture(false, "omp");
+    const prepare = { hook_event_name: "UserPromptSubmit", omp_prepare: true };
+    const accepted = (id: string) => ({ hook_event_name: "OmpRefocusAccepted", omp_delivery_id: id });
+    f.run("PostCompact");
+    const { ompRevision: first, ompComplete } = JSON.parse(f.run(prepare));
+    expect(first).toEqual(expect.any(String));
+    expect(ompComplete).toBe(true);
+    expect(f.state()).toMatchObject({ pendingRevision: first, pendingOn: "PostCompact" });
+    expect(f.state().firedAt).toBeUndefined();
+    expect(JSON.parse(f.run(prepare)).ompRevision).toBe(first);
+    f.run(accepted(first), "", true, {}, "another-occupant");
+    expect(f.state().pendingRevision).toBe(first);
+    expect(existsSync(join(f.root, "refocus", "seat@test__another-occupant.json"))).toBe(false);
+    f.run("PostCompact");
+    const { ompRevision: next } = JSON.parse(f.run(prepare));
+    expect(next).toEqual(expect.any(String));
+    expect(next).not.toBe(first);
+    f.run(accepted(first));
+    expect(f.state().pendingRevision).toBe(next);
+    f.run(accepted(next));
+    expect(f.state().pendingRevision).toBeUndefined();
+    expect(f.state().firedOn).toBe("UserPromptSubmit");
+    const settled = f.state();
+    f.run(accepted(next));
+    expect(f.state()).toEqual(settled);
+    expect(f.run(prepare)).toBe("");
+  });
+  it("adopts legacy pending OMP state and retries an acknowledgement blocked by a concurrent writer", () => {
+    const f = fixture(false, "omp");
+    mkdirSync(join(f.root, "refocus"));
+    writeFileSync(f.stateFile, JSON.stringify({ lastBytes: 100, pendingOn: "PostCompact" }));
+    const prepare = { hook_event_name: "UserPromptSubmit", omp_prepare: true };
+    const { ompRevision } = JSON.parse(f.run(prepare));
+    expect(ompRevision).toEqual(expect.any(String));
+    const accept = { hook_event_name: "OmpRefocusAccepted", omp_delivery_id: ompRevision };
+    const guard = f.stateFile + ".guard";
+    symlinkSync(process.pid + "-" + randomUUID(), guard);
+    f.run(accept);
+    expect(f.state().pendingRevision).toBe(ompRevision);
+    unlinkSync(guard);
+    f.run(accept);
+    expect(f.run(prepare)).toBe("");
+  });
+  it("retries an on-demand OMP context after cancellation or a failed render", () => {
+    const f = fixture(false, "omp");
+    const prepare = { hook_event_name: "UserPromptSubmit", omp_prepare: true };
+    const failed = JSON.parse(f.run(prepare, "", false, { OPENRIG_REFOCUS_NOW: "1" }));
+    expect(failed.ompComplete).toBe(false);
+    const revision = f.state().pendingRevision;
+    expect(revision).toEqual(expect.any(String));
+    writeFileSync(f.transcript, "smaller");
+    const retry = JSON.parse(f.run(prepare));
+    expect(retry.ompRevision).toBe(revision);
+    expect(retry.ompComplete).toBe(true);
+    expect(retry.hookSpecificOutput.additionalContext).toContain("on demand");
+    f.run({ hook_event_name: "OmpRefocusAccepted", omp_delivery_id: revision });
+    expect(f.run(prepare)).toBe("");
+  });
+  it.each(["omp", "codex"])("the %s hook ignores growth thresholds and does not unwrap Claude pasted content", (runtime) => {
+    const f = fixture(false, runtime);
     expect(f.run("UserPromptSubmit")).toBe("");
     writeFileSync(f.transcript, "x".repeat(2_048));
     expect(f.run("UserPromptSubmit", "continue", true, { OPENRIG_REFOCUS_BYTES: "1000" })).toBe("");
