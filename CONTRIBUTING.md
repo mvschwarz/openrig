@@ -61,14 +61,18 @@ the lockfile change with it.
 
 With npm 12, dependency install scripts are blocked unless the root
 `package.json` permits them in `allowScripts`. That field approves the locked
-esbuild versions so their postinstall binary checks run. better-sqlite3 loads its
-bundled prebuilt binary; approving its implicit `node-gyp rebuild` would add a
-native build-tool requirement even when that binary works, so it stays blocked.
+esbuild versions so their postinstall binary checks run. better-sqlite3 13 bundles
+prebuilt binaries for x64 and arm64 on macOS, Windows and Linux (glibc or musl), so
+its install scripts stay unapproved. On other platforms, install the native
+build tools required by [node-gyp](https://github.com/nodejs/node-gyp#installation),
+then explicitly build with `npm --prefix node_modules/better-sqlite3 run build-release`;
+this runs the package's build script without adding an install-script approval.
 When updating esbuild, review its script and run
 [`npm install-scripts approve esbuild`](https://docs.npmjs.com/cli/v12/commands/npm-install-scripts/)
-to update the pinned entries alongside the lockfile. Other dependency scripts
-remain blocked. Keep these approvals in the project, without changing user or
-global npm settings.
+to update the pinned entries alongside the lockfile, then run `npm rebuild esbuild`
+to execute any postinstall checks skipped before approval. Other dependency
+scripts remain blocked. Keep these approvals in the project, without changing
+user or global npm settings.
 
 `npm test` builds the daemon and runs repository checks before the package suites. Read the
 specific failure. Each shipped skill has one editable home in this repository (see
