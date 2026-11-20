@@ -189,6 +189,8 @@ export class SeatActivityService {
     if (lastActivityEpochSeconds === null) {
       const seatNodeId = this.sessionToSeat.get(paneId);
       const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+      // The self-report is read, and retired, on every sweep, including one whose pane activity couldn't be read.
+      if (seat) this.consultSelfReport(paneId, seatNodeId!, seat);
       if (seat) this.arbitrate(seat);
       return null;
     }
@@ -264,16 +266,20 @@ export class SeatActivityService {
           this.arbitrate(seat);
         }
       }
-      if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
-        const evd = this.selfReportReader(paneId, seatNodeId);
-        // Unread on two sweeps running (no file for this seat, unknown status), its last report retires, so the rungs
-        // below decide. One unread sweep, such as a file read mid-write, keeps it.
-        seat.selfReportUnread = evd ? 0 : (seat.selfReportUnread ?? 0) + 1;
-        if (evd) this.reportEvidence(evd);
-        else if (seat.selfReportUnread >= 2 && seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE)) this.arbitrate(seat);
-      }
+      if (seat) this.consultSelfReport(paneId, seatNodeId, seat);
     }
     return record;
+  }
+
+  /** The self-report rung, for a seat whose inventory staffs it. Unread on two sweeps running (no file for this seat,
+   *  unknown status), its last report retires, so the rungs below decide. One unread sweep, such as a file read
+   *  mid-write, keeps it. */
+  private consultSelfReport(paneId: string, seatNodeId: string, seat: SeatLadderState): void {
+    if (!this.selfReportReader || !seat.inventory?.rungs.some((r) => r.rung === "self-report")) return;
+    const evd = this.selfReportReader(paneId, seatNodeId);
+    seat.selfReportUnread = evd ? 0 : (seat.selfReportUnread ?? 0) + 1;
+    if (evd) this.reportEvidence(evd);
+    else if (seat.selfReportUnread >= 2 && seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE)) this.arbitrate(seat);
   }
 
   private async pollPermissionPrompt(sessionName: string, canCapture = true): Promise<void> {

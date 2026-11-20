@@ -5,7 +5,6 @@ import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
-import { lstartToMinTs } from "../domain/codex-thread-id.js";
 import type { SeatIdentityVerdict } from "../domain/types.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
@@ -1537,30 +1536,18 @@ export interface ClaudeSelfReportRead {
   readFile(path: string): string;
   /** Whether a process with this PID is running. Default: signal 0 (a process we may not signal still exists). */
   isAlive?(pid: number): boolean;
-  /** A file's modification time in ms. Default: stat. */
-  mtimeMs?(path: string): number;
 }
 
 const defaultSelfReportRead: ClaudeSelfReportRead = {
   listFiles: (dir) => fs.readdirSync(dir),
   readFile: (p) => fs.readFileSync(p, "utf8"),
   isAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } },
-  mtimeMs: (p) => fs.statSync(p).mtimeMs,
 };
 
-/** The seat's verified native Claude PID for the self-report read: only from a verified verdict for this same session. */
+/** The seat's verified native Claude PID for the self-report read: only from a verified verdict for this same session.
+ *  The identity reconciler re-verifies it every few seconds, so a PID whose process ended or was reused stops being named. */
 export function verifiedSelfReportPid(verdict: SeatIdentityVerdict | null | undefined, sessionName: string): number | undefined {
   return verdict?.verdict === "verified" && verdict.sessionName === sessionName ? verdict.evidence.observedPid ?? undefined : undefined;
-}
-
-/** Whether `<pid>.json` was written by the process now running as `pid`, started at `processStartedAt` (`ps` lstart): its
- *  own `procStart` (the same lstart) when it records one, else #3334's rule, a file no older than the process. A leftover
- *  file for a reused PID fails either. */
-function writtenByRunningProcess(record: { procStart?: unknown }, file: string, processStartedAt: string, read: ClaudeSelfReportRead): boolean {
-  const squash = (value: string) => value.trim().replace(/\s+/g, " ");
-  if (typeof record.procStart === "string") return squash(record.procStart) === squash(processStartedAt);
-  const started = lstartToMinTs(processStartedAt);
-  return started !== undefined && (read.mtimeMs ?? defaultSelfReportRead.mtimeMs!)(file) >= started * 1000;
 }
 
 /** Read the freshest self-report for `sessionName` as ladder evidence, or null.
@@ -1576,19 +1563,16 @@ export function readClaudeSelfReportEvidence(input: {
   /** The seat's verified native Claude PID. Its own `<pid>.json` is the seat's, whatever its `name` (the conversation
    *  title, which `/rename` changes) says, while that process runs. */
   pid?: number;
-  /** That process's start (`ps` lstart). Without it the PID's file isn't trusted, and the name match applies. */
-  processStartedAt?: string;
   read?: ClaudeSelfReportRead;
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
   const read = input.read ?? defaultSelfReportRead;
   try {
     let best: { status: string; statusUpdatedAt: number } | null = null;
-    if (input.pid !== undefined && input.processStartedAt && (read.isAlive ?? defaultSelfReportRead.isAlive!)(input.pid)) {
+    if (input.pid !== undefined && (read.isAlive ?? defaultSelfReportRead.isAlive!)(input.pid)) {
       try {
-        const file = nodePath.join(input.sessionsDir, `${input.pid}.json`);
-        const record = JSON.parse(read.readFile(file)) as { pid?: unknown; procStart?: unknown; status?: unknown; statusUpdatedAt?: unknown };
-        if (record.pid === input.pid && typeof record.status === "string" && typeof record.statusUpdatedAt === "number"
-          && writtenByRunningProcess(record, file, input.processStartedAt, read)) {
+        const record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, `${input.pid}.json`))) as
+          { pid?: unknown; status?: unknown; statusUpdatedAt?: unknown };
+        if (record.pid === input.pid && typeof record.status === "string" && typeof record.statusUpdatedAt === "number") {
           best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
         }
       } catch { /* no file for this process: the name match below, as before */ }

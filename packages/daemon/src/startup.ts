@@ -115,7 +115,6 @@ import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { restoredRunnerHookEvidence } from "./routes/activity.js";
 import { readClaudeSelfReportEvidence, verifiedSelfReportPid } from "./adapters/claude-code-adapter.js";
-import { ProcessCensus } from "./domain/process-census.js";
 import { replaceFile } from "./adapters/replace-file.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
@@ -677,20 +676,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // AgentSpec.profile.activity is currently inert (the poller uses the
   // global default; per-seat windows are not wired to the live poll).
   const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
-  // The self-report rung's verified Claude PIDs, each with its process start, so a leftover pid.json for a reused PID
-  // isn't read as the seat's. The sweep is synchronous: the starts come from a background census, at most every 5 s.
   const selfReportIdentities = new SeatIdentityStore(db);
-  const selfReportCensus = new ProcessCensus({ freshnessMs: 5_000 });
-  let selfReportStarts = new Map<number, string>(), selfReportStartsAt = -Infinity;
-  const selfReportProcessStart = (pid: number): string | undefined => {
-    if (Date.now() - selfReportStartsAt > 5_000) {
-      selfReportStartsAt = Date.now();
-      selfReportCensus.list().then((rows) => {
-        selfReportStarts = new Map(rows.flatMap((row) => row.startedAt ? [[row.pid, row.startedAt] as [number, string]] : []));
-      }, () => { /* unknown starts: the PID's file isn't trusted, the name match applies */ });
-    }
-    return selfReportStarts.get(pid);
-  };
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
     structuralActivity: seatStructuralActivityService,
@@ -721,8 +707,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const sessionsDir = nodePath.join(claudeConfigRootFor(db, seatNodeId), "sessions");
       // The verified native process's own pid.json is the seat's after a /rename; the name match stays the fallback.
       const pid = verifiedSelfReportPid(selfReportIdentities.getForNode(seatNodeId), sessionName);
-      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId, pid,
-        processStartedAt: pid === undefined ? undefined : selfReportProcessStart(pid) });
+      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId, pid });
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
     restoreHookEvidence: (seat, runtime) => restoredRunnerHookEvidence(agentActivityStore, seat, runtime),
