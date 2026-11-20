@@ -662,6 +662,23 @@ export class SeatActivityService {
     return seat.arbitrated;
   }
 
+  /** This oracle's pane check of a Codex seat's hook-raised permission requests, for the readers that would otherwise
+   *  hold the raw request hook until the turn's next hook (the wake ladder, the send gate). "blocked" while a request is
+   *  on screen or its pane can't be read; "unknown" until a read lands at least the grace after `raisedAt`, the latest
+   *  request hook (a same-turn request keeps its earlier entry); then "clear" when that read found no prompt, and came
+   *  after `after` when given. Null when no request is tracked: the caller keeps its own hook reading. */
+  codexPermissionState(seatNodeId: string, raisedAt?: string | null, after?: string): "blocked" | "clear" | "unknown" | null {
+    const seat = this.ladder.get(seatNodeId);
+    if (!seat || seat.retired || (seat.inventory?.runtime ?? "codex") !== "codex" || seat.permissions.size === 0) return null;
+    const requests = [...seat.permissions.values()];
+    if (requests.some(request => request.confirmed)) return "blocked";
+    const readAt = Date.parse(seat.permissionEvidence?.observedAt ?? "");
+    const raised = Date.parse(raisedAt ?? "");
+    if (requests.some(request => request.nextCheckMs === 0) || !Number.isFinite(readAt)
+        || (Number.isFinite(raised) && readAt < raised + PERMISSION_REQUEST_GRACE_MS)) return "unknown";
+    return after !== undefined && !(readAt > Date.parse(after)) ? "unknown" : "clear";
+  }
+
   /** Wait-after-seq read primitive (T1 seam, exposed not consumed here): resolves when
    *  the arbitrated seq passes `afterSeq` (a fast pass-through transition still
    *  satisfies the wait — the lost-wakeup guard). Timeout resolves null, never throws. */
