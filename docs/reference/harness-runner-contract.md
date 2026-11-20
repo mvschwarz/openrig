@@ -134,6 +134,7 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 
 Managed hosted Pi and OMP, Pi-RPC presets and declared community runners can receive an actual-launch credential in
 `OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`.
+It is delivered through tmux's private environment, never as a literal launch argument or launch-result field.
 
 Give the launch credential to the component that reports this launch's activity. That component can be a runner or the harness's own lifecycle hooks. Reports must describe events and observations from the seat and launch they name; a tool command or generated message is not evidence that a turn ended, a permission prompt opened or a model changed. The credential identifies the reporting launch, not an independently verified native conversation or model. Keep credential values out of command arguments, launch records and logs. See the [author guide's trust model](author-contracts.md#trust-model) for the scope of local cooperation and configured isolation.
 
