@@ -1113,6 +1113,8 @@ export function makePromptStateReader(deps: {
 
 export interface PermissionPromptObservation extends HookReviewObservation {
   evidenceRef: string;
+  /** When the prompt the seat waits at started, so each prompt of one occupant is its own. Absent when that can't be told. */
+  prompt?: string;
 }
 
 /** A permission hook can need an answer even when its seat holds no work. Like the refusal path,
@@ -1120,6 +1122,8 @@ export interface PermissionPromptObservation extends HookReviewObservation {
 export function makePermissionPromptReader(deps: {
   db: Database.Database;
   getLatestHook: (destination: string, runtime: string | null) => AgentActivity | null | undefined;
+  /** When the occupant's current prompt started (AgentActivityStore.findPermissionPromptStart). */
+  getPromptStart?: (destination: string, generation: string) => string | null | undefined;
   log?: (line: string) => void;
 }): (destination?: string) => PermissionPromptObservation[] {
   return (onlyDestination) => (deps.db.prepare(`SELECT n.id AS nodeId, s.session_name AS destination, n.runtime
@@ -1140,7 +1144,12 @@ export function makePermissionPromptReader(deps: {
       const state = !current ? "unknown"
         : retainedState === "needs_input" && permission || latestHookPermissionPending(hook, runtime) ? "blocked"
         : hook?.rawEvent === "PermissionPromptCleared" || retainedState === "running" || retainedState === "idle" ? "clear" : "unknown";
-      return { destination, state, episode: hook?.generation ?? "unknown", observedAt: hook?.eventAt ?? "",
+      let prompt: string | null | undefined;
+      if (state === "blocked" && hook?.generation) {
+        try { prompt = deps.getPromptStart?.(destination, hook.generation); }
+        catch (error) { (deps.log ?? console.error)(`[wake-ladder] permission prompt start unreadable for ${JSON.stringify(destination)}: ${String(error)}`); }
+      }
+      return { destination, state, episode: hook?.generation ?? "unknown", ...(prompt ? { prompt } : {}), observedAt: hook?.eventAt ?? "",
         evidenceRef: `rig telemetry events --start retained --node ${nodeId} --limit 128 --json` };
     });
 }
@@ -1153,6 +1162,7 @@ const PROMPT_RETIRED_NOTE = "prompt escalation retired: the seat's prompt read c
 /** The ladder's positive-clear boundary, independent of whether the alert's owner still holds its custody.
  * A transition, not the resolution: a fallback route may already hold that field's text. */
 const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
+const PROMPT_NEW_NOTE = "prompt escalation: a new permission prompt joined this alert";
 /** Rows whose tag text could hold the prompt alert tag: valid JSON stores a string verbatim or with backslash
  * escapes, so this superset (LIKE also ignores case) loses no row the exact json_each test below accepts. It only
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
@@ -1416,7 +1426,7 @@ async function advancePromptRefusals(
       // An owner may already have closed the alert. A later clear still bounds that episode,
       // without reopening or changing the owner's disposition; the next prompt gets a new key.
       if (state === "clear") {
-        const prefix = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|after:`;
+        const prefix = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|`;
         const latest = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
           AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
           AND EXISTS (SELECT 1 FROM json_each(tags) WHERE substr(value, 1, ?) = ?)
@@ -1428,7 +1438,9 @@ async function advancePromptRefusals(
         }
       }
       if (state !== "blocked" || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
-      const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
+      // Each prompt is its own episode when its start is known; otherwise the occupant's prompts share one key.
+      const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}`
+        + `${observation.prompt ? `|prompt:${observation.prompt}` : ""}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
       if (closedEpisode(key)) continue;
       let group = groups.get(observation.destination);
       if (!group) { group = { keys: [], rowKeys: new Map(), jobKeys: new Set(), rows: new Map(), jobs: new Map(), refusedAt: observation.observedAt }; groups.set(observation.destination, group); }
@@ -1541,7 +1553,7 @@ async function advancePromptRefusals(
     const sameEpisode = group?.keys.some(key => tags.includes(key));
     const permission = permissionObservations.get(dest);
     const state = tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:`))
-      ? permission && tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:${permission.episode}|after:`))
+      ? permission && tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:${permission.episode}|`))
         ? permission.state : "unknown"
       : promptState(dest, aggregate.tsCreated);
     const cleared = state === "clear";
@@ -1683,6 +1695,13 @@ async function advancePromptRefusals(
       group.permissionHook ? permissionObservations.get(dest)?.evidenceRef : undefined);
     if (!aggregate || deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     const row = deps.queueRepo.getById(aggregate.qitemId);
+    // A prompt the alert hasn't carried, after an earlier prompt it has: its owner hears of it once, owner-held included.
+    // Only prompts told apart by their own start count; a generation key keeps today's behaviour.
+    const permissionPrefix = `${PROMPT_EPISODE_TAG}${dest}|permission-hook:`;
+    if (row && group.permissionHook?.includes("|prompt:") && !row.tags?.includes(group.permissionHook)
+      && row.tags?.some(t => t.startsWith(permissionPrefix) && t.includes("|prompt:"))) {
+      await wakeOwnerForNewPrompt(deps, row, dest, group.permissionHook, attemptWake);
+    }
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = [...keys, ...waiterTags].filter(key => !row.tags?.includes(key));
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
@@ -1781,6 +1800,23 @@ async function advancePromptRefusals(
       appendExhausted(deps.queueRepo, row, floor ? PROMPT_FLOOR_EXHAUSTED : "operator rung resolved");
     }
   }
+}
+
+/** A new prompt joined a seat's open alert: wake the alert's owner once for it, as the orchestrator rung does, and record it
+ *  in one transition either way. The key on the alert marks the prompt handled. A person, the prompted seat or an address
+ *  with no session here isn't woken; this adds no notice to a person. */
+async function wakeOwnerForNewPrompt(deps: WakeLadderDeps, row: QueueItem, dest: string, key: string,
+  attemptWake: (qitemId: string, target: string) => Promise<string>): Promise<void> {
+  const owner = row.destinationSession;
+  const notWoken = owner === dest ? "it is the prompted seat" : knownPerson(deps, owner) ? "it is a person"
+    : !deps.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(owner) ? "it has no session on this host" : null;
+  const outcome = notWoken ? null : await attemptWake(row.qitemId, owner);
+  if (outcome === "deferred:rig_delivery_drain") return; // the next tick tries again
+  const tags = [...(row.tags ?? []), key];
+  deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(tags), row.qitemId);
+  row.tags = tags;
+  appendMarker(deps.queueRepo, row, notWoken ? `${PROMPT_NEW_NOTE}; ${owner} not woken: ${notWoken}`
+    : `${PROMPT_NEW_NOTE}; woke ${owner} outcome=${outcome}`, true);
 }
 
 /** Open rows with a return route and the seat each is stuck on: its own holder, or for a blocked row the seat it's blocked on,

@@ -222,7 +222,8 @@ export function startWakeLadderScheduler(deps: {
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
-  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">
+    & Partial<Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "findPermissionPromptStart">>;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   gatewaySubsystem?: { status?: () => { state?: unknown }; dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
@@ -253,6 +254,7 @@ export function startWakeLadderScheduler(deps: {
       readPermissionPrompts: makePermissionPromptReader({ db,
         getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
           order: runtime === "claude-code" ? "source" : "arrival" }),
+        getPromptStart: (sessionName, generation) => deps.agentActivityStore?.findPermissionPromptStart?.({ sessionName, generation }),
       }),
       readPromptState: makePromptStateReader({
         db,

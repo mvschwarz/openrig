@@ -649,3 +649,120 @@ it("an existing Feed permission carrier gains missing hook evidence", async () =
     expect(repo.list({ limit: 100 })).toHaveLength(1);
   } finally { await scheduler.stop(); }
 });
+
+// C4's shape: a builder answered one permission prompt and met the next about 14 s later, before any tick read clear. Each
+// prompt is keyed by its own start. The seat keeps one alert, and its owner hears of each new prompt once.
+function promptEpisodeFixture() {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  // The seat's lead owns the alert: a live session on this host, named from the seat's own address.
+  const lead = f.name.replace(/^worker-a/, "lead-a"), registry = new SessionRegistry(f.db);
+  const leadNode = new RigRepository(f.db).addNode(f.node.rigId, "lead.a", { role: "lead", runtime: "claude-code" });
+  registry.updateStatus(registry.registerSession(leadNode.id, lead).id, "running");
+  const read = makePermissionPromptReader({ db: f.db,
+    getLatestHook: destination => f.store.getLatestForNode({ sessionName: destination, order: "source" }),
+    getPromptStart: (destination, generation) => f.store.findPermissionPromptStart({ sessionName: destination, generation }) });
+  const woken: string[] = [];
+  const tick = (reader = read) => runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+    resolveOrchestrator: () => lead, readPermissionPrompts: reader, retryIntervalSeconds: 1,
+    attemptWake: async (_id, target) => { woken.push(target); return "verified"; } });
+  const later = async (ms: number, event: string, subtype: string | null) => {
+    f.clock.value = new Date(f.clock.value.getTime() + ms);
+    await f.hook(event, subtype, 0);
+    return f.clock.value.toISOString();
+  };
+  const alerts = () => repo.list({ limit: 100 }).filter(r => r.tags?.includes("wake-prompt-refusal"));
+  const newPromptNotes = (id: string) => repo.listTransitions(id)
+    .filter(t => t.transitionNote?.startsWith("prompt escalation: a new permission prompt joined this alert"));
+  return { f, repo, lead, woken, tick, later, alerts, newPromptNotes };
+}
+
+it.each(["open", "owner-held"])("a second permission prompt at a seat whose alert is %s wakes the alert's owner once, with one transition and no new row", async hold => {
+  const { f, repo, lead, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  await later(0, "Notification", "permission_prompt");
+  await tick();
+  expect(alerts()).toHaveLength(1);
+  const id = alerts()[0]!.qitemId;
+  expect(alerts()[0]!.destinationSession).toBe(lead);
+  expect(woken).toEqual([lead]); // the orchestrator rung, for the first prompt
+  if (hold === "owner-held") repo.update({ qitemId: id, actorSession: lead, state: "blocked", blockedOn: "external:answer" });
+  await later(14_000, "Notification", "permission_prompt");
+  await tick();
+  await tick();
+  expect(woken).toEqual([lead, lead]);
+  expect(newPromptNotes(id)).toHaveLength(1);
+  expect(newPromptNotes(id)[0]!.transitionNote).toContain(`woke ${lead} outcome=verified`);
+  expect(repo.list({ limit: 100 })).toHaveLength(1);
+  expect(repo.getById(id)?.state).toBe(hold === "open" ? "pending" : "blocked");
+  expect(f.paste).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["a pane confirmation after its notification", "Notification", "permission_prompt", "PermissionPromptConfirmed", null],
+  ["its notification six seconds after its PermissionRequest", "PermissionRequest", null, "Notification", "permission_prompt"],
+] as const)("one prompt's two hooks wake no one again: %s", async (_, firstEvent, firstSubtype, secondEvent, secondSubtype) => {
+  const { repo, lead, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  await later(0, firstEvent, firstSubtype);
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  await later(6_000, secondEvent, secondSubtype);
+  await tick();
+  await tick();
+  expect(woken).toEqual([lead]);
+  expect(newPromptNotes(id)).toEqual([]);
+  expect(repo.list({ limit: 100 })).toHaveLength(1);
+});
+
+it("without a prompt's own start, a second prompt keeps the occupant's key and wakes no one again", async () => {
+  const { f, repo, lead, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  const generationOnly = makePermissionPromptReader({ db: f.db,
+    getLatestHook: destination => f.store.getLatestForNode({ sessionName: destination, order: "source" }) });
+  await later(0, "Notification", "permission_prompt");
+  await tick(generationOnly);
+  const id = alerts()[0]!.qitemId;
+  await later(14_000, "Notification", "permission_prompt");
+  await tick(generationOnly);
+  await tick(generationOnly);
+  expect(woken).toEqual([lead]);
+  expect(newPromptNotes(id)).toEqual([]);
+  expect(repo.list({ limit: 100 })).toHaveLength(1);
+  expect(repo.getById(id)!.tags).toContain(`prompt-episode:${f.name}|permission-hook:${f.generation}|after:start`);
+});
+
+it("a prompt starts at the newest prompt hook in the occupant's unbroken run of permission hooks", async () => {
+  const { f, later } = promptEpisodeFixture();
+  const start = (generation = f.generation) => f.store.findPermissionPromptStart({ sessionName: f.name, generation });
+  const first = await later(0, "Notification", "permission_prompt");
+  await later(1_000, "PermissionPromptConfirmed", null);
+  expect(start()).toBe(first);
+  const second = await later(14_000, "Notification", "permission_prompt");
+  await later(1_000, "PermissionPromptConfirmed", null);
+  expect(start()).toBe(second);
+  expect(start("another-occupant")).toBeNull();
+  await later(1_000, "Stop", null);
+  await later(1_000, "PermissionPromptConfirmed", null);
+  expect(start()).toBeNull(); // the turn ended, and no prompt hook came after it
+});
+
+it("the production reader keys each prompt by its own start; an alert owner with no session records a new one without a wake", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  const key = () => `prompt-episode:${f.name}|permission-hook:${f.generation}`
+    + `|prompt:${f.store.findPermissionPromptStart({ sessionName: f.name, generation: f.generation })}|after:start`;
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const alert = repo.listAttention()[0]!, first = key();
+    expect(alert.tags).toContain(first);
+    f.clock.value = new Date(f.clock.value.getTime() + 14_000);
+    await f.hook("Notification", "permission_prompt", 0);
+    await scheduler.runTickNow();
+    await scheduler.runTickNow();
+    expect(key()).not.toBe(first);
+    expect(repo.getById(alert.qitemId)!.tags).toEqual(expect.arrayContaining([first, key()]));
+    expect(repo.listTransitions(alert.qitemId).map(t => t.transitionNote).filter(n => n?.startsWith("prompt escalation: a new permission prompt"))).toEqual([
+      `prompt escalation: a new permission prompt joined this alert; ${alert.destinationSession} not woken: it has no session on this host`]);
+    expect(repo.list({ limit: 100 })).toHaveLength(1);
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  } finally { await scheduler.stop(); }
+});

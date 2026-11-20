@@ -352,6 +352,43 @@ export class AgentActivityStore {
     return earliest;
   }
 
+  /** When the permission prompt the seat waits at started: the newest prompt hook (Claude's `permission_prompt`
+   *  notification, or a PermissionRequest) in this occupant's unbroken run of permission hooks that ends at its latest
+   *  hook. A confirmation read from the pane joins the run without starting a prompt. Claude sends PermissionRequest
+   *  when it asks and the notification about six seconds later, so a notification that follows a request in the run is
+   *  that request's. Null when another hook, or another occupant's, ends the run before a prompt hook: then one prompt
+   *  can't be told from the next. Read in the emitter's order, as the latest hook is. */
+  findPermissionPromptStart(input: { sessionName: string; generation: string }): string | null {
+    if (!input.generation) return null;
+    const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
+    if (!nodeId) return null;
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).all(nodeId) as EventPayloadRow[];
+    let start: AgentActivity | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity || activity.generation !== input.generation) break;
+      const request = activity.rawEvent === "PermissionRequest";
+      if (!request && !(activity.rawEvent === "Notification" && activity.rawSubtype === "permission_prompt")) {
+        if (activity.rawEvent === "PermissionPromptConfirmed") continue;
+        break;
+      }
+      if (!start) {
+        start = activity;
+        if (request) break;
+        continue;
+      }
+      if (request) start = activity;
+      break;
+    }
+    return start?.eventAt ?? null;
+  }
+
   getLatestForNode(input: {
     nodeId?: string | null;
     sessionName?: string | null;
