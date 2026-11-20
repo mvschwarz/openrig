@@ -10,10 +10,13 @@ import { promisify } from "node:util";
 import type { Duplex } from "node:stream";
 import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { daemonFetch } from "../src/daemon-transport.js";
+import { getDaemonStatus } from "../src/daemon-lifecycle.js";
+import { realDeps } from "../src/commands/daemon.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 
@@ -33,7 +36,7 @@ async function listen(server: http.Server, protocol = "http:"): Promise<string> 
   return `${protocol}//127.0.0.1:${address.port}`;
 }
 
-async function fixture(mode: "allow" | "deny" | "hang-connect" = "allow", tlsMode: "none" | "target" | "both" = "none") {
+async function fixture(mode: "allow" | "deny" | "deny-html" | "hang-connect" | "hang-health" = "allow", tlsMode: "none" | "target" | "both" = "none") {
   let tlsOptions: https.ServerOptions | undefined;
   let ca: string | undefined;
   if (tlsMode !== "none") {
@@ -57,7 +60,7 @@ async function fixture(mode: "allow" | "deny" | "hang-connect" = "allow", tlsMod
       res.write("data: first\n\n");
       return;
     }
-    if (req.url === "/cut" || req.url === "/stall") {
+    if (req.url === "/cut" || req.url === "/stall" || (req.url === "/healthz" && mode === "hang-health")) {
       res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "80" });
       res.write('{"accepted":');
       if (req.url === "/cut") setTimeout(() => res.destroy(), 20);
@@ -84,8 +87,8 @@ async function fixture(mode: "allow" | "deny" | "hang-connect" = "allow", tlsMod
       client.resume();
       return;
     }
-    if (mode === "deny" || req.url !== new URL(target).host) {
-      const body = JSON.stringify({ error: "fixture_proxy_denied" });
+    if (mode === "deny" || mode === "deny-html" || req.url !== new URL(target).host) {
+      const body = mode === "deny-html" ? "<html>fixture proxy denied CONNECT</html>" : JSON.stringify({ error: "fixture_proxy_denied" });
       client.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
       return;
     }
@@ -188,14 +191,19 @@ describe("daemon requests through the sandbox's supplied HTTP proxy", () => {
     expect(f.connects).toHaveLength(0);
   });
 
-  it("rejects an invalid supplied proxy without exposing it or trying a direct write", async () => {
+  it("keeps the caller transport for an invalid proxy, with a warning that omits the value", async () => {
     const f = await fixture();
     f.configure();
     vi.stubEnv("http_proxy", "socks://fixture-user:fixture-password@127.0.0.1:1");
-    const error: unknown = await new DaemonClient(f.target).post("/write", {}).catch((value: unknown) => value);
-    expect(error).toBeInstanceOf(DaemonConnectionError);
-    expect(String(error)).toContain("valid HTTP(S) URL");
-    expect(String(error)).not.toMatch(/fixture-user|fixture-password/);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const response = new Response("original caller transport");
+    const direct = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const input = `${f.target}/write`;
+    const init = { method: "POST", body: "once" };
+    expect(await daemonFetch(f.target, direct)(input, init)).toBe(response);
+    expect(direct).toHaveBeenCalledExactlyOnceWith(input, init);
+    expect(warning).toHaveBeenCalledOnce();
+    expect(warning.mock.calls.flat().join(" ")).not.toMatch(/fixture-user|fixture-password|socks:/);
     expect(f.requests).toHaveLength(0);
     expect(f.connects).toHaveLength(0);
   });
@@ -226,12 +234,69 @@ describe("daemon requests through the sandbox's supplied HTTP proxy", () => {
     expect(f.connects).toHaveLength(1);
   });
 
-  it.each([5_000, 405_000])("keeps proxy refusal truthful without a direct retry or a write at %i ms", async (timeoutMs) => {
-    const f = await fixture("deny");
+  it.each([5_000, 405_000].flatMap(timeoutMs => (["deny", "deny-html"] as const)
+    .flatMap(mode => (["none", "target"] as const).map(tlsMode => ({ timeoutMs, mode, tlsMode })))))(
+    "reports CONNECT refusal as a connection error ($mode, $tlsMode TLS, $timeoutMs ms), with no daemon write or retry", async ({ timeoutMs, mode, tlsMode }) => {
+    const f = await fixture(mode, tlsMode);
     f.configure();
-    const response = await new DaemonClient(f.target, { timeoutMs }).post("/write", { action: "once" });
-    expect(response).toMatchObject({ status: 403, data: { error: "fixture_proxy_denied" } });
+    const error: unknown = await new DaemonClient(f.target, { timeoutMs }).post("/write", { action: "once" }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(DaemonConnectionError);
+    expect(error).not.toBeInstanceOf(DaemonResponseError);
+    expect(String(error)).toMatch(/sandbox proxy.*403/i);
+    expect(String(error)).toContain(new URL(f.target).host);
+    expect(String(error)).not.toContain("fixture_proxy_denied");
     expect(f.requests).toHaveLength(0);
+    expect(f.connects).toHaveLength(1);
+    await expect.poll(() => f.tunnels.size).toBe(0);
+  });
+
+  it("reports status as unverified when CONNECT is refused, without retrying the proxy", async () => {
+    const f = await fixture("deny-html");
+    f.configure();
+    vi.stubEnv("OPENRIG_URL", f.target);
+    const status = await getDaemonStatus(realDeps());
+    expect(status.state).toBe("unverified");
+    expect(status.healthy).toBeUndefined();
+    expect(f.requests).toHaveLength(0);
+    expect(f.connects).toHaveLength(1);
+  });
+
+  it("keeps a recorded PID unverified when its health probe is refused by the proxy", async () => {
+    const f = await fixture("deny-html");
+    f.configure();
+    vi.stubEnv("OPENRIG_URL", "");
+    vi.stubEnv("RIGGED_URL", "");
+    const target = new URL(f.target);
+    const state = { pid: 12345, port: Number(target.port), host: target.hostname, db: "fixture.db", startedAt: "fixture" };
+    const status = await getDaemonStatus({ ...realDeps(),
+      exists: (file) => file.endsWith("daemon.json"),
+      readFile: (file) => file.endsWith("daemon.json") ? JSON.stringify(state) : null,
+      isProcessAlive: () => true, processLiveness: () => "alive" });
+    expect(status).toMatchObject({ state: "unverified", pid: state.pid, probeErrorCode: "ESANDBOXPROXY" });
+    expect(status.healthy).toBeUndefined();
+    expect(f.requests).toHaveLength(0);
+    expect(f.connects).toHaveLength(1);
+  });
+
+  it("does not call a daemon stopped when its supplied proxy is not listening", async () => {
+    const f = await fixture();
+    const unused = net.createServer();
+    const unavailable = await listen(unused);
+    await new Promise<void>((resolve) => unused.close(() => resolve()));
+    f.configure();
+    vi.stubEnv("http_proxy", unavailable);
+    vi.stubEnv("OPENRIG_URL", f.target);
+    expect((await getDaemonStatus(realDeps())).state).toBe("unverified");
+    expect(f.requests).toHaveLength(0);
+  });
+
+  it("keeps the real status probe deadline active through a stalled health body", async () => {
+    const f = await fixture("hang-health");
+    f.configure();
+    const probe = realDeps().fetch(`${f.target}/healthz`);
+    await expect.poll(() => f.requests.length).toBe(1);
+    await expect(probe).rejects.toThrow(/timed out/i);
+    await expect.poll(() => f.tunnels.size).toBe(0);
     expect(f.connects).toHaveLength(1);
   });
 

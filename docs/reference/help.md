@@ -127,6 +127,11 @@ Inside Claude Code's Bash sandbox, CLI daemon requests use the supplied HTTP(S) 
 endpoint, including when the sandbox's loopback `NO_PROXY` would select a direct connection. The proxy's host and
 port permissions still apply. OpenRig does not change `NO_PROXY`, the endpoint or sandbox settings, and a refused
 request is not retried directly. This works on Node 22 without enabling Node's global environment-proxy support.
+HTTPS daemon URLs use `HTTPS_PROXY` and HTTP daemon URLs use `HTTP_PROXY` (lowercase forms take precedence).
+If the matching variable is absent, or its URL is invalid, the request keeps the caller's existing transport; an
+invalid URL warns without printing its value. HTTP daemon request headers cross the supplied proxy inside its CONNECT
+tunnel; HTTPS daemon headers are protected by the daemon's TLS connection. A non-200 CONNECT response is a sandbox
+proxy connection error, not a daemon reply. A refused or unreachable proxy leaves daemon status unverified.
 The route covers `DaemonClient` (including identity and long requests), lifecycle health/kernel probes and
 `rig chatroom watch`. The separate SSE paths for `rig stream` and workflow following retain their existing routing.
 

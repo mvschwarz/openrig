@@ -2,7 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
-import { daemonFetch } from "./daemon-transport.js";
+import { daemonFetch, SandboxProxyError } from "./daemon-transport.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
@@ -1274,6 +1274,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
  *  crash-cart-detect semantics): ONLY a connection refusal is strong down evidence;
  *  a timeout / abort / anything else never proves the daemon dead. */
 function isRefusedError(err: unknown): boolean {
+  if (err instanceof SandboxProxyError) return false;
   if (!(err instanceof Error)) return false;
   const cause = (err as Error & { cause?: { code?: string } }).cause;
   const code = (err as Error & { code?: string }).code;
@@ -1485,6 +1486,9 @@ export async function getDaemonStatus(
     databaseWarnings = ev.databaseWarnings;
     terminals = ev.terminals;
   } catch (err) {
+    if (err instanceof SandboxProxyError) {
+      return { state: "unverified", port: state.port, host, pid: state.pid, ...probeErrorCodeOf(err) };
+    }
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
     // "unresponsive" reason so the operator knows it's the control plane.
@@ -1688,6 +1692,7 @@ async function probeHealthzWithSettle(deps: LifecycleDeps, url: string): Promise
       return await fetchDaemonProbe(deps, url, remaining);
     } catch (err) {
       lastErr = err;
+      if (err instanceof SandboxProxyError) throw err; // no daemon-down evidence, and no retry of a proxy refusal
       if (err instanceof HealthProbeTimeoutError) break; // deadline spent — do not re-allocate a new window
       if (attempt < STATUS_PROBE_MAX_ATTEMPTS && Date.now() + STATUS_PROBE_RETRY_DELAY_MS < deadline) {
         await sleep(STATUS_PROBE_RETRY_DELAY_MS);

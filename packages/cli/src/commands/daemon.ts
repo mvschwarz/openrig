@@ -107,13 +107,14 @@ export function realDeps(): LifecycleDeps {
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
     fetch: async (url, init) => {
+      let body = "";
       const res = await fetchWithTimeout(daemonFetch(url, globalThis.fetch), url, init?.signal ? { signal: init.signal } : {}, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
+        consumeResponse: async (response) => { body = await response.text(); },
       });
-      // OPR.0.4.3.21 — expose json() so getDaemonStatus can read the enriched
-      // /healthz event-loop evidence. Bound to this Response instance.
-      return { ok: res.ok, json: () => res.json() };
+      // Read the finite health body inside the deadline, then expose its cached JSON to lifecycle evidence readers.
+      return { ok: res.ok, json: async () => JSON.parse(body) as unknown };
     },
     isPortOccupied: (host, port) => new Promise((resolve) => {
       const server = createServer();
