@@ -170,9 +170,11 @@ commands; if the two ever differ, this step is right.
   rig ID (the `rigId` of the `kernel` row in `rig ps --json`) and its `operator` pod:
   `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex|omp> --print-env`.
   `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
-  (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
-  later `rig` command. Check with `rig whoami --json`, and use it or `rig seat status` later for identity and state,
-  not `rig attach --json` output. Don't print `OPENRIG_ACTIVITY_*` values: they're credentials.
+  (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). If it fails, don't retry with other names: continue unjoined, and
+  hand over the goal with `--return-route auto` ("If the person stays with you" below), so the team's questions still
+  come back here. Each command may run in a fresh shell, so put them in front of every later `rig` command. Check with
+  `rig whoami --json`, and use it or `rig seat status` later for identity and state, not `rig attach --json` output.
+  Don't print `OPENRIG_ACTIVITY_*` values: they're credentials.
   If they decline, a message that must still say who it's from can go as a queue item with a declared source,
   `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
   seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).

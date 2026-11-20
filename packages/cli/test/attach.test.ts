@@ -88,6 +88,13 @@ describe("Attach CLI", () => {
         return;
       }
 
+      if (req.url === "/api/rigs/rig-taken/attach-self" && req.method === "POST") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, code: "address_conflict",
+          error: "Team address 'lead@rig-taken' conflicts with another member. Choose another member name." }));
+        return;
+      }
+
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
@@ -142,6 +149,19 @@ describe("Attach CLI", () => {
       "export OPENRIG_NODE_ID='node-1'",
       "export OPENRIG_SESSION_NAME='orch1-lead@rigged-buildout'",
     ]);
+  });
+
+  it("a failed attach keeps the daemon's error first, then names the unjoined route", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "attach", "--self", "--rig", "rig-taken",
+        "--pod", "operator", "--member", "person-agent", "--runtime", "claude-code", "--print-env"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs[0]).toBe("Team address 'lead@rig-taken' conflicts with another member. Choose another member name.");
+    expect(logs[1]).toContain("Not joined.");
+    expect(logs[1]).toContain("rig queue create --destination <seat> --return-route auto");
+    expect(logs).toHaveLength(2);
   });
 
   it("attach rejects missing --self", async () => {
