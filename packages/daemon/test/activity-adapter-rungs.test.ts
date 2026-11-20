@@ -10,7 +10,7 @@ import {
   PI_ACTIVITY_RUNG_INVENTORY,
   runtimeRungInventory,
 } from "../src/domain/activity-taxonomy.js";
-import { readClaudeSelfReportEvidence, type ClaudeSelfReportRead } from "../src/adapters/claude-code-adapter.js";
+import { readClaudeSelfReportEvidence, verifiedSelfReportPid, type ClaudeSelfReportRead } from "../src/adapters/claude-code-adapter.js";
 import { SeatActivityService } from "../src/domain/seat-activity-service.js";
 
 // OPR.0.5.5.19 A5 — per-harness rung inventories + the Claude self-report rung (r3) +
@@ -90,14 +90,41 @@ describe("S19 A5 — readClaudeSelfReportEvidence: the pid.json rung, undocument
     expect(ev.activity).toBe("working"); // 3.json is fresher than 2.json; 1.json is a different seat
   });
 
+  const START = "Fri Nov 20 07:00:00 2026";
   it("#3604: the verified PID's own file is the seat's after /rename, whatever its title; not another process's, not a stopped one", () => {
-    const renamed = readOf({ "123.json": record({ name: "Some Title", status: "idle" }) });
+    const renamed = readOf({ "123.json": record({ name: "Some Title", status: "idle", procStart: START }) });
     const running = (read: ClaudeSelfReportRead, pids: number[]) => ({ ...read, isAlive: (pid: number) => pids.includes(pid) });
-    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [123])), pid: 123 })!.activity).toBe("idle-at-prompt");
+    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [123])), pid: 123, processStartedAt: START })!.activity).toBe("idle-at-prompt");
     expect(readClaudeSelfReportEvidence(input(running(renamed, [123])))).toBeNull(); // no PID: the title no longer names the seat
-    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [])), pid: 123 })).toBeNull(); // not running
-    const other = running(readOf({ "124.json": record({ pid: 999, name: "Some Title" }) }), [124]);
-    expect(readClaudeSelfReportEvidence({ ...input(other), pid: 124 })).toBeNull(); // the file names another process
+    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [])), pid: 123, processStartedAt: START })).toBeNull(); // not running
+    const other = running(readOf({ "124.json": record({ pid: 999, name: "Some Title", procStart: START }) }), [124]);
+    expect(readClaudeSelfReportEvidence({ ...input(other), pid: 124, processStartedAt: START })).toBeNull(); // the file names another process
+    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [123])), pid: 123 })).toBeNull(); // the process start isn't known yet
+  });
+
+  it("#3605: a leftover pid.json for a reused PID isn't the seat's, by its own procStart or, without one, by its age (#3334's rule)", () => {
+    const running = (files: Record<string, string>, mtimeMs = 0) => ({ ...readOf(files), isAlive: () => true, mtimeMs: () => mtimeMs });
+    const at = (lstart: string) => Date.parse(lstart.replace(/^\w+ (\w+) +(\d+) (\S+) (\d+)$/, "$1 $2, $4 $3"));
+    const reused = "Fri Nov 20 09:30:00 2026"; // the process now running as 123 started after the file's own process
+    const leftover = record({ name: "Some Title", procStart: START });
+    expect(readClaudeSelfReportEvidence({ ...input(running({ "123.json": leftover })), pid: 123, processStartedAt: reused })).toBeNull();
+    expect(readClaudeSelfReportEvidence({ ...input(running({ "123.json": leftover })), pid: 123, processStartedAt: "Fri Nov 20  07:00:00 2026" })!
+      .activity).toBe("working"); // the same lstart, spacing aside
+    const noProcStart = record({ name: "Some Title" });
+    expect(readClaudeSelfReportEvidence({ ...input(running({ "123.json": noProcStart }, at(START))), pid: 123, processStartedAt: reused })).toBeNull();
+    expect(readClaudeSelfReportEvidence({ ...input(running({ "123.json": noProcStart }, at(reused) + 5_000)), pid: 123, processStartedAt: reused })!
+      .activity).toBe("working");
+  });
+
+  it("#3605: the PID comes only from a verified verdict for this same session", () => {
+    const verdict = (over: Record<string, unknown> = {}, evidence: Record<string, unknown> = {}) => ({ nodeId: SEAT, verdict: "verified",
+      evidenceSource: null, reason: null, sessionName: NAME, observedAt: "2026-11-20T07:00:00Z",
+      evidence: { registeredPane: "%1", observedPid: 123, observedCommand: "claude", matchedLayer: 1, ...evidence }, ...over }) as never;
+    expect(verifiedSelfReportPid(verdict(), NAME)).toBe(123);
+    expect(verifiedSelfReportPid(verdict({ verdict: "unverified" }), NAME)).toBeUndefined();
+    expect(verifiedSelfReportPid(verdict({ sessionName: "another-seat" }), NAME)).toBeUndefined();
+    expect(verifiedSelfReportPid(verdict({}, { observedPid: null }), NAME)).toBeUndefined();
+    expect(verifiedSelfReportPid(null, NAME)).toBeUndefined();
   });
 
   it("unreadable dir, malformed file, unknown status, wrong shape — ALL return null, never throw (fall down the ladder)", () => {
@@ -150,11 +177,12 @@ describe("S19 A5 — production wiring: the sweep auto-declares, consults self-r
       try {
         const clock = { now: Date.parse("2026-11-20T07:20:00Z") };
         const pidFile = (name: string, status: string) =>
-          fs.writeFileSync(path.join(dir, "4242.json"), JSON.stringify({ pid: 4242, name, status, statusUpdatedAt: clock.now }));
+          fs.writeFileSync(path.join(dir, "4242.json"), JSON.stringify({ pid: 4242, procStart: "Fri Nov 20 07:00:00 2026", name, status, statusUpdatedAt: clock.now }));
         const read: ClaudeSelfReportRead = { listFiles: (d) => fs.readdirSync(d), readFile: (f) => fs.readFileSync(f, "utf8"), isAlive: () => true };
         const svc = new SeatActivityService({
           tmux: { readPaneLastActivity: async () => clock.now / 1000 - 10 }, defaultWindowSeconds: 3, now: () => new Date(clock.now),
-          selfReportReader: (sessionName, seatNodeId) => readClaudeSelfReportEvidence({ sessionsDir: dir, sessionName, seatNodeId, read, ...(bound ? { pid: 4242 } : {}) }),
+          selfReportReader: (sessionName, seatNodeId) => readClaudeSelfReportEvidence({ sessionsDir: dir, sessionName, seatNodeId, read,
+            ...(bound ? { pid: 4242, processStartedAt: "Fri Nov 20 07:00:00 2026" } : {}) }),
         });
         const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: "claude-code", attachment_type: "tmux" }] }) } as unknown as Database.Database;
         const state = () => { const s = svc.getSeatState(SEAT)!; return [s.activity, s.decidedBy]; };
