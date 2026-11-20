@@ -103,6 +103,35 @@ describe("rig gateway human add verb (post-relocate)", () => {
     }
   });
 
+  it("says a person added with no connector is asked in the Feed and Steering only, and says nothing of it with one", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const bare = createProgram(); bare.exitOverride();
+    await bare.parseAsync(["node", "rig", "gateway", "human", "add", "ana", "--display-name", "Ana", "--delivery-class", "A"]);
+    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true, entityId: "ana", delivery: "Feed and Steering only" });
+    expect(error.mock.calls.map((call) => String(call[0]))).toEqual([
+      "ana has no connector binding, so messages and questions reach them only in the TUI's Feed and Steering until one is added: rerun rig gateway human add ana --replace "
+        + "with the same options plus --binding <kind:connectorRef:secretsRef:primary[:handle=<id>]> (rig gateway human set's binding.<n> changes only a binding that exists).",
+    ]);
+    expect(process.exitCode).toBeUndefined();
+    // The hint's command adds the binding; binding.0 on a person with none is out of range, which is why the hint doesn't name it.
+    const outOfRange = createProgram(); outOfRange.exitOverride();
+    await outOfRange.parseAsync(["node", "rig", "gateway", "human", "set", "ana", "binding.0", "slack:main:vault://slack/ana:primary"]);
+    expect(process.exitCode).toBe(1);
+    expect(String(error.mock.calls.at(-1)?.[0])).toContain("is out of range");
+    process.exitCode = undefined;
+    const replaced = createProgram(); replaced.exitOverride();
+    await replaced.parseAsync(["node", "rig", "gateway", "human", "add", "ana", "--replace", "--display-name", "Ana", "--delivery-class", "A", "--binding", "slack:main:vault://slack/ana:primary"]);
+    expect(process.exitCode).toBeUndefined();
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok && loaded.entities.find((e) => e.entityId === "ana")?.connectorBindings.length).toBe(1);
+    error.mockClear();
+    const bound = createProgram(); bound.exitOverride();
+    await bound.parseAsync(["node", "rig", "gateway", "human", "add", "mike", "--display-name", "Mike", "--binding", "slack:main:vault://slack/mike:primary", "--delivery-class", "B"]);
+    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).not.toHaveProperty("delivery");
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("A6 v3: an OPTIONAL handle= token parses alongside a ':'-bearing secretsRef (inbound-resolvable)", async () => {
     const program = createProgram();
     program.exitOverride();
