@@ -9,6 +9,8 @@ import { expect, it } from "vitest";
 
 const tsxLoader = new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href;
 const source = (name: string) => fileURLToPath(new URL(`../src/${name}`, import.meta.url));
+// A .mts probe is an ES module, where a bare Windows path is not a valid specifier; these are URLs.
+const sourceUrl = (name: string) => new URL(`../src/${name}`, import.meta.url).href;
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "tui-cwd-")));
@@ -37,12 +39,16 @@ console.log(JSON.stringify({ source: call.cwd }));`);
 it.each([false, true])("helpers preserve cwd after an attempted removal, recovering only if the OS permits deletion (remove: %s)", async deleted => {
   const f = await fixture();
   try {
-    const probe = join(f.root, "probe.ts");
+    // The probe imports tui sources that now reach subpath exports of @openrig/daemon. A bare .ts file
+    // outside any package scope loads as CommonJS, where Node resolves those subpaths through the
+    // "require" condition only and fails with ERR_PACKAGE_PATH_NOT_EXPORTED. A .mts probe is an ES
+    // module, so the "import" condition those exports declare applies.
+    const probe = join(f.root, "probe.mts");
     await writeFile(probe, `
 import { rmSync } from 'node:fs';
-import { readLocal } from ${JSON.stringify(source("local-reading.ts"))};
-import { openTerminalInWindow } from ${JSON.stringify(source("terminals/open-window.ts"))};
-import { launchProcess, spawnLaunch } from ${JSON.stringify(source("specs/launch.ts"))};
+import { readLocal } from ${JSON.stringify(sourceUrl("local-reading.ts"))};
+import { openTerminalInWindow } from ${JSON.stringify(sourceUrl("terminals/open-window.ts"))};
+import { launchProcess, spawnLaunch } from ${JSON.stringify(sourceUrl("specs/launch.ts"))};
 async function run() {
   process.chdir(${JSON.stringify(f.cwd)});
   const result: Record<string, unknown> = {};
