@@ -26,7 +26,7 @@ export function stageCodexActivityRelay({
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
     }
-    if (!current?.equals(asset.content)) replaceFile(asset.source, asset.target);
+    if (!current?.equals(asset.content)) replaceFile(asset.source, asset.target, { atomicOnly: true });
   }
   return path.join(targetDir, "activity-relay.cjs");
 }

@@ -3,14 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stageCodexActivityRelay } from "../src/adapters/codex-activity-relay.js";
 import { CodexRuntimeAdapter, computeCodexHookTrust } from "../src/adapters/codex-runtime-adapter.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const shipped = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts");
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-stable-relay-"));
@@ -98,6 +98,25 @@ describe("Codex activity relay across Node installation moves", () => {
     expect(fs.readFileSync(first)).toEqual(before);
   });
 
+  it.each(["activity-relay.cjs", "permission-stop-descriptor.cjs"])("keeps published bytes when %s staging cannot be created", name => {
+    const f = fixture();
+    const relay = stageCodexActivityRelay({ stateDir: f.stateDir, sourceDir: f.first });
+    const target = path.join(path.dirname(relay), name);
+    const priorRelay = fs.readFileSync(relay);
+    const priorAsset = fs.readFileSync(target);
+    fs.appendFileSync(path.join(f.second, name), "\n// changed daemon asset\n");
+    const stagingError = Object.assign(new Error("fixture staging denied"), { code: "EACCES" });
+    const createStaging = fs.mkdtempSync;
+    vi.spyOn(fs, "mkdtempSync").mockImplementation((prefix, options) => {
+      if (String(prefix).startsWith(`${target}.tmp-`)) throw stagingError;
+      return createStaging(prefix, options);
+    });
+    expect(() => stageCodexActivityRelay({ stateDir: f.stateDir, sourceDir: f.second })).toThrow(stagingError);
+    expect(fs.readFileSync(relay)).toEqual(priorRelay);
+    expect(fs.readFileSync(target)).toEqual(priorAsset);
+    expect(fs.readdirSync(path.dirname(relay)).sort()).toEqual(["activity-relay.cjs", "permission-stop-descriptor.cjs"]);
+  });
+
   it("runs the staged real relay after removing the original installation", async () => {
     const f = fixture();
     const relay = stageCodexActivityRelay({ stateDir: f.stateDir, sourceDir: f.first });
@@ -114,6 +133,7 @@ describe("Codex activity relay across Node installation moves", () => {
       const address = server.address();
       if (address === null || typeof address === "string") throw new Error("fixture receiver has no TCP port");
       const child = spawn(process.execPath, [relay], {
+        cwd: f.home,
         env: { PATH: path.dirname(process.execPath), HOME: f.root, OPENRIG_HOME: f.stateDir,
           OPENRIG_URL: `http://127.0.0.1:${address.port}`, OPENRIG_ACTIVITY_HOOK_TOKEN: "fixture-token",
           OPENRIG_SESSION_NAME: "worker@fixture", OPENRIG_NODE_ID: "node-fixture", OPENRIG_RUNTIME: "codex" },
