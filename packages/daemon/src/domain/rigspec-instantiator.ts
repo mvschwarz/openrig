@@ -1448,7 +1448,10 @@ export class PodRigInstantiator {
         ...(result.processLimits ? { processLimits: result.processLimits } : {}) };
     }
     // The preflight above covers the whole rig and isn't returned; this member's agent spec advisories are.
-    const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved), ...(result.warnings ?? [])];
+    // #3395: the retry launches from the seat's stored settings (the fragment can't carry `pool`), so a stored pool
+    // block that can't be used is reported from the node, as the first start does.
+    const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved),
+      ...storedPoolAdvisories(node.logicalId, this.deps.rigRepo.getNodePool(nodeId)), ...(result.warnings ?? [])];
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: warnings.length ? warnings : result.warnings };
   }
 
