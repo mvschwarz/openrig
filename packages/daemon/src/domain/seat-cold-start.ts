@@ -19,8 +19,8 @@
 //   - the one revivable stop is a resource-reclaiming daemon stop: slice 2's idle reaper
 //     records itself as operator `daemon:seat-reaper` with reason `idle_reap` so new work
 //     CAN wake the seat again;
-//   - a rolled-back launch (`superseded` row, a failed start) is retryable, subject to
-//     the same failure backoff as any other attempt;
+//   - a rolled-back launch (`superseded` row, a failed start) is refused like an
+//     intentional stop — a failed start is never auto-revived (maintainer R1, 2026-11-20);
 //   - the rig is up: some OTHER seat of the same rig has a live tmux session — a down rig
 //     keeps today's whole-rig deferral semantics;
 //   - the seat's tmux session is really gone (re-probed here, not trusted from the
@@ -55,8 +55,8 @@ export const COLD_START_REVIVABLE_STOPS: ReadonlyArray<{ operator: string; reaso
   { operator: "daemon:seat-reaper", reason: "idle_reap" },
 ];
 
-/** Why a seat is stopped, from the daemon's own records. Only `dormant`, `failed_start` and
- *  `daemon_reclaim` may be woken; `intentional` carries the operator/reason for the log. */
+/** Why a seat is stopped, from the daemon's own records. Only `dormant` and `daemon_reclaim`
+ *  may be woken; `failed_start` and `intentional` are refused (the latter carries operator/reason for the log). */
 export type ColdStartStopIntent =
   | { kind: "dormant" }
   | { kind: "failed_start" }
@@ -103,7 +103,7 @@ function isRevivableStop(operator: string, reason: string): boolean {
  * | No row | dormant (never ran) | yes |
  * | Explicit stop + exact reaper/idle_reap attribution | daemon_reclaim | yes |
  * | Explicit stop + any other, legacy or absent attribution | intentional | no |
- * | Superseded, without explicit stop intent | failed_start | under backoff |
+ * | Superseded, without explicit stop intent | failed_start | no (refused) |
  * | Other row, without explicit stop intent (crash/lost session) | dormant | yes |
  *
  * All yes cases still require opt-in, an unchanged seat, no live target and a live peer.
@@ -340,6 +340,9 @@ export class SeatColdStarter {
       return stop.operator
         ? `seat was stopped intentionally by '${stop.operator}'${stop.reason ? ` (${stop.reason})` : ""}`
         : "seat was stopped intentionally (no revivable daemon stop recorded)";
+    }
+    if (stop.kind === "failed_start") {
+      return "seat's latest start failed (superseded launch); a failed start is never auto-revived";
     }
     return null;
   }

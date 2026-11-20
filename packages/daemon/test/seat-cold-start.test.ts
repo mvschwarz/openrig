@@ -273,10 +273,12 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
-  it("retries a failed start (a rolled-back launch's superseded row is not an intentional stop)", async () => {
+  it("never revives a failed start (a rolled-back launch's superseded row is refused like an intentional stop)", async () => {
     const f = fixture({ status: "superseded" });
     f.starter.notify("dev.impl@fleet");
-    await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+    await flush();
+    expect(f.launches).toHaveLength(0);
+    expect(f.logs.some(line => line.includes("failed start"))).toBe(true);
     f.db.close();
   });
 
