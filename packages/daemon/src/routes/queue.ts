@@ -1683,6 +1683,9 @@ export function queueRoutes(): Hono {
     // refinement, so a row it drops never reads as more rows.
     const repo = getRepo(c);
     const filtered = items.filter((item) => isAttentionItem(item) || repo.isCurrentHumanAsk(item.qitemId));
+    // A full read that the refinement thinned to the limit or fewer can't tell whether accepted rows lie past it, so the
+    // page carries no marker rather than claim either way.
+    if (pageLimit >= 0 && items.length > pageLimit && filtered.length <= pageLimit) return c.json(filtered);
     return c.json(cutListPage(c, pageLimit, filtered));
   });
 

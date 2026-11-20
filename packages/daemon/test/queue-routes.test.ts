@@ -2043,11 +2043,17 @@ describe("queue routes", () => {
     expect(await read(1)).toEqual({ ids: ids.slice(0, 1), limit: "1", truncated: "1" });
     expect(await read(2)).toEqual({ ids, limit: "2", truncated: "0" });
 
-    // A row the route's own attention check drops isn't counted as more rows: the cut is marked after that check.
+    // A row the route's own attention check drops isn't counted as more rows. When it leaves the full read at the limit
+    // or fewer, accepted rows may still lie past the read, so the page carries no marker rather than claim either way.
     const [newest, older] = queueRepo.listAttention({ limit: 2 });
-    const spy = vi.spyOn(queueRepo, "listAttention").mockReturnValueOnce([newest!, { ...older!, qitemId: "qitem-not-stored", destinationSession: "human-@kernel" }]);
-    expect(await read(1)).toEqual({ ids: [newest!.qitemId], limit: "1", truncated: "0" });
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ limit: 2 }));
+    const dropped = { ...older!, qitemId: "qitem-not-stored", destinationSession: "human-@kernel" };
+    const spy = vi.spyOn(queueRepo, "listAttention")
+      .mockReturnValueOnce([newest!, dropped])
+      .mockReturnValueOnce([newest!, dropped]);
+    expect(await read(1)).toEqual({ ids: [newest!.qitemId], limit: null, truncated: null });
+    expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 2 }));
+    // A read that came back short holds every match, so a row the check drops from it leaves an honest 0.
+    expect(await read(2)).toEqual({ ids: [newest!.qitemId], limit: "2", truncated: "0" });
     spy.mockRestore();
   });
 
