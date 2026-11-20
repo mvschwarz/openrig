@@ -62,7 +62,7 @@ function coordinationTransitions<T extends { qitemId: string; state: string; act
     const park = lastPark.get(t.qitemId);
     if (t.state !== "blocked" || !t.transitionNote?.startsWith(CONTINUATION_MARKER)) lastPark.delete(t.qitemId);
     else {
-      const acknowledgesWake = park !== undefined && park.actor === t.actorSession && park.note === t.transitionNote && park.target === t.closureTarget
+      const acknowledgesWake = park !== undefined && park.actor === t.actorSession && park.note === t.transitionNote && park.target !== null && park.target === t.closureTarget
         && prev?.state === "blocked" && prev.transitionNote !== null
         && WAKE_NOTE_PREFIXES.some((prefix) => prev.transitionNote!.startsWith(prefix));
       lastPark.set(t.qitemId, { note: t.transitionNote, target: t.closureTarget, actor: t.actorSession });

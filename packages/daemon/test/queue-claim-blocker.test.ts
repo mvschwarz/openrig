@@ -141,8 +141,10 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ blockedOn: null });
     expect(repo.getById(row.qitemId)?.blockedOn).toBeNull();
-    expect(repo.listTransitions(row.qitemId).find((entry) => entry.closureTarget === "external:old-gate"))
-      .toMatchObject({ transitionNote: "claimed", closureReason: null });
+    const log = repo.listTransitions(row.qitemId);
+    const claimed = log.findIndex((entry) => entry.transitionNote === "claimed");
+    expect(log[claimed]).toMatchObject({ closureTarget: "external:old-gate", closureReason: null });
+    expect(log.slice(claimed + 1).filter((entry) => entry.closureTarget === "external:old-gate")).toEqual([]);
   });
 
   it.each([false, true])("preserves only an unchanged claim gate through an overdue audit (cleared: %s)", async (cleared) => {
