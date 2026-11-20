@@ -1322,6 +1322,9 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
   that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
   `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
   A fresh launch of the seat from its recorded launch keeps the stored block.
+- **Export and bundles:** `rig spec export` and `rig bundle create` leave the pool's agents out and write the model
+  member with its block. An edge touching a pool agent is left out and named in a "Not carried" line. Pool agents
+  aren't drift, so `--allow-drift` isn't needed for them.
 - **Older daemons:** `pool` is a new member key. A daemon from 0.7.18 or earlier refuses a spec that has it, as it
   refuses any unknown member key.
 

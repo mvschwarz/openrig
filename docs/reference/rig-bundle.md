@@ -313,7 +313,7 @@ rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <
 | `--notes <text>` | no | — | Notes stored in the manifest's provenance. |
 | `--include-packages <refs...>` | no | all from the spec | Legacy (schema 1) specs only: the package refs to include. |
 | `--include-login-files` | no | off | Only if recipients should have these logins and their owner agrees (for example, an internal test bundle), include them and record their exact archive-relative paths. Create and consumers show a credential-bearing notice. Does not exempt other sensitive files. |
-| `--allow-drift` | no | off | Build a spec that differs from the running rig of the same name. Without it, create refuses; with it, the difference is written into the manifest's provenance notes. |
+| `--allow-drift` | no | off | Build a spec that differs from the running rig of the same name. Without it, create refuses; with it, the difference is written into the manifest's provenance notes. Pool agents are omitted and aren't drift, so this flag isn't needed for them. |
 | `--json` | no | off | Machine-readable output. |
 
 `--context-pack` and `--project-dir` exist only on create. `rig up` and `rig bundle install` have neither, so a bundle
