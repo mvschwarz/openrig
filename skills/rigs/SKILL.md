@@ -18,7 +18,8 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
   that work raises: each one still goes to them. Never tell the team they approved something, or will answer a prompt,
   unless they said so.
 - **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them, unless
-  they told you outright to decide that kind of prompt (step 2).
+  they told you outright to decide that kind of prompt (step 2). If they want fewer prompts, the operator offers once
+  to allow the commands that keep asking, for their project only (step 2).
 - **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
   the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
   result is in the handed-over task's resolution. Set it before you promise to report back. This chat has no wake of
@@ -27,7 +28,9 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
   operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
-  yourself, with `rig send`, not raw tmux keys into a seat's terminal.
+  yourself, with `rig send`, not raw tmux keys into a seat's terminal. If your own app refuses that send (an auto-mode
+  check, say), tell them what it refused and why, and let them choose: approve it there, or answer in the team's
+  terminals the operator opened. Don't retry it another way.
 
 The full rules are in step 2, "Bring seat permission prompts to the person here".
 
