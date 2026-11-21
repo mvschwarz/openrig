@@ -103,10 +103,10 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
 
 /** What's worth knowing about a reference that would work: a subscription token file that group or others can read.
  *  `rig provider switch --token-file` accepts it, so adding it does too. */
-export function accountRefWarnings(input: AccountRefInput): string[] {
+export function accountRefWarnings(input: AccountRefInput): string[] | { problem: string } {
   if (input.provider !== "claude" || !("tokenFile" in input)) return [];
   let mode: number;
-  try { mode = fs.statSync(input.tokenFile).mode & 0o777; } catch { return []; }
+  try { mode = fs.statSync(input.tokenFile).mode & 0o777; } catch { return { problem: `the token file ${input.tokenFile} doesn't exist` }; }
   return (mode & 0o044) !== 0
     ? [`the token file ${input.tokenFile} can be read by group or others (mode ${mode.toString(8).padStart(4, "0")}); 0600 or 0400 is recommended`] : [];
 }
@@ -165,13 +165,15 @@ export class ProviderAccountRefsRepository {
     }
     const problem = accountRefProblem(input);
     if (problem) return { ok: false, ...problem };
+    // Looked at again for the warning before anything is stored: a file gone since the check is refused, not added.
+    const warnings = accountRefWarnings(input);
+    if (!Array.isArray(warnings)) return { ok: false, code: "reference_unusable", message: `${warnings.problem}. ${NOTHING_STORED}` };
     const kind: AccountRefKind = input.provider === "codex" ? "codex_saved_login" : "apiKeyFile" in input ? "claude_api_key_file" : "claude_token_file";
     const file = input.provider === "claude" ? ("apiKeyFile" in input ? input.apiKeyFile : input.tokenFile) : null;
     this.db.prepare(`INSERT INTO provider_account_refs (provider, label, kind, file_path, codex_home, login_name, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(input.provider, input.label, kind, file,
       input.provider === "codex" ? input.codexHome : null, input.provider === "codex" ? input.login : null,
       (this.opts.now ?? (() => new Date().toISOString()))());
-    const warnings = accountRefWarnings(input);
     return { ok: true, account: this.get(input.provider, input.label)!, ...(warnings.length ? { warnings } : {}) };
   }
 

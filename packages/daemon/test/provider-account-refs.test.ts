@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -95,13 +95,31 @@ describe("provider account references", () => {
     expect(loose).toMatchObject({ ok: true, account: { label: "open", kind: "claude_token_file" } });
     expect(loose.ok && loose.warnings).toEqual([`the token file ${path.join(dir, "open")} can be read by group or others (mode 0644); 0600 or 0400 is recommended`]);
     const tight = repo.add({ provider: "claude", label: "tight", tokenFile: file("tight", 0o600) });
-    expect(tight.ok && "warnings" in tight).toBe(false);
+    expect(tight).toMatchObject({ ok: true });
+    expect(tight).not.toHaveProperty("warnings");
     // Writable by group but readable by no one else: it can't be read, so there's nothing to warn about reading.
     const writable = file("writable", 0o600);
     fs.chmodSync(writable, 0o620);
     const groupWrite = repo.add({ provider: "claude", label: "writable", tokenFile: writable });
-    expect(groupWrite.ok && "warnings" in groupWrite).toBe(false);
+    expect(groupWrite).toMatchObject({ ok: true });
+    expect(groupWrite).not.toHaveProperty("warnings");
     expect(JSON.stringify([loose, tight])).not.toContain(CONTENT);
+  });
+
+  it("a token file that goes away between the check and the warning is refused, and nothing is stored", () => {
+    const f = file("vanishing", 0o600);
+    const realStat = fs.statSync;
+    let calls = 0;
+    // The first stat is the switch's file check; the second, the warning's, finds the file gone.
+    const spy = vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, o?: fs.StatSyncOptions) => {
+      if (p === f && ++calls === 2) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return realStat(p, o);
+    }) as typeof fs.statSync);
+    try {
+      expect(repo.add({ provider: "claude", label: "gone", tokenFile: f })).toEqual({ ok: false, code: "reference_unusable",
+        message: `the token file ${f} doesn't exist. Nothing was stored.` });
+    } finally { spy.mockRestore(); }
+    expect(rows().n).toBe(0);
   });
 
   it("follows a symlinked Claude file to a private regular file, as the launch does; a symlinked Codex login isn't one", () => {
