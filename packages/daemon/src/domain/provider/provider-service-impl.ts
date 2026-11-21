@@ -272,19 +272,22 @@ export class ProviderServiceImpl implements ProviderService {
   /** #3625 slice 3: the plan again, and if its digest is the one the person saw, each seat through the existing switch.
    *  One apply per rig at a time; the assignment is stored when it starts, and each result as it lands. */
   async applyAssignment(input: AssignmentApplyRequest, tools: AssignmentApplyTools): Promise<AssignmentApplyResult> {
-    const planned = await this.planFor(input, tools);
-    if (!planned.ok) return planned;
-    const { plan, account, rigId, nodeOf } = planned;
-    if (applying.has(rigId)) {
+    // The rig is held before the plan is computed again: its prechecks wait, and an apply that ran meanwhile would leave
+    // this one comparing the reviewed digest with seats read before that apply changed them.
+    const rigKey = (this.deps.db.prepare("SELECT id FROM rigs WHERE name = ?").get(input.rig) as { id: string } | undefined)?.id ?? `name:${input.rig}`;
+    if (applying.has(rigKey)) {
       return { ok: false, code: "apply_in_progress", message: `An assignment is already being applied to rig ${input.rig} on this daemon. Nothing changed; its results show in the plan as they land.` };
     }
-    if (plan.digest !== input.digest) {
-      return { ok: false, code: "plan_changed", digest: plan.digest,
-        message: `The plan for rig ${input.rig} changed since plan ${input.digest} was shown (it's ${plan.digest} now): a seat, its account, a precheck or a shared home is different. `
-          + `Nothing changed. Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
-    }
-    applying.add(rigId);
+    applying.add(rigKey);
     try {
+      const planned = await this.planFor(input, tools);
+      if (!planned.ok) return planned;
+      const { plan, account, rigId, nodeOf } = planned;
+      if (plan.digest !== input.digest) {
+        return { ok: false, code: "plan_changed", digest: plan.digest,
+          message: `The plan for rig ${input.rig} changed since plan ${input.digest} was shown (it's ${plan.digest} now): a seat, its account, a precheck or a shared home is different. `
+            + `Nothing changed. Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+      }
       const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
       const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
       // The rig's assignment is stored once a seat is on the account or may be: switched, pending successor, unknown, or
@@ -319,7 +322,7 @@ export class ProviderServiceImpl implements ProviderService {
       });
       return { ok: true, report };
     } finally {
-      applying.delete(rigId);
+      applying.delete(rigKey);
     }
   }
 

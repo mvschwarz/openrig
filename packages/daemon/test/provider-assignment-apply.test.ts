@@ -254,6 +254,25 @@ describe("applying an assignment on the daemon", () => {
     // Once it's done, the rig takes another apply.
     expect((await svc.applyAssignment(request("max-3", await digestOf("max-3", claude)), { claudeSeat: claude })).ok).toBe(true);
   });
+
+  it("an apply holds the rig while it computes the plan again, so one that starts meanwhile is refused, not run against seats read before it", async () => {
+    seat("a");
+    const claude = stoppedClaude();
+    const digest = await digestOf("max-2", claude);
+    // The first apply's precheck waits; the rig is held from before the plan is computed.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const precheck = svc.precheck.bind(svc);
+    const waiting = vi.spyOn(svc, "precheck").mockImplementationOnce(async (...args) => { await gate; return precheck(...args); });
+    const first = svc.applyAssignment(request("max-2", digest), { claudeSeat: claude });
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledOnce());
+    const before = everything();
+    expect(await svc.applyAssignment(request("max-2", digest), { claudeSeat: claude })).toMatchObject({ ok: false, code: "apply_in_progress" });
+    expect(everything()).toBe(before);
+    release();
+    const done = await first;
+    expect(done.ok && done.report.results.map((r) => r.kind)).toEqual(["switched"]);
+  });
 });
 
 describe("POST /api/provider/assignment-apply", () => {
