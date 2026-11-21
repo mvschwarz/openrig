@@ -249,7 +249,7 @@ export class RigTeardownOrchestrator {
         // rotation intact even when its stale row is removed.
         if (!ownedByAnotherRig) stopTranscriptRotation(session.sessionName);
         // Success or already gone — update DB atomically
-        this.atomicNodeCleanup(session);
+        this.atomicNodeCleanup(session, { ownedByAnotherRig });
         this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result, session.nodeId);
         if (killResult.ok) result.sessionsKilled++;
         if (killResult.ok && communityHarnessOf(session.communityHarness, session.runtime)) (result.paneOnly ??= []).push(session.sessionName);
@@ -374,14 +374,19 @@ export class RigTeardownOrchestrator {
     if (kept.length > 0) result.keptSkills = kept;
   }
 
-  /** Atomically record the supported stop and clear its binding. */
-  private atomicNodeCleanup(session: Pick<LatestNodeSession, "sessionId" | "nodeId" | "sessionName">): void {
+  /** Atomically record the supported stop and clear its binding. The stop event is skipped for
+   *  an archived rig's stale row whose name a live rig now owns (#3173 round 5): the transcript
+   *  subscriber stops rotation by session name alone, so the shared-name event would end a live
+   *  seat's capture — and a stale row needs no cold-start attribution. */
+  private atomicNodeCleanup(session: Pick<LatestNodeSession, "sessionId" | "nodeId" | "sessionName">, opts?: { ownedByAnotherRig?: boolean }): void {
     const tx = this.db.transaction(() => {
       this.deps.sessionRegistry.markIntentionallyStopped(session.sessionId);
-      const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(session.nodeId) as { rig_id: string };
-      this.deps.eventBus.persistWithinTransaction({ type: "session.stopped", rigId: node.rig_id,
-        nodeId: session.nodeId, sessionId: session.sessionId, sessionName: session.sessionName,
-        operator: "rig-teardown", reason: "rig_down" });
+      if (!opts?.ownedByAnotherRig) {
+        const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(session.nodeId) as { rig_id: string };
+        this.deps.eventBus.persistWithinTransaction({ type: "session.stopped", rigId: node.rig_id,
+          nodeId: session.nodeId, sessionId: session.sessionId, sessionName: session.sessionName,
+          operator: "rig-teardown", reason: "rig_down" });
+      }
       this.deps.sessionRegistry.clearBinding(session.nodeId);
     });
     tx();

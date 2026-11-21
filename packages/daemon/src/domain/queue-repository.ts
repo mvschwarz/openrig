@@ -1401,7 +1401,7 @@ export class QueueRepository {
     return { source: trigger, urgent, ...(urgent && row ? { urgentBy: trigger === "openrig" ? "OpenRig" : row.sourceSession } : {}) };
   }
 
-  private classifyWakeResult(res: Awaited<ReturnType<QueueNudgeTransport["send"]>>): WakeAttemptOutcome {
+  private classifyWakeResult(res: Awaited<ReturnType<QueueNudgeTransport["send"]>>, destinationSession?: string): WakeAttemptOutcome {
     // Held by the seat's hold or interruption level (on purpose; a retry is held again) is the typing guard's; any other
     // retention is the draft-aware delivery's (a draft, an unreadable input, a native prompt), which can clear.
     if (res.outcome === "retained") return { classified: "retained", nudgeResult: res.reason === "typing_guard_enabled"
@@ -1417,7 +1417,14 @@ export class QueueRepository {
     if (inputUncertain || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
       return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}` };
     }
-    return { classified: "failed", nudgeResult: `failed:${detail}`, preInputFailure: res.inputPhase === "not_reached" && res.sent !== true };
+    const outcome: WakeAttemptOutcome = { classified: "failed", nudgeResult: `failed:${detail}`, preInputFailure: res.inputPhase === "not_reached" && res.sent !== true };
+    // #2829 slice 1 — positive no-receiver evidence rides the shared send path: a send
+    // that never reached the input phase means the seat was gone before the wake could be
+    // typed. Best-effort; it can never change this classification.
+    if (outcome.preInputFailure === true && destinationSession !== undefined) {
+      try { this.wakeHasNoReceiver(destinationSession); } catch { /* never changes the outcome */ }
+    }
+    return outcome;
   }
 
   /**
@@ -1873,12 +1880,6 @@ export class QueueRepository {
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice(group) + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
       trigger, recheckMembers,
     );
-    // #2829 slice 1 — a failed wake send is re-classified with the no-receiver rule:
-    // a seat positively proven without a receiver here (its session is gone or the
-    // address is unroutable) triggers the cold-start notifier. Best-effort only.
-    if (outcome.classified === "failed") {
-      try { this.wakeHasNoReceiver(intent.destinationSession); } catch { /* never changes the send's outcome */ }
-    }
     // A bridged wake isn't confirmed, so the pass counts it as unconfirmed; its row is the bridge's to settle.
     let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered"
       : outcome.classified === "bridged" ? "indeterminate" : outcome.classified;
@@ -2104,6 +2105,13 @@ export class QueueRepository {
     if (!opts?.explicit && this.deliveryDrains.holds(destinationSession)) return;
     if (!this.transport) return;
     const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger, undefined, opts?.explicit === true);
+    // #2829 slice 1 — the same no-receiver rule as deliverWakeIntent: a re-nudge whose send
+    // failed (wake ladder, health diagnosis, stream intake) for a seat that kept its tmux
+    // binding is positive no-receiver evidence and requests the cold start. Best-effort only;
+    // never changes the send's outcome or its recorded attempt.
+    // `preInputFailure` is the honest shape: the input phase was never reached and nothing
+    // was sent — the seat was gone before the wake could be typed. Pre-send refusals
+    // (unroutable, terminal-seat teaching) already fired their check inside the send.
     this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
   }
 
@@ -2364,13 +2372,16 @@ export class QueueRepository {
       // expired — so it records `indeterminate` (never silently delivered, never a
       // hard `failed`). A definite non-timeout failure (unreachable, unknown
       // session) stays `failed`.
-      return this.classifyWakeResult(res);
+      return this.classifyWakeResult(res, destinationSession);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // A thrown timeout is equally ambiguous (see above).
       if (isWakeTimeoutSignal(msg)) {
         return { classified: "indeterminate", nudgeResult: `indeterminate:${msg}` };
       }
+      // #2829 slice 1 — a thrown send is still an attempted send: the same positive
+      // no-receiver evidence check rides here (best-effort, never changes the outcome).
+      try { this.wakeHasNoReceiver(destinationSession); } catch { /* never changes the outcome */ }
       return { classified: "failed", nudgeResult: `failed:${msg}` };
     }
   }
