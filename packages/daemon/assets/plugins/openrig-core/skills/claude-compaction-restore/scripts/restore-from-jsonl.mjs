@@ -54,9 +54,11 @@ function parseArgs(argv) {
 // The transcript is read a line at a time: a long-lived seat's JSONL runs to gigabytes, past the longest string Node can
 // make (about 512 MB), so the whole file is never read into one string.
 // From a byte offset (a tail packet), the stream starts one byte early and drops its first line: that's the rest of the
-// line the cut fell in, or empty when the cut falls at a line start.
-async function* readJsonLines(file, start = 0) {
-  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", start: start ? start - 1 : 0 }), crlfDelay: Infinity });
+// line the cut fell in, or empty when the cut falls at a line start. It ends at the size recorded when the tail was
+// chosen, so lines appended while it reads stay out of the packet and out of the range its coverage line names.
+async function* readJsonLines(file, start = 0, size = 0) {
+  const range = start ? { start: start - 1, end: size - 1 } : { start: 0 };
+  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", ...range }), crlfDelay: Infinity });
   let index = 0;
   let skip = start > 0;
   for await (const line of lines) {
@@ -298,7 +300,7 @@ async function analyze(jsonlPath, cwd, staging, start = 0, size = 0) {
   let records = 0;
   let firstTimestamp = null;
 
-  for await (const record of readJsonLines(jsonlPath, start)) {
+  for await (const record of readJsonLines(jsonlPath, start, size)) {
     records += 1;
     if (!firstTimestamp && typeof record.timestamp === "string") firstTimestamp = record.timestamp;
     registry.tick();
