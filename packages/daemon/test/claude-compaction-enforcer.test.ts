@@ -19,8 +19,8 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { reportRestoreDeliveryFailure } from "../src/domain/compaction-restore-notice.js";
-import type { RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
+import { reportRestoreDeliveryFailure, settleCompactionNotices } from "../src/domain/compaction-restore-notice.js";
+import type { CompactionDebtEnded, RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
 import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 
 
@@ -354,6 +354,138 @@ describe("ClaudeCompactionEnforcer", () => {
       await expect(enforcer.drainPendingPostCompactStage(input)).resolves.toMatchObject({ reason: "no_pending_stage" });
       expect(completion).toHaveBeenCalledTimes(1);
     } finally { warning.mockRestore(); }
+  });
+
+  // #3688: a debt that ends without a delivery settles the notices it opened.
+  describe("a compaction debt that ends without a delivery", () => {
+    const seat = "claude-seat@rig";
+    const settled = () => new Promise(resolve => setImmediate(resolve));
+    async function withQueue(opts: Record<string, unknown> = {}) {
+      const db = createDb(); migrate(db, ALL_MIGRATIONS);
+      const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const ended = vi.fn(async (end: CompactionDebtEnded) => settleCompactionNotices(queue, end));
+      const { transport } = makeSessionTransport();
+      // The live occupant; a test swaps it to model a committed handover.
+      let live = "gen-1";
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, dedupWindowMs: 0, onCompactionDebtEnded: ended,
+        resolveOccupantGeneration: () => live, ...opts } as never);
+      const notice = async (kind: "restore" | "uptake", attemptId: string) => {
+        const qitemId = `qitem-compaction-${kind}-${attemptId}`;
+        await queue.create({ qitemId, sourceSession: seat, destinationSession: "owner@rig", body: "owed", nudge: false,
+          tags: ["compaction", "restore-delivery", `attempt:${attemptId}`] });
+        return qitemId;
+      };
+      const compactSent = async () => {
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        const attemptId = enforcer.getPreparationState(seat)!.attemptId;
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+        return attemptId;
+      };
+      const reasons = () => (ended.mock.calls as unknown as [CompactionDebtEnded][]).map(([end]) => end.reason);
+      return { db, queue, ended, enforcer, notice, compactSent, reasons, swap: (g: string) => { live = g; } };
+    }
+
+    it("rig compact --cancel closes the notice of the attempt it ended, and the cancel's result is unchanged", async () => {
+      const f = await withQueue();
+      try {
+        const attemptId = await f.compactSent();
+        const id = await f.notice("restore", attemptId);
+        const earlier = await f.notice("uptake", "earlier-attempt");
+        const state = f.enforcer.cancelPreparation(seat);
+        expect(state).toMatchObject({ attemptId, status: "stopped", reason: "compaction_cancelled" });
+        expect(f.enforcer.getOwedRestore(seat)).toBeNull();
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "compaction_cancelled", attemptId });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain("the compaction was cancelled");
+        // An attempt the cancel didn't end keeps its notice.
+        expect(f.queue.getById(earlier)?.state).toBe("pending");
+      } finally { f.db.close(); }
+    });
+
+    it("a cancel that ends nothing settles nothing: a posted uptake notice, whose check already ended, stays", async () => {
+      let now = Date.now();
+      let posted: string | undefined;
+      const f = await withQueue({ now: () => now, onRestoreUptakeUnknown: async (u: { attemptId: string }) => { posted = await f.notice("uptake", u.attemptId); } });
+      try {
+        await f.compactSent();
+        for (let i = 0; i < 3; i++) await f.enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        now += 31 * 60_000;
+        await f.enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" });
+        await settled();
+        expect(posted).toBeDefined();
+        const before = f.reasons().length;
+        f.enforcer.cancelPreparation(seat);
+        await settled();
+        expect(f.reasons()).toHaveLength(before);
+        expect(f.queue.getById(posted!)?.state).toBe("pending");
+      } finally { f.db.close(); }
+    });
+
+    it("a new attempt supersedes the earlier attempt's posted uptake notice", async () => {
+      const f = await withQueue();
+      try {
+        const first = await f.compactSent();
+        for (let i = 0; i < 3; i++) await f.enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        const id = await f.notice("uptake", first);
+        await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        const second = f.enforcer.getPreparationState(seat)!.attemptId;
+        expect(second).not.toBe(first);
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "attempt_superseded", attemptId: second });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "superseded" });
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain(`attempt ${second} replaced attempt ${first}`);
+      } finally { f.db.close(); }
+    });
+
+    it.each([["gen-0", "gen-0"], [undefined, "gen-1"]])("a replaced occupant names the retiring generation (passed %s, reported %s)", async (passed, reported) => {
+      const f = await withQueue();
+      try {
+        const attemptId = await f.compactSent();
+        const id = await f.notice("restore", attemptId);
+        // The handover committed: the live occupant is the successor, not the attempt's recorded gen-1.
+        f.swap("gen-2");
+        f.enforcer.invalidateOccupant(seat, passed);
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: reported });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain(`the seat's occupant was replaced (retiring generation ${reported})`);
+      } finally { f.db.close(); }
+    });
+
+    it("a swap that rolled back, with the retiring occupant still live, settles nothing", async () => {
+      const f = await withQueue();
+      try {
+        const attemptId = await f.compactSent();
+        const id = await f.notice("restore", attemptId);
+        const before = f.reasons().length;
+        f.enforcer.invalidateOccupant(seat, "gen-1");
+        await settled();
+        expect(f.reasons()).toHaveLength(before);
+        expect(f.queue.getById(id)?.state).toBe("pending");
+      } finally { f.db.close(); }
+    });
+
+    it("contains a throwing settle without changing the cancel or the occupant swap", async () => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      // The production settle is synchronous: it throws rather than rejecting.
+      const ended = vi.fn((_end: CompactionDebtEnded) => { throw new Error("storage unavailable"); });
+      try {
+        const { transport } = makeSessionTransport();
+        const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+          postCompactRestoreCooldownMs: 0, onCompactionDebtEnded: ended } as never);
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+        expect(() => enforcer.cancelPreparation(seat)).not.toThrow();
+        expect(() => enforcer.invalidateOccupant(seat, "retired-generation")).not.toThrow();
+        await settled();
+        expect(enforcer.getOwedRestore(seat)).toBeNull();
+        // The attempt's start, the cancel and the swap each tried to settle; each failure stayed a warning.
+        expect((ended.mock.calls as unknown as [CompactionDebtEnded][]).map(([end]) => end.reason)).toEqual(["attempt_superseded", "compaction_cancelled", "occupant_replaced"]);
+        expect(warning).toHaveBeenCalledWith("[compaction] debt-ended notice failed", expect.objectContaining({ sessionName: seat, reason: "compaction_cancelled", errorClass: "Error" }));
+      } finally { warning.mockRestore(); }
+    });
   });
 
   describe("a delivered restore whose uptake can't be seen", () => {

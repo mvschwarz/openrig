@@ -263,6 +263,21 @@ it('an open record older than the recovery window is not resumed: rig compact --
  expect(restarted.observedCompaction(seat)?.detail).toContain('replaces a compaction from before an OpenRig restart');
 });
 
+// #3688: a restart that stops retrying a stranded attempt says it can't tell whether the seat still needs it, and the next
+// attempt says it replaced that one.
+it('a stranded record reports its debt as unknown, and the next attempt as superseded',async()=>{
+ const f=fixture();const first=await compactedBy(f);const attemptId=first.getPreparationState(seat)!.attemptId;
+ f.advance(RESTART_RECOVERY_WINDOW_MS_DEFAULT+1);
+ const ended=vi.fn();
+ const restarted=f.daemon(undefined,{onCompactionDebtEnded:ended});
+ await stateOf(restarted);await staleTick(restarted);await new Promise(resolve=>setImmediate(resolve));
+ expect(ended).toHaveBeenCalledWith({sessionName:seat,reason:'owed_unknown',attemptId});
+ await restarted.maybeAutoCompact(high);await new Promise(resolve=>setImmediate(resolve));
+ const next=restarted.getPreparationState(seat)!.attemptId;
+ expect(next).not.toBe(attemptId);
+ expect(ended).toHaveBeenLastCalledWith({sessionName:seat,reason:'attempt_superseded',attemptId:next});
+});
+
 it("a record in a shape this daemon doesn't write is ignored, so it can't hold up the seat's compaction",async()=>{
  const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);
  const record=recordFile(first);

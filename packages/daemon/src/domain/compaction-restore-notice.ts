@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
-import type { QueueRepository } from "./queue-repository.js";
+import { type CompactionDebtEnded, type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
+import type { EventBus } from "./event-bus.js";
+import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import { describeDefaultReceiver, resolveDefaultReceiver } from "./default-receiver.js";
 import { workflowHumanDestination } from "./workflow-human-destination.js";
@@ -128,8 +129,7 @@ export async function reportRestoreUptakeUnknown(db: Database.Database, queue: Q
 
 /** One diagnostic per seat/occupant: an owner's disposition stands across automatic attempt IDs and restarts. */
 export async function reportPreparationFailure(db: Database.Database, queue: QueueRepository, failure: PreparationFailure): Promise<void> {
-  const key = createHash("sha256").update(`${failure.sessionName}\0${failure.occupantGeneration}`).digest("hex").slice(0, 24);
-  const qitemId = `qitem-compaction-preparation-${key}`;
+  const qitemId = preparationNoticeId(failure.sessionName, failure.occupantGeneration);
   const summary = `Managed preparation for ${failure.sessionName}: ${failure.endedAttempts} ended unsent attempts (${failure.reason})`;
   const evidence = `Attempt ${failure.attemptId}; reason ${failure.reason}; input box ${failure.inputBox ? JSON.stringify(failure.inputBox) : "reading unavailable"}`;
   const existing = queue.getById(qitemId);
@@ -147,5 +147,119 @@ export async function reportPreparationFailure(db: Database.Database, queue: Que
     summary, wakeTrigger: "openrig", tags: ["compaction", "preparation-delivery", `occupant:${failure.occupantGeneration}`],
     evidenceRef: recipient.kind === "agent" ? failure.statePath : null,
     body: `${summary}. ${recipient.note} ${recipient.kind === "agent" ? `${evidence}. ` : ""}These are ended automatic attempts while usage remained above the threshold, not repeated sends in one attempt. Inspect rig compact ${shellQuote(failure.sessionName)} --state --json and the seat before choosing an existing supported recovery route. This finding does not force input, skip a map, reset the seat, or change its account or model. No input is authorized by this notice.`,
+  });
+}
+
+function preparationNoticeId(sessionName: string, occupantGeneration: string): string {
+  return `qitem-compaction-preparation-${createHash("sha256").update(`${sessionName}\0${occupantGeneration}`).digest("hex").slice(0, 24)}`;
+}
+
+const OPEN_NOTICE_STATES: QueueItem["state"][] = ["pending", "in-progress", "blocked"];
+const NOTICE_KINDS = [
+  { prefix: "qitem-compaction-restore-", kind: "restore", label: "Managed restore" },
+  { prefix: "qitem-compaction-uptake-", kind: "uptake", label: "Restore uptake check" },
+  { prefix: "qitem-compaction-preparation-", kind: "preparation", label: "Managed preparation" },
+] as const;
+
+function noticeKind(item: QueueItem): (typeof NOTICE_KINDS)[number] | null {
+  return NOTICE_KINDS.find((k) => item.qitemId.startsWith(k.prefix)) ?? null;
+}
+
+function openNotices(queue: QueueRepository, sourceSession?: string): QueueItem[] {
+  return queue.list({ tag: "compaction", state: OPEN_NOTICE_STATES, limit: 1000, ...(sourceSession ? { sourceSession } : {}) })
+    .filter((item) => noticeKind(item) !== null);
+}
+
+/** Close an open notice the debt no longer backs, as #3415 closes it after delivery. `canceled` and `superseded`
+ *  closures stay out of #3415's reopen branch, which only reopens its own `no-follow-on` close. A row the owner moved
+ *  meanwhile keeps the owner's disposition. */
+function closeNotice(queue: QueueRepository, item: QueueItem, closureReason: "canceled" | "superseded", why: string): void {
+  const note = `${noticeKind(item)!.label} for ${item.sourceSession}: no longer owed: ${why}`;
+  try {
+    queue.update({ qitemId: item.qitemId, actorSession: "system:compaction", expectState: item.state, state: "done",
+      closureReason, resolution: note, transitionNote: note });
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "qitem_state_changed") throw error;
+  }
+}
+
+/** Where OpenRig can't tell whether the debt ended, the open notice says so once and stays open. */
+function noteOwedUnknown(queue: QueueRepository, item: QueueItem, why: string): void {
+  const note = `${noticeKind(item)!.label} for ${item.sourceSession}: OpenRig can't tell whether this is still owed: ${why}`;
+  if (queue.listTransitions(item.qitemId).at(-1)?.transitionNote === note) return;
+  try {
+    queue.update({ qitemId: item.qitemId, actorSession: "system:compaction", expectState: item.state, transitionNote: note });
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "qitem_state_changed") throw error;
+  }
+}
+
+/** #3688: settle the notices a seat's compaction opened once their debt ends without a delivery. */
+export function settleCompactionNotices(queue: QueueRepository, ended: CompactionDebtEnded): void {
+  const { sessionName } = ended;
+  for (const item of openNotices(queue, sessionName)) {
+    const kind = noticeKind(item)!;
+    const attemptId = kind.kind === "preparation" ? null : item.qitemId.slice(kind.prefix.length);
+    switch (ended.reason) {
+      case "compaction_cancelled":
+        // Only the attempt the cancel ended. The seat and its occupant stay: a preparation notice counts their ended
+        // attempts and is left as it is.
+        if (attemptId !== null && attemptId === ended.attemptId) closeNotice(queue, item, "canceled", "the compaction was cancelled (rig compact --cancel), so OpenRig stopped owing its remaining steps and its uptake check. This records the cancel, not that the seat restored.");
+        break;
+      case "attempt_superseded":
+        if (attemptId !== null && ended.attemptId && attemptId !== ended.attemptId) {
+          closeNotice(queue, item, "superseded", `attempt ${ended.attemptId} replaced attempt ${attemptId} on this seat, so OpenRig no longer owes the earlier attempt's steps or its uptake check.`);
+        }
+        break;
+      case "occupant_replaced": {
+        const generation = ended.occupantGeneration ?? null;
+        const replaced = `the seat's occupant was replaced${generation ? ` (retiring generation ${generation})` : ""}, and OpenRig dropped this compaction with it; the new occupant doesn't inherit it.`;
+        if (attemptId !== null) closeNotice(queue, item, "canceled", replaced);
+        else if (generation === null) {
+          noteOwedUnknown(queue, item, "the seat's occupant was replaced, but the retiring occupant's generation wasn't recorded, so OpenRig can't tell whether this notice was that occupant's. Close it if it was.");
+        } else if (item.qitemId === preparationNoticeId(sessionName, generation)) closeNotice(queue, item, "canceled", replaced);
+        break;
+      }
+      case "owed_unknown":
+        if (attemptId !== null && attemptId === ended.attemptId && kind.kind === "restore") {
+          noteOwedUnknown(queue, item, "after a restart OpenRig found this compaction's record older than its recovery window, so it no longer retries these steps, and it can't tell whether the seat still needs them.");
+        }
+        break;
+    }
+  }
+}
+
+/** A seat is removed when no node carries its name any more, in any rig. An unclaim keeps the node, and an archived rig
+ *  keeps its nodes (it can be restored, and a seat still running in it is still monitored). */
+export function seatNameCarried(db: Database.Database): (sessionName: string) => boolean {
+  const carried = db.prepare(`SELECT 1 FROM nodes n WHERE
+    EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id AND s.session_name = ?)
+    OR EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id AND (b.tmux_session = ? OR b.external_session_name = ?)) LIMIT 1`);
+  return (sessionName) => !!carried.get(sessionName, sessionName, sessionName);
+}
+
+/** #3688: a removed seat's open notices close, since nothing is left to deliver to or take up their steps. */
+export function closeNoticesOfRemovedSeats(queue: QueueRepository, carriesSessionName: (sessionName: string) => boolean): void {
+  const gone = new Map<string, boolean>();
+  for (const item of openNotices(queue)) {
+    if (!gone.has(item.sourceSession)) gone.set(item.sourceSession, !carriesSessionName(item.sourceSession));
+    if (gone.get(item.sourceSession)) {
+      closeNotice(queue, item, "canceled", `${item.sourceSession} no longer exists on this host, so nothing can deliver or take up this step.`);
+    }
+  }
+}
+
+/** Settles once at startup, for seats removed while no daemon ran, and again after each removal event commits. A failure
+ *  leaves a safe diagnostic and never fails the startup or the removal. */
+export function wireCompactionNoticeSeatRemoval(eventBus: Pick<EventBus, "subscribe">, queue: QueueRepository,
+  carriesSessionName: (sessionName: string) => boolean): () => void {
+  const settle = (cause: string) => {
+    void Promise.resolve().then(() => closeNoticesOfRemovedSeats(queue, carriesSessionName)).catch((error) => {
+      console.warn("[compaction] removed-seat notice settle failed", { cause, errorClass: error instanceof Error ? error.name : typeof error });
+    });
+  };
+  settle("startup");
+  return eventBus.subscribe((event) => {
+    if (event.type === "session.detached" || event.type === "node.removed" || event.type === "rig.deleted") settle(event.type);
   });
 }
