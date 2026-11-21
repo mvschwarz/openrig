@@ -73,7 +73,10 @@ field, with `state: unknown` and the raw `error` value in `rawSubtype`.
 `provider_billing_error`. The current occupant's last such failure raises attention
 until a hook shows a newer turn (a prompt, a question to a person, a `Stop` or
 `PostToolBatch`, or another `StopFailure`) or another occupant takes the seat; as for any
-hook, an occupant that can't be told shows nothing. Claude's idle notification and the
+hook, an occupant that can't be told shows nothing.
+Retention is bounded to the node's newest 200 activity records: a failure followed by 200 records that
+show no newer turn stops showing, even without a newer turn or occupant; this does not mean the account recovered.
+Claude's idle notification and the
 five-minute hook freshness window alone don't end it, and hook freshness is unchanged
 for everything else. The row serves that failure, with its original event time, over the cached pane
 reading, and the reason column names it. It says the last reported failure hasn't been
