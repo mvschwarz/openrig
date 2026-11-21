@@ -128,8 +128,10 @@ function pendingMarkerPath(input) {
 // generated + the marker is written), carrying the SAME identity binding the marker gets.
 // Its presence-without-a-marker is what lets the bridge be LOUD about a missing packet
 // (hook died partway / write failed); policy off = no hook = no sentinel = silent.
-function writeExpectedSentinel(input) {
-  const p = path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.expected.json`);
+// It also names this compaction's packet build from the start (packetJob), so a marker from any other build can't stand
+// in for it.
+function writeExpectedSentinel(input, packetJob) {
+  const p = sentinelPath(input);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, `${JSON.stringify({
     version: 1,
@@ -139,14 +141,19 @@ function writeExpectedSentinel(input) {
     sessionId: input.session_id || input.sessionId || null,
     transcriptPath: input.transcript_path || null,
     createdAt: nowIso(),
+    packetJob,
   }, null, 2)}\n`, "utf8");
 }
 
-function writePendingRestoreMarker(input, parsed, restoreInstruction, customMessage) {
-  const markerPath = pendingMarkerPath(input);
-  fs.mkdirSync(path.dirname(markerPath), { recursive: true });
-  const payload = {
+function sentinelPath(input) {
+  return path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.expected.json`);
+}
+
+// The marker carries its build's jobId: the bridge delivers it only while the sentinel names that build.
+function restoreMarker(input, parsed, restoreInstruction, customMessage, jobId) {
+  return {
     version: 1,
+    jobId,
     managedRefocusPending: typeof input.custom_instructions === "string"
       && input.custom_instructions.trimStart().startsWith("OpenRig managed compaction; wait for the restore request."),
     createdAt: nowIso(),
@@ -161,8 +168,6 @@ function writePendingRestoreMarker(input, parsed, restoreInstruction, customMess
     deliveredAt: null,
     deliveryCount: 0,
   };
-  fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  return markerPath;
 }
 
 // Slice 27 — read the OpenRig config directly (no daemon HTTP dependency
@@ -262,11 +267,12 @@ function failureText(reason) {
   return `Claude compaction restore packet generation failed: ${reason}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
 }
 
-// The packet build's job and result, one pair per seat: the hook writes the job, the finisher writes the result. The
-// sentinel records the job (its id, the finisher's pid, the result path) so the bridge can tell building from failed.
-function packetJobPaths(input) {
-  const base = path.join(getOpenRigHome(), "compaction", "packet-jobs", sessionKey(input));
-  return { jobPath: `${base}.job.json`, resultPath: `${base}.result.json` };
+// Each packet build has its own job, result and reported-status files, named by its jobId, so builds for one seat never
+// read, replace or remove each other's. The hook writes the job; the finisher writes the result and removes its own job;
+// the bridge writes which status it last reported. Results stay behind, a few KB each.
+function packetJobPaths(input, jobId) {
+  const base = path.join(getOpenRigHome(), "compaction", "packet-jobs", `${sessionKey(input)}.${jobId}`);
+  return { jobPath: `${base}.job.json`, resultPath: `${base}.result.json`, reportPath: `${base}.reported.json` };
 }
 
 function writeJsonAtomic(file, value) {
@@ -284,15 +290,21 @@ function readResult(resultPath, jobId) {
 }
 
 function recordPacketJob(input, packetJob) {
-  const p = path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.expected.json`);
+  const p = sentinelPath(input);
   try {
     const sentinel = JSON.parse(fs.readFileSync(p, "utf8"));
-    fs.writeFileSync(p, `${JSON.stringify({ ...sentinel, packetJob }, null, 2)}\n`, "utf8");
+    writeJsonAtomic(p, { ...sentinel, packetJob });
   } catch { /* the sentinel is written first; without it the bridge stays as it was */ }
 }
 
-// --finish <job>: the detached packet build. It has no time limit; it writes the marker the normal way when the packet is
-// made, and its result either way.
+function isCurrentJob(input, jobId) {
+  try { return JSON.parse(fs.readFileSync(sentinelPath(input), "utf8")).packetJob?.jobId === jobId; } catch { return false; }
+}
+
+// --finish <job>: the detached packet build. It has no time limit. Its result records the outcome either way, and on
+// success carries the marker. It publishes that marker only while the seat's sentinel still names this build; a later
+// compaction's build owns the marker otherwise, and the bridge reads the current build's own result if this one wins a
+// late write anyway.
 function runFinisher(jobPath) {
   const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
   const result = spawnSync(process.execPath, job.args, { encoding: "utf8" });
@@ -300,8 +312,11 @@ function runFinisher(jobPath) {
   if (result.status === 0) {
     try {
       const parsed = JSON.parse(result.stdout);
-      const markerPath = writePendingRestoreMarker(job.input, parsed, restoreText(parsed.outputDir), job.customMessage);
-      outcome = { ok: true, outputDir: parsed.outputDir, markerPath };
+      const marker = restoreMarker(job.input, parsed, restoreText(parsed.outputDir), job.customMessage, job.jobId);
+      const markerPath = pendingMarkerPath(job.input);
+      const published = isCurrentJob(job.input, job.jobId);
+      if (published) writeJsonAtomic(markerPath, marker);
+      outcome = { ok: true, outputDir: parsed.outputDir, markerPath, published, marker };
     } catch (error) {
       outcome = { ok: false, reason: error.message };
     }
@@ -327,7 +342,9 @@ try {
     process.stderr.write("OPENRIG_TEST_CLOCK_NOW active — timestamps are injected\n");
   }
   const input = readHookInput();
-  writeExpectedSentinel(input); // R5: sentinel FIRST, before the packet + marker (catches hook-died-partway)
+  const jobId = randomUUID();
+  const { jobPath, resultPath, reportPath } = packetJobPaths(input, jobId);
+  writeExpectedSentinel(input, { jobId, resultPath, reportPath }); // R5: sentinel FIRST, before the packet + marker (catches hook-died-partway)
   const args = [restoreScript, "--out", outRoot, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.transcript_path && input.transcript_path.endsWith(".jsonl") && fs.existsSync(input.transcript_path)) {
@@ -338,13 +355,11 @@ try {
 
   const customMessage = readClaudeCompactionMessage();
 
-  const { jobPath, resultPath } = packetJobPaths(input);
-  const jobId = randomUUID();
   writeJsonAtomic(jobPath, { jobId, input, args, customMessage, resultPath });
   const finisher = spawn(process.execPath, [fileURLToPath(import.meta.url), "--finish", jobPath], { detached: true, stdio: "ignore" });
   finisher.unref();
   const startedAt = nowIso();
-  recordPacketJob(input, { jobId, pid: finisher.pid ?? null, resultPath, startedAt });
+  recordPacketJob(input, { jobId, pid: finisher.pid ?? null, resultPath, reportPath, startedAt });
 
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
   const deadline = Date.now() + restoreTimeoutMs;
