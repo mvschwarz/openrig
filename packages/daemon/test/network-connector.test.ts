@@ -38,6 +38,8 @@ class FakeHub {
   readonly stallShow = new Set<string>();
   /** Runs while a show is waiting on the hub, before it answers. */
   duringShow: ((id: string) => void) | null = null;
+  /** Runs while a connection is being set up, before it's ready. */
+  duringConnect: (() => void) | null = null;
   /** Someone else closes these items just as ours arrives: the hub keeps theirs and answers ours as done. */
   readonly raceClose = new Map<string, Partial<HubItem>>();
   closes = 0;
@@ -54,6 +56,7 @@ class FakeHub {
 
   readonly connect: HubConnect = async (_url, token, signal) => {
     this.tokens.push(token);
+    this.duringConnect?.();
     if (this.revoked) throw new HubError("revoked", "The hub refused this participant's credential.");
     if (this.down) throw new HubError("unavailable", "The hub couldn't be reached: connect ECONNREFUSED");
     const get = (id: string) => {
@@ -836,6 +839,54 @@ describe("network connector", () => {
       const texts = [repo.getById("req-13")!.body, ...repo.listTransitions("req-13").map((t) => t.transitionNote)].join("\n");
       expect(texts).not.toContain("pasted-key");
       expect(texts).toContain("https://hub.example/mcp (query hidden)");
+    });
+
+    it("a command retry of an unconfirmed create shows the hub item first: one the hub rerouted after the lost reply is found, not refused", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-20");
+      hub.loseCreateAnswer.add(hubId);
+      expect((await send(b.id, "req-20")).state).toBe("unknown");
+      expect(hub.creates).toBe(1);
+      // The hub hands the item to another seat before the command is retried.
+      answer(hubId, { destinationSession: `relief-${PEER}` });
+      const shows: string[] = [];
+      hub.duringShow = (id) => { shows.push(id); };
+      expect(await send(b.id, "req-20")).toMatchObject({ state: "sent", hubQitemId: hubId });
+      expect(shows).toEqual([hubId]);
+      expect(hub.creates).toBe(1);
+      expect(repo.getById("req-20")!.state).toBe("blocked");
+      hub.duringShow = null;
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Done by the relief." });
+      await pass(b.id);
+      expect(repo.getById("req-20")).toMatchObject({ state: "done", resolution: "Done by the relief." });
+      expect(hub.creates).toBe(1);
+    });
+
+    it.each(["cancel", "erasure", "disconnect"] as const)("the person's %s while the pass reads a missing hub item starts no create", async (what) => {
+      const b = bind();
+      hub.down = true;
+      expect((await send(b.id, "req-21")).state).toBe("unknown");
+      hub.down = false;
+      hub.duringShow = () => {
+        if (what === "cancel") repo.update({ qitemId: "req-21", actorSession: b.localSession, state: "done", closureReason: "canceled" });
+        if (what === "erasure") db.prepare("UPDATE queue_items SET body = '', summary = NULL WHERE qitem_id = 'req-21'").run();
+        if (what === "disconnect") bindings.disconnect(b.id);
+      };
+      await pass(b.id);
+      expect(hub.creates).toBe(0);
+      expect(outcome("req-21")).toEqual({ outcome: what === "cancel" ? "local_closed" : what === "erasure" ? "unknown" : null });
+    });
+
+    it.each(["cancel", "disconnect"] as const)("the person's %s while the command reaches the hub starts no create", async (what) => {
+      const b = bind();
+      hub.duringConnect = () => {
+        if (what === "cancel") repo.update({ qitemId: "req-22", actorSession: b.localSession, state: "done", closureReason: "canceled" });
+        else bindings.disconnect(b.id);
+      };
+      expect((await send(b.id, "req-22")).state).toBe("unknown");
+      hub.duringConnect = null;
+      expect(hub.creates).toBe(0);
+      expect(outcome("req-22")).toEqual({ outcome: what === "cancel" ? "local_closed" : null });
     });
 
     it("a retry after a local cancel sends nothing; a refusal from show that isn't not-found neither creates nor closes", async () => {

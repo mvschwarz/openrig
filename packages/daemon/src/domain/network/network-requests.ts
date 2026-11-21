@@ -177,6 +177,50 @@ async function createOnHub(hub: HubSession, receipt: RequestRow, payload: { body
   }
 }
 
+/** What stops a create just before it starts: the binding no longer active, or the local item closed or erased here. */
+type CreateStop = "binding" | "closed" | "erased";
+type BeforeCreate = { kind: "ready"; payload: { body: string; summary: string | null } } | { kind: "stopped"; stop: CreateStop };
+
+/** Read right before a remote create, never from a copy taken before an await: the binding the create goes through and the
+ *  local item, with the request's payload from that item as it is now. A close, erasure or disconnect here meanwhile
+ *  stops the create. */
+function beforeCreate(deps: NetworkRequestDeps, bindingId: string, receipt: RequestRow, live: () => boolean): BeforeCreate {
+  if (!live() || deps.bindings.get(bindingId)?.state !== "active") return { kind: "stopped", stop: "binding" };
+  const local = deps.queueRepo.getById(receipt.local_qitem_id);
+  if (local && LOCAL_CLOSED.has(local.state)) return { kind: "stopped", stop: "closed" };
+  const payload = local ? requestPayload(local, receipt) : null;
+  return payload ? { kind: "ready", payload } : { kind: "stopped", stop: "erased" };
+}
+
+type Reached = CreateOutcome | { kind: "found"; item: HubItem } | { kind: "stopped"; stop: CreateStop };
+
+/** The request's hub item, read before any create. With `showFirst` (a request the hub may already hold), it's shown by
+ *  its id first, and only a confirmed qitem_not_found, for a request the hub never confirmed, goes on to the create under
+ *  that id; any other answer to the show (unavailable, out of scope, unreadable) leaves the outcome unknown. The command's
+ *  retry and the connector's pass both go through here. A revoked credential is thrown. */
+async function reachOnHub(deps: NetworkRequestDeps, hub: HubSession, bindingId: string, receipt: RequestRow, showFirst: boolean,
+  live: () => boolean = () => true): Promise<Reached> {
+  if (showFirst) {
+    try {
+      return { kind: "found", item: await hub.show(receipt.hub_qitem_id) };
+    } catch (error) {
+      if (!(error instanceof HubError) || error.kind === "revoked") throw error;
+      if (receipt.hub_created_at || error.code !== "qitem_not_found") return { kind: "unknown", error };
+    }
+  }
+  const ready = beforeCreate(deps, bindingId, receipt, live);
+  if (ready.kind === "stopped") return ready;
+  return createOnHub(hub, receipt, ready.payload);
+}
+
+/** Why a create didn't start, on the receipt. A close or erasure here settles the request; an ended binding leaves it open
+ *  for a new binding for the same seat, hub and participant to take over. */
+function stopBeforeCreate(deps: NetworkRequestDeps, receipt: RequestRow, stop: CreateStop, now: () => Date): void {
+  if (stop === "closed") settle(deps, receipt, "local_closed", now);
+  else if (stop === "erased") settle(deps, receipt, "unknown", now, "The request's text is gone here, so it can't be sent.");
+  else noteError(deps, receipt, "The binding wasn't active at the create, so nothing was sent through it.");
+}
+
 /** Send a request to a peer through the binding's hub. It's recorded first, as an item from the seat to OpenRig under
  *  `requestId`, parked on the hub item; then created on the hub. A create the hub refused closes the local item failed
  *  with the hub's words; one whose outcome isn't known stays parked, and the connector's next pass finds or creates it by
@@ -248,13 +292,20 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     settle(deps, receipt, closedHere ? "local_closed" : "unknown", now, closedHere ? null : "The request's text is gone here, so it can't be sent.");
     return result(receipt, "unknown", `${requestId} was ${closedHere ? "closed" : "erased"} here before the hub confirmed hub item ${hubId}, so it isn't sent.`);
   }
-  let outcome: CreateOutcome;
+  // A request recorded before whose create wasn't confirmed: its hub item is shown first, as the connector's pass does.
+  let outcome: Reached;
   try {
-    outcome = await withHub(deps, binding, token, (hub) => createOnHub(hub, receipt, payload));
+    outcome = await withHub(deps, binding, token, (hub) => reachOnHub(deps, hub, binding.id, receipt, !!existing));
   } catch (error) {
     if (!(error instanceof HubError)) throw error;
     // The credential refused is definite here too: nothing can be sent through this binding.
     outcome = error.kind === "revoked" ? { kind: "refused", error } : { kind: "unknown", error };
+  }
+  if (outcome.kind === "stopped") {
+    stopBeforeCreate(deps, receipt, outcome.stop, now);
+    return result(receipt, "unknown", outcome.stop === "binding"
+      ? `${binding.id} wasn't active when ${requestId} was to be created on the hub, so nothing was sent. A new binding for the same seat, hub and participant picks it up.`
+      : `${requestId} was ${outcome.stop === "closed" ? "closed" : "erased"} here before the hub confirmed hub item ${hubId}, so it isn't sent.`);
   }
   if (outcome.kind === "refused") {
     refuse(deps, receipt, outcome.error, now);
@@ -265,7 +316,8 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     return result(receipt, "unknown", `${requestId} is recorded, and whether the hub has it yet is unknown (${outcome.error.message}). The connector checks hub item ${hubId} on its next pass and creates it there under the same id if it's missing. Retry only with the same --id.`);
   }
   deps.db.prepare("UPDATE network_requests SET hub_created_at = ?, last_error = NULL WHERE local_qitem_id = ?").run(now().toISOString(), requestId);
-  return result(receipt, "sent", `Sent to ${peer} as hub item ${hubId}. Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.`);
+  return result(receipt, "sent", `${outcome.kind === "found" ? `${requestId} is already on the hub as hub item ${hubId}` : `Sent to ${peer} as hub item ${hubId}`}. `
+    + `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.`);
 }
 
 function result(receipt: RequestRow, state: NetworkRequestState, message: string): NetworkRequestResult {
@@ -324,30 +376,22 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
     if (!local) { settle(deps, receipt, "unknown", now, "The local item is gone, so the answer has nowhere to land."); continue; }
     // Someone here closed it first: that disposition stands, and the hub item is left as it is.
     if (LOCAL_CLOSED.has(local.state)) { settle(deps, receipt, "local_closed", now); continue; }
-    let shown: HubItem | null = null;
-    try {
-      shown = await hub.show(receipt.hub_qitem_id);
-    } catch (error) {
-      if (!(error instanceof HubError) || error.kind === "revoked") throw error;
-      noteError(deps, receipt, error.message);
+    // Only a confirmed not-found means a create never landed. Any other refusal of the show (out of scope after a lost
+    // reply, say) is recorded, and the request is neither created again nor closed on it.
+    const reached = await reachOnHub(deps, hub, binding.id, receipt, true, live);
+    if (reached.kind === "stopped") {
+      stopBeforeCreate(deps, receipt, reached.stop, now);
+      if (reached.stop === "binding") break;
+      continue;
+    }
+    if (reached.kind === "refused") { refuse(deps, receipt, reached.error, now); continue; }
+    if (reached.kind === "unknown") {
+      noteError(deps, receipt, reached.error.message);
       // The hub stopped answering partway: the rest wait for the next pass, and the work taken in this pass stands.
-      if (error.kind === "unavailable") break;
-      // Only a confirmed not-found means a create never landed. Any other refusal (out of scope after a lost reply, say)
-      // is recorded, and the request is neither created again nor closed on it.
-      if (receipt.hub_created_at || error.code !== "qitem_not_found") continue;
+      if (reached.error.kind === "unavailable") break;
+      continue;
     }
-    if (!shown) {
-      const payload = requestPayload(local, receipt);
-      if (!payload) { settle(deps, receipt, "unknown", now, "The request's text is gone here, so it can't be sent."); continue; }
-      const created = await createOnHub(hub, receipt, payload);
-      if (created.kind === "refused") { refuse(deps, receipt, created.error, now); continue; }
-      if (created.kind === "unknown") {
-        noteError(deps, receipt, created.error.message);
-        if (created.error.kind === "unavailable") break;
-        continue;
-      }
-      shown = created.item;
-    }
+    const shown = reached.item;
     if (!receipt.hub_created_at) {
       deps.db.prepare("UPDATE network_requests SET hub_created_at = ?, last_error = NULL WHERE local_qitem_id = ?").run(now().toISOString(), receipt.local_qitem_id);
     }
