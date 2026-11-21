@@ -673,7 +673,7 @@ function promptEpisodeFixture() {
   const alerts = () => repo.list({ limit: 100 }).filter(r => r.tags?.includes("wake-prompt-refusal"));
   const newPromptNotes = (id: string) => repo.listTransitions(id)
     .filter(t => t.transitionNote?.startsWith("prompt escalation: a new permission prompt joined this alert"));
-  return { f, repo, lead, woken, tick, later, alerts, newPromptNotes };
+  return { f, repo, lead, read, woken, tick, later, alerts, newPromptNotes };
 }
 
 it.each(["open", "owner-held"])("a second permission prompt at a seat whose alert is %s wakes the alert's owner once, with one transition and no new row", async hold => {
@@ -765,4 +765,85 @@ it("the production reader keys each prompt by its own start; an alert owner with
     expect(f.paste).not.toHaveBeenCalled();
     expect(f.enter).not.toHaveBeenCalled();
   } finally { await scheduler.stop(); }
+});
+
+// #3611 r1: the four controls dev-guard asked for.
+it("a request owns every notification after it in its run: a third hook keeps the prompt's start and wakes no one again", async () => {
+  const { f, lead, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  const request = await later(0, "PermissionRequest", null);
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  await later(6_000, "Notification", "permission_prompt");
+  await tick();
+  await later(6_000, "Notification", "permission_prompt");
+  await tick();
+  await tick();
+  expect(f.store.findPermissionPromptStart({ sessionName: f.name, generation: f.generation })).toBe(request);
+  expect(woken).toEqual([lead]);
+  expect(newPromptNotes(id)).toEqual([]);
+});
+
+it("a prompt whose start is read only after its alert was closed keeps that close; a prompt that starts after the close alerts", async () => {
+  const { f, repo, lead, woken, tick, later } = promptEpisodeFixture();
+  let readable = false;
+  const flaky = makePermissionPromptReader({ db: f.db, log: () => {},
+    getLatestHook: destination => f.store.getLatestForNode({ sessionName: destination, order: "source" }),
+    getPromptStart: (destination, generation) => {
+      if (!readable) throw new Error("retained events unreadable");
+      return f.store.findPermissionPromptStart({ sessionName: destination, generation });
+    } });
+  const open = () => repo.list({ limit: 100 }).filter(r => r.tags?.includes("wake-prompt-refusal")
+    && ["pending", "in-progress", "blocked"].includes(r.state));
+  await later(0, "Notification", "permission_prompt");
+  await tick(flaky);
+  const id = open()[0]!.qitemId;
+  expect(repo.getById(id)!.tags).toContain(`prompt-episode:${f.name}|permission-hook:${f.generation}|after:start`);
+  await repo.update({ qitemId: id, actorSession: lead, state: "done", closureReason: "no-follow-on" });
+  readable = true; // the same retained hook, its start readable now
+  await tick(flaky);
+  await tick(flaky);
+  expect(open()).toEqual([]);
+  expect(woken).toEqual([lead]);
+  await later(15_000, "Notification", "permission_prompt");
+  await tick(flaky);
+  expect(open()).toHaveLength(1);
+});
+
+it("a new prompt that clears while the tick awaits hook reviews gets no stale wake", async () => {
+  const { f, repo, lead, read, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  await later(0, "Notification", "permission_prompt");
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  await later(14_000, "Notification", "permission_prompt");
+  await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+    resolveOrchestrator: () => lead, readPermissionPrompts: read, retryIntervalSeconds: 1,
+    // The seat moves on while this read is pending: its next turn starts, so the second prompt is gone.
+    readHookReviews: async () => { await later(1_000, "UserPromptSubmit", null); return []; },
+    attemptWake: async (_id, target) => { woken.push(target); return "verified"; } });
+  expect(woken).toEqual([lead]);
+  expect(newPromptNotes(id)).toEqual([]);
+});
+
+it("a new prompt's wake that a drain defers stays owed on a pending alert, and goes once when the drain lets go", async () => {
+  const { f, repo, lead, read, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  let draining = false;
+  const attempts: string[] = [];
+  const tick = () => runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+    resolveOrchestrator: () => lead, readPermissionPrompts: read, retryIntervalSeconds: 1,
+    attemptWake: async (_id, target) => { if (draining) return "deferred:rig_delivery_drain"; attempts.push(target); return "verified"; } });
+  await later(0, "Notification", "permission_prompt");
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  expect(repo.getById(id)!.state).toBe("pending");
+  await later(14_000, "Notification", "permission_prompt");
+  draining = true;
+  await tick();
+  expect(newPromptNotes(id)).toEqual([]);
+  draining = false;
+  const before = attempts.length;
+  await tick();
+  await tick();
+  expect(newPromptNotes(id)).toHaveLength(1);
+  expect(newPromptNotes(id)[0]!.transitionNote).toContain(`woke ${lead} outcome=verified`);
+  expect(attempts.slice(before)).toContain(lead);
 });

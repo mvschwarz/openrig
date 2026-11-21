@@ -1334,12 +1334,16 @@ async function advancePromptRefusals(
   // membership is the same exact json_each value equality; and nothing below writes before the last episode is
   // checked, so every episode sees the snapshot its own lookup would have read.
   let closedAlertTags: Set<unknown> | undefined;
-  const closedEpisode = (episodeTag: string): boolean => {
-    closedAlertTags ??= new Set((deps.db.prepare(`WITH alerts AS MATERIALIZED (
+  /** For each tag on a closed alert, when the latest such alert closed (its first transition into its final state). */
+  let closedAlertAt: Map<string, string> | undefined;
+  const closedEpisode = (episodeTag: string, promptStart?: string): boolean => {
+    if (!closedAlertTags) {
+      const closedRows = deps.db.prepare(`WITH alerts AS MATERIALIZED (
         SELECT qitem_id, tags, state, source_session, handed_off_from FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
           AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)),
       closed AS MATERIALIZED (
-        SELECT tags FROM alerts q WHERE state NOT IN ('pending','in-progress','blocked')
+        SELECT tags, (SELECT MIN(f.ts) FROM queue_transitions f WHERE f.qitem_id = q.qitem_id AND f.state = q.state) AS closed_at
+          FROM alerts q WHERE state NOT IN ('pending','in-progress','blocked')
           AND (state != 'handed-off' OR NOT EXISTS (
             SELECT 1 FROM alerts successor WHERE successor.handed_off_from = q.qitem_id))
           -- A tagged local successor carries custody; replaced tags or no local successor leave a final disposition.
@@ -1349,9 +1353,22 @@ async function advancePromptRefusals(
             AND t.actor_session = q.source_session AND t.transition_note = ?
             AND NOT EXISTS (SELECT 1 FROM queue_transitions c WHERE c.qitem_id = q.qitem_id
               AND c.actor_session = ? AND c.transition_note = ?)))
-      SELECT j.value FROM closed, json_each(closed.tags) j`)
-      .all(PROMPT_ALERT_TAG, LEGACY_PROMPT_RETIRED_NOTE, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as Array<{ value: unknown }>).map(row => row.value));
-    return closedAlertTags.has(episodeTag);
+      SELECT j.value, closed.closed_at FROM closed, json_each(closed.tags) j`)
+        .all(PROMPT_ALERT_TAG, LEGACY_PROMPT_RETIRED_NOTE, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as Array<{ value: unknown; closed_at: string | null }>;
+      closedAlertTags = new Set(closedRows.map(row => row.value));
+      closedAlertAt = new Map();
+      for (const row of closedRows) {
+        if (typeof row.value !== "string" || !row.closed_at) continue;
+        const known = closedAlertAt.get(row.value);
+        if (!known || Date.parse(row.closed_at) > Date.parse(known)) closedAlertAt.set(row.value, row.closed_at);
+      }
+    }
+    if (closedAlertTags.has(episodeTag)) return true;
+    // A prompt whose start became readable only later was keyed by its generation alone before. An alert closed under that
+    // key while the prompt had already started disposed of it too; a prompt that started after that close is new.
+    if (!promptStart) return false;
+    const fallbackClosedAt = closedAlertAt!.get(episodeTag.replace(`|prompt:${promptStart}|`, "|"));
+    return fallbackClosedAt !== undefined && Date.parse(promptStart) <= Date.parse(fallbackClosedAt);
   };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
@@ -1441,7 +1458,7 @@ async function advancePromptRefusals(
       // Each prompt is its own episode when its start is known; otherwise the occupant's prompts share one key.
       const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}`
         + `${observation.prompt ? `|prompt:${observation.prompt}` : ""}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
-      if (closedEpisode(key)) continue;
+      if (closedEpisode(key, observation.prompt)) continue;
       let group = groups.get(observation.destination);
       if (!group) { group = { keys: [], rowKeys: new Map(), jobKeys: new Set(), rows: new Map(), jobs: new Map(), refusedAt: observation.observedAt }; groups.set(observation.destination, group); }
       group.keys.push(key);
@@ -1700,7 +1717,20 @@ async function advancePromptRefusals(
     const permissionPrefix = `${PROMPT_EPISODE_TAG}${dest}|permission-hook:`;
     if (row && group.permissionHook?.includes("|prompt:") && !row.tags?.includes(group.permissionHook)
       && row.tags?.some(t => t.startsWith(permissionPrefix) && t.includes("|prompt:"))) {
-      await wakeOwnerForNewPrompt(deps, row, dest, group.permissionHook, attemptWake);
+      // Re-read the seat first, as the send boundary below does: the observation came before the awaited hook-review read,
+      // and its prompt may have cleared or changed since. An unreadable seat leaves the whole group for the next tick, so
+      // the prompt isn't marked handled without a wake; a prompt that's positively gone or replaced gets no stale wake.
+      let current: PermissionPromptObservation | undefined;
+      try { current = deps.readPermissionPrompts?.(dest).find(o => o.destination === dest); }
+      catch (error) {
+        (deps.log ?? console.error)(`[wake-ladder] permission hook read before a new-prompt wake unreadable for ${JSON.stringify(dest)}: ${String(error)}`);
+        continue;
+      }
+      const observed = permissionObservations.get(dest);
+      if (current?.state === "blocked" && current.episode === observed?.episode && current.prompt === observed?.prompt
+        && await wakeOwnerForNewPrompt(deps, row, dest, group.permissionHook, attemptWake) === "deferred") {
+        continue; // the drain holds the owner: no membership update, so the next tick tries this prompt again
+      }
     }
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = [...keys, ...waiterTags].filter(key => !row.tags?.includes(key));
@@ -1806,17 +1836,18 @@ async function advancePromptRefusals(
  *  in one transition either way. The key on the alert marks the prompt handled. A person, the prompted seat or an address
  *  with no session here isn't woken; this adds no notice to a person. */
 async function wakeOwnerForNewPrompt(deps: WakeLadderDeps, row: QueueItem, dest: string, key: string,
-  attemptWake: (qitemId: string, target: string) => Promise<string>): Promise<void> {
+  attemptWake: (qitemId: string, target: string) => Promise<string>): Promise<"deferred" | "recorded"> {
   const owner = row.destinationSession;
   const notWoken = owner === dest ? "it is the prompted seat" : knownPerson(deps, owner) ? "it is a person"
     : !deps.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(owner) ? "it has no session on this host" : null;
   const outcome = notWoken ? null : await attemptWake(row.qitemId, owner);
-  if (outcome === "deferred:rig_delivery_drain") return; // the next tick tries again
+  if (outcome === "deferred:rig_delivery_drain") return "deferred"; // the caller leaves the prompt for the next tick
   const tags = [...(row.tags ?? []), key];
   deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(tags), row.qitemId);
   row.tags = tags;
   appendMarker(deps.queueRepo, row, notWoken ? `${PROMPT_NEW_NOTE}; ${owner} not woken: ${notWoken}`
     : `${PROMPT_NEW_NOTE}; woke ${owner} outcome=${outcome}`, true);
+  return "recorded";
 }
 
 /** Open rows with a return route and the seat each is stuck on: its own holder, or for a blocked row the seat it's blocked on,
