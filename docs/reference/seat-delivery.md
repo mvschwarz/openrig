@@ -15,6 +15,8 @@ type: `openrig-urgent`, `urgent-only`, `sends-only` and `queue-only`. Sibling se
 | `queue-only` | For a seat a person types in. Deliberate sends from people and agents type, urgent or not, never over a draft; OpenRig's own notices never type, urgent ones included | A watchdog reminder reaches the seat's queue instead (below); other notices from OpenRig are held with their urgency, and held messages stay readable |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
+For a Claude seat you type in, the opt-in [hook bridge](#claude-hook-bridge-opt-in) can deliver ordinary messages at a turn boundary without typing into its input box; it takes effect at the next launch or restore.
+
 Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`. At `queue-only` it goes ahead: the
 level only changes how OpenRig's notices reach the seat, so managed compaction and its restore still run there, and the
 seat still compacts when its context runs out. Each write they make is checked as at `draft-aware`, so it never types

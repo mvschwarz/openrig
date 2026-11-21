@@ -62,6 +62,8 @@ export interface RemoteJsonFailure {
   status?: number;
   /** Bearer message / network error message / remote error text (may be ""). */
   detail: string;
+  /** Parsed HTTP failure body for callers that need endpoint-specific detail. */
+  payload?: unknown;
   /** The answer exceeded the caller's `maxBytes` and wasn't read further (kind "network"). */
   tooLarge?: true;
 }
@@ -188,7 +190,7 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
   const remoteError = payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
     ? (payload as { error: string }).error
     : "";
-  return { ok: false, kind: "http", status: res.status, detail: remoteError };
+  return { ok: false, kind: "http", status: res.status, detail: remoteError, payload };
 }
 
 /** The body as text, or null once it passes `maxBytes` (the rest isn't read). */
