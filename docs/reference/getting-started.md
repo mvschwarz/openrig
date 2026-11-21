@@ -1089,6 +1089,48 @@ there. If a fresh start paused before context delivery, **c** finishes that
 delivery to the same occupant (from a shell, `rig seat continue <seat>` does the
 same). **r** reads actual state again; **d** expands details.
 
+## Run the daemon under a supervisor
+
+A supervisor such as launchd or systemd keeps the daemon running. These are the
+facts it needs.
+
+- **Start it through the CLI** (`rig daemon start`), not by running the daemon
+  entry directly: the start reservation, the port checks and the readiness check
+  of the child run only in the CLI's start. `rig daemon start` returns once the
+  daemon is ready and leaves it running detached, so watch the daemon's PID or
+  `rig status --json`, not the exit of that command.
+- **Give the start time.** `rig daemon start` waits up to
+  `daemon.start_readiness_wait_seconds` (default 180) for its child. Allow the
+  supervisor's own timeout for that command at least that wait plus 19 seconds.
+  When the wait runs out and the child is still alive, the start ends pending: the
+  child keeps running and the reservation is kept. Don't start again; check the
+  state first.
+- **Check liveness with `rig status --json`.** Its exit code doesn't say whether the
+  daemon is up (it is 1 only when the rig summary can't be read), so read its
+  `daemon` object. `state: "running"` is up, also with `healthy: false`, which means
+  busy. `reachable: null` isn't proof that it is down. `stopped` and `stale` mean
+  no daemon answers for `daemon.json`, but a start that is still pending can read
+  `stale` too, since it doesn't write `daemon.json` until it's ready: a new
+  `rig daemon start` then refuses with `Daemon startup is already reserved`, which
+  is that start, not a failure to retry. Don't use a short `/healthz` timeout of
+  your own as a death check: a busy daemon can take longer to answer.
+- **Restart after the process has exited.** After `rig daemon stop` or a SIGTERM,
+  wait until the PID is gone and the port refuses connections, not for a fixed
+  delay. The shutdown budget is 10 seconds, and `rig daemon stop` waits 12.
+- **Don't relaunch on a held port.** A start that finds the port in use stops with
+  the `EADDRINUSE` guidance before it spawns a child. A daemon whose listener can't
+  bind writes one `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>` line and
+  exits with status 69, and `rig daemon start` puts that line in its error. Either
+  way `rig daemon start` exits non-zero with the port named: have the wrapper stop
+  relaunching on that error and find what holds the port first, rather than retrying
+  in a loop. Only a supervisor that runs the daemon process itself sees status 69
+  (for example, `RestartPreventExitStatus=69` in a systemd unit).
+- **Leave `daemon-start.lock` alone.** A reservation from an earlier boot is
+  archived by the next start, and so is one whose recorded launcher and child are
+  both gone in the same pid namespace. Any other reservation stays (a live or
+  unknown process, no child recorded, another namespace), and the start error says
+  what to inspect.
+
 ## Kernel framing (what `rig setup` does and does not do)
 
 Explicit CLI daemon startup retains its automatic kernel behavior. The TUI

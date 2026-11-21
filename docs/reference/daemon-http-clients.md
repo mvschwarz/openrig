@@ -12,7 +12,8 @@ listed here can change.
 `OPENRIG_URL` has no `pid`. `reachable` is `true` when the daemon answered its health probe, `false` when it is
 positively down, and `null` when that isn't confirmed (see `rig status` in
 [the command reference](../as-built/cli-reference.md#status)). It reads the recorded state and probes; it never
-starts a daemon.
+starts a daemon. A supervisor that keeps the daemon running reads it as described in
+[Run the daemon under a supervisor](getting-started.md#run-the-daemon-under-a-supervisor).
 
 The CLI itself finds the daemon in these orders:
 
