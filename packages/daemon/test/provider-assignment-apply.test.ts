@@ -11,6 +11,10 @@ import { readClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
 import { accountRefUses, ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
 import type { AssignmentApplyRequest, ClaudeSeatRelaunch } from "../src/domain/provider/provider-service.js";
+import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
+import { readCurrentSeatActivity } from "../src/domain/node-inventory.js";
+import type { AgentActivity } from "../src/domain/types.js";
+import type { StructuralObservation } from "../src/domain/seat-structural-activity-service.js";
 
 // #3625 slice 3: the daemon applies a plan only while its digest matches, one apply per rig, stores the assignment and
 // each seat's result, and reads them back: in the plan, and in which seats follow an assignment rather than override it.
@@ -105,6 +109,69 @@ describe("applying an assignment on the daemon", () => {
     const uses = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
     expect(uses.remove("claude", "max-2")).toMatchObject({ ok: false, code: "in_use", usedBy: ["rig fleet (claude)"] });
     expect(JSON.stringify(result)).not.toContain(CONTENT);
+  });
+
+  it("reads each seat's activity as rig ps does: a working hook, else the pane; the plan notes a busy seat and the apply stores it", async () => {
+    seat("hook"); seat("pane"); seat("quiet");
+    // hook: its hook says it's working (the pane's idle frame doesn't outrank it). pane: no hook, and the cached pane
+    // reading is working. quiet: neither, so unknown.
+    const hooks: Record<string, AgentActivity> = { "hook@fleet": { state: "running", reason: "user_prompt_submit", evidenceSource: "runtime_hook", sampledAt: "t", stale: false } as AgentActivity };
+    const panes: Record<string, StructuralObservation> = {
+      "hook@fleet": { state: "agent_idle", reason: "idle_prompt", evidence: null, observedAt: "t" },
+      "pane@fleet": { state: "agent_active", reason: "esc_to_interrupt", evidence: "esc to interrupt", observedAt: "t" } };
+    const seatActivity = (s: string) => readCurrentSeatActivity({ hooks: { getLatestForNode: ({ sessionName }) => hooks[sessionName ?? ""] ?? null },
+      structural: { getStructuralActivity: (n) => panes[n] ?? null }, runtimeOf: () => "claude-code" }, s).activity;
+    svc = new ProviderServiceImpl({ db, listRigs: () => db.prepare("SELECT id FROM rigs ORDER BY id").all() as Array<{ id: string }>,
+      env: { HOME: dir }, platform: "linux", now: () => "2026-11-21T07:00:00.000Z", seatActivity,
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const claude = stoppedClaude();
+    const planned = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+    expect(planned.ok && planned.plan.rows.map((r) => [r.seat, r.activity, (r.notes ?? []).some((n) => n.startsWith("busy (working)"))]))
+      .toEqual([["hook@fleet", "running", true], ["pane@fleet", "running", true], ["quiet@fleet", "unknown", false]]);
+    // The activity isn't in the digest, so the apply acts on the same plan, and each result stores what the seat was doing.
+    const result = await svc.applyAssignment(request("max-2", planned.ok ? planned.plan.digest : ""), { claudeSeat: claude });
+    expect(result.ok).toBe(true);
+    expect(new ProviderAccountAssignmentsRepository(db).results("rig-fleet", "claude").map((r) => [r.seat, r.kind, r.activity]).sort())
+      .toEqual([["hook@fleet", "switched", "running"], ["pane@fleet", "switched", "running"], ["quiet@fleet", "switched", "unknown"]]);
+    // Status shows it with the seat's last result.
+    const model = await svc.getReadModel();
+    expect(model.bindings.find((b) => b.seatSession === "hook@fleet")!.assignment?.applied).toMatchObject({ kind: "switched", activity: "running" });
+  });
+
+  it("a seat brought in with --include-overrides that's already on the account follows the assignment from then on", async () => {
+    seat("own"); seat("mine");
+    // Both chose max-2 by hand. Only "own" is brought in with --include-overrides.
+    for (const id of ["own", "mine"]) db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?").run(JSON.stringify({ label: "max-2", tokenFile: path.join(dir, "max-2") }), id);
+    const claude = stoppedClaude();
+    const digest = async (over: { includeOverrides: boolean; label: string }) => {
+      const p = await svc.assignmentPlan({ rig: "fleet", provider: "claude", daemon: "host-a", ...over }, undefined, claude);
+      if (!p.ok) throw new Error(p.message);
+      return p.plan;
+    };
+    const folded = await svc.applyAssignment(request("max-2", (await digest({ includeOverrides: true, label: "max-2" })).digest, { includeOverrides: true }), { claudeSeat: claude });
+    expect(folded.ok && folded.report.results.map((r) => [r.seat, r.kind])).toEqual([["mine@fleet", "unchanged"], ["own@fleet", "unchanged"]]);
+    const saved = new ProviderAccountAssignmentsRepository(db).results("rig-fleet", "claude");
+    expect(saved.map((r) => [r.seat, r.applied?.file ?? null]).sort()).toEqual([["mine@fleet", path.join(dir, "max-2")], ["own@fleet", path.join(dir, "max-2")]]);
+    // The next assignment moves both: neither reads as its own choice again.
+    expect((await digest({ includeOverrides: false, label: "max-3" })).rows.map((r) => [r.seat, r.effect])).toEqual([["mine@fleet", "change"], ["own@fleet", "change"]]);
+  });
+
+  it("without --include-overrides, a seat on the account by its own choice records no applied account and stays its own choice", async () => {
+    seat("mine");
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = 'mine'").run(JSON.stringify({ label: "max-2", tokenFile: path.join(dir, "max-2") }));
+    const claude = stoppedClaude();
+    const result = await svc.applyAssignment(request("max-2", await digestOf("max-2", claude)), { claudeSeat: claude });
+    expect(result.ok && result.report.results.map((r) => [r.seat, r.kind])).toEqual([["mine@fleet", "unchanged"]]);
+    expect(new ProviderAccountAssignmentsRepository(db).results("rig-fleet", "claude").map((r) => r.applied ?? null)).toEqual([null]);
+    const next = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-3", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+    expect(next.ok && next.plan.rows.map((r) => [r.seat, r.effect])).toEqual([["mine@fleet", "kept_override"]]);
+  });
+
+  it("an assignment set from a caller that isn't a seat says so, rather than naming nobody", async () => {
+    seat("a");
+    const claude = stoppedClaude();
+    await svc.applyAssignment(request("max-2", await digestOf("max-2", claude), { requestedBy: null }), { claudeSeat: claude });
+    expect(new ProviderAccountAssignmentsRepository(db).intent("rig-fleet", "claude")?.requestedBy).toBe("a caller that isn't a seat");
   });
 
   it("a seat an earlier assignment moved follows the rig's assignment; one that chose its own account is still an override", async () => {

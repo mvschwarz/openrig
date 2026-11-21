@@ -74,8 +74,10 @@ export class ProviderAccountAssignmentsRepository {
 
   /** Saves a seat's result as it lands. The applied reference changes only with a switched or pending-successor result. */
   saveResult(result: Omit<AssignmentResult, "applied"> & { applied?: AppliedReference }): void {
-    const took = result.kind === "switched" || result.kind === "pending_successor";
-    const a = took ? result.applied : undefined;
+    // The apply passes the account a result put the seat on (a switch, or a seat it brought in that was already on it). A
+    // result without one keeps the seat's earlier applied account.
+    const a = result.applied;
+    const took = a !== undefined;
     this.db.prepare(`INSERT INTO provider_assignment_results (rig_id, provider, node_id, seat, label, kind, detail, recovery, activity,
         ref_file, ref_kind, codex_home, codex_login, applied_at) VALUES (@rig, @provider, @node, @seat, @label, @kind, @detail, @recovery, @activity,
         @file, @fileKind, @home, @login, @at)

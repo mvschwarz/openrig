@@ -67,7 +67,10 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     const earlier = results.findIndex((r) => r.seat === row.seat);
     if (earlier >= 0) results.splice(earlier, 1);
     results.push(result);
-    deps.save(result, kind === "switched" || kind === "pending_successor" ? applied : undefined);
+    // A seat the person brought in with --include-overrides that's already on the account records it too, as a switch
+    // would: it follows the rig's assignment from now on, rather than reading as its own choice again at the next one.
+    const onAccount = kind === "switched" || kind === "pending_successor" || (kind === "unchanged" && row.effect === "unchanged" && plan.includeOverrides);
+    deps.save(result, onAccount ? applied : undefined);
   };
   const notAttempted = (row: PlanRow) => `not attempted: its precheck was unsafe (${row.precheck!.reasons.join(", ")})`
     + (row.precheck!.message ? `: ${row.precheck!.message}` : "");

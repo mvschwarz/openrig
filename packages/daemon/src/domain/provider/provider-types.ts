@@ -107,7 +107,8 @@ export interface SeatAssignment {
   /** The rig's assignment: label, the reference it named, who asked and when. */
   intended: { label: string; reference: string; requestedBy: string | null; at: string } | null;
   /** The seat's last applied result, from any apply to its rig. */
-  applied: { kind: string; label: string; detail: string; at: string; recovery?: string } | null;
+  /** `activity` is what the seat was doing when the apply reached it (as rig ps reads it), when recorded. */
+  applied: { kind: string; label: string; detail: string; at: string; recovery?: string; activity?: string } | null;
   /** The seat's own choice, in words, when it's an override. */
   override?: string;
   /** Follows only as the apply of this label left its home: its configuration names no login, and the login active in

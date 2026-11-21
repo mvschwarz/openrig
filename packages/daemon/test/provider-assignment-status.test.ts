@@ -117,7 +117,7 @@ describe("status: each seat against its rig's assignment", () => {
     expect(changes()).toBe(touched);
     const intended = { label: "max-2", reference: `the token file ${path.join(dir, "max-2")}`, requestedBy: "lead@fleet", at: "2026-11-21T08:00:00.000Z" };
     expect(status["a@fleet"]).toEqual({ provider: "claude", state: "follows", intended,
-      applied: { kind: "switched", label: "max-2", detail: expect.any(String), at: "2026-11-21T08:00:00.000Z" } });
+      applied: { kind: "switched", label: "max-2", detail: expect.any(String), at: "2026-11-21T08:00:00.000Z", activity: "unknown" } });
     expect(status["b@fleet"]).toMatchObject({ state: "override", intended, applied: { kind: "switched" },
       override: `its own token file ${path.join(dir, "max-3")} ("max-3")` });
     // Kept by the apply as the seat's own choice: an override, with the apply's result beside it.
@@ -169,7 +169,7 @@ describe("status: each seat against its rig's assignment", () => {
       kind: "unknown", detail: "the relaunch didn't report a resumed conversation", recovery: "rig launch fleet dev.a --snapshot-id s1", activity: "idle", at: "t2" });
     expect((await statusOf())["a@fleet"]).toEqual({ provider: "claude", state: "not_applied",
       intended: { label: "max-3", reference: "the token file max-3", requestedBy: "lead@fleet", at: "t2" },
-      applied: { kind: "unknown", label: "max-3", detail: "the relaunch didn't report a resumed conversation", at: "t2", recovery: "rig launch fleet dev.a --snapshot-id s1" } });
+      applied: { kind: "unknown", label: "max-3", detail: "the relaunch didn't report a resumed conversation", at: "t2", recovery: "rig launch fleet dev.a --snapshot-id s1", activity: "idle" } });
   });
 });
 
@@ -193,7 +193,7 @@ describe("status only compares seats whose rig has an assignment", () => {
       expect(reads.length - withIntent).toBeGreaterThan(perRead);
     } finally { db.prepare = original; }
     expect(status!["a@fleet"]).toEqual({ provider: "claude", state: "no_assignment", intended: null,
-      applied: { kind: "failed_before_effect", label: "max-2", detail: "not attempted", at: "t" } });
+      applied: { kind: "failed_before_effect", label: "max-2", detail: "not attempted", at: "t", activity: "idle" } });
   });
 });
 

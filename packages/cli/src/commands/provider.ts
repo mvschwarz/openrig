@@ -169,7 +169,7 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
       if (assigned.length) {
         console.log("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
         for (const b of assigned) {
-          console.log(`  ${b["seatSession"]}  ${b["runtime"]}  ${configuredText((b["configured"] ?? {}) as Record<string, unknown>)}`);
+          console.log(`  ${b["seatSession"]}  ${b["runtime"]}  ${configuredText((b["configured"] ?? {}) as Record<string, unknown>, follows(b))}`);
           for (const line of assignmentLines(b)) console.log(line);
         }
       }
@@ -184,13 +184,15 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     return `${f["reason"] ?? "no reason given"}${f["detail"] !== undefined ? ` (${f["detail"]})` : ""}`;
   }
 
-  function configuredText(c: Record<string, unknown>): string {
+  // A seat that follows its rig's assignment has that account in its own file or home: worded as the assignment, not as a
+  // choice of its own.
+  function configuredText(c: Record<string, unknown>, follows = false): string {
     return c["source"] === "registry"
         ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
         : c["source"] === "claude_token"
-          ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${c["label"]} (the seat's own credential file)`
+          ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${c["label"]} (${follows ? "its credential file, as the rig is assigned" : "the seat's own credential file"})`
         : c["source"] === "default_login" && c["homeFrom"]
-          ? `configured: the seat's own home (${c["home"]}, from its ${c["homeFrom"]} env)`
+          ? `configured: ${follows ? "the seat's home" : "the seat's own home"} (${c["home"]}, from its ${c["homeFrom"]} env${follows ? ", as the rig is assigned" : ""})`
         : c["source"] === "default_login"
           ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
           : `configured: unknown (${c["reason"]})`;
@@ -209,6 +211,8 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     }
     return "this seat isn't configured as assigned: its last result didn't move it";
   }
+
+  const follows = (r: Record<string, unknown>) => (r["assignment"] as Record<string, unknown> | undefined)?.["state"] === "follows";
 
   function assignmentLines(r: Record<string, unknown>): string[] {
     const a = r["assignment"] as Record<string, unknown> | undefined;
@@ -233,7 +237,7 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     console.log(`SEATS${where} (configured account; not proof of the login a running session uses)`);
     for (const r of rows) {
       const c = (r["configured"] ?? {}) as Record<string, unknown>;
-      const configured = configuredText(c);
+      const configured = configuredText(c, follows(r));
       const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
       console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
       if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);

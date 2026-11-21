@@ -895,17 +895,17 @@ and changes nothing. In this run, team-dev and team-qa are running on the defaul
 token file. The paths and the host id are shortened; a digest belongs to its own plan, so yours will differ:
 
 ```text
-Plan 205864aff64d on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
-team-dev@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity unknown
-team-qa@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity unknown
+Plan a4814078dba8 on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
+team-dev@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity idle
+team-qa@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity idle
 team-review@my-rig: kept (seat override): its own token file /home/me/keys/claude-own ("own"); --include-overrides moves it too
-A plan only: nothing was changed. Apply exactly this plan with: rig provider assign my-rig --provider claude --account work --apply --plan 205864aff64d
+A plan only: nothing was changed. Apply exactly this plan with: rig provider assign my-rig --provider claude --account work --apply --plan a4814078dba8
 ```
 
 Applying it in the same run:
 
 ```text
-Applied plan 205864aff64d on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
+Applied plan a4814078dba8 on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
 team-dev@my-rig: switched: Relaunched team-dev@my-rig in its own pane on its own token ("work"), resuming its conversation. Work in flight when it stopped didn't carry over.
 team-qa@my-rig: switched: Relaunched team-qa@my-rig in its own pane on its own token ("work"), resuming its conversation. Work in flight when it stopped didn't carry over.
 team-review@my-rig: unchanged: kept (seat override): its own token file /home/me/keys/claude-own ("own")
@@ -914,11 +914,12 @@ Each result is reported on its own: nothing was rolled back or retried.
 
 The rows read like this:
 - **A seat that would change** shows its configured account, the switch's precheck verdict, how it keeps its
-  conversation, and what it's doing now. A busy seat is noted, not refused: a switch interrupts work in flight,
-  including background commands.
+  conversation, and what it's doing now, as `rig ps` reads it. A busy seat is noted, not refused: a switch interrupts
+  work in flight, including background commands.
 - **`unchanged`** means the seat is already on the account.
 - **`kept (seat override)`** means the seat has its own choice of account: its own token or API-key file, its own home,
-  or a saved login in the Codex seat registry. It's kept unless you add `--include-overrides`.
+  or a saved login in the Codex seat registry. It's kept unless you add `--include-overrides`. A seat you bring in that
+  way that's already on the account follows the assignment from then on.
 - **Seats of the other runtime** are listed as not affected.
 
 Codex seats have two extra cases:
@@ -944,7 +945,8 @@ time. Seats move one at a time, and each gets one result:
 - **A failure doesn't stop the others.** Nothing is rolled back or retried.
 - **After an unknown on a Codex home,** that home's remaining seats are skipped.
 - **Seats in another rig** on a switched home are listed with their restart command, never restarted.
-- **Each result is stored as it lands,** with what the seat was doing when it was reached.
+- **Each result is stored as it lands,** with what the seat was doing when it was reached. Status `--json` shows it as
+  `applied.activity`.
 - **The rig's assignment** (label, reference, who asked, when) is stored with the first seat that's on the account or
   may be. An apply where every seat was refused leaves the rig's earlier assignment as it was.
 - **The CLI waits about 120 seconds** for each seat that changes or restarts. If it times out, the apply may still be

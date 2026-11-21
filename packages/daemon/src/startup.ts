@@ -131,7 +131,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport, inspectComposerInput, draftDeliveryAllows, readDraftDeliverySetting } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
-import { hookOrPaneActivity, nodeExecutorConfirmedStopped } from "./domain/node-inventory.js";
+import { nodeExecutorConfirmedStopped, readCurrentSeatActivity } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -719,13 +719,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the attention reconciler exists, so a reading before then waits for the next change.
   let restoredSeatActivity: ((sessionName: string, state: string | undefined) => void) | undefined;
   let rexSeatActivity: ((sessionName: string, current: import("./domain/terminal/rex-agent-status.js").SeatActivity) => void) | undefined;
-  const currentSeatActivity = (sessionName: string) => {
-    const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime ?? null;
-    const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
-    const resolved = hookOrPaneActivity(agentActivityStore.getLatestForNode({ sessionName,
-      order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime);
-    return { activity: resolved?.activity ?? null, runtime, structural };
-  };
+  const currentSeatActivity = (sessionName: string) => readCurrentSeatActivity({ hooks: agentActivityStore,
+    structural: seatStructuralActivityService, runtimeOf: (s) => sessionRegistry.findResumeContextByName(s)?.runtime ?? null }, sessionName);
   const retryPromptWakes = (sessionName: string) => {
     const { activity, runtime, structural } = currentSeatActivity(sessionName);
     const state = activity?.state;
@@ -1664,6 +1659,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
+      // #3625: the plan and apply read each seat's activity as rig ps does (a live hook, else the cached pane reading).
+      seatActivity: (sessionName: string) => currentSeatActivity(sessionName).activity,
       // A Claude seat switch checks what would outrank the seat's own token before it stops anything.
       claudePrecedence: (nodeId: string, opts?: { storedLogin?: boolean }) => claudeManagedLaunch.credentialPrecedence(nodeId, opts),
       // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The native

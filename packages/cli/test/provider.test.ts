@@ -714,7 +714,7 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     expect(at).toBeGreaterThan(-1);
     const rig = "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; ";
     expect(logs.slice(at + 1)).toEqual([
-      "  a@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      "  a@fleet  claude-code  configured: token max-2 (its credential file, as the rig is assigned)",
       `${rig}this seat is configured as assigned`,
       "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
       "  b@fleet  claude-code  configured: token max-3 (the seat's own credential file)",
@@ -745,11 +745,21 @@ describe("rig provider status shows each seat against its rig's assignment (#362
       configured: b.configured, allowance: { linked: false, reason: "not linked" }, assignment: b.assignment })) };
     const { logs } = await run(["status"], deps(() => withSeats));
     expect(logs).not.toContain("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
-    const seat = logs.indexOf("  a@fleet  claude-code  configured: token max-2 (the seat's own credential file) · allowance not linked");
+    const seat = logs.indexOf("  a@fleet  claude-code  configured: token max-2 (its credential file, as the rig is assigned) · allowance not linked");
     expect(logs.slice(seat + 1, seat + 4)).toEqual(["    n", "    allowance not linked: not linked",
       "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned"]);
     const json = await run(["status", "--json"], deps(() => MODEL));
     expect(JSON.parse(json.logs[0]!)).toEqual(MODEL);
+  });
+
+  it("a seat that follows the assignment in its own file or home reads as the assignment, not as its own choice", async () => {
+    const home = { source: "default_login", home: "/homes/succ", homeFrom: "account-switch", homeNote: "n" };
+    const model = { ...MODEL, bindings: [
+      { ...seatRow("p@fleet", { provider: "codex", state: "follows", intended, applied: { ...switched, kind: "pending_successor" } }, home), runtime: "codex" },
+      { ...seatRow("q@fleet", { provider: "codex", state: "override", intended, applied: null, override: "its account home /homes/succ" }, home), runtime: "codex" }] };
+    const { logs } = await run(["status"], deps(() => model));
+    expect(logs).toContain("  p@fleet  codex  configured: the seat's home (/homes/succ, from its account-switch env, as the rig is assigned)");
+    expect(logs).toContain("  q@fleet  codex  configured: the seat's own home (/homes/succ, from its account-switch env)");
   });
 
   it("--all-hosts prints each host's seats with their assignment, and an ssh host points at status --host", async () => {

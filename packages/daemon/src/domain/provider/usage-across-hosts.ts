@@ -353,7 +353,7 @@ const seatAssignment: Check = record({
   provider: oneOf("claude", "codex"),
   state: oneOf("follows", "override", "not_applied", "no_assignment"),
   intended: nullable(record({ label: str, reference: str, requestedBy: nullable(str), at: str })),
-  applied: nullable(record({ kind: str, label: str, detail: str, at: str, recovery: optional(str) })),
+  applied: nullable(record({ kind: str, label: str, detail: str, at: str, recovery: optional(str), activity: optional(str) })),
   override: optional(str),
   asApplied: optional(oneOf(true)),
 });

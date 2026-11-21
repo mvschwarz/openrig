@@ -40,6 +40,7 @@ import { assignmentStanding, planAssignment, type AssignmentPlan, type PlanSeatF
 import { applyAssignment } from "./assignment-apply.js";
 import { ProviderAccountAssignmentsRepository, type AssignmentResult } from "./provider-account-assignments.js";
 import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef, type AccountRefProvider } from "./provider-account-refs.js";
+import type { AgentActivity } from "../types.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderSignal, SeatAccountConfiguration, SeatAssignment } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
@@ -119,6 +120,9 @@ export interface ProviderServiceImplDeps {
   collectClaudeSignals?: () => ProviderSignal[];
   /** Slice-04 C4: the shipped structured activity detector. Undefined keeps the reactive lane empty. */
   agentActivityStore?: Pick<AgentActivityStore, "getLatestForNode">;
+  /** #3625: a seat's activity as rig ps reads it (readCurrentSeatActivity: a live hook, else the cached pane reading),
+   *  for the assignment plan's busy note and the activity each applied result stores. Undefined reads unknown. */
+  seatActivity?: (sessionName: string) => AgentActivity | null;
   /** W2a tap: operator-visible disposition sink. Observability only; never a verification producer. */
   warn?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
@@ -132,6 +136,9 @@ export interface ProviderServiceImplDeps {
   /** Where a Codex seat can switch in place (Linux); tests pin it. */
   platform?: NodeJS.Platform;
 }
+
+/** #3625: who set an assignment when the request names no seat, e.g. rig run from a shell that isn't one. */
+const NOT_A_SEAT = "a caller that isn't a seat";
 
 export class ProviderServiceImpl implements ProviderService {
   constructor(private readonly deps: ProviderServiceImplDeps) {}
@@ -301,10 +308,11 @@ export class ProviderServiceImpl implements ProviderService {
             : { ok: false, code: r.code, message: r.message };
         },
         ...(tools.successor ? { successor: tools.successor } : {}),
-        activityOf: (seat) => this.activityOf(nodeOf.get(seat)?.nodeId ?? "", seat, nodeOf.get(seat)?.runtime ?? ""),
+        activityOf: (seat) => this.activityOf(seat),
         save: (result, applied) => {
           if (!stored && tookEffect(result.kind, result.seat)) {
-            assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
+            assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference,
+              requestedBy: input.requestedBy ?? NOT_A_SEAT, at: now() });
             stored = true;
           }
           assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
@@ -319,9 +327,8 @@ export class ProviderServiceImpl implements ProviderService {
     }
   }
 
-  private activityOf(nodeId: string, session: string, runtime: string): PlanSeatFacts["activity"] {
-    return this.deps.agentActivityStore?.getLatestForNode({ nodeId, sessionName: session, now: new Date(),
-      order: runtime === "claude-code" ? "source" : "arrival" })?.state ?? "unknown";
+  private activityOf(session: string): PlanSeatFacts["activity"] {
+    return this.deps.seatActivity?.(session)?.state ?? "unknown";
   }
 
   /** #3625: what the plan and status know about each seat's account choices, one per entry. A seat whose configuration is
@@ -382,7 +389,8 @@ export class ProviderServiceImpl implements ProviderService {
       const provider = providerOf(seat.runtime);
       if (!provider) return undefined;
       const last = resultOf(nodeId, seat);
-      const applied = last ? { kind: last.kind, label: last.label, detail: last.detail, at: last.at, ...(last.recovery ? { recovery: last.recovery } : {}) } : null;
+      const applied = last ? { kind: last.kind, label: last.label, detail: last.detail, at: last.at, ...(last.recovery ? { recovery: last.recovery } : {}),
+        ...(last.activity ? { activity: last.activity } : {}) } : null;
       const intent = intents.get(`${rigId}\0${provider}`);
       if (!intent) return { provider, state: "no_assignment", intended: null, applied };
       const intended = { label: intent.label, reference: intent.reference, requestedBy: intent.requestedBy, at: intent.at };
@@ -422,7 +430,7 @@ export class ProviderServiceImpl implements ProviderService {
     const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => ({
       ...facts[index]!,
       running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
-      activity: this.activityOf(nodeId, seat.seatSession, seat.runtime),
+      activity: this.activityOf(seat.seatSession),
     }));
     const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,

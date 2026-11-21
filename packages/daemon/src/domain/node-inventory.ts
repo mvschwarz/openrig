@@ -1851,6 +1851,20 @@ export function hookOrPaneActivity(
   return null;
 }
 
+/** A seat's activity now, the way rig ps reads it: a live hook, else the cached pane reading (hookOrPaneActivity).
+ *  Capture-free. The daemon reads it for prompt wakes, and the provider plan and apply read it for each seat. */
+export function readCurrentSeatActivity(sources: {
+  hooks: Pick<AgentActivityStore, "getLatestForNode">;
+  structural: { getStructuralActivity(sessionName: string): StructuralObservation | null };
+  runtimeOf: (sessionName: string) => string | null;
+}, sessionName: string): { activity: AgentActivity | null; runtime: string | null; structural: StructuralObservation | null } {
+  const runtime = sources.runtimeOf(sessionName);
+  const structural = sources.structural.getStructuralActivity(sessionName);
+  const resolved = hookOrPaneActivity(sources.hooks.getLatestForNode({ sessionName,
+    order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime);
+  return { activity: resolved?.activity ?? null, runtime, structural };
+}
+
 export async function attachAgentActivity(
   entries: NodeInventoryEntry[],
   deps: {
