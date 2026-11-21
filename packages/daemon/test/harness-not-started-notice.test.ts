@@ -173,4 +173,44 @@ describe("the grouped notice for seats left as bare shells", () => {
     expect(notices()[0]!.body).toBe(body);
   });
 
+  const summaryOf = (qitemId: string) => (db.prepare("SELECT summary FROM queue_items WHERE qitem_id = ?").get(qitemId) as { summary: string }).summary;
+
+  it("tells a rolled-back seat's owner from its node when it has no session left, with that cause's own lines", async () => {
+    const lead = seat("crew", "lead", "lead@crew");
+    // A recreated seat whose failed resume rolled back the only session it had: no sessions row at all.
+    const a = rigs.addNode(lead.rig.id, "a", { runtime: "claude-code" });
+    rigs.addEdge(lead.rig.id, lead.node.id, a.id, "delegates_to");
+    const cause = "Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running.";
+    const report = await noticeHarnessNotStarted(db, queue, { rigId: lead.rig.id, attempt: "restore attempt 11",
+      seats: [{ nodeId: a.id, logicalId: "a", cause, rolledBack: true }] });
+
+    expect(report.unrouted).toEqual([]);
+    expect(report.notices).toEqual([expect.objectContaining({ owner: "lead@crew", seats: ["a@crew"] })]);
+    const notice = notices()[0]!;
+    expect(notice.body).toContain(`- a@crew: ${cause}`);
+    expect(notice.body).toContain("couldn't resume these seats' conversations");
+    expect(notice.body).not.toContain("left these seats as a bare shell");
+    expect(summaryOf(notice.qitem_id)).toBe("1 seat with no agent running: resume rolled back (restore attempt 11)");
+    expect(report.warnings).toEqual([]);
+  });
+
+  it("lists a bare shell and a rolled-back seat for one owner in one notice, each under its own lines", async () => {
+    const lead = seat("crew", "lead", "lead@crew");
+    const a = seat("crew", "a", "a@crew");
+    const b = seat("crew", "b", "b@crew");
+    rigs.addEdge(lead.rig.id, lead.node.id, a.node.id, "delegates_to");
+    rigs.addEdge(lead.rig.id, lead.node.id, b.node.id, "delegates_to");
+    await noticeHarnessNotStarted(db, queue, { rigId: lead.rig.id, attempt: "restore attempt 12", seats: [
+      { nodeId: a.node.id, logicalId: "a", cause: "Harness not started: no startup context for a." },
+      { nodeId: b.node.id, logicalId: "b", cause: "Original session unresumable: resume attempted but failed.", rolledBack: true },
+    ] });
+
+    expect(notices()).toHaveLength(1);
+    const { body, qitem_id } = notices()[0]!;
+    // The bare shell under the shell lines, then the rolled-back seat under its own.
+    expect(body.indexOf("- a@crew")).toBeLessThan(body.indexOf("couldn't resume these seats' conversations"));
+    expect(body.indexOf("couldn't resume these seats' conversations")).toBeLessThan(body.indexOf("- b@crew"));
+    expect(summaryOf(qitem_id)).toBe("2 seats with no agent running: 1 bare shell, 1 resume rolled back (restore attempt 12)");
+  });
+
 });

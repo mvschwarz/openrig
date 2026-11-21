@@ -3442,6 +3442,31 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.harnessNotStarted).toEqual(report);
   });
 
+  // A resume that finds no conversation rolls its blank session back: no agent runs in the seat, so it goes to the same
+  // notice, marked rolled back, and the rig isn't fully restored.
+  it("hands a seat whose resume was rolled back for a missing conversation to the notice, marked rolled back", async () => {
+    const token = "00000000-0000-4000-8000-0000000ba5e2";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    adapter.launchHarness.mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh", missingConversation: true as const } as never);
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-y", seats: ["dev-moved@r"] }], unrouted: [], warnings: [] };
+    const notice = vi.fn(async () => report);
+    const result = await createOrchestrator({ harnessNotStartedNotice: notice, listProcesses: nativeLineage("claude-code", token) })
+      .restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node0 = result.result.nodes[0]!;
+    expect(node0).toMatchObject({ status: "awaiting-decision", stage: "resume_rolled_back" });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: expect.stringMatching(/^restore attempt \d+$/),
+      seats: [{ nodeId: node0.nodeId, logicalId: "dev.moved", cause: node0.error, rolledBack: true }],
+    }));
+    expect(result.result.harnessNotStarted).toEqual(report);
+    expect(result.result.rigResult).toBe("partially_restored");
+  });
+
   it("a full restore reports a recreated seat's current session to its owner", async () => {
     const { node: savedNode, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
     db.prepare("DELETE FROM nodes WHERE id = ?").run(savedNode.id);

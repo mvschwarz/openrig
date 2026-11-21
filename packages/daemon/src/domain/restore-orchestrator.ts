@@ -288,8 +288,9 @@ export interface RestoreOrchestratorDeps {
    *  Absent in older wiring/tests: the current selection is unknown, so a
    *  missing saved marker is reported, never guessed. */
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
-  /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
-  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
+  /** Tells the resolved escalation owners which seats an attempt left with no agent running: bare shells, and seats whose
+   *  failed resume was rolled back (noticeHarnessNotStarted). */
+  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string; rolledBack?: true }> }) => Promise<HarnessNotStartedReport>;
 }
 
 /** A restored seat's checkpoint file in its working directory, named for the seat, so seats restored into one folder (a
@@ -1911,18 +1912,18 @@ export class RestoreOrchestrator {
     return { rolledBack: true, terminalStopped };
   }
 
-  /** The notice for the seats an attempt positively left as bare shells, each with its own cause. Its warnings join the
-   *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
-   *  positively left as shells stay in the roll call. */
+  /** The notice for the seats an attempt positively left with no agent running, each with its own cause: a bare shell, or
+   *  a failed resume whose blank session was rolled back. Its warnings join the attempt's, and a failure to send it is a
+   *  warning too: it never changes or blocks the attempt's own result. Other seats stay in the roll call. */
   private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
-    const shells = results.filter((n) => n.stage === "harness_not_started");
+    const shells = results.filter((n) => n.stage === "harness_not_started" || n.stage === "resume_rolled_back");
     if (shells.length === 0 || !this.harnessNotStartedNotice) return undefined;
     try {
       // The launcher finds a seat by its logical id in the live rig, so a seat recreated since the snapshot was launched
       // under its live node, while its result keeps the snapshot's node id: the notice reads the node the shell is on.
       const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
-      const seats = shells.map(({ nodeId, logicalId, error }) => ({ nodeId: liveNodes.find((node) => node.logicalId === logicalId)?.id ?? nodeId,
-        logicalId, ...(error ? { cause: error } : {}) }));
+      const seats = shells.map(({ nodeId, logicalId, error, stage }) => ({ nodeId: liveNodes.find((node) => node.logicalId === logicalId)?.id ?? nodeId,
+        logicalId, ...(error ? { cause: error } : {}), ...(stage === "resume_rolled_back" ? { rolledBack: true as const } : {}) }));
       const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
       for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
       return report;
@@ -2292,7 +2293,7 @@ export class RestoreOrchestrator {
           // a confirmed blank agent (precision guard trigger (i)). Roll back to
           // zero sessions; the stop-and-ask is realized as awaiting-decision.
           { const kept = await rollbackOwnBlank(); if (kept) return kept; }
-          return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. Check the harness state manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
+          return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", stage: "resume_rolled_back", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. Check the harness state manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
         }
       }
     } else if (resumeRequested && isPodAware) {
@@ -2644,6 +2645,7 @@ export class RestoreOrchestrator {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
+                  stage: "resume_rolled_back",
                   error: resumeWithoutContext
                     ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. ${noContextFresh} Restore the original session manually.`
                     : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
