@@ -317,7 +317,7 @@ The pre-0.5.8 complete array remains available with: rig watchdog list --all --f
 
   cmd
     .command("status <jobId>")
-    .description("Show one watchdog job + recent evaluation history")
+    .description("Show one watchdog job + recent evaluation history + its quiet count since the daemon started")
     .option("--json", "JSON output for agents")
     .action(async (jobId: string, opts: { json?: boolean }) => {
       const deps = getDeps();
