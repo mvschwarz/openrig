@@ -167,6 +167,27 @@ it("follows the verified process's open Codex databases when its declared home h
   expect(expectedBody.suffix).toContain(JSON.stringify({ marker: old }));
 });
 
+it("stays unverified on both record routes when the verified native process is replaced while its open databases are read", async () => {
+  const f = fixture(), { actual } = relaunchedElsewhere(f);
+  const original = f.processes[1]!;
+  // The native PID ends and is reused during the OS read: a later census gives it a later start.
+  vi.spyOn(CodexThreadIdResolver.prototype, "openDatabaseHome").mockImplementation(async pid => {
+    if (pid !== 20) return undefined;
+    f.processes[1] = { ...original, startedAt: "Sun Sep  6 23:59:59 2026" };
+    return actual;
+  });
+  for (const [route, error] of [
+    ["/generation-record?sinceBytes=0", "record_identity_unverified"],
+    [`/generation-record-expected?sinceBytes=0&expectedNodeId=${f.node.id}&expectedRuntime=codex&expectedNativeId=${A}`, "expected_identity_unavailable"],
+  ] as const) {
+    f.processes[1] = original;
+    const response = await f.request(route), body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe(error);
+    expect(body.suffix).toBeUndefined();
+  }
+});
+
 it.each(["no single database home", "an unreadable open-file list"] as const)("stays unverified when the OS gives %s", async condition => {
   const f = fixture(); relaunchedElsewhere(f);
   vi.spyOn(CodexThreadIdResolver.prototype, "openDatabaseHome").mockImplementation(async () => {

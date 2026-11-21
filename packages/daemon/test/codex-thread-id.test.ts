@@ -56,6 +56,32 @@ it("reads a verified process's open database home only on a miss and only when a
   expect(hit).not.toHaveBeenCalled();
 });
 
+it("follows the open database home only when the declared home holds none of the process's rows", async () => {
+  const declared = fixture(), actual = fixture();
+  // Two qualifying threads in the declared home: ambiguous proof, not absence.
+  declared.thread("first"); declared.log("first"); declared.thread("second"); declared.log("second");
+  actual.thread("moved-thread"); actual.log("moved-thread"); actual.finish(); declared.finish();
+  const openDatabaseHomeByPid = vi.fn(() => path.join(actual.home, ".codex"));
+  const resolver = new CodexThreadIdResolver({ codexHome: path.join(declared.home, ".codex"), openDatabaseHomeByPid });
+  expect(await resolver.resolveWithHome(60422, identity, true)).toEqual({});
+  expect(openDatabaseHomeByPid).not.toHaveBeenCalled();
+});
+
+it("an fd link that fails to read for a reason other than closing leaves the open database home unknown", async () => {
+  const fds = (code: string) => ({
+    readdir: async () => ["3", "4"],
+    readlink: async (link: string) => {
+      if (link.endsWith("/3")) return "/codex/home/logs_2.sqlite";
+      throw Object.assign(new Error(`${code}: ${link}`), { code });
+    },
+  });
+  // An fd closed since the listing (ENOENT) is skipped; one that can't be read (EACCES) leaves the list incomplete.
+  expect(await defaultOpenCodexDatabaseHomeByPid(7, fds("ENOENT"))).toBe("/codex/home");
+  await expect(defaultOpenCodexDatabaseHomeByPid(7, fds("EACCES"))).rejects.toThrow("EACCES");
+  const resolver = new CodexThreadIdResolver({ openDatabaseHomeByPid: pid => defaultOpenCodexDatabaseHomeByPid(pid, fds("EACCES")) });
+  expect(await resolver.openDatabaseHome(7)).toBeUndefined();
+});
+
 describe("Codex home discovery respects an explicit HOME", () => {
   it("reads the default home before resolving a process home and never consults passwd", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-default-home-")); roots.push(home);

@@ -62,7 +62,7 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
   try {
     rootPid = await tmux.getPanePid(pane);
     if (!rootPid || rootPid !== (proof.evidence.observedPanePid ?? proof.evidence.observedPid)) unavailable("The pane process no longer matches its verified occupant.");
-    const deps = { getPanePid: () => tmux.getPanePid(pane), listProcesses: () => census.list(),
+    const deps = { getPanePid: () => tmux.getPanePid(pane), listProcesses: (opts?: { fresh?: boolean }) => census.list(opts),
       readThreadIdByPid: async (pid: number, startedAt?: string) => startedAt ? threads.resolve(pid, startedAt) : undefined };
     if (expected.runtime === "claude-code") {
       const sidecar = store.readSidecar(expected.sessionName);
