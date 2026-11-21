@@ -4985,9 +4985,9 @@ export class QueueRepository {
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
   /** Bounded recorded relations for an opened request/result. No inference from seats, summaries or timestamps. */
   relatedTo(qitemId: string, limit = 101): Array<{ item: QueueItem; relation: "reply-to" | "handed-off-from" | "blocked-on" }> {
-    const rows = this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
+    const rows = runSyncSite("queue.related_to", () => this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
       WHERE reply_to = ? OR handed_off_from = ? OR blocked_on = ? ORDER BY rowid LIMIT ?`)
-      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>;
+      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>);
     return rows.flatMap(row => {
       const item = this.getById(row.qitem_id);
       if (!item) return [];
@@ -5231,9 +5231,9 @@ export class QueueRepository {
   /** The decisions made on a person's behalf under one mode application, oldest first: for the account when they're back. */
   delegatedDecisionsFor(applicationId: string): QueueItem[] {
     if (!this.hasDelegatedDecisionColumn) return [];
-    const rows = this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
+    const rows = runSyncSite("queue.delegated_decisions", () => this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
         AND json_extract(delegated_decision, '$.applicationId') = ?
-      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[];
+      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[]);
     return rows.map((row) => this.rowToItem(row));
   }
 
@@ -5503,13 +5503,13 @@ export class QueueRepository {
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(101, Math.floor(opts.limit!))) : 20;
     const receipts = `SELECT qitem_id, ts, transition_note FROM queue_transitions` +
       (detectTable(this.db, "queue_transitions_archive") ? ` UNION ALL SELECT qitem_id, ts, transition_note FROM queue_transitions_archive` : "");
-    const rows = this.db.prepare(`
+    const rows = runSyncSite("queue.delivered_human_updates", () => this.db.prepare(`
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
         AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
-    `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
+    `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>);
     return rows.map((row) => {
       const deliveryOutcome: "posted" | "accepted" = row.delivery_receipt.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)
         ? "accepted"

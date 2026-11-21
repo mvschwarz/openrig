@@ -5,6 +5,7 @@
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
 import type { RigRepository } from "../rig-repository.js";
+import { runSyncSite } from "../sync-site-wrap.js";
 
 export interface FleetRollupRow {
   rigName: string;
@@ -190,7 +191,7 @@ export class MissionControlFleetCliCapability {
     attentionReason: string | null;
     lastUpdate: string;
   } {
-    const ownedSessions = this.db
+    const ownedSessions = runSyncSite("mission_control.rig_queue_summary", () => this.db
       .prepare(
         `SELECT destination_session, state, ts_updated, blocked_on
            FROM queue_items
@@ -198,7 +199,7 @@ export class MissionControlFleetCliCapability {
             OR source_session LIKE ?
           ORDER BY ts_updated DESC LIMIT 100`,
       )
-      .all(`%@${rigName}`, `%@${rigName}`) as RigQueueRow[];
+      .all(`%@${rigName}`, `%@${rigName}`) as RigQueueRow[]);
 
     if (ownedSessions.length === 0) {
       return {
