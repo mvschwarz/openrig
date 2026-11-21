@@ -18,7 +18,7 @@ psRoutes.get("/resources", (c) => {
       loadAverage: load, loadPerCpu: load ? load.map((value) => value / cpuCount) : null,
       // Forced archival can hide a rig without stopping its seats. Host load
       // measurements must count those running processes as well.
-      runningSeats: psService.getEntries({ includeArchived: true, archivedOnly: false }).reduce((n, entry) => n + entry.runningCount, 0),
+      runningSeats: psService.countRunningSeats(),
       capture: getTranscriptCaptureStats(),
     });
   });
