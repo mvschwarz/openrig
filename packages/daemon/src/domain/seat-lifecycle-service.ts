@@ -1991,6 +1991,7 @@ export class SeatLifecycleService {
       resolvedStartupFiles: startup.resolvedStartupFiles,
       startupActions: startup.startupActions,
       isRestore: false,
+      refreshClaudeFragments: true,
       includeDurableObligations: true,
       sessionName: canonicalSessionName,
       allowFreshFallback: false,
@@ -2384,6 +2385,7 @@ export class SeatLifecycleService {
         ...(typeof raw["mergeStrategy"] === "string" ? { mergeStrategy: raw["mergeStrategy"] as ProjectionEntry["mergeStrategy"] } : {}),
         ...(typeof raw["target"] === "string" ? { target: raw["target"] } : {}),
         ...(typeof raw["pluginType"] === "string" ? { pluginType: raw["pluginType"] as ProjectionEntry["pluginType"] } : {}),
+        ...(raw["onRestore"] === "follow_source" ? { onRestore: "follow_source" as const } : {}),
       }));
     }
 

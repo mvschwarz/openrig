@@ -379,7 +379,7 @@ version.
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
 | `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
 | `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Claude Code and Codex do not read skills from that projected plugin folder, so selected plugin skills are also projected into the seat's skill folder under their plain names: the seat's own storage (see `skills`), or `.claude/skills/<name>` or `.agents/skills/<name>` for a seat without it. The exception is the vendored `openrig-core` selected by a Claude seat: Claude loads that plugin directly, skills included, so its skills are not projected a second time. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, a retained plugin copy whose remembered source can no longer be projected is also kept with `plugin_skill_kept` (a seat selecting that plugin refreshes it at its next launch), and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
-| `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. |
+| `runtime_resources` | `id`, `path`, `runtime`, `type`, `on_restore`* | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. See "Following Claude fragments" for the optional refresh. |
 
 *Fields marked with `*` are optional.
 
@@ -390,6 +390,27 @@ Recognized runtime resource types:
 - `codex_config_fragment` — upsert a TOML fragment into `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) inside an OpenRig-managed block.
 
 Unknown runtime resource types are still copied to the Claude or Codex runtime extension directory for agent-visible context.
+
+#### Following Claude fragments
+
+Set `on_restore: follow_source` on a `claude_mcp_fragment` or `claude_settings_fragment`
+with `runtime: claude-code`, and select it in the profile's `uses.runtime_resources`.
+A native restore (including an existing rig started from a snapshot) applies the opted-in
+fragments from today's agent spec before Claude resumes its conversation. An explicit fresh
+launch of an existing seat reads today's selection of both fragment types, including fragments
+with no restore opt-in. It applies the usual merge even when the user has changed the file,
+and records each write. The saved launch recipe supplies the spec location and profile.
+If the seat has no recipe, a fresh launch tries its saved fragments and warns about unreadable
+sources. If the current selection can't be resolved, OpenRig warns and continues the launch.
+A legacy seat without a recipe or relevant saved fragments starts without a fragment warning.
+
+During the opt-in refresh before resume, OpenRig leaves a target with local JSON edits intact
+and reports the skipped fragments.
+For a file without a write record, the first refresh can add missing values and can keep
+matching ones. If the refresh would replace an existing value, it leaves the file as it is.
+An unreadable source or target, or a failed replacement, is reported and an otherwise-valid
+resume continues. These files use the ordinary additive JSON merge. Deselecting a fragment
+or removing keys from its source leaves previously merged values in the file.
 
 #### Writing a `codex_config_fragment`
 

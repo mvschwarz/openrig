@@ -336,7 +336,8 @@ import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from 
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
-import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
+import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, isClaudeFragmentEntry,
+  type ProjectionPlan, type ResolveClaudeFragments } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
@@ -2350,20 +2351,9 @@ export class PodRigInstantiator {
    * can't be resolved, says why; the restore then keeps the saved selection.
    */
   async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
-    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
-    if (!node) return { ok: false, reason: `node ${nodeId} not found` };
-    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
-    if (!recipe) return { ok: false, reason: `${node.logicalId} has no launch recipe` };
-    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
-    if (!context) return { ok: false, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
-    const member = this.persistedMember(node, context.member);
-    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
-    if (!resolved.ok) return { ok: false, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
-    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
-      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
-      skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
-    if (!config.ok) return { ok: false, reason: config.errors.join("; ") };
-    const skills = config.config.selectedResources.skills;
+    const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId);
+    if (!resolved.ok) return resolved;
+    const skills = resolved.config.selectedResources.skills;
     const selected = new Set(skills.map((skill) => skill.effectiveId));
     return { ok: true, selection: {
       selected,
@@ -2372,9 +2362,35 @@ export class PodRigInstantiator {
         source: nodePath.resolve(skill.sourcePath, (skill.resource as SkillResource).path),
       })),
       // OpenRig's own packaged plugin skills follow the packaged source by default, so an upgrade's copy comes back.
-      packaged: packagedSeatSkills(config.config.skillLoadout?.entries ?? [], selected),
-      warnings: config.config.skillWarnings ?? [],
+      packaged: packagedSeatSkills(resolved.config.skillLoadout?.entries ?? [], selected),
+      warnings: resolved.config.skillWarnings ?? [],
     } };
+  }
+
+  seatClaudeFragments: ResolveClaudeFragments = async (rigId, nodeId) => {
+    const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId);
+    if (!resolved.ok) return resolved;
+    const input = { ...resolved, fsOps: this.deps.fsOps };
+    const result = planProjection(input);
+    if (!result.ok) return { ok: false, reason: result.errors.join("; ") };
+    return { ok: true, entries: result.plan.entries.filter(isClaudeFragmentEntry) };
+  };
+
+  private async resolvePersistedSeatConfig(rigId: string, nodeId: string) {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return { ok: false as const, reason: `node ${nodeId} not found` };
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!recipe) return { ok: false as const, reason: `${node.logicalId} has no launch recipe`, missingRecipe: true as const };
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return { ok: false as const, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
+    const member = this.persistedMember(node, context.member);
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return { ok: false as const, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
+      skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    if (!config.ok) return { ok: false as const, reason: config.errors.join("; ") };
+    return { ok: true as const, config: config.config, collisions: resolved.collisions };
   }
 
   /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */
