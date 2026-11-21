@@ -125,6 +125,9 @@ export interface SeatLifecycleDeps {
   readProcessCensus?: () => Promise<ProcessTableCensus>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
+  /** Arms the seat's continuity notice (its `managed-compaction` or `apprentice-handover` jobs) for the occupant a fresh launch just
+   *  started, reconciled by the seat's stable address. Resolves to a warning to report, or null. A failure never fails the launch. */
+  armContinuity?: (rigId: string, nodeId: string) => Promise<string | null>;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   occupantInvalidator?: OccupantInvalidator;
   activityOracle?: { declareOccupantSwap(nodeId: string, generation: string): void; getSeatState?(nodeId: string): ArbitratedSeatState | null };
@@ -387,6 +390,7 @@ export class SeatLifecycleService {
   private readonly readProcessCensus: () => Promise<ProcessTableCensus>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
+  private readonly armContinuity: SeatLifecycleDeps["armContinuity"] | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
   private readonly occupantInvalidator: OccupantInvalidator | null;
   private readonly activityOracle: SeatLifecycleDeps["activityOracle"] | null;
@@ -411,6 +415,7 @@ export class SeatLifecycleService {
     this.readProcessCensus = deps.readProcessCensus ?? readProcessTableCensusNow;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
+    this.armContinuity = deps.armContinuity ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.activityOracle = deps.activityOracle ?? null;
@@ -2083,6 +2088,17 @@ export class SeatLifecycleService {
     tx();
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
+    // The new occupant is running: its continuity notice is armed the way a first start arms it (one job per seat address).
+    let resultWarnings = warnings;
+    if (this.armContinuity) {
+      try {
+        const problem = await this.armContinuity(seat.rigId, node.id);
+        if (problem) resultWarnings = [...(warnings ?? []), problem];
+      } catch (error) {
+        resultWarnings = [...(warnings ?? []), `continuity policy was not armed for ${seat.logicalId}: ${(error as Error).message}`];
+      }
+    }
+
     if (attentionRequired) {
       return {
         ok: false,
@@ -2094,7 +2110,7 @@ export class SeatLifecycleService {
         sessionName: canonicalSessionName,
         sessionId: launch.session.id,
         generation,
-        warnings,
+        warnings: resultWarnings,
       };
     }
 
@@ -2110,7 +2126,7 @@ export class SeatLifecycleService {
       advisor: node.advisor ?? undefined,
       startupPolicyHash: startup.hash,
       supersededSessionIds,
-      warnings,
+      warnings: resultWarnings,
     };
   }
 

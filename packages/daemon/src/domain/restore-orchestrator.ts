@@ -132,6 +132,9 @@ export interface SelectedRestoreHistory {
 }
 
 
+/** Restore outcomes that leave a session running (or parked on a prompt), the seats whose continuity notice is armed again. */
+const CONTINUITY_ARMED_STATUSES: ReadonlySet<RestoreNodeResult["status"]> = new Set(["resumed", "rebuilt", "fresh-primed", "attention_required", "operator_recovered"]);
+
 export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigResult {
   if (nodes.length === 0) return "failed";
   // L3: `attention_required` is non-terminal failure (alive but blocked on
@@ -280,6 +283,10 @@ export interface RestoreOrchestratorDeps {
   /** A seat's skill selection as its spec says today (from its launch recipe), so skills that follow their source
    *  (`on_restore: follow_source`) come back with today's bytes and today's selection. Absent: saved selection only. */
   seatSkillSelection?: (rigId: string, nodeId: string) => Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }>;
+  /** Arms the seat's continuity notice (its `managed-compaction` or `apprentice-handover` jobs) for the occupant a restore just
+   *  started, the way a first start from the spec does, reconciled by the seat's stable address so a repeat leaves one job.
+   *  Resolves to a warning to report, or null. Absent: nothing is armed on restore. A failure never fails the restore. */
+  armContinuity?: (rigId: string, nodeId: string) => Promise<string | null>;
   /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
   routerLineSettings?: Pick<SettingsStore, "resolveOne">;
   /** Read-only current authored selection for Claude activity hooks (the
@@ -323,6 +330,7 @@ export class RestoreOrchestrator {
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
   private seatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
+  private armContinuity: RestoreOrchestratorDeps["armContinuity"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
@@ -369,6 +377,7 @@ export class RestoreOrchestrator {
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.seatSkillSelection = deps.seatSkillSelection;
+    this.armContinuity = deps.armContinuity;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
     this.harnessNotStartedNotice = deps.harnessNotStartedNotice;
     this.routerLineSettings = deps.routerLineSettings;
@@ -1273,7 +1282,23 @@ export class RestoreOrchestrator {
    * Restore one planned seat, checking continuity before launching its occupant.
    * Preserve prior state so a failed launch or resume can be compensated.
    */
-  private async restoreNodeWithCompensation(
+  /** Restore one seat, then arm its continuity notice when a session is running again. Every restore path (the whole rig, a
+   *  subset, a kept pane, a selected history) goes through here, so the notice is armed the same way for all of them. */
+  private async restoreNodeWithCompensation(...args: Parameters<RestoreOrchestrator["restoreNodeCore"]>): Promise<RestoreNodeResult> {
+    const result = await this.restoreNodeCore(...args);
+    if (this.armContinuity && CONTINUITY_ARMED_STATUSES.has(result.status)) {
+      try {
+        const problem = await this.armContinuity(args[1], result.nodeId);
+        if (problem) args[5]?.push(problem);
+      } catch (error) {
+        args[5]?.push(`continuity policy was not armed for ${result.logicalId}: ${(error as Error).message}`);
+      }
+    }
+    return result;
+  }
+
+  /** @internal The restore of one seat; call `restoreNodeWithCompensation`, which also arms its continuity notice. */
+  async restoreNodeCore(
     entry: PlanEntry,
     rigId: string,
     snapshotId: string,

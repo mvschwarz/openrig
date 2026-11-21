@@ -2349,20 +2349,51 @@ export class PodRigInstantiator {
    * Every skill its profile selects, and those whose resource follows its source, with the source's full path. When it
    * can't be resolved, says why; the restore then keeps the saved selection.
    */
-  async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
+  /** A seat's launch config as its spec says today: resolved from its launch recipe the way a fresh launch of it would be, with
+   *  the agent spec read from disk now. Shared by every restore-time read of the spec (skills, the continuity notice). */
+  private async resolveSeatConfigToday(rigId: string, nodeId: string) {
     const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
-    if (!node) return { ok: false, reason: `node ${nodeId} not found` };
+    if (!node) return { ok: false as const, reason: `node ${nodeId} not found` };
     const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
-    if (!recipe) return { ok: false, reason: `${node.logicalId} has no launch recipe` };
+    if (!recipe) return { ok: false as const, reason: `${node.logicalId} has no launch recipe` };
     const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
-    if (!context) return { ok: false, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
+    if (!context) return { ok: false as const, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
     const member = this.persistedMember(node, context.member);
     const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
-    if (!resolved.ok) return { ok: false, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
+    if (!resolved.ok) return { ok: false as const, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
     const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
       profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
       skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
-    if (!config.ok) return { ok: false, reason: config.errors.join("; ") };
+    if (!config.ok) return { ok: false as const, reason: config.errors.join("; ") };
+    return { ok: true as const, node, config };
+  }
+
+  /**
+   * A seat's continuity strategy as its spec says today (its `compaction_strategy` and `mechanic`), for a start that is not
+   * the first one: a restore (`rig up --existing`) or a fresh launch. A first start arms it from the spec directly; the others
+   * come here, so a seat that selects `managed-compaction` or `apprentice-handover` keeps its notice across them.
+   */
+  async seatContinuityPolicy(rigId: string, nodeId: string): Promise<{ ok: true; compactionStrategy: CompactionStrategy; mechanic: string | undefined; runtime: string }
+    | { ok: false; reason: string; silent?: true }> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    // A seat with no launch recipe (an adopted or attached one) or no runtime never selected a strategy: nothing to arm, nothing to say.
+    if (!node?.runtime || !this.deps.rigRepo.getNodeLaunchRecipe(nodeId)) return { ok: false, reason: "no launch recipe or runtime", silent: true };
+    // A terminal-only seat is launched from `builtin:terminal`, which is not an agent spec: it selects no strategy, so there is nothing
+    // to resolve and nothing to warn about, even though its materialized recipe is kept like any other seat's.
+    if (node.runtime === "terminal") return { ok: false, reason: "a terminal seat selects no continuity strategy", silent: true };
+    // Only a Claude agent is planned a notice (continuity-policy-materializer): for any other runtime the plan is empty whatever the spec says,
+    // so its spec is not resolved (a Codex agent whose spec no longer resolves gets no warning about a notice it never had) and arming with the
+    // default strategy still retires a job a Claude start left behind (#3579 R2).
+    if (node.runtime !== "claude-code") return { ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: node.runtime };
+    const seat = await this.resolveSeatConfigToday(rigId, nodeId);
+    if (!seat.ok) return seat;
+    return { ok: true, compactionStrategy: seat.config.config.compactionStrategy as CompactionStrategy, mechanic: seat.config.config.mechanic, runtime: node.runtime };
+  }
+
+  async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
+    const seat = await this.resolveSeatConfigToday(rigId, nodeId);
+    if (!seat.ok) return seat;
+    const config = seat.config;
     const skills = config.config.selectedResources.skills;
     const selected = new Set(skills.map((skill) => skill.effectiveId));
     return { ok: true, selection: {

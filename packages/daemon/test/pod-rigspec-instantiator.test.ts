@@ -1338,6 +1338,77 @@ profiles:
     db.close();
   });
 
+  it("#3579 seatContinuityPolicy reads the strategy and mechanic the spec says today, for a restore or a fresh launch of a seat that started earlier", async () => {
+    const agentPath = `${RIG_ROOT}/agents/impl/agent.yaml`;
+    const files: Record<string, string> = { [agentPath]: agentYaml("impl") };
+    const { db, rigRepo, inst } = setup(files);
+    const yaml = `
+version: "0.2"
+name: test-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`;
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const rigId = result.result.rigId;
+    const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+    // As first started, the spec selected nothing: nothing to arm.
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toMatchObject({ ok: true, compactionStrategy: "default-compaction", runtime: "claude-code" });
+    // The spec changes later (the role now selects managed-compaction): the seat's next start reads it as it is now.
+    files[agentPath] = "version: \"0.2\"\nname: impl\ndefaults:\n  runtime: claude-code\n  lifecycle:\n    compaction_strategy: managed-compaction\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []";
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toMatchObject({ ok: true, compactionStrategy: "managed-compaction", runtime: "claude-code" });
+    // The apprentice strategy carries its mechanic, resolved the same three-level way as a first start.
+    files[agentPath] = "version: \"0.2\"\nname: impl\ndefaults:\n  runtime: claude-code\n  lifecycle:\n    compaction_strategy: apprentice-handover\n    mechanic: mech@rig\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []";
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toMatchObject({ ok: true, compactionStrategy: "apprentice-handover", mechanic: "mech@rig" });
+    // A spec that can no longer be read says why (a warning for the caller); a seat with no launch recipe is silent.
+    delete files[agentPath];
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toMatchObject({ ok: false });
+    const bare = rigRepo.addNode(rigId, "dev.adopted", { runtime: "claude-code" });
+    expect(await inst.seatContinuityPolicy(rigId, bare.id)).toEqual({ ok: false, reason: "no launch recipe or runtime", silent: true });
+    db.close();
+  });
+
+  it("#3579 R2: a seat that is not Claude is not resolved against its spec: no warning for a notice it never had", async () => {
+    const agentPath = `${RIG_ROOT}/agents/impl/agent.yaml`;
+    const files: Record<string, string> = { [agentPath]: agentYaml("impl") };
+    const { db, rigRepo, inst } = setup(files);
+    const yaml = `
+version: "0.2"
+name: test-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        cwd: .
+    edges: []
+edges: []
+`;
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const rigId = result.result.rigId;
+    const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toEqual({ ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: "codex" });
+    // Its spec can no longer be read: still no resolution and no warning (a Claude seat in the same state warns, as the test above shows).
+    delete files[agentPath];
+    expect(await inst.seatContinuityPolicy(rigId, nodeId)).toEqual({ ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: "codex" });
+    db.close();
+  });
+
   // CP2-R3: Topological ordering enforced (delegates_to edge)
   it("launches nodes in topological order based on edges", async () => {
     const files = {
@@ -1462,6 +1533,20 @@ profiles:
       expect(sessions.length).toBeGreaterThan(0);
       expect(sessions[0]!.restore_policy).toBe("checkpoint_only");
     }
+    db.close();
+  });
+
+  it("#3579 a terminal-only seat with a launch recipe reads no continuity policy, silently (builtin:terminal is not an agent spec)", async () => {
+    const { db, rigRepo, inst } = setup({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") });
+    const spec = makeRigSpec({ pods: [{ id: "infra", label: "Infra",
+      members: [{ id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." }], edges: [] }] });
+    const result = await inst.materialize(RigSpecCodec.serialize(spec), RIG_ROOT);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const node = rigRepo.getRig(result.result.rigId)!.nodes[0]!;
+    // The control: the seat does keep a launch recipe, the shape materialize, expand and add-member all create.
+    expect(rigRepo.getNodeLaunchRecipe(node.id)).not.toBeNull();
+    expect(await inst.seatContinuityPolicy(result.result.rigId, node.id)).toEqual({ ok: false, reason: "a terminal seat selects no continuity strategy", silent: true });
     db.close();
   });
 

@@ -960,6 +960,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   let persistedFreshPodLaunch: RestoreOrchestratorDeps["freshLaunch"];
   let persistedFreshPodLaunchAvailable: ((rigId: string, nodeId: string) => boolean) | undefined;
   let persistedSeatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
+  let persistedArmSeatContinuity: RestoreOrchestratorDeps["armContinuity"];
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -975,6 +976,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
+    armContinuity: async (rigId, nodeId) => persistedArmSeatContinuity ? persistedArmSeatContinuity(rigId, nodeId) : null,
     harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
 
@@ -1374,6 +1376,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   persistedFreshPodLaunch = (rigId, nodeId, launchOpts) => podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts);
   persistedFreshPodLaunchAvailable = (rigId, nodeId) => podInstantiator.canLaunchPersistedFresh(rigId, nodeId);
   persistedSeatSkillSelection = (rigId, nodeId) => podInstantiator.seatSkillSelection(rigId, nodeId);
+  // A start that is not the first (a restore, a fresh launch) arms the seat's continuity notice the way the first start does:
+  // the strategy as the spec says today, reconciled by the seat's stable session name (one job, never a duplicate).
+  persistedArmSeatContinuity = async (rigId, nodeId) => {
+    const policy = await podInstantiator.seatContinuityPolicy(rigId, nodeId);
+    if (!policy.ok) return policy.silent ? null : `continuity policy was not re-armed for node ${nodeId}: ${policy.reason}`;
+    const live = sessionRegistry.getLatestLiveSessions(rigId).find((session) => session.nodeId === nodeId);
+    if (!live) return null;
+    continuityPolicyMaterializer.arm({ compactionStrategy: policy.compactionStrategy, mechanic: policy.mechanic, runtime: policy.runtime,
+      targetSession: live.sessionName, sessionId: live.sessionId });
+    return null;
+  };
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
@@ -1644,6 +1657,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     eventBus,
     nodeLauncher,
     startupOrchestrator,
+    armSeatContinuity: (rigId, nodeId) => persistedArmSeatContinuity ? persistedArmSeatContinuity(rigId, nodeId) : Promise.resolve(null),
     tmuxAdapter,
     tmuxOptionDefaults,
     sessionEnv: launchSessionEnv,
