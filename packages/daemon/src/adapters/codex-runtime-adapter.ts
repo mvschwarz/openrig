@@ -1214,7 +1214,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
     const queueStateDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
-      ? "" : teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
+      ? "" : teamWorkspaceArg || this.prepareQueueStateAddDirArg(name);
     // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
     // (its cwd, the launch PATH), applied to fresh, fork and resume.
     const daemonSupport = this.detectDaemonSupport ? await (own ? this.detectDaemonSupport(binding.cwd, own) : this.detectDaemonSupport(binding.cwd)) : undefined;
@@ -1248,11 +1248,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       : this.launchCommand(cmd, this.homeFor(binding));
   }
 
-  private buildQueueStateAddDirArg(sessionName: string): string {
+  private prepareQueueStateAddDirArg(sessionName: string): string {
     const sharedDocsRoot = process.env.OPENRIG_SHARED_DOCS_ROOT?.trim()
       || nodePath.join(this.fs.homedir ?? os.homedir(), ".openrig", "shared-docs");
     const root = codexQueueStateRoot(sessionName, sharedDocsRoot);
-    return root ? ` --add-dir ${shellQuote(root)}` : "";
+    if (!root) return "";
+    try {
+      // Named profiles skip the team-default workspace preparation, but Codex still
+      // needs its generated pod-state root to exist before it can use --add-dir.
+      this.fs.mkdirp(root);
+      return ` --add-dir ${shellQuote(root)}`;
+    } catch (error) {
+      console.warn(`[openrig] Codex pod state not added (${root}): ${error instanceof Error ? error.message : String(error)}`);
+      return "";
+    }
   }
 
   /**
