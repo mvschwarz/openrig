@@ -1123,13 +1123,15 @@ facts it needs.
   exits with status 69, and `rig daemon start` puts that line in its error. Either
   way `rig daemon start` exits non-zero with the port named: have the wrapper stop
   relaunching on that error and find what holds the port first, rather than retrying
-  in a loop. Only a supervisor that runs the daemon process itself sees status 69
-  (for example, `RestartPreventExitStatus=69` in a systemd unit).
-- **Leave `daemon-start.lock` alone.** A reservation from an earlier boot is
-  archived by the next start, and so is one whose recorded launcher and child are
-  both gone in the same pid namespace. Any other reservation stays (a live or
-  unknown process, no child recorded, another namespace), and the start error says
-  what to inspect.
+  in a loop. `rig daemon start` exits 1 on every failure, so its exit code doesn't
+  tell failures apart; only the daemon's own bind failure has a status of its own,
+  69, and only a supervisor that runs the daemon process itself sees it (for
+  example, `RestartPreventExitStatus=69` in a systemd unit).
+- **Don't let the supervisor clear `daemon-start.lock`.** A reservation from an
+  earlier boot is archived by the next start, and so is one whose recorded launcher
+  and child are both gone in the same pid namespace, unless `rig daemon stop`
+  retained it. Any other reservation stays; a person reads the start error, which
+  says what to inspect and when the reservation can be archived.
 
 ## Kernel framing (what `rig setup` does and does not do)
 
