@@ -290,6 +290,124 @@ describe("the record of a lost tmux server", () => {
   });
 });
 
+describe("a probe that finishes after a newer loss or return, through the real observer wiring", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); });
+
+  /** A real TmuxAdapter, wired as the daemon wires it, whose tmux commands the TEST settles one by one, so probes can
+   *  finish in any order. */
+  function deferredTerminal(db: Database.Database, drains: RigDeliveryDrainStore) {
+    const calls: Array<{ command: string; answer: (stdout: string) => void; fail: (stderr: string) => void }> = [];
+    const adapter = new TmuxAdapter(command => new Promise<string>((resolve, reject) => {
+      calls.push({ command, answer: resolve,
+        fail: stderr => reject(Object.assign(new Error(`Command failed: ${command}\n${stderr}`), { stderr, execStderr: stderr })) });
+    }));
+    const changes: TerminalServerChange[] = [];
+    const reach = wireTerminalReachability({ db, adapter, drains, socket: SOCKET, emit: change => { changes.push(change); },
+      drainPendingWakeIntents: async () => ({}), retryPromptWakes: () => {} });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    /** The oldest (or the newest) pending call whose command contains `text`; throws if there is none. */
+    const pending = (text: string, newest = false) => {
+      const matches = calls.map((c, i) => [c, i] as const).filter(([c]) => c.command.includes(text));
+      const match = newest ? matches.at(-1) : matches[0];
+      if (!match) throw new Error(`no pending ${text}`);
+      return calls.splice(match[1], 1)[0]!;
+    };
+    return { adapter, reach, changes, pending, calls };
+  }
+  const settle = () => vi.advanceTimersByTimeAsync(0);
+
+  it("an older probe's success does not end a newer loss", async () => {
+    const db = database(); seats(db);
+    const drains = new RigDeliveryDrainStore(db);
+    const { adapter, reach, changes, pending, calls } = deferredTerminal(db, drains);
+    const lossA = adapter.probeSession("worker@test");
+    pending("tmux has-session").fail(`${NO_SERVER}\n`);
+    expect(await lossA).toMatchObject({ state: "transport_unavailable" }); // loss A
+    await vi.advanceTimersByTimeAsync(5_000);
+    const returnProbeA = pending("openrig-reachability-"); // A's return probe, still in flight
+    const listing = adapter.listSessions();
+    pending("tmux list-sessions").answer("");
+    await listing; // the server answers again
+    vi.setSystemTime(new Date("2026-01-01T00:00:08Z"));
+    const lossB = adapter.probeSession("worker@test");
+    pending("tmux has-session").fail(`${NO_SERVER}\n`);
+    await lossB; // and goes again: loss B
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back", "tmux.server_gone"]);
+    returnProbeA.answer(""); // A's probe now reports the success it saw before B
+    await settle();
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back", "tmux.server_gone"]);
+    expect(drains.holds("worker@test")).toBe(true);
+    expect(reach.snapshot().servers[0]).toMatchObject({ state: "unreachable", since: "2026-01-01T00:00:08.000Z" });
+    await vi.advanceTimersByTimeAsync(5_000); // B keeps its own return probe
+    expect(calls.filter(c => c.command.includes("openrig-reachability-"))).toHaveLength(1);
+    reach.stop();
+  });
+
+  it("an older probe's no-server answer does not reopen a loss after a newer return, from has-session or a listing", async () => {
+    const db = database(); seats(db);
+    const drains = new RigDeliveryDrainStore(db);
+    const { adapter, reach, changes, pending } = deferredTerminal(db, drains);
+    const lossA = adapter.probeSession("worker@test");
+    pending("tmux has-session").fail(`${NO_SERVER}\n`);
+    await lossA; // loss A
+    const olderProbe = adapter.probeSession("worker@test"); // both start during loss A
+    const olderListing = adapter.listSessions();
+    const back = adapter.probeSession("worker@test");
+    pending("tmux has-session", true).answer("");
+    await back; // a newer probe sees the server answer again
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back"]);
+    pending("tmux has-session").fail(`${NO_SERVER}\n`); // the older ones now report what they saw during A
+    pending("tmux list-sessions").fail("error connecting to /custom/openrig.sock (Connection refused)\n");
+    expect(await olderProbe).toMatchObject({ state: "transport_unavailable" }); // each probe's own answer is unchanged
+    expect(await olderListing).toEqual([]);
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back"]);
+    expect(drains.holds("worker@test")).toBe(false);
+    expect(reach.snapshot()).toMatchObject({ state: "ok", servers: [{ state: "reachable" }] });
+    reach.stop();
+  });
+
+  it("an older probe can't undo an unknown reading: its late answer neither reopens the loss nor claims a return", async () => {
+    for (const late of ["no-server", "success"] as const) {
+      const db = database(); seats(db);
+      const drains = new RigDeliveryDrainStore(db);
+      const { adapter, reach, changes, pending } = deferredTerminal(db, drains);
+      const lossA = adapter.probeSession("worker@test");
+      pending("tmux has-session").fail(`${NO_SERVER}\n`);
+      await lossA; // loss A
+      const older = adapter.probeSession("worker@test"); // starts during loss A
+      await vi.advanceTimersByTimeAsync(5_000);
+      pending("openrig-reachability-").fail("error connecting to /custom/openrig.sock (Permission denied)\n");
+      await settle(); // A's return probe can't be read: unknown, the hold ends
+      expect(reach.snapshot().servers[0]).toMatchObject({ state: "unknown" });
+      if (late === "no-server") pending("tmux has-session").fail(`${NO_SERVER}\n`);
+      else pending("tmux has-session").answer("");
+      await older;
+      expect(changes.map(c => c.type)).toEqual(["tmux.server_gone"]);
+      expect(drains.holds("worker@test")).toBe(false);
+      expect(reach.snapshot().servers[0]).toMatchObject({ state: "unknown" });
+      reach.stop();
+    }
+  });
+
+  it("a probe that started in the current state still changes it", async () => {
+    const db = database(); seats(db);
+    const drains = new RigDeliveryDrainStore(db);
+    const { adapter, reach, changes, pending } = deferredTerminal(db, drains);
+    const first = adapter.probeSession("worker@test");
+    const second = adapter.probeSession("worker@test"); // both start while the server answers
+    pending("tmux has-session").fail(`${NO_SERVER}\n`);
+    pending("tmux has-session").fail(`${NO_SERVER}\n`);
+    await Promise.all([first, second]);
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone"]); // the second agrees: one loss
+    const current = adapter.probeSession("worker@test"); // starts during the loss
+    pending("tmux has-session").answer("");
+    await current;
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back"]);
+    expect(drains.holds("worker@test")).toBe(false);
+    reach.stop();
+  });
+});
+
 describe("the tmux adapter reports each classified probe", () => {
   it("tells its observer what a probe showed, without changing the probe's result", async () => {
     const terminal = toggleableTerminal(["worker@test"]);

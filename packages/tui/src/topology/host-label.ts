@@ -1,11 +1,11 @@
-import { stripVTControlCharacters } from "node:util";
+import { terminalSafeText } from "../terminal-safe-text.js";
 import type { HostNode } from "../types.js";
 
 export function sanitizeHostDisplayName(value: string): string {
-  // Node 22's VT stripper does not consume every OSC payload (for example a
-  // window title with spaces). Remove the entire string before stripping CSI.
-  const plain = value.replace(/(?:\x1b\]|\x9d)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)/g, "");
-  return stripVTControlCharacters(plain).replace(/[\x00-\x1f\x7f-\x9f\p{Bidi_Control}]/gu, "").trim();
+  // A configured display name is a label, so it is trimmed, keeps no bidi marks, and closes the gap a
+  // removed control byte leaves: a name that never meant to contain one should read as the name it was.
+  // The bidi removal is asked for here because the shared helper keeps them by default.
+  return terminalSafeText(value, { trim: true, control: "remove", keepBidi: false });
 }
 
 function displayName(host: HostNode): string | undefined {
