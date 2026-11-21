@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -182,28 +182,6 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     const bridge = runBridge(openrigHome, { hook_event_name: "UserPromptSubmit" }, { OPENRIG_COMPACTION_OUT_ROOT: undefined });
     expect(bridge.status).toBe(0);
     expect(JSON.parse(bridge.stdout.trim()).hookSpecificOutput.additionalContext).toContain(`Restore packet: ${packets}`);
-  });
-
-  it("a new packet removes packets older than a week, and only folders named as packets", () => {
-    const packets = join(tmpDir, "packets");
-    const folder = (name: string, ageDays: number) => {
-      const dir = join(packets, name);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "restore-instructions.md"), "old");
-      const at = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000);
-      utimesSync(dir, at, at);
-      return dir;
-    };
-    const old = folder("11111111-1111-4111-8111-111111111111-2026-11-01T00-00-00-000Z", 8);
-    const recent = folder("22222222-2222-4222-8222-222222222222-2026-11-20T00-00-00-000Z", 6);
-    const unrelated = folder("notes-from-someone", 30);
-    const { status } = runHook(openrigHome);
-    expect(status).toBe(0);
-    const marker = JSON.parse(readFileSync(pendingMarker(openrigHome), "utf8"));
-    expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
-    expect(existsSync(old)).toBe(false);
-    expect(existsSync(recent)).toBe(true);
-    expect(existsSync(unrelated)).toBe(true);
   });
 
   it("HG-6: inline message is appended to systemMessage", () => {

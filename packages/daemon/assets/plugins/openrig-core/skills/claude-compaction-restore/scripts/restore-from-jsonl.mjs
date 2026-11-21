@@ -434,30 +434,11 @@ function nowIso() {
   return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
 }
 
-// Packets once sat in /tmp, which the system clears; nothing else clears the home's folder, so each write removes packets
-// older than a week. Only folders named as writeOutputs names them, never a link. A restore reads its packet minutes
-// after the compaction that wrote it.
-const PACKET_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const PACKET_NAME = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|unknown-session)-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/i;
-
-function removeOldPackets(outRoot, now = Date.now()) {
-  let entries;
-  try { entries = fs.readdirSync(outRoot, { withFileTypes: true }); } catch { return; }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !PACKET_NAME.test(entry.name)) continue;
-    const dir = path.join(outRoot, entry.name);
-    try {
-      if (now - fs.lstatSync(dir).mtimeMs > PACKET_RETENTION_MS) fs.rmSync(dir, { recursive: true, force: true });
-    } catch { /* best-effort: a packet left behind is only disk */ }
-  }
-}
-
 function writeOutputs(summary, outRoot) {
   const stamp = nowIso().replace(/[:.]/g, "-");
   const base = path.join(outRoot, `${summary.sessionId ?? "unknown-session"}-${stamp}`);
   // Owner-only: a packet holds an extract of the conversation.
   fs.mkdirSync(outRoot, { recursive: true, mode: 0o700 });
-  removeOldPackets(outRoot);
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
 
   const outputPaths = {

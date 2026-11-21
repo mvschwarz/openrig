@@ -195,7 +195,7 @@ it.each([
   expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
 });
 
-it("with no packet root set, the restore request and the grant both name the OpenRig home's runtime folder", async () => {
+it("with no packet root set, the request and the grant name the OpenRig home's runtime folder, and the grant keeps the previous root for this session only", async () => {
   const { compactionPacketRoot, withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
   const { buildPostCompactRestorePrompt } = await import("../src/domain/claude-compaction-enforcer.js");
   const { deriveCanonicalSessionName } = await import("../src/domain/session-name.js");
@@ -212,10 +212,12 @@ it("with no packet root set, the restore request and the grant both name the Ope
   }
   const allow = JSON.parse(withManagedRestoreReads([], { openrigHome: home, session: seat, cwd: path.join(root, "project"),
     nativeSessionId: CHILD })[1]!).permissions.allow as string[];
-  for (const file of ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]) {
-    expect(allow).toContain(`Read(/${packets}/${CHILD}-*/${file})`);
-  }
-  expect(allow.filter(rule => rule.includes("tmp/claude-compaction-restore"))).toEqual([]);
+  const files = ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"];
+  // An upgrade: a marker written before it still names a packet under the previous root, and the seat reads its own.
+  const expected = [...spellings(packets), ...spellings("/tmp/claude-compaction-restore")]
+    .flatMap(root => files.map(file => `Read(/${root}/${CHILD}-*/${file})`));
+  expect(allow.filter(rule => rule.includes(`/${CHILD}-*/`))).toEqual(expected);
+  expect(allow.some(rule => rule.includes(PARENT))).toBe(false);
 });
 
 it("both Claude launch paths grant the configured extra file the restore will name", async () => {
