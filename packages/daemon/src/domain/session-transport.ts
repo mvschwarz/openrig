@@ -97,8 +97,9 @@ const MID_WORK_PATTERNS = [
 // as in a reasoning header clipped before "esc to interrupt" ("• Working on the test fixtures (6m 12s").
 // Prose such as "Working (as requested), …" or "Working... then I committed it." has no timer. The timer paren holds
 // only timer parts, then closes the row, opens the "• esc to interrupt" tail or is clipped: prose such as
-// "Working on the tests (2s per test), I found it." has more words in the paren.
-const LIVE_TIMER_PAREN = String.raw`\(\s*\d+[hms](?:\s+\d+[hms]?)*\s*(?:\)\s*$|[•·]|$)`;
+// "Working on the tests (2s per test), I found it." has more words in the paren. A paren clipped right after
+// its first timer digit ("• Working on the test fixtures (6") still reads live.
+const LIVE_TIMER_PAREN = String.raw`\(\s*\d+(?:[hms](?:\s+\d+[hms]?)*\s*(?:\)\s*$|[•·]|$)|\s*$)`;
 const LIVE_WORKING_ROW_PATTERN = new RegExp(String.raw`^(?:\S\s+)?Working(?:\s*${LIVE_TIMER_PAREN}` +
   String.raw`|\s*(?:…|\.{3})\s*(?:${LIVE_TIMER_PAREN}|$)|\s*$|\b.*${LIVE_TIMER_PAREN})`);
 const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>

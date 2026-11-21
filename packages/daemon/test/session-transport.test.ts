@@ -228,7 +228,8 @@ describe("agent pane activity classifier", () => {
     for (const status of ["⠋ Working", "Working…", "• Working", "Working...", "◦ Working (3s • esc to interrupt)",
       "✻ Working… (12s)", "• Working ( 3s", "• Working on the test fixtures (6m 12s",
       "• Working on the test fixtures (3s", "• Working on the test fixtures (6m 12s • esc to interrupt)",
-      "• Working on the test fixtures (6m 1", "• Working (1h 2m 3s)"]) {
+      "• Working on the test fixtures (6m 1", "• Working (1h 2m 3s)", "• Working on the test fixtures (6",
+      "• Working (6"]) {
       const result = classifyPaneActivity([status, "", "› "].join("\n"));
 
       expect(result.state, status).toBe("agent_active");
