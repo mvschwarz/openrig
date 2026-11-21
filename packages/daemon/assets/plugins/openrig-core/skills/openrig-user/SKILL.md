@@ -1201,10 +1201,11 @@ never run it as a form. "Whatever you think" or "skip" is an answer: write down 
    box uses about four times the tokens of the laptop; any I can't see?").
 3. **Ask how they want them used,** offering the common shape: the busiest machine gets its own subscription, the
    rest share, and one stays spare.
-4. **Ask what you may do on your own:** move a machine's Codex seats without asking; machines or seats to ask about
-   first or never move; sign-ins (may agents, and through which browser or profile, or always ask). Say what's
-   supported today: moves are by Codex home, Claude moves aren't supported yet, and a sign-in preference is used only
-   where a sign-in route and access exist.
+4. **Ask what you may do on your own:** move a machine's seats without asking; machines or seats to ask about first
+   or never move; sign-ins (may agents, and through which browser or profile, or always ask). Say what's supported
+   today: a Claude or Codex seat moves with `rig provider switch`, and a whole rig with `rig provider assign`; a Codex
+   seat moves in place only on Linux, with every seat on its Codex home; and a sign-in preference is used only where a
+   sign-in route and access exist.
 5. **Ask how to reach them** (their seat's queue, a chat channel, the Fleet app), for what, and what to do when they
    don't answer. A channel they name is a preference: check the route with `messaging-the-human`, and use a queue
    item to their seat if it isn't ready.
