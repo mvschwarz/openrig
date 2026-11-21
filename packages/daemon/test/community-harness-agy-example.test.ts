@@ -249,7 +249,18 @@ import { appendFileSync } from "node:fs";
 appendFileSync(process.env.FAKE_LOG, JSON.stringify({ argv: process.argv.slice(2), key: process.env.GEMINI_API_KEY ?? null }) + "\\n");
 if (process.argv.includes("-p")) process.stdout.write(JSON.stringify({ conversation_id: "conv-1", response: "ready" }));
 `;
-  function launch(extra: string[], keyFile?: string) {
+  // Stand-ins for the launcher's own helpers, first on PATH: the parse (jq) and the report's move (mv). Each logs only
+  // whether it got a key, never a value, then does the helper's job.
+  const FAKE_JQ = `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+appendFileSync(process.env.HELPER_LOG, "jq " + ("GEMINI_API_KEY" in process.env ? "key" : "none") + "\\n");
+try { const id = JSON.parse(readFileSync(0, "utf8")).conversation_id; if (id) process.stdout.write(id + "\\n"); } catch {}
+`;
+  const FAKE_MV = `#!/bin/sh
+if [ "\${GEMINI_API_KEY+set}" = set ]; then echo "mv key" >> "$HELPER_LOG"; else echo "mv none" >> "$HELPER_LOG"; fi
+exec /bin/mv "$@"
+`;
+  function launch(extra: string[], keyFile?: string, helpers = false) {
     const dir = mkdtempSync(join(tmpdir(), "agy-plain-key-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const fake = join(dir, "fake-agy.mjs");
@@ -257,11 +268,18 @@ if (process.argv.includes("-p")) process.stdout.write(JSON.stringify({ conversat
     chmodSync(fake, 0o755);
     const key = keyFile ?? join(dir, "gemini-api-key");
     if (!keyFile) writeFileSync(key, `${KEY}\n`, { mode: 0o600 });
-    const log = join(dir, "agy.log"), result = join(dir, "result.json");
+    const log = join(dir, "agy.log"), result = join(dir, "result.json"), helperLog = join(dir, "helpers.log"), bin = join(dir, "bin");
+    if (helpers) {
+      mkdirSync(bin);
+      writeFileSync(join(bin, "jq"), FAKE_JQ, { mode: 0o755 });
+      writeFileSync(join(bin, "mv"), FAKE_MV, { mode: 0o755 });
+    }
     const run = spawnSync("sh", [join(EXAMPLE, "openrig-agy-launch"), "--agy-home", dir, "--agy", fake, "--key-file", key, ...extra], { encoding: "utf8",
-      env: { PATH: process.env["PATH"]!, HOME: dir, FAKE_LOG: log, OPENRIG_RUNTIME: "agy-plain", OPENRIG_LAUNCH_RESULT: result, OPENRIG_LAUNCH_ATTEMPT: "attempt-1" } });
+      env: { PATH: helpers ? `${bin}:${process.env["PATH"]!}` : process.env["PATH"]!, HOME: dir, FAKE_LOG: log, HELPER_LOG: helperLog,
+        OPENRIG_RUNTIME: "agy-plain", OPENRIG_LAUNCH_RESULT: result, OPENRIG_LAUNCH_ATTEMPT: "attempt-1" } });
     const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { argv: string[]; key: string | null }) : [];
-    return { run, calls, record: existsSync(result) ? JSON.parse(readFileSync(result, "utf8")) as Record<string, unknown> : undefined };
+    const helperCalls = existsSync(helperLog) ? readFileSync(helperLog, "utf8").split("\n").filter(Boolean) : [];
+    return { run, calls, helperCalls, record: existsSync(result) ? JSON.parse(readFileSync(result, "utf8")) as Record<string, unknown> : undefined };
   }
 
   it("gives agy the key in its environment only, and pins the model for the first turn and the terminal UI", () => {
@@ -273,6 +291,14 @@ if (process.argv.includes("-p")) process.stdout.write(JSON.stringify({ conversat
     ]);
     expect(record).toMatchObject({ harness: "agy-plain", nativeRef: "conv-1" });
     expect(`${run.stdout}${run.stderr}`).not.toContain(KEY);
+  });
+
+  it("keeps the key out of the launcher's own helpers: the parse and the report's move get none, while agy gets it", () => {
+    const { run, calls, helperCalls, record } = launch(["--model", "gemini-4-neon-high"], undefined, true);
+    expect(run.status).toBe(0);
+    expect(helperCalls).toEqual(["jq none", "mv none"]);
+    expect(calls.map((call) => call.key)).toEqual([KEY, KEY]);
+    expect(record).toMatchObject({ harness: "agy-plain", nativeRef: "conv-1" });
   });
 
   it("passes a model name with a space as one argument", () => {
