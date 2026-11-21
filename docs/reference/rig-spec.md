@@ -868,7 +868,7 @@ credential kind correctly.
 ### Assigning an account to a whole rig
 
 `rig provider switch` moves one seat. `rig provider assign` moves every seat of one provider in a rig to one
-account, in two steps: a plan that changes nothing, then an apply of exactly that plan. Each seat moves through the
+account, in two steps: a plan that changes nothing of the rig's, then an apply of exactly that plan. Each seat moves through the
 same switch, so it keeps its conversation the way `rig provider switch` would. The exception is `--account-home`,
 where a fresh successor takes the seat with a handover.
 
@@ -896,7 +896,9 @@ rig provider account remove budget --provider claude
 - A label is your name for a reference, not proof of the login a running seat uses.
 
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
-and changes nothing. In this run, team-dev and team-qa are running on the default login, and team-review has its own
+and changes nothing of the rig's: no seat, account or assignment. A Codex seat that would change, or restart with its
+home, is checked with the restart preview (`rig seat restart <seat> --keep-conversation --plan`). Like that preview,
+the check can bring the seat's Codex home `config.toml` to OpenRig's managed hooks block when it differs. In this run, team-dev and team-qa are running on the default login, and team-review has its own
 token file. The paths and the host id are shortened; a digest belongs to its own plan, so yours will differ:
 
 ```text
