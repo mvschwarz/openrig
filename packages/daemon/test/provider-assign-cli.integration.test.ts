@@ -92,14 +92,10 @@ it.skipIf(process.platform === "win32")("compiled provider assign plans, then ap
       await until(() => tmux("capture-pane", "-p", "-t", s.pane).includes(`MEMORY:${s.marker} AUTH:plan`), `${s.seat} probe`);
     }
 
-    // Read back: the rig's assignment, each seat's result, and the label in use.
+    // Read back: the rig's assignment and each seat's result.
     const after = await ok([...assign, "--json"]);
     expect(after.plan.intent).toMatchObject({ label: "plan" });
     expect(after.plan.rows.map((r: { effect: string; lastResult?: { kind: string } }) => [r.effect, r.lastResult?.kind])).toEqual([["unchanged", "switched"], ["unchanged", "switched"]]);
-    const removal = await rigCli(["provider", "account", "remove", "plan", "--provider", "claude"]);
-    expect(removal.code).toBe(1);
-    expect(removal.stderr + removal.stdout).toContain(`rig ${rig.name} (claude)`);
-
     // #3625 slice 4: status reads both seats as following the rig's assignment.
     type Binding = { seatSession: string; assignment?: { state: string; intended: { label: string } | null; applied: { kind: string } | null; override?: string } };
     const statusOf = async () => Object.fromEntries(((await ok(["provider", "status", "--json"])).bindings as Binding[]).map((b) => [b.seatSession, b.assignment]));
@@ -119,7 +115,15 @@ it.skipIf(process.platform === "win32")("compiled provider assign plans, then ap
     const human = await rigCli(["provider", "status"]);
     expect(human.code).toBe(0);
     expect(human.stdout).toContain(`this seat is configured with its own choice: its own token file ${startFile} ("start")`);
-    expect(JSON.stringify([planned, applied, after, status, human.stdout])).not.toMatch(/synthetic-(start|plan)/);
+    // Removing the label in use warns, naming the rig, and goes ahead; the seats stay as they are, and status says the
+    // reference is missing.
+    const removal = await rigCli(["provider", "account", "remove", "plan", "--provider", "claude"]);
+    expect(removal.code).toBe(0);
+    expect(removal.stdout).toContain(`Warning: plan was assigned to rig ${rig.name} (claude).`);
+    const missing = await statusOf() as Record<string, { state: string; referenceMissing?: true } | undefined>;
+    expect(missing[alpha.seat]).toMatchObject({ state: "follows", referenceMissing: true });
+    expect(missing[beta.seat]).toMatchObject({ referenceMissing: true });
+    expect(JSON.stringify([planned, applied, after, status, human.stdout, removal.stdout])).not.toMatch(/synthetic-(start|plan)/);
   } finally {
     db?.close();
     if (daemon) await daemon.stop(); else scaffold.cleanup();
