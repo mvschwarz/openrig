@@ -497,21 +497,32 @@ export class AgentActivityStore {
    *  inside a turn), a Stop or PostToolBatch, or another StopFailure (Claude sends StopFailure instead of Stop, so each
    *  ends its own turn). An idle notification, a compaction or session-start record, or another occupant's record that
    *  shows no turn doesn't. The failure keeps its original event time, typed reason and raw value, and must be the live
-   *  occupant's by getLatestForNode's generation rules: an unknown, unresolvable or replaced occupant reads null. Only
-   *  the node's newest SOURCE_ORDER_WINDOW records are read. It isn't aged by the freshness window: it reports that the
-   *  last failure hasn't been superseded, not a fresh check of the account. */
+   *  occupant's by getLatestForNode's generation rules: an unknown, unresolvable or replaced occupant reads null. The
+   *  records read are the SOURCE_ORDER_WINDOW that end at the node's newest record that decides (a turn or a
+   *  StopFailure, in any session), so records that show no turn can't push the failure out of view: everything that
+   *  arrived after that record is one the walk skips. Finding it walks back only over those records. It isn't aged by
+   *  the freshness window: it reports that the last failure hasn't been superseded, not a fresh check of the account. */
   latestUnsupersededProviderFailure(input: { nodeId?: string | null; sessionName: string; now?: Date }): AgentActivity | null {
     const sessionName = physicalSessionName(this.db, input.sessionName);
     const nodeId = input.nodeId ?? this._resolveSession({ sessionName })?.node_id;
     if (!nodeId) return null;
+    // The node's newest record that decides, by arrival and in any session (filtering the session here would walk a
+    // new session's whole earlier history). No such record means no StopFailure either.
+    const anchor = this.db.prepare(`
+      SELECT seq FROM events
+      WHERE node_id = ? AND type = 'agent.activity'
+        AND (json_extract(payload, '$.activity.state') IN ('running', 'needs_input')
+          OR json_extract(payload, '$.activity.rawEvent') IN ('Stop', 'PostToolBatch', 'StopFailure'))
+      ORDER BY seq DESC LIMIT 1`).get(nodeId) as { seq: number } | undefined;
+    if (!anchor) return null;
     const rows = this.db.prepare(`
       SELECT payload FROM (
         SELECT payload, seq FROM events
-        WHERE node_id = ? AND type = 'agent.activity'
+        WHERE node_id = ? AND type = 'agent.activity' AND seq <= ?
         ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
       WHERE json_extract(payload, '$.sessionName') = ?
       ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
-        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).iterate(nodeId, sessionName) as IterableIterator<EventPayloadRow>;
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).iterate(nodeId, anchor.seq, sessionName) as IterableIterator<EventPayloadRow>;
     for (const row of rows) {
       const activity = parseActivityPayload(row.payload)?.activity;
       if (!activity) continue;

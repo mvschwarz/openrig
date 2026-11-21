@@ -542,6 +542,21 @@ describe("Claude provider interruptions (#99)", () => {
       expect(latestHookWaitsOnPerson(latest(), "claude-code")).toBe(false);
     });
 
+    it("retains the failure past more records that show no turn than the source-order window holds", async () => {
+      report({ hook_event_name: "StopFailure", error: "authentication_failed" }, identity, "2025-01-01T11:50:00.000Z");
+      for (let i = 0; i < 205; i++) {
+        const hook = i % 2 ? { hook_event_name: "Notification", notification_type: "idle_prompt" }
+          : { hook_event_name: "SessionStart", source: "compact" };
+        report(hook, identity, new Date(Date.parse("2025-01-01T11:51:00.000Z") + i * 1000).toISOString());
+      }
+      expect(store.latestUnsupersededProviderFailure({ sessionName: SESSION }))
+        .toMatchObject({ reason: "provider_auth_error", eventAt: "2025-01-01T11:50:00.000Z" });
+      const served = await displayActivity();
+      expect(served).toMatchObject({ state: "unknown", reason: "provider_auth_error",
+        eventAt: "2025-01-01T11:50:00.000Z" });
+      expect(seatNeedsAttention(seat, served!, null)).toBe(true);
+    });
+
     it("retains the failure past the five-minute window, without lifting hook freshness for anything else", async () => {
       const hookAge = AGENT_ACTIVITY_FRESHNESS_MS + 60_000;
       const served = await displayLimit({ hookAge, paneAge: 0 }, "authentication_failed");
