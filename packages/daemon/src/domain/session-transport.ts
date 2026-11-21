@@ -95,9 +95,12 @@ const MID_WORK_PATTERNS = [
 // timer paren, an ellipsis that ends the line or opens the timer, or the end of the line
 // ("• Working (3s • esc to interrupt)", "✻ Working…", "⠋ Working"), or a digit timer paren later on the row,
 // as in a reasoning header clipped before "esc to interrupt" ("• Working on the test fixtures (6m 12s").
-// Prose such as "Working (as requested), …" or "Working... then I committed it." has no timer.
-const LIVE_WORKING_ROW_PATTERN =
-  /^(?:\S\s+)?Working(?:\s*\(\s*\d+[hms]\b|\s*(?:…|\.{3})\s*(?:\(\s*\d+[hms]\b|$)|\s*$|\b.*\(\s*\d+[hms]\b)/;
+// Prose such as "Working (as requested), …" or "Working... then I committed it." has no timer. The timer paren holds
+// only timer parts, then closes the row, opens the "• esc to interrupt" tail or is clipped: prose such as
+// "Working on the tests (2s per test), I found it." has more words in the paren.
+const LIVE_TIMER_PAREN = String.raw`\(\s*\d+[hms](?:\s+\d+[hms]?)*\s*(?:\)\s*$|[•·]|$)`;
+const LIVE_WORKING_ROW_PATTERN = new RegExp(String.raw`^(?:\S\s+)?Working(?:\s*${LIVE_TIMER_PAREN}` +
+  String.raw`|\s*(?:…|\.{3})\s*(?:${LIVE_TIMER_PAREN}|$)|\s*$|\b.*${LIVE_TIMER_PAREN})`);
 const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>
   pattern === WORKING_WORD_PATTERN ? LIVE_WORKING_ROW_PATTERN : pattern);
 
