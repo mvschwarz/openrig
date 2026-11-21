@@ -190,13 +190,15 @@ describe("the explanation names only a cause the check tested", () => {
     const { result } = await check("claude-code", [shell, claude(RUNNING)], { token: null, strict: false });
     expect(result.ok).toBe(true);
   });
-  it.each(["claude-code", "codex"] as const)("a failed process listing for %s is not reported as an absence", async (runtime) => {
+  it.each(["claude-code", "codex"] as const)("reports an unreadable process listing for %s as unavailable", async (runtime) => {
     const throwing = () => { throw new Error("ps: fork failed"); };
-    const text = await detail(runtime, throwing);
-    expect(text).toContain("could not be found in the process listing");
-    expect(text).not.toContain("does not hold");
+    const { result, verdict } = await check(runtime, throwing);
+    expect(result).toMatchObject({
+      ok: false, reason: "tmux_unavailable", detail: expect.stringContaining("native process listing failed: ps: fork failed"),
+    });
+    expect(verdict).toEqual({ verdict: runtime === "codex" ? "mismatch" : "tmux_unavailable", reason: "tmux_unavailable" });
   });
-  it.each(["claude-code", "codex"] as const)("an empty process table for %s (the default lister's failure) is not reported as an absence", async (runtime) => {
+  it.each(["claude-code", "codex"] as const)("an empty process table for %s is inconclusive", async (runtime) => {
     const text = await detail(runtime, []);
     expect(text).toContain("could not be found in the process listing");
     expect(text).not.toContain("does not hold");
