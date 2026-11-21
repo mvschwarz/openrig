@@ -63,6 +63,10 @@ export interface TypingGuardConfig extends TypingGuardSettings { revision: strin
 const DEFAULT_GUARD: TypingGuardConfig = { mode: "off", revision: "legacy-off" };
 /** How long the guard waits before reading again an input it couldn't read right after its own paste or Enter (#2429). */
 const OWN_INPUT_REREAD_MS = 300;
+/** How long the guard keeps re-reading its own paste before refusing the Enter: the life of the `paste again to expand`
+ *  hint that replaces Claude's mode bar after a large paste (Claude Code's own timer clears it 8 s later). A notice the
+ *  reader doesn't know beside the hint leaves the input unreadable until then (#2429). */
+const OWN_PASTE_REREAD_LIMIT_MS = 8000;
 /** Right before an automatic paste, the empty input is read once more after this wait: a draft typed (or redrawn by the
  *  agent's TUI) since the first read is seen before the paste, not after it, where nothing is removed (#2447, #3076). */
 const PASTE_SETTLE_MS = 300;
@@ -526,8 +530,11 @@ export class SeatDeliveryGuard {
     };
     const unknown = (reading: ComposerInput | null) => new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.", inputReadDiagnostic("draft-aware", reading));
     let input = await read();
-    // Claude may still be redrawing this lease's own paste: one bounded re-read before refusing its Enter.
-    if (submit && lease.staged && (!input || input.state === "unknown")) { await this.sleep(OWN_INPUT_REREAD_MS); input = await read(); }
+    // Claude may still be redrawing this lease's own paste, or showing its paste hint: bounded re-reads before refusing
+    // its Enter. Each read checks this lease again, so input from a person through OpenRig still ends the wait.
+    for (let waited = 0; submit && lease.staged && (!input || input.state === "unknown") && waited < OWN_PASTE_REREAD_LIMIT_MS; waited += OWN_INPUT_REREAD_MS) {
+      await this.sleep(OWN_INPUT_REREAD_MS); input = await read();
+    }
     if (!input || input.state === "unknown") {
       // No Enter was sent, so the paste stays there unsubmitted, and the next delivery may recognize it as OpenRig's.
       if (submit && lease.staged) this.leftovers.set(target.nodeId, { target: lease.target, humanEpoch: lease.humanEpoch, ...lease.staged });

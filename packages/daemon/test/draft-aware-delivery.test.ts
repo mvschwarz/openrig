@@ -1600,4 +1600,91 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
       expect(await f.send("unknown-notice", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
       expect(f.submissions).toEqual([]);
     });
+
+  // The issue's shape: a periodic reminder longer than the input, collapsed with its line count, while a notice the
+  // reader knows on its own row sits at the footer's right.
+  const reminder = Array.from({ length: 7 }, (_, i) => `reminder line ${i + 1}: ${"x".repeat(60)}`).join("\n");
+  const knownNotices = ["Update available! Run: brew upgrade claude-code", "current: 2.1.326 · latest: 2.1.330 ✔ Update installed · Restart to update",
+    "You've used 80% of your weekly limit · resets 4pm (UTC)", "new task? /clear to save 12.3k tokens"];
+
+  it.each(knownNotices)("submits its own pasted reminder when the hint shares the footer with the status notice %s", async notice => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    collapsedUnder(f, reminder, "[Pasted text #1 +6 lines]", `paste again to expand${" ".repeat(40)}${notice}`,
+      `⏵⏵ bypass permissions on (shift+tab to cycle)${" ".repeat(40)}${notice}`);
+    const result = await f.send("status-notice", reminder, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([reminder]);
+  });
+
+  // A count-less label is ours only when notePasted recorded it, so this one needs the hint's frame readable at once.
+  it("submits its own single-line reminder collapsed to [Pasted text #1] beside the update banner", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `reminder: ${"x".repeat(1190)}`;
+    collapsedUnder(f, text, "[Pasted text #1]", "paste again to expand  Update available! Run: npm i -g @anthropic-ai/claude-code");
+    const result = await f.send("status-notice-one-line", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  // A notice the reader doesn't know keeps the hint's frame unreadable until the hint goes back to the mode bar. Reads
+  // while staged: notePasted's, the Enter's first, then one per re-read; re-read 27 is the last within 8 s.
+  it.each([1, 7, 27])("submits its own paste when an unknown notice's hint gives way to the mode bar on re-read %i", async clearsOn => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    let stagedReads = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const staged = f.bodies.a === reminder;
+      const snapshot = frame(staged ? "[Pasted text #1 +6 lines]" : f.bodies.a ?? "");
+      const hint = staged && stagedReads++ < clearsOn + 1;
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${hint ? "paste again to expand  ✦ a notice no list has" : "⏵⏵ bypass permissions on (shift+tab to cycle)"}\n`);
+      return snapshot;
+    });
+    const result = await f.send("hint-clears", reminder, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([reminder]);
+    expect(stagedReads).toBe(clearsOn + 2);
+  });
+
+  it("stops re-reading after about 8 s and leaves its paste unsubmitted when the hint stays", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    let stagedReads = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const staged = f.bodies.a === reminder;
+      if (staged) stagedReads++;
+      const snapshot = frame(staged ? "[Pasted text #1 +6 lines]" : f.bodies.a ?? "");
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${staged ? "paste again to expand  ✦ a notice no list has" : "⏵⏵ bypass permissions on (shift+tab to cycle)"}\n`);
+      return snapshot;
+    });
+    expect(await f.send("hint-stays", reminder, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    expect(stagedReads).toBe(2 + 27);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(reminder);
+  });
+
+  it("does not paste into a person's draft shown above the hint and a known notice", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    f.bodies.a = "a person's unfinished draft";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const snapshot = frame(f.bodies.a ?? "");
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", "paste again to expand  Update available! Run: brew upgrade claude-code\n");
+      return snapshot;
+    });
+    expect(await f.send("draft-under-hint", reminder, { verify: false })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("a person's unfinished draft");
+  });
+
+  it("sends no Enter when the hint gives way to someone else's text during the re-reads", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    let stagedReads = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const staged = f.bodies.a === reminder;
+      const hint = staged && stagedReads++ < 3;
+      const snapshot = frame(staged ? (hint ? "[Pasted text #1 +6 lines]" : "someone else's words") : f.bodies.a ?? "");
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${hint ? "paste again to expand  ✦ a notice no list has" : "⏵⏵ bypass permissions on (shift+tab to cycle)"}\n`);
+      return snapshot;
+    });
+    expect(await f.send("hint-gives-way", reminder, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+  });
 });
