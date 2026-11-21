@@ -398,12 +398,17 @@ What reads these declarations:
   `?filter=active&derived=blocked` narrows the authored active slices to the blocked ones. An unknown value
   answers 400 `derived_invalid` when the indexer is ready. If no root is ready, the route returns 503
   `slices_root_not_configured` first. Every row's `slicePath` is absolute. The daemon keeps each configured root
-  spelling and resolves it for each list request. It makes a relative spelling absolute and applies `path.resolve`
-  to roots without `..`; a symlink alias in such a root keeps its name. For a root containing `..`, it calls
-  `fs.realpathSync.native` so the filesystem follows a symlink before it applies `..` (for example,
-  `link/../missions` names `missions` beside the link target). If that call fails, the daemon keeps the absolute
-  configured spelling. One resolved root is used for the slice list and project readiness in that request.
-  Duplicate roots are removed after this normalization. A missing or unreadable root behaves as before.
+  spelling and captures its physical target once with `fs.realpathSync.native` for each list request. It makes a
+  relative spelling absolute and applies `path.resolve` to roots without `..`; a symlink alias in such a root keeps
+  its alias spelling as `slicePath` metadata. For a root containing `..`, the filesystem follows a symlink before
+  applying `..` (for example, `link/../missions` names `missions` beside the link target), and the resolved physical
+  path is also its identity. If that capture fails, the daemon keeps the absolute configured spelling as metadata
+  and treats the root as missing or unreadable without walking or re-resolving it in that request. Within that
+  request, the daemon reads the slice list, candidate walks, queue counts, configured-root project ownership, and
+  slice and project readiness through each configured root's captured physical target rather than re-traversing a
+  symlink alias; this pins the configured root target for the request, not a filesystem snapshot of mutations inside
+  that target or of separate catalog roots. Duplicate roots are removed after this normalization. A missing or
+  unreadable root behaves as before.
   `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
   join by physical slice path, only when it can confirm the daemon is this home's own (its `/healthz` instance id
   matches this home's); a daemon it cannot confirm gives `unknown` for every slice, because the same absolute

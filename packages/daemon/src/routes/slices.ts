@@ -30,6 +30,7 @@ import {
   SliceIndexer,
   SliceListEntry,
   SliceStatus,
+  type ConfiguredRootResolution,
   type SliceQueueDerivedState,
 } from "../domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../domain/slices/slice-detail-projector.js";
@@ -132,17 +133,22 @@ export function slicesRoutes(): Hono {
         const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
           deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
         if (derivedFilter) filtered = filtered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter);
+        const readPathOf = (slicePath: string): string =>
+          typeof deps.indexer.physicalPathFor === "function"
+            ? deps.indexer.physicalPathFor(slicePath)
+            : slicePath;
         const parentRoots = new Map<string, ParentScopeNode[]>();
         const parentWarnings: string[] = [];
         for (const slice of filtered) {
           if (!slice.missionId) continue;
-          const root = path.resolve(slice.slicePath, "..", "..", "..");
+          const root = path.resolve(readPathOf(slice.slicePath), "..", "..", "..");
           if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
         }
         const childMissions = (slicePath: string, missionId: string | null) => {
           if (!missionId) return [];
-          const nodes = parentRoots.get(path.resolve(slicePath, "..", "..", "..")) ?? [];
-          const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === slicePath);
+          const readSlicePath = readPathOf(slicePath);
+          const nodes = parentRoots.get(path.resolve(readSlicePath, "..", "..", "..")) ?? [];
+          const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === readSlicePath);
           return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
         };
         return {
@@ -151,7 +157,7 @@ export function slicesRoutes(): Hono {
             childMissions: childMissions(s.slicePath, s.missionId),
             queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
             derivedState: derivedStateOf(s.slicePath),
-            readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
+            readiness: readSliceReadiness(readPathOf(s.slicePath), undefined, readPolicy),
           })),
           totalCount: filtered.length,
           filter,
@@ -358,6 +364,29 @@ function resolveSliceProjectLookup(
   c: { get: (key: string) => unknown },
   indexer: SliceIndexer,
 ): SliceProjectLookup {
+  const capturedResolutions = typeof indexer.configuredRootResolutions === "function"
+    ? indexer.configuredRootResolutions()
+    : null;
+  const capturedByIdentity = new Map<string, ConfiguredRootResolution>();
+  if (capturedResolutions) {
+    for (const root of capturedResolutions) {
+      if (root.identity.length > 0 && !capturedByIdentity.has(root.identity)) {
+        capturedByIdentity.set(root.identity, root);
+      }
+    }
+  }
+  const resolveCapturedOrRealpath = (targetPath: string): ResolvedPath => {
+    if (!targetPath) return { ok: false, missing: true };
+    const absolute = path.isAbsolute(targetPath) ? targetPath : process.cwd() + path.sep + targetPath;
+    const lookupPath = absolute.split(/[\\/]+/).includes("..") ? absolute : path.resolve(absolute);
+    const captured = capturedByIdentity.get(lookupPath);
+    if (captured) {
+      return captured.status === "ok" && captured.physicalPath !== null
+        ? { ok: true, path: captured.physicalPath }
+        : { ok: false, missing: captured.status === "missing" };
+    }
+    return resolveRealpath(targetPath);
+  };
   let projects: Array<{ id: string; root: string | null; missionsRoot: string | null; error?: string }> = [];
   let rootUnreadable = false;
   let canonicalProjectId: ((id: string) => string) | undefined;
@@ -366,8 +395,8 @@ function resolveSliceProjectLookup(
     const owners = new Map(listed.projects.flatMap((p) => (p.aliases ?? []).map((alias) => [alias, p.id] as const)));
     canonicalProjectId = (id) => owners.get(id) ?? id;
     projects = listed.projects.map((p) => {
-      const resolvedRoot = resolveRealpath(p.root);
-      const resolvedMissionsRoot = resolveRealpath(p.missionsRoot);
+      const resolvedRoot = resolveCapturedOrRealpath(p.root);
+      const resolvedMissionsRoot = resolveCapturedOrRealpath(p.missionsRoot);
       if ((!resolvedRoot.ok && !resolvedRoot.missing) || (!resolvedMissionsRoot.ok && !resolvedMissionsRoot.missing)) {
         rootUnreadable = true;
       }
@@ -396,8 +425,8 @@ function resolveSliceProjectLookup(
     ? indexer.projectId
     : null;
   const explicitRoots = explicitProjectId
-    ? (typeof indexer.configuredRootResolutions === "function"
-        ? indexer.configuredRootResolutions().flatMap((root) => {
+    ? (capturedResolutions !== null
+        ? capturedResolutions.flatMap((root) => {
             if (root.status === "missing") return [];
             if (root.status === "unreadable") {
               rootUnreadable = true;

@@ -2740,6 +2740,289 @@ describe("GET /api/slices observed queue counts", () => {
       expect(secondBody.missions["shipping"]?.readiness?.historicalStatus).toBe("closed");
     });
 
+    it("keeps the whole list operation bound to the captured physical root when a symlink root retargets before the walk", async () => {
+      const oldRoot = path.join(root, "alpha", "missions");
+      const newRoot = path.join(root, "beta", "missions");
+      const alias = path.join(root, "current-walk-alias");
+
+      write(path.join(oldRoot, "shipping", "SPEC.md"), nodeBytes("M.OLD", "active", "Old Mission"));
+      write(
+        path.join(oldRoot, "shipping", "mission.yaml"),
+        "metadata:\n  id: M.OLD\n  status: active\nproofPolicy:\n  judges:\n    - judge@old\n",
+      );
+      write(
+        path.join(oldRoot, "shipping", "slices", "01-old", "SPEC.md"),
+        `${nodeBytes("OPR.OLD", "active", "Old Slice")}\n## Proof contract\n- [ ] Old outcome.\n`,
+      );
+      write(
+        path.join(oldRoot, "child-old", "SPEC.md"),
+        "---\nid: M.CHILD.OLD\nstatus: active\nparent: OPR.OLD\n---\n# Child Old\n",
+      );
+      fs.mkdirSync(path.join(oldRoot, "child-old", "slices"), { recursive: true });
+
+      write(path.join(newRoot, "shipping", "SPEC.md"), nodeBytes("M.NEW", "closed", "New Mission"));
+      write(
+        path.join(newRoot, "shipping", "mission.yaml"),
+        "metadata:\n  id: M.NEW\n  status: closed\nproofPolicy:\n  judges:\n    - judge@new\n",
+      );
+      write(
+        path.join(newRoot, "shipping", "slices", "01-old", "SPEC.md"),
+        `${nodeBytes("OPR.NEW.SHARED", "closed", "New Collision Slice")}\n## Proof contract\n- [ ] New collision outcome.\n`,
+      );
+      write(
+        path.join(newRoot, "shipping", "slices", "02-new", "SPEC.md"),
+        `${nodeBytes("OPR.NEW", "closed", "New Slice")}\n## Proof contract\n- [ ] New outcome.\n`,
+      );
+      write(
+        path.join(newRoot, "child-new", "SPEC.md"),
+        "---\nid: M.CHILD.NEW\nstatus: active\nparent: OPR.NEW.SHARED\n---\n# Child New\n",
+      );
+      fs.mkdirSync(path.join(newRoot, "child-new", "slices"), { recursive: true });
+
+      row("old-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-old"]);
+      row("new-shared-pending", "pending", ["project:beta", "mission:shipping", "slice:01-old"]);
+      row("new-only-pending", "pending", ["project:beta", "mission:shipping", "slice:02-new"]);
+
+      fs.symlinkSync(oldRoot, alias, "dir");
+      const { app, indexer } = route("alpha", false, alias);
+
+      type DetailedEntry = Entry & {
+        childMissions?: Array<{ id: string | null }>;
+        readiness?: { policy?: { judges?: string[] } | null };
+      };
+      type DetailedBody = {
+        slices: DetailedEntry[];
+        missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+      };
+
+      const origIsReady = indexer.isReady.bind(indexer);
+      let retargetBeforeWalk = true;
+      const readySpy = vi.spyOn(indexer, "isReady").mockImplementation(() => {
+        if (retargetBeforeWalk) {
+          retargetBeforeWalk = false;
+          fs.rmSync(alias);
+          fs.symlinkSync(newRoot, alias, "dir");
+        }
+        return origIsReady();
+      });
+      try {
+        // Request 1: retarget happens inside withResolvedRoots AFTER capture and BEFORE the uncached walk.
+        const first = await app.request("/api/slices");
+        expect(first.status).toBe(200);
+        const firstBody = await first.json() as DetailedBody;
+        expect(firstBody.slices.map((s) => s.name)).toEqual(["01-old"]);
+        expect(firstBody.slices[0]).toMatchObject({
+          name: "01-old",
+          slicePath: path.join(alias, "shipping", "slices", "01-old"),
+          status: "active",
+          rawStatus: "active",
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+          readiness: { policy: { judges: ["judge@old"] } },
+        });
+        expect(firstBody.slices[0]?.childMissions).toMatchObject([{ id: "M.CHILD.OLD" }]);
+        expect(firstBody.missions["shipping"]?.authoredStatus).toBe("active");
+        expect(firstBody.missions["shipping"]?.readiness?.historicalStatus).toBe("active");
+
+        // Request 2: subsequent request observes the retargeted alias coherently across list, counts, and readiness.
+        const second = await app.request("/api/slices");
+        expect(second.status).toBe(200);
+        const secondBody = await second.json() as DetailedBody;
+        expect(secondBody.slices.map((s) => s.name)).toEqual(["01-old", "02-new"]);
+        expect(secondBody.slices.find((s) => s.name === "01-old")).toMatchObject({
+          slicePath: path.join(alias, "shipping", "slices", "01-old"),
+          rawStatus: "closed",
+          queueCounts: { ...ZERO, pending: 1 },
+          derivedState: "pending",
+          readiness: { policy: { judges: ["judge@new"] } },
+        });
+        expect(secondBody.slices.find((s) => s.name === "01-old")?.childMissions).toMatchObject([{ id: "M.CHILD.NEW" }]);
+        expect(secondBody.slices.find((s) => s.name === "02-new")).toMatchObject({
+          slicePath: path.join(alias, "shipping", "slices", "02-new"),
+          queueCounts: { ...ZERO, pending: 1 },
+          derivedState: "pending",
+        });
+        expect(secondBody.missions["shipping"]?.authoredStatus).toBe("closed");
+        expect(secondBody.missions["shipping"]?.readiness?.historicalStatus).toBe("closed");
+
+        // Repeat with ?derived=blocked&refresh=1 from the same pre-walk retarget starting state.
+        fs.rmSync(alias);
+        fs.symlinkSync(oldRoot, alias, "dir");
+        retargetBeforeWalk = true;
+        const filteredFirst = await list(app, "?derived=blocked&refresh=1");
+        expect(filteredFirst).toHaveLength(1);
+        expect(filteredFirst[0]).toMatchObject({
+          name: "01-old",
+          slicePath: path.join(alias, "shipping", "slices", "01-old"),
+          derivedState: "blocked",
+        });
+        expect((await list(app, "?derived=pending")).map((s) => s.name)).toEqual(["01-old", "02-new"]);
+      } finally {
+        readySpy.mockRestore();
+      }
+    });
+
+    it("keeps explicit project ownership and reads bound to the captured physical root when a symlink root retargets or unlinks before the walk", async () => {
+      const externalOldRoot = path.join(root, "alpha-external-old-missions");
+      const betaRoot = path.join(root, "beta", "missions");
+      const alias = path.join(root, "explicit-walk-alias");
+
+      write(path.join(externalOldRoot, "shipping", "SPEC.md"), nodeBytes("M.EXT.OLD", "active", "External Old Mission"));
+      write(path.join(externalOldRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.EXT.OLD\n  status: active\n");
+      write(
+        path.join(externalOldRoot, "shipping", "slices", "01-ext", "SPEC.md"),
+        nodeBytes("OPR.EXT.OLD", "active", "External Old Slice"),
+      );
+
+      write(path.join(betaRoot, "shipping", "SPEC.md"), nodeBytes("M.BETA", "closed", "Beta Mission"));
+      write(path.join(betaRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.BETA\n  status: closed\n");
+      write(path.join(betaRoot, "shipping", "slices", "01-ext", "SPEC.md"), nodeBytes("OPR.BETA.1", "closed", "Beta Slice 1"));
+      write(path.join(betaRoot, "shipping", "slices", "02-beta", "SPEC.md"), nodeBytes("OPR.BETA.2", "closed", "Beta Slice 2"));
+
+      row("ext-old-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-ext"]);
+      row("beta-ext-pending", "pending", ["project:beta", "mission:shipping", "slice:01-ext"]);
+      row("beta-only-pending", "pending", ["project:beta", "mission:shipping", "slice:02-beta"]);
+
+      catalog([{ id: "beta", root: "beta" }]);
+      fs.symlinkSync(externalOldRoot, alias, "dir");
+      const { app, indexer } = route("alpha", true, alias);
+
+      const origIsReady = indexer.isReady.bind(indexer);
+      let preWalkAction: "retarget" | "unlink" | null = "retarget";
+      const readySpy = vi.spyOn(indexer, "isReady").mockImplementation(() => {
+        if (preWalkAction === "retarget") {
+          preWalkAction = null;
+          fs.rmSync(alias);
+          fs.symlinkSync(betaRoot, alias, "dir");
+        } else if (preWalkAction === "unlink") {
+          preWalkAction = null;
+          fs.rmSync(alias);
+        }
+        return origIsReady();
+      });
+      try {
+        // Case 1: retargeting the explicit symlink root to Beta before the walk stays bound to externalOldRoot.
+        const retargeted = await app.request("/api/slices");
+        expect(retargeted.status).toBe(200);
+        const retargetedBody = await retargeted.json() as {
+          slices: Entry[];
+          missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        };
+        expect(retargetedBody.slices.map((s) => s.name)).toEqual(["01-ext"]);
+        expect(retargetedBody.slices[0]).toMatchObject({
+          slicePath: path.join(alias, "shipping", "slices", "01-ext"),
+          rawStatus: "active",
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect(retargetedBody.missions["shipping"]?.authoredStatus).toBe("active");
+        expect(retargetedBody.missions["shipping"]?.readiness?.historicalStatus).toBe("active");
+
+        // Case 2: unlinking the alias after capture and before the uncached walk still completes coherently
+        // from the captured physical root with zero filesystem reads through the removed alias.
+        fs.rmSync(alias);
+        fs.symlinkSync(externalOldRoot, alias, "dir");
+        indexer.invalidate();
+        preWalkAction = "unlink";
+        const unlinkedMidOp = await app.request("/api/slices");
+        expect(unlinkedMidOp.status).toBe(200);
+        const unlinkedBody = await unlinkedMidOp.json() as {
+          slices: Entry[];
+          missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        };
+        expect(unlinkedBody.slices.map((s) => s.name)).toEqual(["01-ext"]);
+        expect(unlinkedBody.slices[0]).toMatchObject({
+          slicePath: path.join(alias, "shipping", "slices", "01-ext"),
+          rawStatus: "active",
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect(unlinkedBody.missions["shipping"]?.authoredStatus).toBe("active");
+        expect(unlinkedBody.missions["shipping"]?.readiness?.historicalStatus).toBe("active");
+
+        // Subsequent request after unlink observes the missing alias as 503 slices_root_not_configured.
+        const afterUnlink = await app.request("/api/slices");
+        expect(afterUnlink.status).toBe(503);
+        expect(await afterUnlink.json()).toMatchObject({ error: "slices_root_not_configured" });
+      } finally {
+        readySpy.mockRestore();
+      }
+    });
+
+    it("keeps catalog-matched configured symlink root ownership bound to the captured physical target when retargeted before the walk", async () => {
+      const oldRoot = path.join(root, "alpha", "missions-v1");
+      const newRoot = path.join(root, "alpha", "missions-v2");
+      const alphaMissions = path.join(root, "alpha", "missions");
+
+      write(path.join(oldRoot, "shipping", "SPEC.md"), nodeBytes("M.CAT.OLD", "active", "Catalog Old Mission"));
+      write(path.join(oldRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.CAT.OLD\n  status: active\n");
+      write(
+        path.join(oldRoot, "shipping", "slices", "01-old", "SPEC.md"),
+        nodeBytes("OPR.CAT.OLD", "active", "Catalog Old Slice"),
+      );
+
+      write(path.join(newRoot, "shipping", "SPEC.md"), nodeBytes("M.CAT.NEW", "closed", "Catalog New Mission"));
+      write(path.join(newRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.CAT.NEW\n  status: closed\n");
+      write(
+        path.join(newRoot, "shipping", "slices", "02-new", "SPEC.md"),
+        nodeBytes("OPR.CAT.NEW", "closed", "Catalog New Slice"),
+      );
+
+      row("cat-old-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-old"]);
+      row("cat-new-pending", "pending", ["project:alpha", "mission:shipping", "slice:02-new"]);
+
+      fs.rmSync(alphaMissions, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(alphaMissions), { recursive: true });
+      fs.symlinkSync(oldRoot, alphaMissions, "dir");
+      const { app, indexer } = route("alpha", false, alphaMissions);
+
+      const origIsReady = indexer.isReady.bind(indexer);
+      let retargetBeforeWalk = true;
+      const readySpy = vi.spyOn(indexer, "isReady").mockImplementation(() => {
+        if (retargetBeforeWalk) {
+          retargetBeforeWalk = false;
+          fs.rmSync(alphaMissions);
+          fs.symlinkSync(newRoot, alphaMissions, "dir");
+        }
+        return origIsReady();
+      });
+      try {
+        const first = await app.request("/api/slices");
+        expect(first.status).toBe(200);
+        const firstBody = await first.json() as {
+          slices: Entry[];
+          missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        };
+        expect(firstBody.slices.map((s) => s.name)).toEqual(["01-old"]);
+        expect(firstBody.slices[0]).toMatchObject({
+          slicePath: path.join(alphaMissions, "shipping", "slices", "01-old"),
+          rawStatus: "active",
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect(firstBody.missions["shipping"]?.authoredStatus).toBe("active");
+        expect(firstBody.missions["shipping"]?.readiness?.historicalStatus).toBe("active");
+
+        const second = await app.request("/api/slices");
+        expect(second.status).toBe(200);
+        const secondBody = await second.json() as {
+          slices: Entry[];
+          missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        };
+        expect(secondBody.slices.map((s) => s.name)).toEqual(["02-new"]);
+        expect(secondBody.slices[0]).toMatchObject({
+          slicePath: path.join(alphaMissions, "shipping", "slices", "02-new"),
+          rawStatus: "closed",
+          queueCounts: { ...ZERO, pending: 1 },
+          derivedState: "pending",
+        });
+        expect(secondBody.missions["shipping"]?.authoredStatus).toBe("closed");
+        expect(secondBody.missions["shipping"]?.readiness?.historicalStatus).toBe("closed");
+      } finally {
+        readySpy.mockRestore();
+      }
+    });
+
     it("keeps captured snapshot roots unchanged in sliceRoots during withResolvedRoots", () => {
       const alphaExtra = path.join(root, "alpha-snapshot-missions");
       const alphaSlicePath = path.join(alphaExtra, "shipping", "slices", "01-release");

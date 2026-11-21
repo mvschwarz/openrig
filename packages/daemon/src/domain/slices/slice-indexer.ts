@@ -303,6 +303,7 @@ interface SliceLocation {
   name: string;
   missionId: string | null;
   slicePath: string;
+  physicalSlicePath: string;
 }
 
 /** the per-generation batch membership index. Replaces the
@@ -495,6 +496,25 @@ export class SliceIndexer {
     return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).map((root) => ({ ...root }));
   }
 
+  /** Map a published path under a captured configured root identity to the corresponding path
+   *  under that root's captured physical target so reads never re-traverse a symlink alias. */
+  physicalPathFor(publishedPath: string): string {
+    const normalized = path.resolve(publishedPath);
+    let bestMatch: { identity: string; physicalPath: string } | null = null;
+    for (const root of this.sliceRootResolutions()) {
+      if (normalized !== root.identity) {
+        const prefix = root.identity.endsWith(path.sep) ? root.identity : `${root.identity}${path.sep}`;
+        if (!normalized.startsWith(prefix)) continue;
+      }
+      if (!bestMatch || root.identity.length > bestMatch.identity.length) {
+        bestMatch = root;
+      }
+    }
+    if (!bestMatch || bestMatch.identity === bestMatch.physicalPath) return publishedPath;
+    const relative = path.relative(bestMatch.identity, normalized);
+    return relative.length === 0 ? bestMatch.physicalPath : path.join(bestMatch.physicalPath, relative);
+  }
+
   /** Keep one configured-root snapshot across a synchronous compound read. */
   withResolvedRoots<T>(fn: () => T): T {
     if (this.resolvedRootsForOperation !== null) return fn();
@@ -508,7 +528,7 @@ export class SliceIndexer {
 
   /** Returns true when any configured slice root exists on disk. */
   isReady(): boolean {
-    return this.sliceRoots().some((root) => this.isDirectory(root));
+    return this.sliceRootResolutions().some((root) => this.isDirectory(root.physicalPath));
   }
 
   /** The explicit COMPOSITE-OPERATION scope: a
@@ -583,7 +603,7 @@ export class SliceIndexer {
       if (entry.missionId) indexedMissionIds.add(entry.missionId);
     }
     const statuses: Record<string, { authoredStatus: string | null }> = {};
-    for (const root of this.sliceRoots()) {
+    for (const { physicalPath: root } of this.sliceRootResolutions()) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
@@ -674,7 +694,7 @@ export class SliceIndexer {
   private reconcileComposition(): void {
     const roots = this.sliceRootResolutions();
     const rootIdentities = roots.map((root) => [root.identity, root.physicalPath]);
-    const rows = roots.flatMap(({ identity: root }) => {
+    const rows = roots.flatMap(({ physicalPath: root }) => {
       if (!fs.existsSync(root)) return [];
       return fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).flatMap(entry => {
         const mission = path.join(root, entry.name), manifest = path.join(mission, "mission.yaml");
@@ -699,7 +719,7 @@ export class SliceIndexer {
    *  authored ID, unless a differently named mission in any configured root claims that ID. */
   missionTagKeys(missionId: string, slicePath?: string): string[] {
     const aliases = this.missionIdAliases();
-    const missionPath = slicePath ? this.missionPathOfSlice(missionId, slicePath) : null;
+    const missionPath = slicePath ? this.missionPathOfSlice(missionId, this.physicalPathFor(slicePath)) : null;
     const id = missionPath
       ? aliases.idByPath.get(missionPath)
       : aliases.idByName.get(missionId);
@@ -761,14 +781,15 @@ export class SliceIndexer {
     };
 
     for (const entry of entries) {
-      const resolved = resolveCountPath(entry.slicePath);
+      const readPath = this.physicalPathFor(entry.slicePath);
+      const resolved = resolveCountPath(readPath);
       if (!resolved.ok) {
         if (!resolved.missing) physicalIdentityComplete = false;
         result.set(entry.slicePath, null);
         continue;
       }
       const physicalPath = resolved.path;
-      const projectId = entry.missionId ? projectForPath(entry.slicePath) : null;
+      const projectId = entry.missionId ? projectForPath(readPath) : null;
       const counts = entry.missionId && projectId ? zeroQueueCounts() : null;
       if (!visibleCountsByPath.has(physicalPath)) {
         visibleCountsByPath.set(physicalPath, counts);
@@ -803,7 +824,7 @@ export class SliceIndexer {
     // first visible location that happens to share its directory name.
     const locationsByPath = new Map<string, SliceLocation>();
     for (const location of candidateLocations) {
-      const physicalPath = canonicalizeCountPath(location.slicePath);
+      const physicalPath = canonicalizeCountPath(location.physicalSlicePath);
       if (!physicalPath) {
         candidateScanComplete = false;
         continue;
@@ -827,7 +848,7 @@ export class SliceIndexer {
     const pathsBySliceId = new Map<string, Set<string>>();
     for (const [physicalPath, location] of locationsByPath) {
       const id = this.readSliceIdForCounting(
-        location.slicePath,
+        location.physicalSlicePath,
         () => { candidateScanComplete = false; },
       );
       sliceIdsByPath.set(physicalPath, id);
@@ -840,7 +861,7 @@ export class SliceIndexer {
     for (const [physicalPath, location] of locationsByPath) {
       const missionKeys = new Set<string>();
       if (location.missionId) {
-        const missionPath = this.missionPathOfSlice(location.missionId, location.slicePath);
+        const missionPath = this.missionPathOfSlice(location.missionId, location.physicalSlicePath);
         const canonicalMissionPath = missionPath ? canonicalizeCountPath(missionPath) : null;
         if (!canonicalMissionPath) {
           candidateScanComplete = false;
@@ -856,7 +877,7 @@ export class SliceIndexer {
         sliceKeys.add(sliceId);
       }
       const target: TargetScope = {
-        projectId: projectForPath(location.slicePath),
+        projectId: projectForPath(location.physicalSlicePath),
         missionId: location.missionId,
         missionKeys,
         sliceKeys,
@@ -964,22 +985,27 @@ export class SliceIndexer {
       locations.push(location);
     };
 
-    for (const root of this.sliceRoots(additionalRoots, onReadError)) {
+    const seenPhysicalRoots = new Set<string>();
+    for (const { identity, physicalPath } of this.sliceRootResolutions(additionalRoots, onReadError)) {
+      if (seenPhysicalRoots.has(physicalPath)) continue;
+      seenPhysicalRoots.add(physicalPath);
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(root, { withFileTypes: true });
+        entries = fs.readdirSync(physicalPath, { withFileTypes: true });
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
         continue;
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-        const entryPath = path.join(root, entry.name);
+        const entryPath = path.join(identity, entry.name);
+        const physicalEntryPath = path.join(physicalPath, entry.name);
         const nestedSlicesRoot = path.join(entryPath, "slices");
-        if (this.isDirectory(nestedSlicesRoot, onReadError)) {
+        const physicalNestedSlicesRoot = path.join(physicalEntryPath, "slices");
+        if (this.isDirectory(physicalNestedSlicesRoot, onReadError)) {
           let nestedEntries: fs.Dirent[];
           try {
-            nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
+            nestedEntries = fs.readdirSync(physicalNestedSlicesRoot, { withFileTypes: true });
           } catch {
             nestedEntries = [];
             onReadError?.();
@@ -990,6 +1016,7 @@ export class SliceIndexer {
               name: nested.name,
               missionId: entry.name,
               slicePath: path.join(nestedSlicesRoot, nested.name),
+              physicalSlicePath: path.join(physicalNestedSlicesRoot, nested.name),
             });
           }
           continue;
@@ -998,6 +1025,7 @@ export class SliceIndexer {
           name: entry.name,
           missionId: null,
           slicePath: entryPath,
+          physicalSlicePath: physicalEntryPath,
         });
       }
     }
@@ -1016,8 +1044,8 @@ export class SliceIndexer {
     const idOfPath = new Map<string, string | null>();
     const claims = new Map<string, Set<string>>();
     for (const location of physical) {
-      const id = this.readSliceId(location.slicePath);
-      idOfPath.set(location.slicePath, id);
+      const id = this.readSliceId(location.physicalSlicePath);
+      idOfPath.set(location.physicalSlicePath, id);
       if (!id || names.has(id)) continue;
       const claimants = claims.get(id) ?? new Set<string>();
       claimants.add(`${location.missionId ?? ""}/${location.name}`);
@@ -1026,7 +1054,7 @@ export class SliceIndexer {
     const nameById = new Map<string, string>();
     const idByName = new Map<string, string>();
     for (const location of this.readSliceLocations()) {
-      const id = idOfPath.get(location.slicePath);
+      const id = idOfPath.get(location.physicalSlicePath);
       if (!id || claims.get(id)?.size !== 1) continue;
       nameById.set(id, location.name);
       idByName.set(location.name, id);
@@ -1093,7 +1121,7 @@ export class SliceIndexer {
     const missionNames = new Set<string>();
     const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
     const claims = new Map<string, Set<string>>();
-    for (const root of this.sliceRoots()) {
+    for (const { physicalPath: root } of this.sliceRootResolutions()) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
@@ -1192,15 +1220,14 @@ export class SliceIndexer {
     }
   }
 
-  /** The distinct, absolute roots to scan, each by its filesystem identity (see
-   *  `resolveConfiguredRoot`). Every slice path the indexer produces is built from
-   *  these, so the walk, the duplicate check and the published paths name the same
-   *  directory, and a client sees absolute paths whatever its working directory.
-   *  Inside `withResolvedRoots`, the captured snapshot roots are used as they are
-   *  so one request does not re-resolve them mid-operation. A root that was missing
-   *  at capture stays excluded for that operation, and an unreadable root reports a
-   *  read error and stays excluded rather than passing an unresolved spelling to
-   *  `fs.readdirSync` and `path.join`. */
+  /** The distinct, absolute roots to scan, each with its metadata identity and captured
+   *  physical path (see `resolveConfiguredRoot`). Published slice paths are built from
+   *  `identity` (keeping a symlink alias as metadata), while filesystem walks and reads use
+   *  `physicalPath` so one operation reads one captured root. Inside `withResolvedRoots`, the
+   *  captured snapshot roots are used as they are so one request does not re-resolve them
+   *  mid-operation. A root that was missing at capture stays excluded for that operation, and
+   *  an unreadable root reports a read error and stays excluded rather than passing an
+   *  unresolved spelling to `fs.readdirSync` and `path.join`. */
   private sliceRootResolutions(
     additionalRoots: readonly string[] = [],
     onReadError?: () => void,
@@ -1225,27 +1252,23 @@ export class SliceIndexer {
     return out;
   }
 
-  private sliceRoots(additionalRoots: readonly string[] = [], onReadError?: () => void): string[] {
-    return this.sliceRootResolutions(additionalRoots, onReadError).map((root) => root.identity);
-  }
-
   private resolveConfiguredRoots(): ConfiguredRootResolution[] {
     return [this.configuredSlicesRoot, ...this.configuredAdditionalSliceRoots].map(resolveConfiguredRoot);
   }
 
   private toListEntry(location: SliceLocation, served: Set<string> | null): SliceListEntry {
-    const { name, missionId, slicePath } = location;
-    const frontmatter = this.readPrimaryFrontmatter(slicePath);
+    const { name, missionId, slicePath, physicalSlicePath } = location;
+    const frontmatter = this.readPrimaryFrontmatter(physicalSlicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
     const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
-    const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
+    const lastActivityAt = this.computeLastActivity(physicalSlicePath, qitemIds, proofPacket);
 
     return {
       name,
       missionId,
-      displayName: this.extractDisplayName(slicePath, frontmatter, name),
+      displayName: this.extractDisplayName(physicalSlicePath, frontmatter, name),
       railItem,
       workflowSpec: parseWorkflowSpecRef(frontmatter["workflow_spec"]),
       status,
@@ -1264,21 +1287,21 @@ export class SliceIndexer {
   }
 
   private buildRecord(location: SliceLocation, served: Set<string> | null): SliceRecord {
-    const { name, missionId, slicePath } = location;
-    const frontmatter = this.readPrimaryFrontmatter(slicePath);
+    const { name, missionId, slicePath, physicalSlicePath } = location;
+    const frontmatter = this.readPrimaryFrontmatter(physicalSlicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
     const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
-    const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
+    const lastActivityAt = this.computeLastActivity(physicalSlicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
-    const files = this.listSliceFiles(slicePath);
+    const files = this.listSliceFiles(physicalSlicePath);
 
     return {
       name,
       missionId,
       slicePath,
-      displayName: this.extractDisplayName(slicePath, frontmatter, name),
+      displayName: this.extractDisplayName(physicalSlicePath, frontmatter, name),
       railItem,
       status,
       rawStatus: (frontmatter["status"] as string | undefined) ?? null,
@@ -1607,7 +1630,7 @@ export class SliceIndexer {
       if (served !== null && !served.has(slice)) continue;
       const typed = typedBySlice.get(slice);
       if (typed && typed.length > 0) continue;
-      const frontmatter = this.readPrimaryFrontmatter(location.slicePath);
+      const frontmatter = this.readPrimaryFrontmatter(location.physicalSlicePath);
       const railItem = this.extractRailItem(frontmatter, location.missionId);
       const explicitRailItem = this.extractExplicitRailItem(frontmatter);
       const modernMission = location.missionId !== null && typedMissions.has(location.missionId);
@@ -1703,7 +1726,7 @@ export class SliceIndexer {
 
   private discoverMissionIds(): Set<string> {
     const missionIds = new Set<string>();
-    for (const root of this.sliceRoots()) {
+    for (const { physicalPath: root } of this.sliceRootResolutions()) {
       let entries: fs.Dirent[];
       try { entries = fs.readdirSync(root, { withFileTypes: true }); }
       catch { continue; }
