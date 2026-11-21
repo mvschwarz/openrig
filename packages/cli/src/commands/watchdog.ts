@@ -93,7 +93,7 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .option("--threshold-bytes <n>", "(context-usage-threshold) transcript byte threshold")
     .option("--threshold-mb <n>", "(context-usage-threshold) transcript threshold in decimal MB")
     .option("--threshold-tokens <n>", "(context-usage-threshold) sampled-context token threshold; triggers from the seat's own usage sample")
-    .option("--threshold-percent <n>", "(context-usage-threshold) percent of the seat's context window; triggers from the seat's own usage sample")
+    .option("--threshold-percent <n>", "(context-usage-threshold) percent of the seat's context window; triggers from the seat's own usage sample; samples without a percentage, including current Pi samples, cannot trigger it (use --threshold-tokens)")
     .option("--watched-file <path>", "(context-usage-threshold) explicit transcript file; recorded context path is the fallback")
     .option("--requires-job <jobId>", "(context-usage-threshold) require this earlier job's receipt for the same occupant")
     .option("--message <text>", "(context-usage-threshold) message delivered when the threshold fires")
