@@ -11,6 +11,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
+import { CodexThreadIdResolver } from "../src/domain/codex-thread-id.js";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
 
 // Set the daemon home before importing the route, including its old module-scoped resolver.
@@ -78,7 +79,7 @@ function fixture(selection: Selection = "member") {
     for (const [key, value] of Object.entries({ sessionRegistry: registry, tmuxAdapter: tmux, contextUsageStore: store, terminalBearerToken: "fixture-token" })) c.set(key as never, value as never);
     await next();
   }); app.route("/api/sessions", sessionAdminRoutes);
-  const request = () => app.request(`/api/sessions/${sessionName}/generation-record?sinceBytes=0`, { headers: { authorization: "Bearer fixture-token" } });
+  const request = (route = "/generation-record?sinceBytes=0") => app.request(`/api/sessions/${sessionName}${route}`, { headers: { authorization: "Bearer fixture-token" } });
   const editLogs = (sql: string) => { const logs = new Database(join(paths[selection], "logs_2.sqlite")); try { logs.exec(sql); } finally { logs.close(); } };
   return { db, node, paths, selectedHome: paths[selection], request, editLogs, processes, census, tmux, registry, sessionName, store };
 }
@@ -129,6 +130,70 @@ it("still verifies the opened record's native identity", async () => {
 it("does not fall back to a copied state row when the selected home's retained CLI identity row is missing", async () => {
   const f = fixture(), state = new Database(join(f.selectedHome, "state_5.sqlite"));
   try { state.exec("DELETE FROM threads"); } finally { state.close(); }
+  const response = await f.request(), body = await response.json();
+  expect(response.status).toBe(409); expect(body.error).toBe("record_identity_unverified"); expect(body.suffix).toBeUndefined();
+});
+
+// A seat relaunched under a CODEX_HOME OpenRig wasn't told about (or a Codex sqlite_home of its own) logs to that home, and a
+// resumed thread's rollout can stay in the old home's sessions. The verified process's open databases name its home.
+function relaunchedElsewhere(f: ReturnType<typeof fixture>) {
+  f.editLogs("DELETE FROM logs");
+  const actual = mkdtempSync(join(homes.root, "actual-")), old = mkdtempSync(join(homes.root, "old-sessions-"));
+  cleanup.push(() => { rmSync(actual, { recursive: true, force: true }); rmSync(old, { recursive: true, force: true }); });
+  const logs = new Database(join(actual, "logs_2.sqlite"));
+  logs.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, ts_nanos INTEGER, process_uuid TEXT, thread_id TEXT)");
+  logs.prepare("INSERT INTO logs (ts,ts_nanos,process_uuid,thread_id) VALUES (?,0,'pid:20:fixture',?)").run(start + 1, A);
+  logs.close();
+  const rollout = join(old, `${A}.jsonl`);
+  writeFileSync(rollout, JSON.stringify({ type: "session_meta", payload: { id: A } }) + "\n" + JSON.stringify({ marker: old }) + "\n");
+  const state = new Database(join(actual, "state_5.sqlite"));
+  state.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT, rollout_path TEXT)");
+  state.prepare("INSERT INTO threads VALUES (?,'cli',?)").run(A, rollout);
+  state.close();
+  return { actual, old };
+}
+
+it("follows the verified process's open Codex databases when its declared home has none of its rows, on both record routes", async () => {
+  const f = fixture(), { actual, old } = relaunchedElsewhere(f);
+  const asked = vi.spyOn(CodexThreadIdResolver.prototype, "openDatabaseHome").mockImplementation(async pid => pid === 20 ? actual : undefined);
+  const response = await f.request(), body = await response.json();
+  expect(response.status, JSON.stringify(body)).toBe(200);
+  expect(body.sessionId).toBe(A);
+  expect(body.suffix).toContain(JSON.stringify({ marker: old }));
+  expect(asked.mock.calls.map(([pid]) => pid)).toEqual([20]);
+  const expected = await f.request(`/generation-record-expected?sinceBytes=0&expectedNodeId=${f.node.id}&expectedRuntime=codex&expectedNativeId=${A}`);
+  const expectedBody = await expected.json();
+  expect(expected.status, JSON.stringify(expectedBody)).toBe(200);
+  expect(expectedBody.suffix).toContain(JSON.stringify({ marker: old }));
+});
+
+it("stays unverified on both record routes when the verified native process is replaced while its open databases are read", async () => {
+  const f = fixture(), { actual } = relaunchedElsewhere(f);
+  const original = f.processes[1]!;
+  // The native PID ends and is reused during the OS read: a later census gives it a later start.
+  vi.spyOn(CodexThreadIdResolver.prototype, "openDatabaseHome").mockImplementation(async pid => {
+    if (pid !== 20) return undefined;
+    f.processes[1] = { ...original, startedAt: "Sun Sep  6 23:59:59 2026" };
+    return actual;
+  });
+  for (const [route, error] of [
+    ["/generation-record?sinceBytes=0", "record_identity_unverified"],
+    [`/generation-record-expected?sinceBytes=0&expectedNodeId=${f.node.id}&expectedRuntime=codex&expectedNativeId=${A}`, "expected_identity_unavailable"],
+  ] as const) {
+    f.processes[1] = original;
+    const response = await f.request(route), body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe(error);
+    expect(body.suffix).toBeUndefined();
+  }
+});
+
+it.each(["no single database home", "an unreadable open-file list"] as const)("stays unverified when the OS gives %s", async condition => {
+  const f = fixture(); relaunchedElsewhere(f);
+  vi.spyOn(CodexThreadIdResolver.prototype, "openDatabaseHome").mockImplementation(async () => {
+    if (condition === "an unreadable open-file list") throw new Error("lsof failed");
+    return undefined;
+  });
   const response = await f.request(), body = await response.json();
   expect(response.status).toBe(409); expect(body.error).toBe("record_identity_unverified"); expect(body.suffix).toBeUndefined();
 });

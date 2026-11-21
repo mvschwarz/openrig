@@ -640,7 +640,7 @@ async function chatRigId(client: DaemonClient, handle: string): Promise<{ id: st
 
 /** Options for the transport routes: the wait-for-idle timeout, plus the daemon's terminal bearer token when one is
  *  configured (the daemon checks it on /api/transport/* only), sent the way the CLI's send and capture send it. */
-function transportRequestOptions(timeout?: { timeoutMs: number }): { timeoutMs?: number; headers?: Record<string, string> } | undefined {
+function transportRequestOptions(timeout?: { timeoutMs?: number; signal?: AbortSignal }): { timeoutMs?: number; signal?: AbortSignal; headers?: Record<string, string> } | undefined {
   const headers = terminalAuthHeaders();
   const hasHeaders = Object.keys(headers).length > 0;
   if (!timeout && !hasHeaders) return undefined;
@@ -1007,6 +1007,8 @@ export function mintUnknownSender(): string {
  * @returns McpServer instance (not yet connected to a transport)
  */
 export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+  /** HTTP disconnect/legacy cancellation, combined with the SDK's per-call cancellation for bounded reads. */
+  requestSignal?: AbortSignal;
   /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
   clientFactory?: (baseUrl: string) => DaemonClient;
   /** Test seams for the host registry and its learned bindings; production reads ~/.openrig. */
@@ -1062,12 +1064,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     return { client: remoteDaemonClient(clientFactory, match.host.url, undefined, seatOf()), headers: bearerAuthHeaders(bearer.token), remote: true, name: match.host.id };
   };
   /** Request options for a host target: a remote call carries that host's bearer; a local one keeps the terminal token. */
-  const hostOptions = (target: { headers: Record<string, string>; remote: boolean }, timeout?: { timeoutMs: number }) =>
+  const hostOptions = (target: { headers: Record<string, string>; remote: boolean }, timeout?: { timeoutMs?: number; signal?: AbortSignal }) =>
     target.remote
       ? { ...(timeout ?? {}), ...(Object.keys(target.headers).length > 0 ? { headers: target.headers } : {}) }
       : transportRequestOptions(timeout);
   /** A call with no options stays a one-argument call (the request shape existing callers and tests expect). */
-  const hostGet = <T = unknown>(target: { client: DaemonClient; headers: Record<string, string>; remote: boolean }, path: string, timeout?: { timeoutMs: number }) => {
+  const hostGet = <T = unknown>(target: { client: DaemonClient; headers: Record<string, string>; remote: boolean }, path: string, timeout?: { timeoutMs?: number; signal?: AbortSignal }) => {
     const options = hostOptions(target, timeout);
     return options === undefined ? target.client.get<T>(path) : target.client.get<T>(path, options);
   };
@@ -1839,17 +1841,32 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       ...worded("rig_queue_show", "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. The item's sourceSession is who created it, and each transition's actorSession and identityPrincipal (with its grant) name who made that change, not necessarily you; for an external connection, viewer is you (this connection), and createdBy and each transition's actor say whether that one is you (you: null when no principal was recorded to tell). host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", READ_ONLY),
       inputSchema: z.object({
         qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
+        waitSeconds: z.number().int().min(0).max(50).optional().describe("Wait at most this many seconds while this item is pending or in-progress. Omitted or 0 reads immediately. Other states return immediately; no successor is followed. At the bound, waited names a timeout, not completion."),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ qitemId, host }) => {
+    async ({ qitemId, host, waitSeconds }, ctx) => {
       try {
         const target = hostTarget(host);
         if ("content" in target) return target;
         const id = encodeURIComponent(qitemId);
-        const item = await hostGet(target, `/api/queue/${id}`);
+        let item = await hostGet(target, `/api/queue/${id}`);
         if (item.status >= 400) return mapResult(item);
         if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
+        let waited: unknown;
+        if (waitSeconds && ["pending", "in-progress"].includes(String(structured(item.data).state))) {
+          // Scope is checked before parking and again after: the item may have changed parties while waiting.
+          // Only this call gets a longer deadline; the client's ordinary five-second default stays intact.
+          item = await hostGet(target, `/api/queue/${id}?waitSeconds=${waitSeconds}`, {
+            timeoutMs: waitSeconds * 1000 + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS,
+            signal: options.requestSignal ? AbortSignal.any([ctx.mcpReq.signal, options.requestSignal]) : ctx.mcpReq.signal,
+          });
+          if (item.status >= 400) return mapResult(item);
+          if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
+          const { waited: marker, ...row } = structured(item.data);
+          waited = marker;
+          item = { ...item, data: row };
+        }
         const transitions = await hostGet(target, `/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
@@ -1862,7 +1879,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           ? labelActors({ item: projectForExternal(shownItem, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data },
             { seat: seatOf() ?? null, principal: access?.principal ?? null, grant: access?.external?.grant?.id ?? null })
           : { item: shownItem, transitions: transitions.data };
-        return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
+        return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}), ...(waited ? { waited } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

@@ -3031,7 +3031,9 @@ export class PodRigInstantiator {
       }
     }
 
-    if (startupResult.ok && this.deps.continuityPolicyMaterializer) {
+    // A start held at a trust dialog or another attention state leaves a live session that is cleared later, so it is armed
+    // as a ready start is. A failed start is not.
+    if ((startupResult.ok || startupResult.startupStatus === "attention_required") && this.deps.continuityPolicyMaterializer) {
       try {
         this.deps.continuityPolicyMaterializer.arm({
           compactionStrategy: configResult.config.compactionStrategy as CompactionStrategy,
