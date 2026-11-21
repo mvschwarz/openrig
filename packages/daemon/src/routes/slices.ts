@@ -1,10 +1,12 @@
 import type { EventBus } from "../domain/event-bus.js";
 import { listProjects, selectedProject, projectMission, workSource, insideProject, projectReadResponse } from "../domain/workspace/project-read.js";
-import { inferCatalogProject, ProjectReadError } from "../domain/workspace/project-catalog.js";
+import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 // Slice Story View v0 — HTTP routes.
 //
 // Endpoints:
 //   GET /api/slices?filter=all|active|done|closed|blocked  — list (default: all)
+//       &derived=blocked|in-progress|pending|idle|none|unknown — optional
+//                                                       queue-derived state filter
 //   GET /api/slices/:name                            — full per-tab payload
 //   GET /api/slices/:name/proof-asset/:relPath{.+}   — serves screenshots /
 //                                                       videos / traces from
@@ -22,7 +24,14 @@ import { readParentScope, type ParentScopeNode } from "../domain/scope/mission-p
 import { createProofPolicyRead, readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
+import {
+  deriveSliceQueueState,
+  SLICE_QUEUE_DERIVED_STATES,
+  SliceIndexer,
+  SliceListEntry,
+  SliceStatus,
+  type SliceQueueDerivedState,
+} from "../domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../domain/slices/slice-detail-projector.js";
 import { findSliceWorkflowBinding } from "../domain/workflow/slice-workflow-binding.js";
 
@@ -32,6 +41,7 @@ export interface SlicesRoutesDeps {
 }
 
 const VALID_FILTERS = new Set<SliceStatus | "all">(["all", "active", "done", "closed", "blocked"]);
+const VALID_DERIVED = new Set<SliceQueueDerivedState>(SLICE_QUEUE_DERIVED_STATES);
 
 export function slicesRoutes(): Hono {
   const app = new Hono();
@@ -41,105 +51,129 @@ export function slicesRoutes(): Hono {
   app.get("/", async (c) => {
     const deps = getDeps(c);
     if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
-    if (!deps.indexer.isReady()) {
-      return c.json({
-        error: "slices_root_not_configured",
-        hint: "Run rig config init-workspace, or set workspace.slices_root to workspace/missions. Supported shape: missions/<mission>/slices/<slice>.",
-      }, 503);
-    }
-    const filter = (c.req.query("filter") ?? "all").toLowerCase();
-    if (!VALID_FILTERS.has(filter as SliceStatus | "all")) {
-      return c.json({
-        error: "filter_invalid",
-        hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
-      }, 400);
-    }
-    const refresh = c.req.query("refresh");
-    if (refresh === "1" || refresh === "true") {
-      deps.indexer.invalidate();
-    }
-    // ONE HTTP request is ONE composite
-    // operation: the list rebuild, the boundToWorkflow per-slice get loop,
-    // and the mission sidecar share ONE membership batch (pre-scope, each
-    // uncached get built its own 2-scan batch: 2+2N total queue scans).
-    // One request-local policy reader for every readiness in this response
-    // (the listing and the project readiness below); never across requests.
-    const readPolicy = createProofPolicyRead();
-    const listing = deps.indexer.withMembershipBatch(() => {
-      const all = deps.indexer.list();
-      let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
-      // Workflows in Spec Library v0: optional lens filter — narrow to
-      // slices bound to a workflow_instance of <name>:<version>.
-      const boundToWorkflow = c.req.query("boundToWorkflow");
-      let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
-      if (boundToWorkflow) {
-        const colonIdx = boundToWorkflow.lastIndexOf(":");
-        if (colonIdx === -1) {
-          return c.json({
-            error: "boundToWorkflow_invalid",
-            hint: "Format is boundToWorkflow=<specName>:<specVersion>",
-          }, 400);
+    const operation = deps.indexer.withResolvedRoots(() => {
+      if (!deps.indexer.isReady()) {
+        return c.json({
+          error: "slices_root_not_configured",
+          hint: "Run rig config init-workspace, or set workspace.slices_root to workspace/missions. Supported shape: missions/<mission>/slices/<slice>.",
+        }, 503);
+      }
+      const filter = (c.req.query("filter") ?? "all").toLowerCase();
+      if (!VALID_FILTERS.has(filter as SliceStatus | "all")) {
+        return c.json({
+          error: "filter_invalid",
+          hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
+        }, 400);
+      }
+      const derivedParam = c.req.query("derived")?.toLowerCase();
+      if (derivedParam !== undefined && !VALID_DERIVED.has(derivedParam as SliceQueueDerivedState)) {
+        return c.json({
+          error: "derived_invalid",
+          hint: `Unknown derived state '${derivedParam}'. Allowed: ${[...SLICE_QUEUE_DERIVED_STATES].join(", ")}.`,
+        }, 400);
+      }
+      const derivedFilter = derivedParam as SliceQueueDerivedState | undefined;
+      const refresh = c.req.query("refresh");
+      if (refresh === "1" || refresh === "true") {
+        deps.indexer.invalidate();
+      }
+      // ONE HTTP request is ONE composite
+      // operation: the list rebuild, the boundToWorkflow per-slice get loop,
+      // and the mission sidecar share ONE membership batch (pre-scope, each
+      // uncached get built its own 2-scan batch: 2+2N total queue scans).
+      // One request-local policy reader for every readiness in this response
+      // (the listing and the project readiness below); never across requests.
+      const readPolicy = createProofPolicyRead();
+      const listing = deps.indexer.withMembershipBatch(() => {
+        const all = deps.indexer.list();
+        let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
+        // Workflows in Spec Library v0: optional lens filter — narrow to
+        // slices bound to a workflow_instance of <name>:<version>.
+        const boundToWorkflow = c.req.query("boundToWorkflow");
+        let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
+        if (boundToWorkflow) {
+          const colonIdx = boundToWorkflow.lastIndexOf(":");
+          if (colonIdx === -1) {
+            return c.json({
+              error: "boundToWorkflow_invalid",
+              hint: "Format is boundToWorkflow=<specName>:<specVersion>",
+            }, 400);
+          }
+          const specName = boundToWorkflow.slice(0, colonIdx);
+          const specVersion = boundToWorkflow.slice(colonIdx + 1);
+          const db = deps.indexer.db;
+          const before = filtered.length;
+          filtered = filtered.filter((slice) => {
+            // Re-resolve binding per slice. The indexer's list payload
+            // doesn't carry workflowName so we do the join here. v0 cost
+            // is bounded by the slice count + a small SQL per slice (the
+            // membership batch is shared across the whole request).
+            const sliceRecord = deps.indexer.get(slice.name);
+            if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
+            const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
+            return binding.primary?.workflowName === specName
+              && binding.primary?.workflowVersion === specVersion;
+          });
+          boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
         }
-        const specName = boundToWorkflow.slice(0, colonIdx);
-        const specVersion = boundToWorkflow.slice(colonIdx + 1);
-        const db = deps.indexer.db;
-        const before = filtered.length;
-        filtered = filtered.filter((slice) => {
-          // Re-resolve binding per slice. The indexer's list payload
-          // doesn't carry workflowName so we do the join here. v0 cost
-          // is bounded by the slice count + a small SQL per slice (the
-          // membership batch is shared across the whole request).
-          const sliceRecord = deps.indexer.get(slice.name);
-          if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
-          const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
-          return binding.primary?.workflowName === specName
-            && binding.primary?.workflowVersion === specVersion;
+        // Sort by lastActivityAt DESC (most recently touched first); slices
+        // without activity sort to the end.
+        filtered.sort(compareByActivityDesc);
+        const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
+        const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
+          additionalSliceRoots: projectLookup.additionalSliceRoots,
+          complete: projectLookup.complete,
+          canonicalProjectId: projectLookup.canonicalProjectId,
         });
-        boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
-      }
-      // Sort by lastActivityAt DESC (most recently touched first); slices
-      // without activity sort to the end.
-      filtered.sort(compareByActivityDesc);
-      const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
-      const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
-        additionalSliceRoots: projectLookup.additionalSliceRoots,
-        complete: projectLookup.complete,
-        canonicalProjectId: projectLookup.canonicalProjectId,
+        const authored = deps.indexer.missionAuthoredStatuses();
+        // Queue-derived state (#2729) is read beside the authored status, from the
+        // same counts and with no further query. A `?derived=` filter narrows the
+        // already status-filtered rows; it never changes `status` or `rawStatus`.
+        const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
+          deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
+        if (derivedFilter) filtered = filtered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter);
+        const parentRoots = new Map<string, ParentScopeNode[]>();
+        const parentWarnings: string[] = [];
+        for (const slice of filtered) {
+          if (!slice.missionId) continue;
+          const root = path.resolve(slice.slicePath, "..", "..", "..");
+          if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
+        }
+        const childMissions = (slicePath: string, missionId: string | null) => {
+          if (!missionId) return [];
+          const nodes = parentRoots.get(path.resolve(slicePath, "..", "..", "..")) ?? [];
+          const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === slicePath);
+          return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
+        };
+        return {
+          slices: filtered.map((s) => ({
+            ...s,
+            childMissions: childMissions(s.slicePath, s.missionId),
+            queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
+            derivedState: derivedStateOf(s.slicePath),
+            readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
+          })),
+          totalCount: filtered.length,
+          filter,
+          boundToWorkflow: boundDiagnostic,
+          parentWarnings,
+          // VM-005 (release-0.4.7): additive authored mission-status sidecar so
+          // chip surfaces can honor authored-wins precedence without a second
+          // round-trip. The `slices` array itself is byte-untouched.
+          missions: authored,
+        };
       });
-      const authored = deps.indexer.missionAuthoredStatuses();
-      const parentRoots = new Map<string, ParentScopeNode[]>();
-      const parentWarnings: string[] = [];
-      for (const slice of filtered) {
-        if (!slice.missionId) continue;
-        const root = path.resolve(slice.slicePath, "..", "..", "..");
-        if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
-      }
-      const childMissions = (slicePath: string, missionId: string | null) => {
-        if (!missionId) return [];
-        const nodes = parentRoots.get(path.resolve(slicePath, "..", "..", "..")) ?? [];
-        const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === slicePath);
-        return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
-      };
-      return {
-        slices: filtered.map((s) => ({
-          ...s,
-          childMissions: childMissions(s.slicePath, s.missionId),
-          queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
-          readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
-        })),
-        totalCount: filtered.length,
-        filter,
-        boundToWorkflow: boundDiagnostic,
-        parentWarnings,
-        // VM-005 (release-0.4.7): additive authored mission-status sidecar so
-        // chip surfaces can honor authored-wins precedence without a second
-        // round-trip. The `slices` array itself is byte-untouched.
-        missions: authored,
-      };
+      if (listing instanceof Response) return listing;
+      const primaryRoot = typeof deps.indexer.configuredRootResolutions === "function"
+        ? deps.indexer.configuredRootResolutions()[0]
+        : undefined;
+      const readinessRoot = primaryRoot?.physicalPath ?? primaryRoot?.identity ?? deps.indexer.slicesRoot;
+      return { listing, slicesRoot: readinessRoot, readPolicy };
     });
-    if (listing instanceof Response) return listing;
+    if (operation instanceof Response) return operation;
+    const { listing, slicesRoot, readPolicy } = operation;
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
-    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot, readPolicy);
+    const readiness = await readProjectReadinessAsync(slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
       ...listing.missions[m.name],
       authoredStatus: m.historicalStatus ?? listing.missions[m.name]?.authoredStatus ?? null,
@@ -296,11 +330,14 @@ function getDeps(c: { get: (key: string) => unknown }): SlicesRoutesDeps | null 
   return { indexer, projector };
 }
 
-function safeRealpath(targetPath: string): string {
+type ResolvedPath = { ok: true; path: string } | { ok: false; missing: boolean };
+
+function resolveRealpath(targetPath: string): ResolvedPath {
+  if (!targetPath) return { ok: false, missing: true };
   try {
-    return fs.realpathSync(targetPath);
-  } catch {
-    return path.resolve(targetPath);
+    return { ok: true, path: fs.realpathSync.native(targetPath) };
+  } catch (err) {
+    return { ok: false, missing: (err as NodeJS.ErrnoException).code === "ENOENT" };
   }
 }
 
@@ -321,47 +358,71 @@ function resolveSliceProjectLookup(
   c: { get: (key: string) => unknown },
   indexer: SliceIndexer,
 ): SliceProjectLookup {
-  let catalogPath: string | null = null;
-  let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
+  let projects: Array<{ id: string; root: string | null; missionsRoot: string | null; error?: string }> = [];
+  let rootUnreadable = false;
   let canonicalProjectId: ((id: string) => string) | undefined;
   try {
     const listed = listProjects(c as never);
-    catalogPath = listed.catalogPath;
     const owners = new Map(listed.projects.flatMap((p) => (p.aliases ?? []).map((alias) => [alias, p.id] as const)));
     canonicalProjectId = (id) => owners.get(id) ?? id;
-    projects = listed.projects.map((p) => ({
-      id: p.id,
-      root: safeRealpath(p.root),
-      missionsRoot: safeRealpath(p.missionsRoot),
-      error: p.error,
-    }));
+    projects = listed.projects.map((p) => {
+      const resolvedRoot = resolveRealpath(p.root);
+      const resolvedMissionsRoot = resolveRealpath(p.missionsRoot);
+      if ((!resolvedRoot.ok && !resolvedRoot.missing) || (!resolvedMissionsRoot.ok && !resolvedMissionsRoot.missing)) {
+        rootUnreadable = true;
+      }
+      return {
+        id: p.id,
+        root: resolvedRoot.ok ? resolvedRoot.path : null,
+        missionsRoot: resolvedMissionsRoot.ok ? resolvedMissionsRoot.path : null,
+        error: p.error,
+      };
+    });
   } catch {
     return { resolveProjectId: () => null, additionalSliceRoots: [], complete: false };
   }
-  const additionalSliceRoots = projects.map((project) => project.missionsRoot);
-  const complete = projects.length > 0 && projects.every((project) => !project.error);
+  const additionalSliceRoots = projects
+    .map((project) => project.missionsRoot)
+    .filter((root): root is string => root !== null);
   if (projects.length === 0) {
-    return { resolveProjectId: () => null, additionalSliceRoots, complete, canonicalProjectId };
+    return { resolveProjectId: () => null, additionalSliceRoots, complete: false, canonicalProjectId };
   }
   // A project-scoped indexer's explicitly configured roots keep their existing
-  // project identity, including compatible roots outside project.yaml. Extra
-  // catalog roots are resolved by containment so hidden sibling projects remain
-  // distinct candidates.
+  // project identity, including compatible roots outside project.yaml. Use the
+  // captured operation snapshot so a root missing or unreadable at capture is
+  // never re-resolved mid-request. Extra catalog roots are resolved by
+  // containment so hidden sibling projects remain distinct candidates.
   const explicitProjectId = typeof indexer.projectId === "string" && indexer.projectId.length > 0
     ? indexer.projectId
     : null;
   const explicitRoots = explicitProjectId
-    ? [indexer.slicesRoot, ...indexer.additionalSliceRoots].map(safeRealpath)
+    ? (typeof indexer.configuredRootResolutions === "function"
+        ? indexer.configuredRootResolutions().flatMap((root) => {
+            if (root.status === "missing") return [];
+            if (root.status === "unreadable") {
+              rootUnreadable = true;
+              return [];
+            }
+            return root.physicalPath !== null ? [root.physicalPath] : [];
+          })
+        : [indexer.slicesRoot, ...(indexer.additionalSliceRoots ?? [])].flatMap((root) => {
+            const resolved = resolveRealpath(root);
+            if (!resolved.ok) {
+              if (!resolved.missing) rootUnreadable = true;
+              return [];
+            }
+            return [resolved.path];
+          }))
     : [];
-  // The resolver is request-local. Reuse inference only for the same canonical
-  // project/mission-root matches, keeping the two containment relations distinct.
-  const inferredByContainment = new Map<string, { id: string; root: string }>();
-  const resolveProjectId = (slicePath: string): string | null => {
-    const actualSlicePath = safeRealpath(slicePath);
+  const complete = !rootUnreadable && projects.every((project) => !project.error);
+  // `observedQueueCounts` passes the canonical physical path already established
+  // by `canonicalizeCountPath`. Containment and deepest-root selection run purely
+  // over the already-resolved canonical paths with no further filesystem reads.
+  const resolveProjectId = (actualSlicePath: string): string | null => {
     if (explicitProjectId && explicitRoots.some((root) => isInsideDir(root, actualSlicePath))) return explicitProjectId;
     const matching = projects.flatMap((project) => {
-      const projectRootContains = isInsideDir(project.root, actualSlicePath);
-      const missionsRootContains = isInsideDir(project.missionsRoot, actualSlicePath);
+      const projectRootContains = project.root !== null && isInsideDir(project.root, actualSlicePath);
+      const missionsRootContains = project.missionsRoot !== null && isInsideDir(project.missionsRoot, actualSlicePath);
       return projectRootContains || missionsRootContains
         ? [{ project, projectRootContains, missionsRootContains }]
         : [];
@@ -372,44 +433,21 @@ function resolveSliceProjectLookup(
     if (matching.length === 1) {
       selected = matching[0]?.project;
     } else {
-      if (!catalogPath) return null;
-      const cacheKey = JSON.stringify(
-        matching
-          .map(({ project, projectRootContains, missionsRootContains }) => ({
-            id: project.id,
-            root: project.root,
-            missionsRoot: project.missionsRoot,
-            error: project.error ?? null,
-            projectRootContains,
-            missionsRootContains,
-          }))
-          .sort((a, b) => {
-            const left = JSON.stringify(a);
-            const right = JSON.stringify(b);
-            return left < right ? -1 : left > right ? 1 : 0;
-          }),
-      );
-      const cached = inferredByContainment.get(cacheKey);
-      if (cached) {
-        selected = matching.find(({ project }) => project.id === cached.id && project.root === cached.root)?.project;
-      } else {
-        try {
-          const inferred = inferCatalogProject(
-            catalogPath,
-            new ProjectReadError("project_required", "Slice queue counts require one containing project"),
-            { cwd: actualSlicePath },
-            [],
-          );
-          if (inferred.selectedBy !== "cwd") return null;
-          selected = matching.find(({ project }) => project.id === inferred.id && project.root === inferred.root)?.project;
-          if (!selected) return null;
-          inferredByContainment.set(cacheKey, { id: inferred.id, root: inferred.root });
-        } catch {
-          return null;
-        }
+      const containing = matching
+        .filter((entry): entry is typeof entry & { project: { root: string } } =>
+          entry.projectRootContains && entry.project.root !== null,
+        )
+        .map(({ project }) => ({
+          project,
+          depth: project.root.split(path.sep).filter(Boolean).length,
+        }));
+      if (containing.length > 0) {
+        const maxDepth = Math.max(...containing.map((entry) => entry.depth));
+        const deepest = containing.filter((entry) => entry.depth === maxDepth);
+        if (deepest.length === 1) selected = deepest[0]?.project;
       }
     }
-    if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
+    if (!selected || selected.error || selected.missionsRoot === null || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
     return selected.id;
   };
   return { resolveProjectId, additionalSliceRoots, complete, canonicalProjectId };

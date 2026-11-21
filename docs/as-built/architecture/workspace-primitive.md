@@ -389,8 +389,11 @@ historical rows are not attributed to a selected project.
 
 The `GET /api/slices` response keeps that legacy `qitemCount` separate from
 `queueCounts`, eight current-state counts (or `null` when the listed
-mission/project scope cannot be resolved or catalog/candidate-root discovery is
-incomplete). `queueCounts` matches exact typed tags in one uncapped queue scan
+mission/project scope cannot be resolved, catalog/candidate-root discovery is
+incomplete, the queue table or its `tags` column cannot be read, or the count
+read fails part-way; a failed count read discards every partial counter and the
+slice rows still return, while a failure of the listing itself still fails the
+request). `queueCounts` matches exact typed tags in one uncapped queue scan
 and is recomputed on every request; `?refresh` invalidates the separate listing
 cache, not a queue-count snapshot. A row may omit `project:` or `mission:` only
 when its remaining scope tokens identify exactly one physical slice with a
@@ -401,6 +404,16 @@ candidates as absent. Ambiguous matches count nowhere, including matches hidden
 by first-wins listing or a list filter. An explicit mismatched project or
 mission never counts. Physical candidates are used for counting only and do
 not change which slice is listed or served.
+
+Each row also carries `derivedState`, a read-time projection of `queueCounts`
+beside the authored `status`, which stays unchanged and is never written back.
+Among open rows `blocked` wins, then `in-progress`, then `pending`. `idle` means
+matched rows exist and none is open (`done`, `failed`, `denied`, `canceled` and
+`handed-off` are not open); it does not say nobody is working on the slice.
+`none` means no row matched. `unknown` means `queueCounts` is `null`, whatever
+the cause listed above, and is never reported as `idle` or `none`.
+`?derived=blocked|in-progress|pending|idle|none|unknown` filters on it after the
+`filter` status filter, from the same counts and with no extra query.
 
 > Source: `domain/slices/slice-indexer.ts` (read-only/no-new-state module
 > contract; `SliceRecord.qitemIds` / `SliceRecord.proofPacket`;
