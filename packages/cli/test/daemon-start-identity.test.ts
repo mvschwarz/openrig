@@ -473,8 +473,10 @@ describe("local startup reservation", () => {
       const home = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-start-lock-"));
       try { body(home); } finally { fs.rmSync(home, { recursive: true, force: true }); }
     };
-    /** The name `rig daemon stop` gives a spent reservation, which a start shares for one from this boot. */
+    /** A start's archive of a reservation from this boot, and the name `rig daemon stop` gives a spent one. */
+    const abandonedOf = (file: string) => `${file}.abandoned-20261110T210559Z-${fs.statSync(file).ino}`;
     const stoppedOf = (file: string) => `${file}.stopped-${fs.statSync(file).ino}`;
+    const claimOf = (file: string) => `${file}.claim-${fs.statSync(file).ino}`;
     const childRecord = (pidNamespace?: string) => JSON.stringify({ childPid: 36449, startToken: "linux:42", ...(pidNamespace ? { pidNamespace } : {}), host: "127.0.0.1", port: 7433 }) + "\n";
     /** A launch written after this boot: `{launcherPid, startedAt[, bootId]}` and, when `child`, its child record. */
     const sameBoot = (home: string, opts: { bootId?: string; pidNamespace?: string; child?: boolean } = {}) => {
@@ -486,7 +488,7 @@ describe("local startup reservation", () => {
       return file;
     };
     it("is archived when it records this boot's ID and both its launcher and child are dead in this shell's pid namespace", () => withHome((home) => {
-      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = stoppedOf(file), liveness = vi.fn(dead);
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file), liveness = vi.fn(dead);
       const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: liveness, pidNamespace: NS });
       expect(lock.archived).toBe(archive);
       expect(fs.readFileSync(archive, "utf8")).toContain('"childPid":36449');
@@ -499,7 +501,7 @@ describe("local startup reservation", () => {
       // The macOS field case: a 0.7.10 reservation is {launcherPid, startedAt} then {childPid}, written after boot.
       const file = path.join(home, "daemon-start.lock");
       fs.writeFileSync(file, JSON.stringify({ launcherPid: 35905, startedAt }) + "\n" + JSON.stringify({ childPid: 36449 }) + "\n");
-      const archive = stoppedOf(file);
+      const archive = abandonedOf(file);
       const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: "host" });
       expect(lock.archived).toBe(archive);
       lock.release();
@@ -543,8 +545,8 @@ describe("local startup reservation", () => {
       expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS })).toThrow(/already reserved/);
       expect(fs.readdirSync(home)).toEqual(["daemon-start.lock"]);
     }));
-    it("notes in the archive that a start archived it, since the name is the one a stop's release uses", () => withHome((home) => {
-      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = stoppedOf(file);
+    it("notes in the archive that a start archived it", () => withHome((home) => {
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file);
       const text = fs.readFileSync(file, "utf8");
       const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS });
       expect(lock.archived).toBe(archive);
@@ -563,16 +565,31 @@ describe("local startup reservation", () => {
       expect(fs.readdirSync(home)).toEqual([path.basename(archive)]);
       expect(fs.readFileSync(archive, "utf8")).toBe(text);
     }));
-    it("leaves the reservation to a stop that has linked it and not yet removed it", () => withHome((home) => {
-      // rig daemon stop's archiveSpentReservation is between its link(2) and its unlink: the start loses the same name.
-      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = stoppedOf(file);
-      const afterInspect = () => { fs.linkSync(file, archive); };
+    it("leaves the reservation to another remover that holds the claim on its inode", () => withHome((home) => {
+      // Another start or a stop is between its claim and its unlink: whatever name it archives under, this start refuses.
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), claim = claimOf(file);
+      const afterInspect = () => { fs.linkSync(file, claim); };
       expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS, afterInspect })).toThrow(/already reserved/);
-      expect(fs.readdirSync(home).sort()).toEqual([path.basename(archive), "daemon-start.lock"].sort());
-      expect(fs.statSync(file).ino).toBe(fs.statSync(archive).ino);
+      expect(fs.readdirSync(home).sort()).toEqual([path.basename(claim), "daemon-start.lock"].sort());
+      expect(fs.statSync(file).ino).toBe(fs.statSync(claim).ino);
+    }));
+    it("has one winner when two starts read an older CLI's reservation as different boots", () => withHome((home) => {
+      // No boot ID: the route rests on each start's boot time. B (a later boot time) archives it as from an earlier
+      // boot and takes the lock between A's inspection and A's claim; A, reading it as from this boot, refuses.
+      const file = path.join(home, "daemon-start.lock");
+      fs.writeFileSync(file, JSON.stringify({ launcherPid: 35905, startedAt }) + "\n" + JSON.stringify({ childPid: 36449 }) + "\n");
+      const written = new Date(Date.parse(startedAt) + 1000);
+      fs.utimesSync(file, written, written);
+      let b: ReturnType<typeof acquireDaemonStartLock> | undefined;
+      const afterInspect = () => { b = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs: Date.parse(startedAt) + 60_000, processLiveness: dead, pidNamespace: "host" }); };
+      expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: "host", afterInspect })).toThrow(/already reserved/);
+      expect(b?.archived).toBeDefined();
+      expect(fs.readFileSync(file, "utf8")).toContain(`"launcherPid":${process.pid}`);
+      b!.release();
+      expect(fs.existsSync(file)).toBe(false);
     }));
     it("leaves a stop nothing to release once a start has archived it, and the start's new lock stays", () => withHome((home) => {
-      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = stoppedOf(file);
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file);
       const text = fs.readFileSync(file, "utf8");
       const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS });
       expect(lock.archived).toBe(archive);

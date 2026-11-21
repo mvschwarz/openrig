@@ -46,11 +46,11 @@ export interface StaleLockCheck {
  * The second: a reservation from this boot is archived only when it records both a launcher and a child, both are positively
  * dead, and its PIDs are numbered in this shell's pid namespace (one that records none is read as the host's,
  * which only an OS without pid namespaces reports). A live or uninspectable PID, a missing child record (the
- * launcher may have died between the spawn and recording it) or another namespace keeps the refusal. Such a
- * reservation is archived under the name `rig daemon stop` gives a spent one (`archiveSpentReservation`), so a
- * start and a stop that both find it race for one name, and link(2) lets only one of them remove it; the start
- * then notes in the archive that it archived it. A reservation that `rig daemon stop` retained after a shutdown it
- * couldn't verify (`markReservationRetained`) keeps the refusal: that state is unknown, not gone. */
+ * launcher may have died between the spawn and recording it) or another namespace keeps the refusal, and so does
+ * a reservation that `rig daemon stop` retained after a shutdown it couldn't verify (`markReservationRetained`):
+ * that state is unknown, not gone. The start notes in the archive that it archived it.
+ * Every route that removes a reservation (both of these, and `rig daemon stop`'s release) first takes one claim on
+ * its inode (`claimAndArchive`), so two of them that both find it removable can't both remove it. */
 export function acquireDaemonStartLock(home: string, stale?: StaleLockCheck): DaemonStartLock {
   fs.mkdirSync(home, { recursive: true });
   const file = path.join(home, "daemon-start.lock");
@@ -123,11 +123,7 @@ export function currentBootId(): string | undefined {
 /** Archives an abandoned reservation (see `acquireDaemonStartLock`) and returns the archive's path: one from an
  * earlier boot, or one from this boot whose recorded launcher and child are both positively dead in this shell's
  * pid namespace. Anything unreadable stays where it is, and so does one naming a PID that isn't positively dead.
- * One launch wins: the archive is a hard link named after the inspected file's inode, made
- * with link(2), which never replaces an existing name. A launch that lost the race, or whose path now holds a
- * different file, gets EEXIST or a mismatched inode and keeps the refusal. Only the winner removes the old
- * name, and nothing else can replace it while it exists, so the winner never removes another launch's lock.
- * A winner that dies between link and unlink leaves both names; later starts refuse, as before this change. */
+ * One launch wins, through `claimAndArchive`. */
 function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undefined {
   let text: string;
   let inspected: fs.Stats;
@@ -181,21 +177,10 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
   }
   stale.afterInspect?.();
   const stamp = new Date(startedAtMs).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
-  // From this boot, `rig daemon stop` may release the same spent reservation: share its name.
-  const target = earlierBoot ? `${file}.abandoned-${stamp}-${inspected.ino}` : `${file}.stopped-${inspected.ino}`;
-  try {
-    fs.linkSync(file, target);
-  } catch {
-    return undefined;
-  }
-  const linked = fs.statSync(target);
-  if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
-    fs.unlinkSync(target);
-    return undefined;
-  }
-  fs.unlinkSync(file);
+  const target = `${file}.abandoned-${stamp}-${inspected.ino}`;
+  if (!claimAndArchive(file, inspected, target)) return undefined;
   if (!earlierBoot) {
-    // The archive's name is the one a stop gives a clean release: say that a start archived it, and why.
+    // Say that a start archived it, and why: the reservation itself only records the launch.
     try {
       fs.appendFileSync(target, JSON.stringify({ archivedBy: "start", reason: "launcher-and-child-gone", launcherPid: process.pid, at: new Date().toISOString() }) + "\n");
     } catch {
@@ -203,6 +188,32 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
     }
   }
   return target;
+}
+
+/** #3637 — moves the reservation at `file`, still the `inspected` inode, to `target` and removes `file`, only after
+ * taking the one claim on that inode that every remover takes: a hard link named after the inode, made with link(2),
+ * which never replaces an existing name. Whoever gets EEXIST, a missing file or another inode under the claim keeps
+ * the reservation where it is. While the claim exists nothing else can remove `file`, so the winner never removes
+ * another launch's lock, whichever archive name each remover would use. The claim goes once the move is done. A
+ * remover that dies holding the claim leaves it, and later removals of that inode refuse until it's cleared. */
+function claimAndArchive(file: string, inspected: fs.Stats, target: string): boolean {
+  const claim = `${file}.claim-${inspected.ino}`;
+  try {
+    fs.linkSync(file, claim);
+  } catch {
+    return false;
+  }
+  try {
+    const claimed = fs.statSync(claim);
+    if (claimed.dev !== inspected.dev || claimed.ino !== inspected.ino) return false;
+    fs.linkSync(file, target);
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { fs.unlinkSync(claim); } catch { /* already gone */ }
+  }
 }
 
 /** #3637 — `rig daemon stop` keeps a reservation after a shutdown it couldn't verify (the child didn't exit, the
@@ -273,21 +284,6 @@ export function archiveSpentReservation(file: string, expected: string): string 
   }
   if (text !== expected) return undefined;
   const target = `${file}.stopped-${inspected.ino}`;
-  try {
-    fs.linkSync(file, target);
-  } catch {
-    return undefined;
-  }
-  try {
-    const linked = fs.statSync(target);
-    if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
-      fs.unlinkSync(target);
-      return undefined;
-    }
-    fs.unlinkSync(file);
-  } catch {
-    // Left for the operator; the caller warns that the reservation was not released.
-    return undefined;
-  }
-  return target;
+  // Left for the operator when the claim or the move fails; the caller warns that the reservation was not released.
+  return claimAndArchive(file, inspected, target) ? target : undefined;
 }
