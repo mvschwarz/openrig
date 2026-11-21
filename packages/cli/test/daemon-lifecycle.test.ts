@@ -2323,14 +2323,15 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     expect(await stop(deps)).toBe("stopped");
     expect(deps.kill).toHaveBeenCalledTimes(1);
     expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
-    expect(deps.releaseStartReservation).toHaveBeenCalledWith(lockFile(), raw);
     expect(fs.existsSync(lockFile())).toBe(false);
     const archived = fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock.stopped-"));
     expect(archived).toHaveLength(1);
-    // The archive is the reservation stop read, with the mark it set before the signal.
+    // The archive is the reservation stop read, with the mark it set before the signal,
+    // and the release names that same text.
     const archivedText = fs.readFileSync(path.join(home, archived[0]!), "utf8");
     expect(archivedText.startsWith(raw)).toBe(true);
     expect(JSON.parse(archivedText.slice(raw.length))).toMatchObject({ retainedBy: "stop", reason: "stopping" });
+    expect(deps.releaseStartReservation).toHaveBeenCalledWith(lockFile(), archivedText);
   });
 
   it("stops the child when the listener answers with the child's own PID", async () => {
