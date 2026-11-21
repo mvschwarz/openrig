@@ -73,6 +73,26 @@ afterEach(() => {
 });
 
 describe("the daemon's assignment plan", () => {
+  it("a Codex seat an apply moved to an account home follows it under either spelling of that home; another home is its own", async () => {
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
+    seat("fleet", "c1", "codex", "c1@fleet");
+    const prepared = path.join(dir, "prepared");
+    fs.mkdirSync(prepared);
+    fs.symlinkSync(prepared, path.join(dir, "prepared-link"));
+    // The seat's account home is written through a symlink; the apply recorded the resolved path.
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'c1'").run(path.join(dir, "prepared-link"));
+    const effectAfter = async (appliedHome: string) => {
+      new ProviderAccountAssignmentsRepository(db).saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "prep",
+        kind: "pending_successor", detail: "d", recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: appliedHome, codexLogin: null } });
+      const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" });
+      return planned.ok ? planned.plan.rows[0]!.effect : planned.message;
+    };
+    expect(await effectAfter(prepared)).toBe("change");
+    const elsewhere = path.join(dir, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    expect(await effectAfter(elsewhere)).toBe("kept_override");
+  });
+
   it("a Codex seat follows an earlier assignment only when its saved login is that name in that home", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     fs.writeFileSync(path.join(codexHome, "auth-profiles", "next.json"), CONTENT, { mode: 0o600 });

@@ -352,7 +352,7 @@ export class ProviderServiceImpl implements ProviderService {
       // The seat's choice is still what an apply gave it: it follows the rig's assignment, so it isn't the seat's own.
       const a = last?.applied;
       const follows = !!a && ((claudeRef !== null && a.file === claudeRef.tokenFile && (a.fileKind === "api-key") === (claudeRef.kind === "api-key"))
-        || (ownHome?.source === "account-switch" && a.codexHome === ownHome.home && a.codexLogin === null)
+        || (ownHome?.source === "account-switch" && a.codexHome !== null && a.codexLogin === null && resolvedHome(a.codexHome) === resolvedHome(ownHome.home))
         // A saved login is a name within its Codex home: the same name in another home is another login.
         || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin
           && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
