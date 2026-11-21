@@ -1,4 +1,4 @@
-// After building daemon and CLI: exercise the packed public entry without workspace aliases or a live daemon.
+// After building daemon, CLI and TUI: exercise the packed public entry without workspace aliases or a live daemon.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -25,6 +25,8 @@ try {
   fs.cpSync(path.join(cli, "dist"), path.join(stage, "dist"), { recursive: true });
   fs.mkdirSync(path.join(stage, "daemon"));
   fs.cpSync(path.join(root, "packages/daemon/dist"), path.join(stage, "daemon/dist"), { recursive: true });
+  fs.mkdirSync(path.join(stage, "tui"));
+  fs.cpSync(path.join(root, "packages/tui/dist"), path.join(stage, "tui/dist"), { recursive: true });
   // Use the actual release import rewrite, including declaration imports, on the staged compiled bytes.
   rewriteDaemonImports({ cliDir: stage, daemonPackageJsonPath: path.join(root, "packages/daemon/package.json") });
   const packed = packEntry(run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], stage,
