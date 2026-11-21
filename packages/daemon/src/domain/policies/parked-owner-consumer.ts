@@ -264,7 +264,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       }
 
       const closures: string[] = [];
-      const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string }> = [];
+      const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string;
+        escalationFailure?: { episodeKey: string; failure: string } }> = [];
       // Rotate after the latest physical delivery selection, including retained input. A single
       // cursor from history cannot lose an owner's turn just because a bounded window filled.
       const lastTarget = recent.find(e => e.deliveryStatus && e.deliveryTargetSession)?.deliveryTargetSession;
@@ -396,6 +397,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           // Delivered, the seat idle and nothing changed: the reminder doesn't repeat. Rows still unclaimed past the bound
           // go to someone who can act, once for this episode.
           const deliveredAt = transitions.find(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)?.ts;
+          let escalationFailure: { episodeKey: string; failure: string } | undefined;
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && namedIds.includes(r.qitemId)).map(r => r.qitemId);
           if (deps.escalateUnclaimed && deliveredAt && unclaimed.length > 0
             && (deps.now?.() ?? Date.now()) - Date.parse(deliveredAt) >= PARKED_OWNER_ESCALATE_AFTER_MS
@@ -403,9 +405,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
             try {
               const told = await deps.escalateUnclaimed({ seat: seat.sessionName, qitemIds: unclaimed, deliveredAt, episodeKey: lastKey! });
               if (told.length > 0) deps.rows.appendNote(primaryRow, `${ESCALATED_PREFIX} ${lastKey} to ${told.join(", ")}`);
-            } catch { /* best-effort: a later pass tries again */ }
+            } catch (error) {
+              // Nothing is marked escalated, so a later pass tries again; this pass's notes say why it didn't land.
+              escalationFailure = { episodeKey: lastKey!, failure: (error as { code?: string }).code ?? (error instanceof Error ? error.name : typeof error) };
+            }
           }
-          skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake" });
+          skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake", ...(escalationFailure ? { escalationFailure } : {}) });
           continue;
         }
         let retentionState: string | null = null;

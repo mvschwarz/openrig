@@ -695,14 +695,15 @@ describe("a delivered reminder whose rows stay unclaimed reaches someone who can
   const unclaimedSeat = (state = "pending") => parkedSeat({
     obligations: { items: ROW_IDS.map((qitemId) => ({ qitemId, state, summary: null })), held: [] },
   });
-  const harness = (state = "pending") => {
+  type Escalation = { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string };
+  const harness = (state = "pending", escalate: (input: Escalation) => Promise<string[]> = async () => [SEAT2]) => {
     const store = new RowStore();
     const history: WatchdogHistoryEntry[] = [];
-    const told: Array<{ seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string }> = [];
+    const told: Escalation[] = [];
     let now = Date.parse("2026-10-11T00:00:00.000Z");
     const evaluate = async (seat: ParkedSeatDiagnosisView) => {
       const result = await makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store, history), now: () => now,
-        escalateUnclaimed: async (input) => { told.push(input); return [SEAT2]; } }).evaluate(makeJob());
+        escalateUnclaimed: async (input) => { told.push(input); return escalate(input); } }).evaluate(makeJob());
       if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: String(result.notes?.["primaryRow"]) }));
       return result;
     };
@@ -736,6 +737,39 @@ describe("a delivered reminder whose rows stay unclaimed reaches someone who can
     advance(30 * 60_000);
     await wake();
     expect(told).toHaveLength(0);
+  });
+
+  const failureOf = (result: { notes?: Record<string, unknown> }) =>
+    ((result.notes?.["skippedSeats"] as Array<{ escalationFailure?: unknown }> | undefined) ?? []).map((s) => s.escalationFailure).filter(Boolean);
+
+  it("says in the pass's notes when no one can be resolved to tell, marks nothing escalated, and tries again later", async () => {
+    const noPerson = Object.assign(new Error("Workflow human fallback needs one registered human"), { code: "no_registered_person" });
+    const { store, told, advance, wake, resume } = harness("pending", async () => { throw noPerson; });
+    const first = await wake();
+    await resume();
+    advance(16 * 60_000);
+    const failed = await wake();
+    expect(failed.action).toBe("skip");
+    expect(failureOf(failed)).toEqual([{ episodeKey: String(first.notes?.["episodeKey"]), failure: "no_registered_person" }]);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(0);
+    await wake();
+    expect(told).toHaveLength(2);
+  });
+
+  it("records exactly one escalation once a write that failed succeeds on a later pass", async () => {
+    let calls = 0;
+    const { store, advance, wake, resume } = harness("pending", async () => {
+      if (++calls === 1) throw new Error("SQLITE_BUSY: database is locked");
+      return [SEAT2];
+    });
+    await wake();
+    await resume();
+    advance(16 * 60_000);
+    expect(failureOf(await wake())).toEqual([expect.objectContaining({ failure: "Error" })]);
+    expect(failureOf(await wake())).toEqual([]);
+    await wake();
+    expect(calls).toBe(2);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(1);
   });
 
   it("doesn't repeat the escalation on a later tick", async () => {
