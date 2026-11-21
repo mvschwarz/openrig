@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startDaemon, getDaemonStatus, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
-import { acquireDaemonStartLock, archiveSpentReservation, currentBootId } from "../src/daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, currentBootId, markReservationRetained } from "../src/daemon-start-lock.js";
 // Resolve the startup import before a fake clock can finish with no timer yet scheduled.
 import "@openrig/daemon/instance-initialization";
 import { createProcessLiveness, readProcessState } from "../src/commands/daemon.js";
@@ -572,6 +572,17 @@ describe("local startup reservation", () => {
       expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS, afterInspect })).toThrow(/already reserved/);
       expect(fs.readdirSync(home).sort()).toEqual([path.basename(claim), "daemon-start.lock"].sort());
       expect(fs.statSync(file).ino).toBe(fs.statSync(claim).ino);
+    }));
+    it("keeps refusing when a stop marks it between this start's inspection and its claim", () => withHome((home) => {
+      // The start decided from the text it read; the stop's mark, appended to the same inode since, keeps the refusal.
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS });
+      const text = fs.readFileSync(file, "utf8");
+      let marked: string | undefined;
+      const afterInspect = () => { marked = markReservationRetained(file, text, "stopping"); };
+      expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS, afterInspect })).toThrow(/already reserved/);
+      expect(marked).toBeDefined();
+      expect(fs.readdirSync(home)).toEqual(["daemon-start.lock"]);
+      expect(fs.readFileSync(file, "utf8")).toBe(marked);
     }));
     it("has one winner when two starts read an older CLI's reservation as different boots", () => withHome((home) => {
       // No boot ID: the route rests on each start's boot time. B (a later boot time) archives it as from an earlier
