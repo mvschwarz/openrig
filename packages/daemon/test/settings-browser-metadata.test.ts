@@ -157,6 +157,13 @@ describe("browser entry metadata", () => {
     expect(browser.readOnly).toBe(true);
   });
 
+  it("reports the daemon start wait as read by each later start, not by the running daemon", () => {
+    expect(browse().entries.find((e) => e.key === "daemon.start_readiness_wait_seconds")).toMatchObject({
+      appliesAt: "unknown",
+      application: "Read by each later daemon start (rig daemon start, rig start, rig up, the TUI); the running daemon doesn't use it.",
+    });
+  });
+
   it("reports the seat polling interval as requiring a daemon restart", () => {
     expect(browse().entries.find((e) => e.key === "daemon.seat_poll_interval_ms")).toMatchObject({
       appliesAt: "daemon_restart",

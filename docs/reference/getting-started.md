@@ -1423,10 +1423,13 @@ daemon start.
 listeners. `rig config set daemon.start_readiness_wait_seconds <seconds>` (an integer from
 1 to 600) or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS` sets that wait for later starts:
 `rig daemon start`, `rig start`, the auto-start of `rig up` and `rig context add`, and the
-TUI's start, which allows its own call that wait plus the probe, cleanup and a margin.
+TUI's start, which allows its own call that wait plus the probe, cleanup and a margin
+(when it can't read the setting, it allows the longest accepted wait, 600 seconds).
 A running daemon isn't affected.
 When the wait runs out and the child is still alive, the start ends pending as before:
 the child is left running and the start reservation is kept, so inspect before retrying.
+A wait shorter than the host needs only makes the start end pending sooner; it doesn't
+stop the child.
 Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow
 start faster.
 
