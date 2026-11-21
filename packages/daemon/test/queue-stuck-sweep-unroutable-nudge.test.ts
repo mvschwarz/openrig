@@ -1736,4 +1736,213 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     });
     expect(newerLogs.some((line) => line.includes("unreported #514"))).toBe(true);
   });
+
+  it("hands off an unclaimed open #514 notice when its recipient rig is removed, reports partial with deduplicated gap logging when no fallback exists, and recovers when a rig returns", async () => {
+    seedSeat("origin", "coord.lead", "lead@origin");
+    seedSeat("ops", "coord.operator", "operator@ops");
+    seedSeat("retired", "work.parked", "parked@retired", { running: false, bound: false });
+
+    const rigs = new RigRepository(db);
+    const validateRig = makeTopologyDestinationCheck({
+      findRigsByName: (name) => rigs.findRigsByName(name),
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
+    queue = new QueueRepository(db, bus, {
+      validateRig,
+      canRecordDestination: makeQueueRecordingCheck(validateRig),
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: {
+        send: async (destination, text) => {
+          nudgesSent.push({ destination, text });
+          return { ok: true, verified: true, sent: true, inputPhase: "written" };
+        },
+      },
+    });
+    queue.attachOutbox(new OutboxHandler(db));
+
+    const now = new Date("2026-11-21T06:00:00.000Z");
+    const stuckRow = await createNoNudge("lead@origin", "parked@retired", "Unreachable task on retired rig", 90, now);
+
+    // Pass 1: creates open #514 notice to lead@origin.
+    const status1 = createStuckSweepStatus();
+    const pass1 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status1,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass1.outcome).toBe("findings");
+    const [original] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@origin", "parked@retired")));
+    expect(original).toBeDefined();
+    expect(original!.destinationSession).toBe("lead@origin");
+
+    // Delete the notice recipient's rig ("origin") before pickup while operator@ops remains reachable.
+    db.prepare("DELETE FROM rigs WHERE name = 'origin'").run();
+    nudgesSent = [];
+    const status2 = createStuckSweepStatus();
+    const pass2 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status2,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass2.outcome).toBe("findings");
+    expect(status2.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 1 });
+    expect(queue.getByIdOrThrow(original!.qitemId).state).toBe("handed-off");
+    const openAfterHandoff = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@origin", "parked@retired")));
+    expect(openAfterHandoff).toHaveLength(1);
+    const handedOff = openAfterHandoff[0]!;
+    expect(handedOff).toMatchObject({
+      destinationSession: "operator@ops",
+      handedOffFrom: original!.qitemId,
+      evidenceRef: original!.evidenceRef,
+    });
+    expect(handedOff.body).toContain("lead@origin");
+    expect(nudgesSent.some((n) => n.destination === "operator@ops")).toBe(true);
+
+    // Pass 3: next sweep refreshes the handed-off notice cleanly without re-creating or nudging.
+    nudgesSent = [];
+    const pass3 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass3.outcome).toBe("findings");
+    expect(pass3.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: `lead@origin${UNROUTABLE_NOTICE_SEPARATOR}parked@retired`,
+      findingQitemId: handedOff.qitemId,
+      action: "refreshed",
+    }]);
+    expect(nudgesSent).toHaveLength(0);
+
+    // Delete the fallback recipient's rig ("ops") as well so NO fallback target is reachable.
+    // Pass 4 must report partial (findingsUndelivered=1) and record the gap transition + log ONCE.
+    db.prepare("DELETE FROM rigs WHERE name = 'ops'").run();
+    const tsBeforeGap = queue.getByIdOrThrow(handedOff.qitemId).tsUpdated;
+    const transitionsBeforeGap = queue.listTransitions(handedOff.qitemId).length;
+    const logs4: string[] = [];
+    const status4 = createStuckSweepStatus();
+    const pass4 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status4,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs4.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass4.outcome).toBe("partial");
+    expect(status4.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(pass4.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: handedOff.qitemId,
+      findingQitemId: handedOff.qitemId,
+      action: "unreported",
+      destination: "operator@ops",
+    });
+    expect(logs4.filter((line) => line.includes("unreported #514"))).toHaveLength(1);
+    expect(queue.listTransitions(handedOff.qitemId)).toHaveLength(transitionsBeforeGap + 1);
+    expect(queue.getByIdOrThrow(handedOff.qitemId).tsUpdated).toBe(tsBeforeGap);
+
+    // Pass 5 (repeat tick with no fallback): still partial with findingsUndelivered=1, zero repeated logs/notes.
+    const logs5: string[] = [];
+    const status5 = createStuckSweepStatus();
+    const pass5 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status5,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs5.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass5.outcome).toBe("partial");
+    expect(status5.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(logs5.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.listTransitions(handedOff.qitemId)).toHaveLength(transitionsBeforeGap + 1);
+
+    // Restore "ops" rig: Pass 6 recovers to findings with findingsUndelivered=0.
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-ops-restored', 'ops')").run();
+    const status6 = createStuckSweepStatus();
+    const pass6 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status6,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass6.outcome).toBe("findings");
+    expect(status6.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0 });
+    expect(pass6.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: `lead@origin${UNROUTABLE_NOTICE_SEPARATOR}parked@retired`,
+      findingQitemId: handedOff.qitemId,
+      action: "refreshed",
+    }]);
+
+    // Also verify deduplicated logging for unreported #514 rows on a populated topology with no notice and no fallback.
+    const orphanRow = await createNoNudge("dead@origin", "parked@retired", "No fallback on populated topology", 90, now);
+    const orphanTransitionsBefore = queue.listTransitions(orphanRow.qitemId).length;
+    const orphanLogs1: string[] = [];
+    const orphanStatus1 = createStuckSweepStatus();
+    const orphanPass1 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: orphanStatus1,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => orphanLogs1.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(orphanPass1.outcome).toBe("partial");
+    expect(orphanStatus1.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(orphanLogs1.filter((line) => line.includes("unreported #514"))).toHaveLength(1);
+    expect(queue.listTransitions(orphanRow.qitemId)).toHaveLength(orphanTransitionsBefore + 1);
+    expect(queue.getByIdOrThrow(stuckRow.qitemId).state).toBe("pending");
+
+    const orphanLogs2: string[] = [];
+    const orphanStatus2 = createStuckSweepStatus();
+    const orphanPass2 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: orphanStatus2,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => orphanLogs2.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(orphanPass2.outcome).toBe("partial");
+    expect(orphanStatus2.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(orphanLogs2.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.listTransitions(orphanRow.qitemId)).toHaveLength(orphanTransitionsBefore + 1);
+  });
 });

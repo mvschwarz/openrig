@@ -2294,6 +2294,20 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       constructor(readonly existingQitemId: string) { super(existingQitemId); }
     }
     class UnroutableNoticeSkippedError extends Error {}
+    const recordUnroutableGap = (
+      row: QueueItem,
+      note: string,
+      logLine: string,
+      destination: string,
+      findingQitemId = "",
+    ): void => {
+      if (!hasGap.get(row.qitemId, note)) {
+        // A same-state daemon note is bookkeeping, not work progress or a new recovery episode.
+        deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "daemon@system", transitionNote: note });
+        log(logLine);
+      }
+      findings.push({ kind: "unroutable-notice", qitemId: row.qitemId, findingQitemId, action: "unreported", destination });
+    };
     const liveUnroutableTags = new Set<string>();
     for (const [groupKey, group] of unroutableGroups) {
       if (dueToYield()) await yieldLoop();
@@ -2322,9 +2336,56 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (surviving.length === 0) continue;
       const openNotice = findUnroutableNotice(deps.db, group.source, group.destination);
       if (openNotice) {
-        liveUnroutableTags.add(tag);
-        findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openNotice.qitemId, action: "refreshed" });
-        continue;
+        const noticeRow = indexed(() => deps.queueRepo.getById(openNotice.qitemId, { waiting: false }));
+        if (noticeRow && ["pending", "in-progress", "blocked"].includes(noticeRow.state)) {
+          if (noticeRow.state === "pending" && !noticeRow.claimedAt
+            && missingRig(noticeRow.destinationSession) && !deliveryHeld(noticeRow)) {
+            const target = unreachableNoticeTarget(group.destination, group.source);
+            if (target) {
+              try {
+                const { created } = await deps.queueRepo.handoff({
+                  qitemId: noticeRow.qitemId,
+                  fromSession: "stuck-sweep@system",
+                  toSession: target,
+                  body: `${noticeRow.body}\n\nOriginal notice destination ${noticeRow.destinationSession} references a missing rig. This notice was handed off to ${target}.`,
+                  summary: noticeRow.summary,
+                  evidenceRef: noticeRow.evidenceRef,
+                });
+                othersMayHaveRun();
+                liveUnroutableTags.add(tag);
+                findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: created.qitemId, action: "created" });
+                continue;
+              } catch (err) {
+                othersMayHaveRun();
+                if (!unknownRig(err)) {
+                  const latest = indexed(() => deps.queueRepo.getById(noticeRow.qitemId, { waiting: false }));
+                  if (latest && ["pending", "in-progress", "blocked"].includes(latest.state)
+                    && (latest.state !== "pending" || latest.claimedAt)) {
+                    liveUnroutableTags.add(tag);
+                    findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: latest.qitemId, action: "refreshed" });
+                    continue;
+                  }
+                  recordFailure(`orphaned unroutable-notice ${noticeRow.qitemId} not handed off`, err);
+                  liveUnroutableTags.add(tag);
+                  continue;
+                }
+              }
+            }
+            liveUnroutableTags.add(tag);
+            const note = `stuck-sweep routing gap: ${noticeRow.destinationSession} references an unknown rig; no reachable source, operator agent or operator seat for ${groupKey}`;
+            recordUnroutableGap(
+              noticeRow,
+              note,
+              `[stuck-sweep] unreported #514 orphaned notice ${noticeRow.qitemId} at ${noticeRow.destinationSession}: no reachable source, operator agent or operator seat`,
+              noticeRow.destinationSession,
+              noticeRow.qitemId,
+            );
+            continue;
+          }
+          liveUnroutableTags.add(tag);
+          findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: noticeRow.qitemId, action: "refreshed" });
+          continue;
+        }
       }
       const dismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
       if (dismissed && !surviving.some((c) => evidenceIsNewer(c.evidenceAt, dismissed.tsUpdated))) continue;
@@ -2332,8 +2393,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!target) {
         liveUnroutableTags.add(tag);
         for (const c of surviving) {
-          log(`[stuck-sweep] unreported #514 unreachable row ${c.row.qitemId} at ${group.destination}: no reachable source, operator agent or operator seat`);
-          findings.push({ kind: "unroutable-notice", qitemId: c.row.qitemId, findingQitemId: "", action: "unreported", destination: group.destination });
+          const note = `stuck-sweep routing gap: ${group.destination} unreachable; no reachable source, operator agent or operator seat`;
+          recordUnroutableGap(
+            c.row,
+            note,
+            `[stuck-sweep] unreported #514 unreachable row ${c.row.qitemId} at ${group.destination}: no reachable source, operator agent or operator seat`,
+            group.destination,
+          );
         }
         continue;
       }
