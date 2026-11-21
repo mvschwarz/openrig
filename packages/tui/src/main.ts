@@ -17,7 +17,7 @@ import { createInputDecoder, resolveEscapeAction, resolveKeyAction, resolveMouse
 import { drawableSize, renderScreen } from "./render.js";
 import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
-import { createControlSocket, defaultSocketPath } from "./socket-server.js";
+import { createControlSocket, defaultSocketPath, type ControlSocket } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
@@ -45,6 +45,7 @@ import type { SpecReviewCache } from "./hydrate.js";
 import { MOTION_FRAME_MS } from "./visual-layout.js";
 import { launchProcess, runSpecLaunch } from "./specs/launch.js";
 import { runCopySession, processCopyTerminal } from "./print-for-copy.js";
+import { isBoundSocketCopy } from "./socket-copy.js";
 import { openTerminalInWindow, terminalWindowNotice } from "./terminals/open-window.js";
 
 function argOf(args: string[], flag: string): string | undefined {
@@ -91,6 +92,9 @@ async function run(): Promise<void> {
   let launching = false;
   let openingTerminal = false;
   let controlSocketPath: string | undefined;
+  /** Why no control socket could be bound, when that happened. Shown in the status bar for as long as
+   *  the TUI runs: the notice above it can be replaced by choosing work, and this cannot. */
+  let controlSocketFailure: string | null = null;
   let shuttingDown = false;
 
   let inputLine = "";
@@ -220,7 +224,7 @@ async function run(): Promise<void> {
       ...(!liveEnabled ? { readErrors: [`Live data not loaded · connection ${startup?.state.connection ?? "probing"} · L Local reading · S Startup`] } : {}),
       launchingCli: process.env["OPENRIG_TUI_CLI_IDENTITY"]?.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 180) };
     if (resolvePendingAddress(view, liveEnabled && live ? live.load() : null)) refreshFromActivity();
-    const opts = { cols, rows, nowMs, completion, controlSocketPath, colorMode: style.mode, commandContext: commandContext(), ...crashCartOpts, ...(startup?.state.open && !view.get().palette ? { startup: startup.state } : {}), restoreScroll: restoreScrollOffset, ...(liveEnabled && live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
+    const opts = { cols, rows, nowMs, completion, controlSocketPath, ...(controlSocketFailure !== null ? { controlSocketUnavailable: true } : {}), colorMode: style.mode, commandContext: commandContext(), ...crashCartOpts, ...(startup?.state.open && !view.get().palette ? { startup: startup.state } : {}), restoreScroll: restoreScrollOffset, ...(liveEnabled && live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
     if (liveEnabled && live?.load().settled) previousPage = { state: { ...view.get() }, snapshot };
     const pageOptions = { ...opts, ...(liveEnabled && !live?.load().settled ? { previousPage } : {}) };
     lastScreen = renderScreen(view.get(), snapshot, pageOptions, inputLine);
@@ -430,20 +434,32 @@ async function run(): Promise<void> {
   }
 
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
-  const socket = await createControlSocket({
-    socketPath,
-    fallbackOnCollision: true,
-    view,
-    onMutation: () => {
-      inputRevision += 1; startup?.interacted();
-      if (startup) startup.state.open = false;
-      draw();
-      refreshFromActivity();
-    },
-    currentContext: () => commandContext(),
-  });
+  // The control socket is how an agent reads and drives this TUI. Losing it costs that, not the
+  // session: a socket home that cannot be written, or a second endpoint that also fails, leaves the
+  // operator with a TUI that draws and works and cannot be reached from outside. Losing the whole
+  // launcher over it would be the worse trade, so the failure is caught and said out loud instead.
+  let socket: ControlSocket | null = null;
+  try {
+    socket = await createControlSocket({
+      socketPath,
+      fallbackOnCollision: true,
+      view,
+      onMutation: () => {
+        inputRevision += 1; startup?.interacted();
+        if (startup) startup.state.open = false;
+        draw();
+        refreshFromActivity();
+      },
+      currentContext: () => commandContext(),
+    });
+  } catch (error) {
+    controlSocketFailure = error instanceof Error ? error.message : String(error);
+  }
 
-  if (socket.path !== socketPath) controlSocketPath = socket.path;
+  if (socket && socket.path !== socketPath) controlSocketPath = socket.path;
+  if (controlSocketFailure !== null) {
+    view.dispatch({ type: "notice", message: `Control socket unavailable, so an agent cannot read or drive this TUI: ${controlSocketFailure}` });
+  }
 
   // Reuse the CLI's desktop opener and the daemon's node-launch contract.
   // The view-state is only told the outcome.
@@ -540,7 +556,7 @@ async function run(): Promise<void> {
     live?.close();
     unsubscribeCopyMode();
     process.stdout.write(PASTE_DISABLE + MOUSE_DISABLE + ALT_SCREEN_OFF);
-    await socket.close();
+    if (socket) await socket.close();
     activityEvents?.close();
     process.exit(0);
   }
@@ -559,7 +575,7 @@ async function run(): Promise<void> {
       // contexts, whose input handlers otherwise consume the status-row click.
       if (ev.type === "mouse" && ev.button === 0 && lastScreen) {
         const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
-        if (hit?.action.type === "print-for-copy" && hit.action.value === socket.path) {
+        if (socket && hit && isBoundSocketCopy(hit.action as { type: string; value?: string }, socket.path)) {
           perform(hit.action);
           return;
         }

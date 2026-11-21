@@ -7,6 +7,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unli
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
 import { declaredRuntimeHomes } from "./seat-runtime-home.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
+import { hasPiUsageEntriesTable } from "./pi-usage-entries-store.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import {
   contextUsageDirectory,
@@ -212,6 +213,54 @@ export class ContextUsageStore {
     });
   }
 
+  /** Read a Pi seat's own spend from the usage entries its runner already posts, and normalize it. Pi posts no
+   *  context-window sample, so the window size is unknown here and usedPercentage stays null: the token
+   *  threshold and the burn series work from the cumulative counters, while a percent threshold honestly
+   *  cannot (absent, never invented). Only `origin = 'own'` entries count, and only the seat's CURRENT Pi
+   *  session: a fork's copied entries and an earlier launch are history, not this occupant's context.
+   *  Until an entry reaches this launch's start, report no_data; after a resumed conversation posts,
+   *  its whole session counts, including entries from before the relaunch. */
+  readPiUsageAndNormalize(input: { nodeId: string; seatSession: string; sessionStartedAt: string }): ContextUsage {
+    if (!hasPiUsageEntriesTable(this.db)) return this.unknownUsage("no_data");
+    const row = this.db
+      .prepare(
+        `SELECT pi_session_id AS piSessionId,
+                SUM(input_tokens + cache_read_tokens + cache_write_tokens) AS totalInput,
+                SUM(output_tokens) AS totalOutput,
+                MAX(entry_timestamp) AS sampledAt
+           FROM pi_usage_entries
+          WHERE seat_session = ? AND origin = 'own'
+            AND pi_session_id = (
+              SELECT pi_session_id FROM pi_usage_entries
+               WHERE seat_session = ? AND origin = 'own'
+               ORDER BY entry_timestamp DESC, id DESC LIMIT 1)
+          GROUP BY pi_session_id`,
+      )
+      .get(input.seatSession, input.seatSession) as
+        | { piSessionId: string; totalInput: number | null; totalOutput: number | null; sampledAt: string | null }
+        | undefined;
+    if (!row?.piSessionId || row.sampledAt === null) return this.unknownUsage("no_data");
+    if (Date.parse(row.sampledAt) < parseSqliteUtcMs(input.sessionStartedAt)) return this.unknownUsage("no_data");
+    return {
+      availability: "known",
+      reason: null,
+      source: "pi_usage_entries",
+      usedPercentage: null,
+      remainingPercentage: null,
+      contextWindowSize: null,
+      totalInputTokens: row.totalInput ?? 0,
+      totalOutputTokens: row.totalOutput ?? 0,
+      currentUsage: null,
+      transcriptPath: null,
+      sessionId: row.piSessionId,
+      sessionName: input.seatSession,
+      sampledAt: row.sampledAt,
+      fresh: this.isFresh(row.sampledAt),
+      clientCostEstimateUsd: null,
+      occupantGeneration: this.resolveOccupantGeneration?.(input.nodeId) ?? null,
+    };
+  }
+
   /** Resolve an explicitly selected native thread, even before its first token count. */
   readCodexTranscriptPath(threadId: string, codexHome?: string): string | null {
     return this.readCodexThread(threadId, codexHome)?.rollout_path ?? null;
@@ -351,10 +400,15 @@ export class ContextUsageStore {
 
   /** Accepted runner events own current facts. The context table cannot revive a prior run or omitted component. */
   private runnerUsage(nodeId: string, sessionName: string): ContextUsage | null {
+    const seat = this.db.prepare(`SELECT n.runtime,s.session_name,s.created_at FROM nodes n JOIN sessions s ON s.node_id=n.id
+      WHERE n.id=? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { runtime: string | null; session_name: string; created_at: string } | undefined;
+    // Pi's posted entries own its cumulative spend, not the generic runner context observation or a cached row.
+    if (seat?.runtime === "pi") {
+      if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
+      return this.readPiUsageAndNormalize({ nodeId, seatSession: sessionName, sessionStartedAt: seat.created_at });
+    }
     if (!this.runnerObservations) return null;
-    const seat = this.db.prepare(`SELECT n.runtime,s.session_name FROM nodes n JOIN sessions s ON s.node_id=n.id
-      WHERE n.id=? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { runtime: string | null; session_name: string } | undefined;
-    // Preserve all existing built-in collectors; Pi has no native context collector here.
+    // Preserve all existing built-in collectors.
     if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "terminal", "stub"].includes(seat.runtime)) return null;
     if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
     const read = this.runnerObservations.getRunnerObservation(nodeId, "context", { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: seat.runtime });

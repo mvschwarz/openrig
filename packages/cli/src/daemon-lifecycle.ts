@@ -2,10 +2,11 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
+import { daemonFetch, SandboxProxyError } from "./daemon-transport.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
-import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
+import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, occupiedPortGuidance, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 // Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
@@ -709,10 +710,6 @@ export async function verifyRequiredListeners(input: {
   return { ok: true, verified };
 }
 
-function occupiedPortGuidance(port: number): string {
-  return `Address already in use (EADDRINUSE) on port ${port}. Inspect the listener before stopping it, or run 'rig daemon start --port <unused-port>'.`;
-}
-
 class StartupIdentityError extends Error {}
 class StartupChildPendingError extends Error {}
 
@@ -831,7 +828,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       ? deps.readFileFrom(LOG_FILE, logOffset) ?? ""
       : Buffer.from(deps.readFile(LOG_FILE) ?? "").subarray(logOffset).toString();
     const dbConflict = startupLog.match(/^(?:Error: )?(OPENRIG_DB_CONFLICT:[^\r\n]*)/m)?.[1];
-    const guidance = dbConflict ? ` ${dbConflict}` : /\bEADDRINUSE\b/.test(startupLog)
+    // The daemon's own listen-failure line already carries the port guidance for EADDRINUSE.
+    const listenFailed = startupLog.match(/^(OPENRIG_LISTEN_FAILED [^\r\n]*)/m)?.[1];
+    const guidance = dbConflict ? ` ${dbConflict}` : listenFailed ? ` ${listenFailed}` : /\bEADDRINUSE\b/.test(startupLog)
       ? ` ${occupiedPortGuidance(port)}`
       : ` See ${LOG_FILE} for details.`;
     childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);
@@ -1273,6 +1272,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
  *  crash-cart-detect semantics): ONLY a connection refusal is strong down evidence;
  *  a timeout / abort / anything else never proves the daemon dead. */
 function isRefusedError(err: unknown): boolean {
+  if (err instanceof SandboxProxyError) return false;
   if (!(err instanceof Error)) return false;
   const cause = (err as Error & { cause?: { code?: string } }).cause;
   const code = (err as Error & { code?: string }).code;
@@ -1484,6 +1484,9 @@ export async function getDaemonStatus(
     databaseWarnings = ev.databaseWarnings;
     terminals = ev.terminals;
   } catch (err) {
+    if (err instanceof SandboxProxyError) {
+      return { state: "unverified", port: state.port, host, pid: state.pid, ...probeErrorCodeOf(err) };
+    }
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
     // "unresponsive" reason so the operator knows it's the control plane.
@@ -1687,6 +1690,7 @@ async function probeHealthzWithSettle(deps: LifecycleDeps, url: string): Promise
       return await fetchDaemonProbe(deps, url, remaining);
     } catch (err) {
       lastErr = err;
+      if (err instanceof SandboxProxyError) throw err; // no daemon-down evidence, and no retry of a proxy refusal
       if (err instanceof HealthProbeTimeoutError) break; // deadline spent — do not re-allocate a new window
       if (attempt < STATUS_PROBE_MAX_ATTEMPTS && Date.now() + STATUS_PROBE_RETRY_DELAY_MS < deadline) {
         await sleep(STATUS_PROBE_RETRY_DELAY_MS);
@@ -1740,7 +1744,7 @@ export async function waitForKernelReady(
       if (checkOwner) await ownerClient.assertLocalOwner(Math.min(1000, Math.max(1, deadline - Date.now())));
       // Once admitted, keep the final request even if an unknown owner check consumed the remainder.
       const remainingMs = Math.max(1, deadline - Date.now());
-      const res = await fetch(`${baseUrl}/api/kernel/status`, {
+      const res = await daemonFetch(baseUrl)(`${baseUrl}/api/kernel/status`, {
         signal: AbortSignal.timeout(remainingMs),
       });
       if (res.ok) {

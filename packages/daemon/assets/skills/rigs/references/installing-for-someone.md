@@ -31,10 +31,15 @@ No, SSH and headless use are valid background outcomes. If OpenRig printed no co
 that row's `tmuxAttachCommand`, exactly as listed (it names the daemon's tmux server when that isn't the default
 one), for a new terminal on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
 Ask the person's goal, project folder and branch unless they've said, then hand them to the ready operator; do not implement the project yourself.
-Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
-`rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`,
-or have the person type the goal and folder in the operator's pane. (If the person stays with you, the skill's step 2 hands the goal over
-as a queue task with a return route instead.) Show where the operator answers and let it
+Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName`. By default the
+person stays with you: hand the goal over as a queue task with a return route, so most of the team's questions come back
+to you (choice dialogs and other hosts keep their path), and the result is in the handed-over task's resolution. Write
+the task as the skill's step 2 says ("If the person stays with you"):
+`rig queue create --destination <canonicalSessionName> --return-route auto --summary "<the goal in a sentence>" --body-file <file> --verify`
+(if this session joined, `--return-route self` with your `OPENRIG_SESSION_NAME` in front). Only if the person chose to answer
+in the operator's pane, send
+`rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
+instead, or have them type the goal and folder there. Show where the operator answers and let it
 help them choose a team before any starter launch.
 If the person gives you a goal later, forward it, the folder and constraints the same way, by the route they chose;
 leave implementation with the operator's team instead of taking over the work yourself.
