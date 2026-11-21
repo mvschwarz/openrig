@@ -700,6 +700,9 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     seatRow("c@fleet", { provider: "claude", state: "not_applied", intended, applied: null }),
     seatRow("u@fleet", { provider: "claude", state: "not_applied", intended,
       applied: { kind: "unknown", label: "max-2", detail: "didn't report a resumed conversation", at: "t", recovery: "rig launch fleet dev.u --snapshot-id s1" } }),
+    seatRow("e@fleet", { provider: "claude", state: "not_applied", intended, applied: { ...switched, label: "max-1", detail: "Relaunched e@fleet on max-1" } }),
+    seatRow("f@fleet", { provider: "claude", state: "not_applied", intended,
+      applied: { kind: "failed_before_effect", label: "max-2", detail: "relaunch_no_pane: no pane", at: "t" } }),
     { ...seatRow("x@other", { provider: "claude", state: "no_assignment", intended: null, applied: null }), rigName: "other" },
   ] };
   const deps = (get: (path: string) => unknown) => ({ ...runningDeps(1), clientFactory: () => ({ get: async (p: string) => ({ status: 200, data: get(p) }) }) as never });
@@ -719,9 +722,15 @@ describe("rig provider status shows each seat against its rig's assignment (#362
       "  c@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
       `${rig}not applied to this seat yet`,
       "  u@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
-      `${rig}this seat isn't configured as assigned: its last result didn't move it`,
+      `${rig}this seat isn't known to be configured as assigned: its last result is unknown and may have moved it (see its recovery)`,
       "    last applied: unknown (max-2, t): didn't report a resumed conversation",
       "      recovery: rig launch fleet dev.u --snapshot-id s1",
+      "  e@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat isn't configured as assigned yet: its last result moved it to max-1, an earlier assignment`,
+      "    last applied: switched (max-1, 2026-11-21T08:00:00.000Z): Relaunched e@fleet on max-1",
+      "  f@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat isn't configured as assigned: its last result didn't move it`,
+      "    last applied: failed-before-effect (max-2, t): relaunch_no_pane: no pane",
     ]);
     // A label is the operator's name for a reference: never worded as the login a session uses.
     expect(logs.join("\n")).not.toMatch(/signed in|logged in|is using|running on|runs as/i);

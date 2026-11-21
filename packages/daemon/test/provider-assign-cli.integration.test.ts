@@ -114,11 +114,11 @@ it.skipIf(process.platform === "win32")("compiled provider assign plans, then ap
     await until(() => launches().length === 5, "beta relaunched by hand");
     const status = await statusOf();
     expect(status[alpha.seat]).toMatchObject({ state: "follows" });
-    // The plan's own order names the first of the seat's choices: its account home (its own config dir) comes before its token.
-    expect(status[beta.seat]).toMatchObject({ state: "override", override: `its account home ${beta.home}`, applied: { kind: "switched" } });
+    // A Claude seat's token is what its launch uses, so it's named, not the config dir the person didn't touch.
+    expect(status[beta.seat]).toMatchObject({ state: "override", override: `its own token file ${startFile} ("start")`, applied: { kind: "switched" } });
     const human = await rigCli(["provider", "status"]);
     expect(human.code).toBe(0);
-    expect(human.stdout).toContain(`this seat is configured with its own choice: its account home ${beta.home}`);
+    expect(human.stdout).toContain(`this seat is configured with its own choice: its own token file ${startFile} ("start")`);
     expect(JSON.stringify([planned, applied, after, status, human.stdout])).not.toMatch(/synthetic-(start|plan)/);
   } finally {
     db?.close();

@@ -132,11 +132,14 @@ const sameHome = (input: Comparison, a: string | null, b: string | null): boolea
 function seatOverride(seat: PlanSeatFacts, input: Comparison): string | null {
   const { account } = input;
   if (seat.followsAssignment) return null;
+  // A Claude seat's own token or API-key reference is what its launch uses, ahead of the login stored in its config dir:
+  // when it has one, that's its choice, and its home is named only when it has none.
+  if (account.provider === "claude" && seat.claudeRef) {
+    return sameClaudeRef(seat.claudeRef, account) ? null
+      : `its own ${seat.claudeRef.kind === "api-key" ? "API-key" : "token"} file ${seat.claudeRef.tokenFile} ("${seat.claudeRef.label}")`;
+  }
   if (seat.ownHome && seat.ownHome.source !== "rig" && !sameHome(input, seat.ownHome.home, account.codexHome)) {
     return seat.ownHome.source === "account-switch" ? `its account home ${seat.ownHome.home}` : `its own home ${seat.ownHome.home} (member env)`;
-  }
-  if (account.provider === "claude" && seat.claudeRef && !sameClaudeRef(seat.claudeRef, account)) {
-    return `its own ${seat.claudeRef.kind === "api-key" ? "API-key" : "token"} file ${seat.claudeRef.tokenFile} ("${seat.claudeRef.label}")`;
   }
   if (account.provider === "codex" && seat.configured?.source === "registry" && seat.configured.profileRef !== account.login) {
     return `the saved login ${seat.configured.profileRef} (seat registry)`;
@@ -154,6 +157,12 @@ function unchanged(seat: PlanSeatFacts, input: Comparison): boolean {
   return seat.configured?.source === "registry" && seat.configured.profileRef === account.login && sameHome(input, seat.codexHome, account.codexHome);
 }
 
+/** The seat's configuration is still what an apply of this label gave it: its last result moved it there. */
+function appliedThis(seat: PlanSeatFacts, label: string): boolean {
+  const last = seat.lastResult;
+  return !!seat.followsAssignment && last?.label === label && (last.kind === "switched" || last.kind === "pending_successor");
+}
+
 /** Where a seat stands against its rig's assignment, by the plan's own rules: on the assigned account (configured as it, or
  *  still as the apply of this assignment left it), its own choice of another account, or not moved yet (no result, or its
  *  last result didn't move it). Configuration only: never proof of the login a running session uses. */
@@ -162,8 +171,7 @@ export function assignmentStanding(seat: PlanSeatFacts, account: AccountRef | nu
   if (!account) return { state: "not_applied" };
   const comparison: Comparison = { account, ...(resolveHome ? { resolveHome } : {}) };
   if (unchanged(seat, comparison)) return { state: "follows" };
-  const last = seat.lastResult;
-  if (seat.followsAssignment && last?.label === intent.label && (last.kind === "switched" || last.kind === "pending_successor")) return { state: "follows" };
+  if (appliedThis(seat, intent.label)) return { state: "follows" };
   const override = seatOverride(seat, comparison);
   return override ? { state: "override", override } : { state: "not_applied" };
 }
@@ -205,6 +213,10 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
         ? `a ${seat.runtime} seat: a ${account.provider} assignment doesn't touch it` : `a ${seat.runtime} seat has no ${account.provider} account`] };
     }
     if (unchanged(seat, input)) return { seat, effect: "unchanged" };
+    // Still as an apply of this label left it: nothing to do, so a re-apply doesn't restart it (or its Codex home) again.
+    // With --account-home, only when that's the home it was moved to.
+    if (appliedThis(seat, account.label) && (!input.accountHome
+      || (seat.ownHome?.source === "account-switch" && sameHome(input, seat.ownHome.home, input.accountHome)))) return { seat, effect: "unchanged" };
     const override = seatOverride(seat, input) ?? undefined;
     if (override && !input.includeOverrides) return { seat, effect: "kept_override", override, notes: ["kept (seat override); --include-overrides moves it too"] };
     return { seat, effect: "change", ...(override ? { override } : {}) };

@@ -109,8 +109,12 @@ describe("status: each seat against its rig's assignment", () => {
     // b's token is changed by hand after the apply.
     ownToken("b", "max-3");
     const before = everything();
+    // total_changes counts every row a statement touched, so even a write that leaves a value as it was shows.
+    const changes = () => (db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const touched = changes();
     const status = await statusOf();
     expect(everything()).toBe(before);
+    expect(changes()).toBe(touched);
     const intended = { label: "max-2", reference: `the token file ${path.join(dir, "max-2")}`, requestedBy: "lead@fleet", at: "2026-11-21T08:00:00.000Z" };
     expect(status["a@fleet"]).toEqual({ provider: "claude", state: "follows", intended,
       applied: { kind: "switched", label: "max-2", detail: expect.any(String), at: "2026-11-21T08:00:00.000Z" } });
@@ -139,6 +143,23 @@ describe("status: each seat against its rig's assignment", () => {
     expect(await statusOf()).toMatchObject({ "a@fleet": { state: "follows", intended: { label: "max-3" } }, "b@fleet": { state: "follows" } });
   });
 
+  it("a Claude seat's own token is named as its choice ahead of its config dir, in the plan and status alike; the dir only when it has no token", async () => {
+    seat("tok"); seat("dir");
+    for (const id of ["tok", "dir"]) db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(path.join(dir, `config-${id}`), id);
+    ownToken("tok", "max-1");
+    const planned = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, stoppedClaude());
+    expect(planned.ok && planned.plan.rows.map((r) => [r.seat, r.override])).toEqual([
+      ["dir@fleet", `its account home ${path.join(dir, "config-dir")}`],
+      ["tok@fleet", `its own token file ${path.join(dir, "max-1")} ("max-1")`],
+    ]);
+    new ProviderAccountAssignmentsRepository(db).setIntent({ rigId: "rig-fleet", provider: "claude", label: "max-2", reference: "r", requestedBy: null, at: "t" });
+    const status = await statusOf();
+    expect([status["tok@fleet"]!.override, status["dir@fleet"]!.override]).toEqual([`its own token file ${path.join(dir, "max-1")} ("max-1")`, `its account home ${path.join(dir, "config-dir")}`]);
+    // Its token already being the assigned account makes it follow, whatever its config dir.
+    ownToken("tok", "max-2");
+    expect((await statusOf())["tok@fleet"]).toMatchObject({ state: "follows" });
+  });
+
   it("a seat whose last result didn't move it isn't on the assignment yet; its result and recovery show beside it", async () => {
     seat("a");
     await apply("max-2");
@@ -149,6 +170,30 @@ describe("status: each seat against its rig's assignment", () => {
     expect((await statusOf())["a@fleet"]).toEqual({ provider: "claude", state: "not_applied",
       intended: { label: "max-3", reference: "the token file max-3", requestedBy: "lead@fleet", at: "t2" },
       applied: { kind: "unknown", label: "max-3", detail: "the relaunch didn't report a resumed conversation", at: "t2", recovery: "rig launch fleet dev.a --snapshot-id s1" } });
+  });
+});
+
+describe("status only compares seats whose rig has an assignment", () => {
+  it("a seat with a result but no assignment for its rig reads no_assignment with that result, and its homes aren't read", async () => {
+    seat("a");
+    new ProviderAccountAssignmentsRepository(db).saveResult({ rigId: "rig-fleet", provider: "claude", nodeId: "a", seat: "a@fleet", label: "max-2",
+      kind: "failed_before_effect", detail: "not attempted", recovery: null, activity: "idle", at: "t" });
+    const reads: string[] = [];
+    const original = db.prepare.bind(db);
+    db.prepare = ((sql: string) => { if (/claude_token_ref|account_home/.test(sql)) reads.push(sql); return original(sql); }) as typeof db.prepare;
+    let status: Record<string, SeatAssignment | undefined>;
+    try {
+      const before = reads.length;
+      status = await statusOf();
+      // seatEntries reads each seat once, as before; the assignment comparison adds no read of its own.
+      const perRead = reads.length - before;
+      db.prepare(`INSERT INTO provider_account_assignments (rig_id, provider, label, reference, requested_by, created_at) VALUES ('rig-fleet', 'claude', 'max-2', 'r', NULL, 't')`).run();
+      const withIntent = reads.length;
+      await statusOf();
+      expect(reads.length - withIntent).toBeGreaterThan(perRead);
+    } finally { db.prepare = original; }
+    expect(status!["a@fleet"]).toEqual({ provider: "claude", state: "no_assignment", intended: null,
+      applied: { kind: "failed_before_effect", label: "max-2", detail: "not attempted", at: "t" } });
   });
 });
 

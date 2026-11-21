@@ -93,6 +93,33 @@ describe("the daemon's assignment plan", () => {
     expect(await effectAfter(elsewhere)).toBe("kept_override");
   });
 
+  it("a Codex seat with no saved login of its own, whose home an apply switched to this login, is unchanged: a re-apply restarts nothing", async () => {
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
+    seat("fleet", "c1", "codex", "c1@fleet");
+    const assignments = new ProviderAccountAssignmentsRepository(db);
+    const planFor = async (label = "team") => {
+      const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label, includeOverrides: false, daemon: "host-a" });
+      if (!planned.ok) throw new Error(planned.message);
+      return planned.plan;
+    };
+    // Before any apply, its home would switch.
+    expect((await planFor()).rows.map((r) => r.effect)).toEqual(["change"]);
+    // What an in-place apply saves: the home and the login it activated there.
+    assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d",
+      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome, codexLogin: "team" } });
+    const again = await planFor();
+    expect(again.rows.map((r) => r.effect)).toEqual(["unchanged"]);
+    expect(again.codexHomes).toEqual([]);
+    // The rig's assignment is that login: status says the seat follows it.
+    assignments.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "r", requestedBy: null, at: "t" });
+    const model = await service().getReadModel();
+    expect(model.bindings.find((b) => b.seatSession === "c1@fleet")!.assignment).toMatchObject({ state: "follows" });
+    // A result that switched another home isn't this seat's: its own home would switch.
+    assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d",
+      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: path.join(dir, "elsewhere"), codexLogin: "team" } });
+    expect((await planFor()).rows.map((r) => r.effect)).toEqual(["change"]);
+  });
+
   it("a Codex seat follows an earlier assignment only when its saved login is that name in that home", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     fs.writeFileSync(path.join(codexHome, "auth-profiles", "next.json"), CONTENT, { mode: 0o600 });

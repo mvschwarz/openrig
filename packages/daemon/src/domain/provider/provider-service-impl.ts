@@ -341,7 +341,10 @@ export class ProviderServiceImpl implements ProviderService {
         || (ownHome?.source === "account-switch" && a.codexHome !== null && a.codexLogin === null && resolvedHome(a.codexHome) === resolvedHome(ownHome.home))
         // A saved login is a name within its Codex home: the same name in another home is another login.
         || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin
-          && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
+          && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome))
+        // A seat with no saved login of its own uses its home's active login, which the apply switched in place.
+        || (seat.runtime === "codex" && seatConfigured?.source === "default_login" && a.codexLogin !== null && a.codexHome !== null
+          && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
       return {
         session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
         configured: seatConfigured, claudeRef, ownHome,
@@ -360,9 +363,21 @@ export class ProviderServiceImpl implements ProviderService {
     const intents = new Map(assignments.allIntents().map((i) => [`${i.rigId}\0${i.provider}`, i]));
     const results = new Map(assignments.allResults().map((r) => [`${r.nodeId}\0${r.provider}`, r]));
     const resultOf = (nodeId: string, seat: ProviderSeat) => { const p = providerOf(seat.runtime); return p ? results.get(`${nodeId}\0${p}`) : undefined; };
-    // Nothing assigned or applied on this daemon: every seat reads "no assignment" without reading its homes.
-    const facts = intents.size || results.size ? this.assignmentFacts(entries, configured, resultOf) : [];
+    // Only a seat whose rig has an assignment for its provider is compared with it: the read model runs every tick, so the
+    // others read "no assignment" (with any result they have) without reading their homes.
+    const compared = entries.flatMap((e, index) => {
+      const p = providerOf(e.seat.runtime);
+      return p && intents.has(`${e.rigId}\0${p}`) ? [index] : [];
+    });
+    const comparedFacts = this.assignmentFacts(compared.map((i) => entries[i]!), compared.map((i) => configured[i]), resultOf);
+    const facts = new Map(compared.map((entryIndex, k) => [entryIndex, comparedFacts[k]!]));
     const refs = new ProviderAccountRefsRepository(this.deps.db);
+    const accounts = new Map<string, AccountRef | null>();
+    const accountOf = (provider: AccountRefProvider, label: string) => {
+      const key = `${provider}\0${label}`;
+      if (!accounts.has(key)) accounts.set(key, refs.get(provider, label));
+      return accounts.get(key)!;
+    };
     return entries.map(({ nodeId, rigId, seat }, index): SeatAssignment | undefined => {
       const provider = providerOf(seat.runtime);
       if (!provider) return undefined;
@@ -371,7 +386,7 @@ export class ProviderServiceImpl implements ProviderService {
       const intent = intents.get(`${rigId}\0${provider}`);
       if (!intent) return { provider, state: "no_assignment", intended: null, applied };
       const intended = { label: intent.label, reference: intent.reference, requestedBy: intent.requestedBy, at: intent.at };
-      const standing = assignmentStanding({ ...facts[index]!, running: null, activity: "unknown" }, refs.get(provider, intent.label), intent, resolvedHome);
+      const standing = assignmentStanding({ ...facts.get(index)!, running: null, activity: "unknown" }, accountOf(provider, intent.label), intent, resolvedHome);
       return { provider, state: standing.state, intended, applied, ...(standing.override ? { override: standing.override } : {}) };
     });
   }

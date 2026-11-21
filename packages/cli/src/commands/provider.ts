@@ -199,6 +199,17 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
   // #3625 slice 4 — a seat against its rig's assignment: what the rig is assigned, where this seat's configuration stands
   // against it, and its last applied result. Configuration and stored results, never the login a session uses. Nothing
   // prints for a seat whose rig has no assignment and that has no result.
+  // A seat not on its rig's assignment, worded from its last result: none, one that moved it to an earlier assignment, an
+  // unknown one (which may have moved it), or one that didn't move it.
+  function notAppliedText(intended: Record<string, unknown> | null, applied: Record<string, unknown> | null): string {
+    if (!applied) return "not applied to this seat yet";
+    if (applied["kind"] === "unknown") return "this seat isn't known to be configured as assigned: its last result is unknown and may have moved it (see its recovery)";
+    if ((applied["kind"] === "switched" || applied["kind"] === "pending_successor") && applied["label"] !== intended?.["label"]) {
+      return `this seat isn't configured as assigned yet: its last result moved it to ${applied["label"]}, an earlier assignment`;
+    }
+    return "this seat isn't configured as assigned: its last result didn't move it";
+  }
+
   function assignmentLines(r: Record<string, unknown>): string[] {
     const a = r["assignment"] as Record<string, unknown> | undefined;
     if (!a || (a["state"] === "no_assignment" && !a["applied"])) return [];
@@ -206,7 +217,7 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     const applied = a["applied"] as Record<string, unknown> | null;
     const standing = a["state"] === "follows" ? "this seat is configured as assigned"
       : a["state"] === "override" ? `this seat is configured with its own choice: ${a["override"] ?? "another account"}`
-        : a["state"] === "not_applied" ? (applied ? "this seat isn't configured as assigned: its last result didn't move it" : "not applied to this seat yet")
+        : a["state"] === "not_applied" ? notAppliedText(intended, applied)
           : "";
     const lines = [intended
       ? `    assignment: rig ${r["rigName"]}'s ${a["provider"]} seats to ${intended["label"]} (${intended["reference"]}), set ${intended["at"]}${intended["requestedBy"] ? ` by ${intended["requestedBy"]}` : ""}; ${standing}`
