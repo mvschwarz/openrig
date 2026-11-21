@@ -917,7 +917,7 @@ The rows read like this:
   conversation, and what it's doing now, as `rig ps` reads it. A busy seat is noted, not refused: a switch interrupts
   work in flight, including background commands. A Claude seat that was already switched in place reads its activity
   as unknown until its next fresh launch: that relaunch keeps an earlier occupant generation, so its hooks aren't
-  counted (a known issue).
+  counted (#3677).
 - **`unchanged`** means the seat is already on the account.
 - **`kept (seat override)`** means the seat has its own choice of account: its own token or API-key file, its own home,
   or a saved login in the Codex seat registry. It's kept unless you add `--include-overrides`. A seat you bring in that
