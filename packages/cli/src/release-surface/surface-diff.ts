@@ -216,17 +216,17 @@ export function computeDiff(
 /** Default `--from`: the latest `v*` tag reachable before `to`. */
 function defaultFrom(repoRoot: string, to: string): string {
   try {
-    return git(repoRoot, ["describe", "--tags", "--abbrev=0", "--match", "v*", `${to}^`]).trim();
+    const commit = `${to}^{commit}`;
+    // A release can have multiple tags. Exclude all names on the target itself
+    // so describe can walk every parent of a merge looking for an earlier release.
+    const tags = git(repoRoot, ["tag", "--no-column", "--list", "v*", "--points-at", commit]).split("\n").filter(Boolean);
+    return git(repoRoot, ["describe", "--tags", "--abbrev=0", "--match", "v*", ...tags.map(tag => `--exclude=${tag}`), commit]).trim();
   } catch {
-    try {
-      return git(repoRoot, ["describe", "--tags", "--abbrev=0", "--match", "v*"]).trim();
-    } catch {
-      throw new SurfaceParserError({
-        fact: "No release tag could be resolved for the default --from ref.",
-        consequence: "Without a prior release ref the surface diff cannot be computed.",
-        action: "Pass an explicit --from <ref> (e.g. --from v0.3.1).",
-      });
-    }
+    throw new SurfaceParserError({
+      fact: `No release tag could be resolved before "${to}" for the default --from ref.`,
+      consequence: "Without a prior release ref the surface diff cannot be computed.",
+      action: "Pass --from <ref> to choose a comparison base.",
+    });
   }
 }
 
