@@ -545,6 +545,15 @@ export class SliceIndexer {
     return entries;
   }
 
+  /** The folder of the mission whose first slice list() would show, or null when
+   *  no listed slice belongs to it. Walks the same locations as list() but builds
+   *  no listing entries, so it never reads queue membership. */
+  missionPath(missionId: string): string | null {
+    if (!this.isReady()) return null;
+    const location = this.readSliceLocations().find((candidate) => candidate.missionId === missionId);
+    return location ? path.resolve(location.slicePath, "..", "..") : null;
+  }
+
   get(name: string): SliceRecord | null {
     if (!this.isReady()) return null;
     if (this.batchDepth === 0) this.reconcileComposition();
