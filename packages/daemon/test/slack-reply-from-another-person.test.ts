@@ -159,6 +159,21 @@ describe("a Slack reply from someone other than the person a question is parked 
       expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: "gateway:slack:v1", principal: "human-ana" }]);
     });
 
+    it("the person's own answer recorded with no identity stays unknown when they complete it later", async () => {
+      const ask = await askAna();
+      await anasAnswer(ask.qitemId, false);
+      expect(await reply(ask.qitemId, ANA, "human-ana")).toBe("resolved");
+      expect(await reply(ask.qitemId, ANA, "human-ana")).toBe("already-resolved");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: null, principal: null }]);
+    });
+
+    it("the person's own committed answer keeps its recorded identity over the completing call's", async () => {
+      const ask = await askAna();
+      await anasAnswer(ask.qitemId, true);
+      expect(await reply(ask.qitemId, ANA, "human-ana-relinked")).toBe("resolved");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: "gateway:slack:v1", principal: "human-ana" }]);
+    });
+
     it("an earlier answer recorded with no identity stays unknown", async () => {
       const ask = await askAna();
       await anasAnswer(ask.qitemId, false);
