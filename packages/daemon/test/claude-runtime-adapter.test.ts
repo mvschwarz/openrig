@@ -1137,10 +1137,11 @@ describe("Claude Code runtime adapter", () => {
     const WAIT_MS = 6_000;
 
     // `screen(read)` is the pane text on the nth capture; `rows(read)` the process list at that point.
-    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
+    // `command(read)`, when given, is the pane's foreground command before the nth capture.
+    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
       let reads = 0;
       const tmux = mockTmux();
-      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue(opts.paneCommand ?? "sh");
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => opts.command?.(reads) ?? opts.paneCommand ?? "sh");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => (opts.screen ?? (() => ""))(reads++));
       (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
       const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: opts.autoDrive, readinessTimeoutMs: "readinessTimeoutMs" in opts ? opts.readinessTimeoutMs : WAIT_MS,
@@ -1205,6 +1206,30 @@ describe("Claude Code runtime adapter", () => {
         recovery: "retry_fresh",
         missingConversation: true,
       });
+    });
+
+    // The launch script holds the pane through the quick window, so the wait is extended; then Claude is the foreground
+    // process with nothing drawn. That alone isn't a resumed conversation in the longer wait either.
+    const foregroundAfterWindow = (read: number) => (read < 16 ? "sh" : "claude");
+
+    it("keeps the longer wait going past a foreground Claude, so the missing conversation it then reports is marked", async () => {
+      const { result, reads } = await run({ command: foregroundAfterWindow,
+        screen: (read) => (read < 19 ? "" : "No conversation found with session ID: abc-123") });
+      expect(result).toEqual({
+        ok: false,
+        probe: probeEvidence,
+        error: "Claude resume failed: no conversation found for the requested session",
+        recovery: "retry_fresh",
+        missingConversation: true,
+      });
+      expect(reads).toBe(20);
+    });
+
+    it("still accepts a foreground Claude with nothing drawn at the longer wait's end (control)", async () => {
+      const { result, reads } = await run({ command: foregroundAfterWindow });
+      expect(result).toMatchObject({ ok: true });
+      // The 30 polls of the bound, then the final read accepts it as before.
+      expect(reads).toBe(31);
     });
 
     it("still stops at a resume-selection prompt that shows up during the extra wait", async () => {
