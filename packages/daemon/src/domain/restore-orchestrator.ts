@@ -1304,7 +1304,7 @@ export class RestoreOrchestrator {
     const notStarted = selectedHistory ? { notStarted: true as const } : {};
 
     // A seat joined with `rig attach` as an external CLI keeps its attachment: launching here would replace it.
-    const external = this.sessionRegistry.getBindingForNode(nodeId);
+    const external = this.sessionRegistry.getBindingForNode(seatNodeId);
     if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId), ...notStarted };
     }
@@ -1380,7 +1380,7 @@ export class RestoreOrchestrator {
     if (node.podId) {
       const continuityRow = this.db.prepare(
         "SELECT status FROM continuity_state WHERE pod_id = ? AND node_id = ?"
-      ).get(node.podId, nodeId) as { status: string } | undefined;
+      ).get(node.podId, seatNodeId) as { status: string } | undefined;
       if (continuityRow) {
         if (continuityRow.status === "restoring") {
           if (selectedHistory) return { nodeId, logicalId: node.logicalId, status: "failed", error: "Continuity recovery already owns this seat.", notStarted: true };
@@ -2421,7 +2421,7 @@ export class RestoreOrchestrator {
         const stale = staleLimits && warnings ? warnings.lastIndexOf(staleLimits) : -1;
         if (stale >= 0) warnings!.splice(stale, 1);
         const replacementExists = () => this.sessionRegistry.getSessionsForRig(rigId)
-          .some((candidate) => candidate.nodeId === node.id
+          .some((candidate) => candidate.nodeId === launchResult.session.nodeId
             && candidate.status === "running"
             && candidate.id !== launchResult.session.id);
         try {
@@ -2437,10 +2437,10 @@ export class RestoreOrchestrator {
           if (fresh.status === "launched") {
             return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed", ...limits };
           }
-          if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
+          if (priorState && !replacementExists()) this.restoreNodeState(launchResult.session.nodeId, priorState);
           return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error, ...limits };
         } catch (err) {
-          if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
+          if (priorState && !replacementExists()) this.restoreNodeState(launchResult.session.nodeId, priorState);
           return {
             nodeId: node.id,
             logicalId: node.logicalId,
