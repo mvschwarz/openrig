@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import YAML from "yaml";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import { evidenceAt } from "../src/domain/proof/judgments.js";
 import { watchProofSources } from "../src/domain/proof/source-watch.js";
 import type { EventBus } from "../src/domain/event-bus.js";
@@ -465,4 +466,45 @@ it("notifies scope followers on a node-header change even when proof readiness i
     expect(scopeChanges).toBeGreaterThan(0);
     expect(readMissionReadiness(f.mission).revision).toBe(before);
   } finally { watch.close(); }
+});
+
+describe("an empty active set reads apart from active work that isn't ready (#3614)", () => {
+  const revisionOf = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const editMission = (f: ReturnType<typeof fixture>, change: (doc: any) => void) => {
+    const file = join(f.mission, "mission.yaml"), doc = YAML.parse(fs.readFileSync(file, "utf8"));
+    change(doc); f.write(file, doc);
+  };
+
+  it("counts a mission's active slices, and a composition with none reads not-ready with 0", () => {
+    const f = fixture();
+    expect(readMissionReadiness(f.mission)).toMatchObject({ state: "not-ready", activeSlices: 2, issues: [] });
+    editMission(f, doc => { for (const member of doc.composition.slices) member.active = false; });
+    const none = readMissionReadiness(f.mission);
+    expect(none).toMatchObject({ state: "not-ready", activeSlices: 0, slices: [], issues: [], historicalStatus: "active" });
+    expect(none.revision).toBe(revisionOf([none.slices, none.issues, none.historicalStatus]));
+  });
+
+  it("keeps a legacy mission and an unreadable composition apart from no active work", () => {
+    const f = fixture();
+    fs.rmSync(join(f.mission, "mission.yaml"));
+    expect(readMissionReadiness(f.mission)).toMatchObject({ state: "legacy", activeSlices: 0 });
+    f.write(join(f.mission, "mission.yaml"), { kind: "mission", metadata: { status: "active" }, composition: { slices: "not a list" } });
+    const unreadable = readMissionReadiness(f.mission);
+    expect(unreadable.state).toBe("unknown");
+    expect(unreadable.issues.join(" ")).toContain("composition.slices must be a list");
+  });
+
+  it("counts a project's active missions, and a project with none reads not-ready with 0, its revision hashed as before", () => {
+    const f = fixture();
+    const live = readProjectReadiness(f.missions);
+    expect(live).toMatchObject({ state: "not-ready", activeMissions: 1 });
+    const { activeSlices, ...hashedAsBefore } = live.missions[0]!;
+    expect(activeSlices).toBe(2);
+    expect(live.revision).toBe(revisionOf([hashedAsBefore]));
+    editMission(f, doc => { doc.metadata.status = "complete"; });
+    const finished = readProjectReadiness(f.missions);
+    expect(finished).toMatchObject({ state: "not-ready", activeMissions: 0 });
+    expect(finished.missions[0]).toMatchObject({ name: "trial", historicalStatus: "complete", activeSlices: 2 });
+    expect(finished.revision).toBe(revisionOf([]));
+  });
 });

@@ -90,6 +90,9 @@ export interface ParkedOwnerConsumerDeps {
   now?: () => number;
   /** #2661 (b): how long a live background shell defers the reminder; BACKGROUND_SHELL_GRACE_MINUTES when absent. */
   backgroundShellGraceMs?: number;
+  /** A delivered reminder whose rows are still pending and unclaimed past PARKED_OWNER_ESCALATE_AFTER_MS: tell someone who can
+   *  act, once per episode. Returns who was told; nothing is held, refused or re-sent to the seat. */
+  escalateUnclaimed?: (input: { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string }) => Promise<string[]>;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
@@ -98,6 +101,9 @@ export const PARKED_OWNER_EVALUATE_SITE = "parked_owner.evaluate";
 /** A seat that just handed work off or asked a person has only started waiting (#1933): its first reminder waits
  *  until its arbitrated waiting state has been unchanged this long. A seat at a prompt gets no grace. */
 export const PARKED_OWNER_IDLE_GRACE_MS = 5 * 60_000;
+/** How long a delivered reminder's rows may stay pending and unclaimed, with the seat idle and nothing changed, before
+ *  someone who can act is told. */
+export const PARKED_OWNER_ESCALATE_AFTER_MS = 15 * 60_000;
 
 /** Stable per-rig registration anchor: member@rig shape, policy name as slug. */
 export function makeRigAnchor(rigName: string): string {
@@ -121,6 +127,8 @@ export const DELIVERED_PREFIX = "parked-owner wake delivered:";
 export const NUDGE_FAIL_PREFIX = "failed: parked-owner wake delivery";
 /** A queue-only seat's reminder, held on purpose (#3076): neither a delivery nor a failure. */
 export const HELD_PREFIX = "parked-owner wake held:";
+/** The once-per-episode notice that a delivered reminder's rows are still unclaimed. */
+export const ESCALATED_PREFIX = "parked-owner escalated:";
 const QUEUE_ONLY_NO_INPUT = "; code queue_only_seat; input not_reached;";
 const QUOTA_NO_INPUT = "; code retained_quota_full; input not_reached;";
 const TERMINAL_NO_INPUT = "; code terminal_seat; input not_reached;";
@@ -218,8 +226,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
     name: PARKED_OWNER_POLICY_NAME,
     // The evaluation is one synchronous block (no await): the diagnosis, the delivery-boundary recheck and the
     // reserve all run before the loop turns. Named, so a pass that holds the loop shows up as a site, not a bare gap.
+    // The one await, the notice for a delivered reminder's still-unclaimed rows (#3651), runs after the block, before
+    // the evaluation is returned.
     async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
-      return runSyncSiteWhenSlow(PARKED_OWNER_EVALUATE_SITE, (): PolicyEvaluation => {
+      const escalations: Array<{ seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string; primaryRow: string;
+        entry: { escalationFailure?: { episodeKey: string; failure: string } } }> = [];
+      const evaluation = runSyncSiteWhenSlow(PARKED_OWNER_EVALUATE_SITE, (): PolicyEvaluation => {
         const rigName = rigFromAnchor(job.target.session);
         const d = deps.diagnoseRig(rigName);
         if (!d) {
@@ -265,7 +277,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         }
 
         const closures: string[] = [];
-        const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string }> = [];
+        const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string;
+          escalationFailure?: { episodeKey: string; failure: string } }> = [];
         // Rotate after the latest physical delivery selection, including retained input. A single
         // cursor from history cannot lose an owner's turn just because a bounded window filled.
         const lastTarget = recent.find(e => e.deliveryStatus && e.deliveryTargetSession)?.deliveryTargetSession;
@@ -397,7 +410,17 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
             && transitions.some(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)
             && !transitions.some(t => (t.transitionNote?.startsWith(FAILED_PREFIX) || t.transitionNote?.startsWith(REFUSED_PREFIX)) && keyOfNote(t.transitionNote!) === lastKey);
           if (delivered && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, reserve)) {
-            skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake" });
+            // Delivered, the seat idle and nothing changed: the reminder doesn't repeat. Rows still unclaimed past the bound
+            // go to someone who can act, once for this episode (sent after this block, below).
+            const entry: (typeof skipped)[number] = { seat: seat.sessionName, why: "unchanged-since-last-wake" };
+            const deliveredAt = transitions.find(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)?.ts;
+            const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && namedIds.includes(r.qitemId)).map(r => r.qitemId);
+            if (deps.escalateUnclaimed && deliveredAt && unclaimed.length > 0
+              && (deps.now?.() ?? Date.now()) - Date.parse(deliveredAt) >= PARKED_OWNER_ESCALATE_AFTER_MS
+              && !transitions.some(t => t.transitionNote?.startsWith(`${ESCALATED_PREFIX} ${lastKey} `))) {
+              escalations.push({ seat: seat.sessionName, qitemIds: unclaimed, deliveredAt, episodeKey: lastKey!, primaryRow, entry });
+            }
+            skipped.push(entry);
             continue;
           }
           let retentionState: string | null = null;
@@ -481,6 +504,16 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         }
         return { action: "skip", reason: "no-parked-owner", notes: { rig: rigName } };
       });
+      for (const e of escalations) {
+        try {
+          const told = await deps.escalateUnclaimed!({ seat: e.seat, qitemIds: e.qitemIds, deliveredAt: e.deliveredAt, episodeKey: e.episodeKey });
+          if (told.length > 0) deps.rows.appendNote(e.primaryRow, `${ESCALATED_PREFIX} ${e.episodeKey} to ${told.join(", ")}`);
+        } catch (error) {
+          // Nothing is marked escalated, so a later pass tries again; this pass's notes say why it didn't land.
+          e.entry.escalationFailure = { episodeKey: e.episodeKey, failure: (error as { code?: string }).code ?? (error instanceof Error ? error.name : typeof error) };
+        }
+      }
+      return evaluation;
     },
   };
 }

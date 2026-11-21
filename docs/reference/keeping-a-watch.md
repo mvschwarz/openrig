@@ -92,8 +92,8 @@ rig queue block <task> --on external:<what> --wake-after 1h --note "checked <tim
 
 A new set-aside replaces the old one and retires any earlier timer, so a task never carries two live timers.
 
-**Put what changed in `--note` or `--continuation`, not both.** When `rig queue block` gets `--continuation`, that is
-the note it records, and `--note` is dropped.
+When `rig queue block` gets both, it records the continuation first and the note after a blank line.
+A wake's preview of the continuation shows both, so keep the note short.
 
 Each check costs one of your turns on the person's subscription. **Use the longest interval that serves the ask.**
 

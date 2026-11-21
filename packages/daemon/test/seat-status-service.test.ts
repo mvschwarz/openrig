@@ -138,6 +138,33 @@ describe("SeatStatusService", () => {
     expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toEqual(stored);
   });
 
+  // #3185 (C14 native): a seat a restore left as a bare shell read `att` on rig ps and `running` on rig seat status.
+  it.each([
+    ["the pane's process identity is ambiguous (a bare shell)", "ready", "mismatch", "process_identity_ambiguous", "attention_required"],
+    ["startup needs attention (restore's own bare-shell marker)", "attention_required", null, null, "attention_required"],
+    ["pane process is verified (control)", "ready", "verified", null, "running"],
+  ] as const)("reads a seat whose %s on seat status as rig ps does", async (_case, startup, verdict, reason, lifecycle) => {
+    const { app, rigRepo: repo, sessionRegistry: registry } = createTestApp(db);
+    const rig = repo.createRig("bare-shell");
+    const node = repo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = registry.registerSession(node.id, "dev-impl@bare-shell");
+    registry.updateStatus(session.id, "running");
+    registry.updateStartupStatus(session.id, startup);
+    registry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%1", attachmentType: "tmux" });
+    if (verdict) new SeatIdentityStore(db).upsert({
+      nodeId: node.id, sessionName: session.sessionName,
+      verdict, reason, evidenceSource: reason ? "pane_process" : null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedCommand: reason ? "bash" : "claude", matchedLayer: reason ? null : 1 },
+      observedAt: new Date(Date.now() + 1).toISOString(),
+    });
+    const ps = await (await app.request(`/api/rigs/${rig.id}/nodes`)).json() as Array<{ logicalId: string; lifecycleState: string }>;
+    expect(ps.find(entry => entry.logicalId === "dev.impl")?.lifecycleState).toBe(lifecycle);
+    const res = await app.request(`/api/seat/status/${encodeURIComponent(session.sessionName)}`);
+    expect(res.status).toBe(200);
+    // The session record stays running (handover and the process-limit read use it); the seat reads as rig ps reads it.
+    expect(await res.json()).toMatchObject({ session_status: "running", lifecycle_state: lifecycle });
+  });
+
   it("reports the runtime home a Claude or Codex seat's launches use, and where it comes from", () => {
     const rig = rigRepo.createRig("home-rig");
     const nodes = {
