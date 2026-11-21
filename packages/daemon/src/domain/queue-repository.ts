@@ -526,6 +526,13 @@ export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
   state?: QueueState;
+  /**
+   * The caller's compare-and-set condition: the state it last read for the row. Checked inside the
+   * update's own transaction, before anything else: when the row is in another state, the update
+   * writes nothing (no state, note, transition, event or wake) and fails with `qitem_state_changed`,
+   * naming the current state. Absent (or null), the update behaves as it always has.
+   */
+  expectState?: QueueState | null;
   /** The actor accepts this revised closure deadline without replacing the claim. */
   closureRequiredAt?: string;
   /** Explicit acknowledgment for a deliberate terminal → active repair. */
@@ -637,6 +644,9 @@ export interface QueueClaimInput {
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
 }
+
+/** A row as a handoff successor shows it (QueueRepository.handoffSuccessorReads). */
+export interface HandoffSuccessorRow { qitemId: string; destinationSession: string; state: QueueState; tsCreated: string }
 
 export interface QueueListOptions {
   /** One legacy exact tag or repeated exact tags, all of which must match before the result bound. */
@@ -3747,6 +3757,23 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
+    if (input.expectState != null) {
+      if (!isQueueState(input.expectState)) {
+        throw new QueueRepositoryError(
+          "invalid_state",
+          `expectState=${String(input.expectState)} not valid; valid: ${QUEUE_STATES.join(", ")}; nothing was written`,
+        );
+      }
+      // The condition is read in the same transaction as the write below, so no other write
+      // (a claim, a close) can land between this check and this update's own write.
+      if (qitem.state !== input.expectState) {
+        throw new QueueRepositoryError(
+          "qitem_state_changed",
+          `qitem ${input.qitemId} is ${qitem.state}, not the expected ${input.expectState}; nothing was written`,
+          { expectedState: input.expectState, currentState: qitem.state },
+        );
+      }
+    }
     const hasReestimate = input.closureRequiredAt !== undefined;
     let closureRequiredAt: string | undefined;
     if (hasReestimate) {
@@ -4186,6 +4213,15 @@ export class QueueRepository {
         nextResolution,
         input.qitemId
       );
+    // A row that enters in-progress here (resolve, or an update to in-progress from blocked, pending or a reopened
+    // terminal state) carries the claimant generation the way claim() stamps it: the destination's current occupant,
+    // not the actor's, since another seat or a person can resolve it. A seat swap releases or transfers in-progress
+    // rows by this stamp (migration 063).
+    if (this.hasClaimedGenColumn && input.state === "in-progress" && fromState !== "in-progress") {
+      this.db
+        .prepare("UPDATE queue_items SET claimed_by_generation_uuid = ? WHERE qitem_id = ?")
+        .run(this.resolveOccupantGeneration?.(qitem.destinationSession) ?? null, input.qitemId);
+    }
 
     // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
     // merely validated-then-dropped) — visible to the attention query, to
@@ -4631,7 +4667,9 @@ export class QueueRepository {
    * preserving earlier clicks and leaving the other questions unanswered. A completed
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
-  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
+  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean;
+    /** The answering person's identity (a Slack reply's `gateway:slack:v1` and entity id), for a close with no committed answer. */
+    identityProvenance?: string | null; identityPrincipal?: string | null }): boolean {
     const passed = this.passRunnerAnswerToDecider(input);
     if (passed !== null) return passed;
     let mine = true;
@@ -4648,9 +4686,14 @@ export class QueueRepository {
         const questions = item.humanQuestions ?? [];
         const decision = questions.length && unansweredQuestions(questions, item.humanAnswers ?? {}).length === 0
           ? formatHumanAnswers(questions, item.humanAnswers ?? {}).join("; ") : humanAnswerText(winner.body);
-        return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession));
+        return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession),
+          this.answerIdentity(winner.qitemId));
       }
-      return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
+      // A close that consumes this caller's own committed answer carries that answer's identity too, so attribution doesn't
+      // depend on who completes it. Only a close with no committed answer takes the caller's.
+      const own = this.getHumanAnswer(item.qitemId, input.actorSession, { primaryUser: input.primaryUser === true });
+      return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true,
+        own ? this.answerIdentity(own.qitemId) : { provenance: input.identityProvenance ?? null, principal: input.identityPrincipal ?? null });
     })();
     if (!result) return false;
     for (const event of result.persistedEvents) {
@@ -4792,8 +4835,16 @@ export class QueueRepository {
     return row && row.replyTo === qitemId && row.sourceSession !== actorSession ? row : null;
   }
 
-  /** Close a pending direct ask as `actor`, its typed words under the first unanswered question. Inside a transaction. */
-  private closeDirectAsk(item: QueueItem, actor: string, decision: string, primaryUser: boolean) {
+  /** The identity an answer row was created with: none for an older row. */
+  private answerIdentity(answerId: string): { provenance: string | null; principal: string | null } {
+    const created = this.transitionLog.listForQitem(answerId)[0];
+    return { provenance: created?.identityProvenance ?? null, principal: created?.identityPrincipal ?? null };
+  }
+
+  /** Close a pending direct ask as `actor`, with that answer's recorded identity, its typed words under the first
+   *  unanswered question. Inside a transaction. */
+  private closeDirectAsk(item: QueueItem, actor: string, decision: string, primaryUser: boolean,
+    identity: { provenance: string | null; principal: string | null }) {
     const asked = item.destinationSession;
     let transitionNote = asked === actor ? "direct human reply received"
       : primaryUser && actor === UNATTRIBUTED_ACTOR
@@ -4810,6 +4861,8 @@ export class QueueRepository {
       closureReason: "no-follow-on",
       transitionNote,
       ownerNotificationKind: "human-decision-resolved",
+      identityProvenance: identity.provenance,
+      identityPrincipal: identity.principal,
     });
   }
 
@@ -5182,6 +5235,41 @@ export class QueueRepository {
         AND json_extract(delegated_decision, '$.applicationId') = ?
       ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[];
     return rows.map((row) => this.rowToItem(row));
+  }
+
+  /** #3645: the reads that name handoff successors (routes/queue.ts handoffSuccessors) for a whole page of rows in two
+   *  statements, batched as createLinkedSuccessorLookup reads (`IN (SELECT value FROM json_each(?))`): for each source,
+   *  the rows whose handed_off_from is that source, newest first by ts_created, at most `perSource` (what
+   *  `list({ handedOffFrom, limit: perSource })` picks for that source); and the rows with the given ids, as getById
+   *  finds them. Only the fields a successor shows, from the stored row, with no listing projection per row. */
+  handoffSuccessorReads(sourceQitemIds: readonly string[], targetQitemIds: readonly string[], perSource: number): {
+    bySource: Map<string, HandoffSuccessorRow[]>;
+    byId: Map<string, HandoffSuccessorRow>;
+  } {
+    const bySource = new Map<string, HandoffSuccessorRow[]>();
+    const byId = new Map<string, HandoffSuccessorRow>();
+    type Read = { qitem_id: string; destination_session: string; state: QueueState; ts_created: string };
+    const shown = (r: Read): HandoffSuccessorRow => ({ qitemId: r.qitem_id, destinationSession: r.destination_session, state: r.state, tsCreated: r.ts_created });
+    if (sourceQitemIds.length > 0) {
+      const rows = this.db.prepare(
+        `SELECT qitem_id, destination_session, state, ts_created, source FROM (
+           SELECT qitem_id, destination_session, state, ts_created, handed_off_from AS source,
+             ROW_NUMBER() OVER (PARTITION BY handed_off_from ORDER BY ts_created DESC) AS n
+           FROM queue_items WHERE handed_off_from IN (SELECT value FROM json_each(?)))
+         WHERE n <= ? ORDER BY source, n`,
+      ).all(JSON.stringify([...new Set(sourceQitemIds)]), perSource) as Array<Read & { source: string }>;
+      for (const r of rows) {
+        const list = bySource.get(r.source);
+        if (list) list.push(shown(r)); else bySource.set(r.source, [shown(r)]);
+      }
+    }
+    if (targetQitemIds.length > 0) {
+      const rows = this.db.prepare(
+        "SELECT qitem_id, destination_session, state, ts_created FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))",
+      ).all(JSON.stringify([...new Set(targetQitemIds)])) as Read[];
+      for (const r of rows) byId.set(r.qitem_id, shown(r));
+    }
+    return { bySource, byId };
   }
 
   /** opts.waiting: false skips the row's waiting view (the stuck sweep's own reads); the default builds it. Per call:

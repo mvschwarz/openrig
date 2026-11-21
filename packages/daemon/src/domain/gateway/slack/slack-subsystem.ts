@@ -95,8 +95,9 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does.
+   *  `identityPrincipal`: the replying person's registered entity id, which a direct ask's close records. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean; identityPrincipal?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -111,7 +112,8 @@ export function makeHumanReplyResolver(
   contract: HumanReplyActionPort | undefined,
   home?: string,
 ): NonNullable<SlackWireOpts["resolveHumanReply"]> {
-  return async (input) => {
+  // The replying person's identity reaches only the direct ask's close below; every other path reads the input as before.
+  return async ({ identityPrincipal, ...input }) => {
     const source = queueRepo.getById(input.qitemId);
     if (source?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
@@ -178,7 +180,9 @@ export function makeHumanReplyResolver(
       // correlated inbound row. Closing the request here records the durable
       // disposition; the inbound create is already the one wake back to the
       // source, so a second nudge here would duplicate attention.
-      return queueRepo.resolveDirectHumanReply(input) ? "resolved" : "not-applicable";
+      // The close records who answered, as the Slack answer row does (`queue-access`), when the sender is a registered person.
+      return queueRepo.resolveDirectHumanReply({ ...input,
+        ...(identityPrincipal ? { identityProvenance: "gateway:slack:v1", identityPrincipal } : {}) }) ? "resolved" : "not-applicable";
     }
   };
 }

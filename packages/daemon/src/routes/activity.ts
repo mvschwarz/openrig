@@ -787,7 +787,11 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
   // settle a matching, older episode. Do not record an unrelated batch as an unknown hook that hides attention.
   const permissionObservation = permissionDiagnostic;
   const claudePermission = body.runtime === "claude-code" && body.hookEvent === "Notification" && body.subtype === "permission_prompt";
-  if (body.hookEvent === "PostToolBatch" || claudePermission || permissionObservation) {
+  // An MCP elicitation and its result are observation and settlement inputs only: a hook can answer one with nothing
+  // displayed, so neither changes activity or attention, and no form field or response is kept.
+  const claudeElicitation = body.runtime === "claude-code"
+    && (body.hookEvent === "Elicitation" || body.hookEvent === "ElicitationResult");
+  if (body.hookEvent === "PostToolBatch" || claudePermission || permissionObservation || claudeElicitation) {
     const oracle = c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined;
     const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
     const sessionName = stringOrNull(body.sessionName);
@@ -817,9 +821,14 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
           completed: body.hookEvent === "PostToolBatch" });
       } catch { /* Optional observation never suppresses the existing completion behavior. */ }
     }
+    if ((claudeElicitation || body.hookEvent === "PostToolBatch") && attributable
+      && (body.nodeId == null || body.nodeId === seat!.nodeId)) {
+      store.observeElicitation({ nodeId: seat!.nodeId, sessionName: seat!.sessionName, generation: generation!,
+        actor: hookAgentId, at: occurredAt, completed: body.hookEvent !== "Elicitation" });
+    }
     // This event adds a diagnostic only. It must not create/clear attention, change activity,
     // write raw provider fields to events, or produce a permission decision.
-    if (permissionObservation) return c.json({ ok: true });
+    if (permissionObservation || claudeElicitation) return c.json({ ok: true });
     if (body.hookEvent === "PostToolBatch") {
       if (attributable && oracle && !oracle.hasRungInventory(seat!.nodeId, seat!.sessionName)) {
         // The completion may be this occupant's first hook to reach the daemon.
