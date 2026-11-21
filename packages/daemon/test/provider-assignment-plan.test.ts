@@ -235,19 +235,18 @@ describe("the daemon's assignment plan", () => {
       .toMatchObject({ ok: false, code: "unknown_rig" });
   });
 
-  it("checks the reference again: a link that now points at a non-private file is refused", async () => {
+  it("checks the reference again: a link that now points at an empty file is refused", async () => {
     seat("fleet", "cl", "claude-code", "cl@fleet");
     const link = path.join(dir, "token-link");
     fs.symlinkSync(privateFile("token"), link);
     expect(new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: link }).ok).toBe(true);
-    const open = path.join(dir, "open");
-    fs.writeFileSync(open, CONTENT, { mode: 0o644 });
-    fs.chmodSync(open, 0o644);
+    const empty = path.join(dir, "empty");
+    fs.writeFileSync(empty, "", { mode: 0o600 });
     fs.rmSync(link);
-    fs.symlinkSync(open, link);
+    fs.symlinkSync(empty, link);
     const result = await service().assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "h" });
     expect(result).toEqual({ ok: false, code: "reference_unusable",
-      message: `max-2's reference no longer checks out: the token file ${link} must be private (0600 or 0400), and it is 0644.` });
+      message: `max-2's reference no longer checks out: the token file ${link} is empty.` });
     expect(JSON.stringify(result)).not.toContain(CONTENT);
   });
 });
