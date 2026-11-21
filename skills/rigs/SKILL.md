@@ -285,15 +285,15 @@ commands; if the two ever differ, this step is right.
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
   - **Get woken when a task arrives at your address:** right after the handover, start this wait with your shell tool's
-    background option (in Claude Code, a background command wakes you when it ends), with your address in place of
-    `<address>`:
+    background option (in Claude Code versions that wake you when a background command ends), with your address in place
+    of `<address>`:
 
         until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
 
     It runs only `rig` and `sleep`, so it spends no model tokens while it waits, and it reads the same in bash and zsh.
-    When it ends, handle what's waiting (below), claiming each task when you show it to the person so the wait doesn't
-    end again for the same one, then start the wait again. A harness with no background wake (Codex, for one) keeps the
-    check whenever the person talks to you.
+    When it ends, claim each pending task at once (claiming isn't answering: it stays open until the person answers),
+    handle what's waiting (below), then start the wait again, so it ends only on new work. A harness with no background
+    wake (Codex, for one) keeps the check whenever the person talks to you.
   - **When a question arrives at your address as a task,** list the pending work with
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
