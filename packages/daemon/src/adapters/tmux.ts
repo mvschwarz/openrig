@@ -75,9 +75,8 @@ export function isStagedSendScriptPath(path: string): boolean {
 }
 
 /** Where the files tmux and a pane's shell later read or run (launch scripts, environment files, buffers) are staged:
- *  the OpenRig home's runtime folder, created owner-only, so nothing else that can write the shared temp folder can
- *  replace one between the write and its use. Resolved against the daemon's cwd, as `run/seat-bin` is, because tmux and
- *  the pane's shell read the path from their own cwd. */
+ *  `run/tmux-staging` in the OpenRig home, created with mode 0700 when a file is written. A relative home is resolved
+ *  against the daemon's cwd, as `run/seat-bin` is, because tmux and the pane's shell read the path from their own cwd. */
 export function tmuxStagingDir(): string {
   return pathResolve(getDefaultOpenRigPath(pathJoin("run", "tmux-staging")));
 }
