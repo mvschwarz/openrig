@@ -1,21 +1,27 @@
-# Install as $OPENRIG_HOME/community-harnesses/agy.yaml, with openrig-agy-launch on the seat's PATH.
-# The seat's pane gets only the daemon's minimal environment, so the setup goes in `command`. Replace each path:
-#   --agy-home  the seat's own agy home (a HOME-style folder that holds .gemini/antigravity-cli), signed in to agy
+# A runner over `agy acp`, on Gemini API-key auth. agy-plain.yaml, agy's own terminal UI, is the fallback.
+# Install as $OPENRIG_HOME/community-harnesses/agy.yaml. The seat's pane gets only the daemon's minimal environment, so the
+# setup goes in `command`. Replace each path:
+#   node        the Node 22+ executable, and the runner after it
+#   --agy-home  the seat's own agy home (a HOME-style folder); its .gemini/antigravity-cli/settings.json sets
+#               "modelProvider": "gemini"
 #   --agy       the agy executable
+#   --key-file  a file holding the Gemini API key; the runner reads it into agy's environment as GEMINI_API_KEY
+#   --model     the model the runner pins after the conversation opens
 #   --rig-path  the folder holding the `rig` executable, so the agent can run `rig` as the seat
+# Keep each limits item quoted: an unquoted item with a colon in it isn't read as text.
 format: 1
 name: agy
-command: openrig-agy-launch --agy-home /path/to/seat-agy-home --agy /path/to/agy --rig-path /path/to/folder-with-rig
+command: /path/to/node /path/to/openrig-agy-runner.mjs --agy-home /path/to/seat-agy-home --agy /path/to/agy --key-file /path/to/gemini-api-key --model gemini-4-neon-high --rig-path /path/to/folder-with-rig
 maintainer: Your name or team
-limits:
-  - checked once with Antigravity CLI 1.5.13 (Gemini 4 Neon) on one account; not a Google-supported integration
-  - a fresh launch spends one small headless model turn to learn the conversation id, because agy allocates none before its first prompt
-  - agy asks before each `rig` shell command until you allow it in its own settings.json (permissions.allow); OpenRig relays no approvals
-  - no guidance, skills or startup files are placed; model and effort are set in agy's own settings, and OpenRig reports the seat's model as unknown
-  - activity and prompts are read from the screen only; in the one check the seat read working while agy waited at its prompt, a suspected false positive whose cause is unknown
-  - does not use `agy acp`; one account per seat
+runner: true
 launch_result: true
+first_input: true
 resume: true
-startup_assisted: false
-first_input: false
-passes_model: false
+limits:
+  - "checked once with Antigravity CLI 1.5.13 over agy acp, on a Gemini API key with Gemini 4 Neon High; not a Google-supported integration"
+  - "the key goes from --key-file into agy's environment only (never argv, logs or this file), and agy's shell tools inherit it"
+  - "agy's default model on API-key auth is Gemini 3.1 Pro (Low), so the runner pins --model with session/set_model and reports it"
+  - "resume uses session/resume only; agy's session/load of an unknown id succeeds silently"
+  - "permissions go through OpenRig; agy offers allow once and reject once only"
+  - "a request or output agy raises after its turn ended (a background task) is treated as an agent-initiated turn; this also fired once, harmlessly, right after a resume"
+  - "one prompt at a time; /abort and Ctrl-C cancel; input is typed into the pane (no runner channel)"

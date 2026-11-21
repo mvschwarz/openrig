@@ -1,0 +1,22 @@
+# The fallback to the runner preset (agy.yaml): agy's own terminal UI, read from the screen.
+# Install as $OPENRIG_HOME/community-harnesses/agy-plain.yaml, with openrig-agy-launch on the seat's PATH.
+# The seat's pane gets only the daemon's minimal environment, so the setup goes in `command`. Replace each path:
+#   --agy-home  the seat's own agy home (a HOME-style folder that holds .gemini/antigravity-cli), signed in to agy
+#   --agy       the agy executable
+#   --rig-path  the folder holding the `rig` executable, so the agent can run `rig` as the seat
+format: 1
+name: agy-plain
+command: openrig-agy-launch --agy-home /path/to/seat-agy-home --agy /path/to/agy --rig-path /path/to/folder-with-rig
+maintainer: Your name or team
+limits:
+  - checked once with Antigravity CLI 1.5.13 (Gemini 4 Neon) on one account; not a Google-supported integration
+  - a fresh launch spends one small headless model turn to learn the conversation id, because agy allocates none before its first prompt
+  - agy asks before each `rig` shell command until you allow it in its own settings.json (permissions.allow); OpenRig relays no approvals
+  - no guidance, skills or startup files are placed; model and effort are set in agy's own settings, and OpenRig reports the seat's model as unknown
+  - activity and prompts are read from the screen only; in the one check the seat read working while agy waited at its prompt, a suspected false positive whose cause is unknown
+  - does not use `agy acp`; one account per seat
+launch_result: true
+resume: true
+startup_assisted: false
+first_input: false
+passes_model: false

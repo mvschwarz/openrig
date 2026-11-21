@@ -299,9 +299,55 @@ Copy both and maintain them as your own.
 
 ## An example: agy
 
-[`community-harness-examples/agy/`](community-harness-examples/agy/) has a preset and a small launcher for the
-Antigravity CLI (`agy`). It was checked once, with agy 1.5.13 and Gemini 4 Neon on one account. It isn't a
-Google-supported integration, and it doesn't use `agy acp`.
+[`community-harness-examples/agy/`](community-harness-examples/agy/) has two presets for the Antigravity CLI (`agy`).
+Neither is a Google-supported integration.
+- **`agy.yaml` is the default:** a runner over `agy acp`, on Gemini API-key auth.
+- **`agy-plain.yaml` is the fallback:** agy's own terminal UI, read from the screen.
+
+### The runner: `agy.yaml` and `openrig-agy-runner.mjs`
+
+- **What one run checked,** with agy 1.5.13, a Gemini API key and Gemini 4 Neon High, on OpenRig 0.7.20:
+  - idle and working;
+  - the model line in `rig ps`, `gemini-4-neon-high`, reported by the runner;
+  - a same-conversation resume: the same `nativeRef` before and after, and agy recalled a word given before the restart;
+  - permissions through OpenRig;
+  - a queue wake, typed in within seconds.
+
+  It didn't rerun the plain preset, `rig acp serve`, or a missing-conversation refusal through a full restore.
+- **Auth, by name:**
+  - **The setting:** in the seat's agy home, `.gemini/antigravity-cli/settings.json` sets `"modelProvider": "gemini"`.
+    Google's [Authenticate page](https://antigravity.google/docs/install/) ("Using a Gemini API key") says the key
+    variable alone has no effect, and that agy won't start with that setting and no key.
+  - **The key:** the runner reads it from the file `--key-file` names, and sets `GEMINI_API_KEY` in agy's environment
+    only. It never goes in the runner's arguments, its output or the preset.
+  - **The limit:** agy's shell tools inherit `GEMINI_API_KEY`.
+- **Pin the model.** On API-key auth, agy's default is Gemini 3.1 Pro (Low). After the conversation opens, the runner
+  sends `session/set_model` with `--model`, then reports that model. `rig acp run -- agy acp` can't pin a model, so it runs
+  agy's default.
+- **Choose data sharing yourself.** In the check, a fresh agy home's first start of agy's own terminal UI showed a "Terms &
+  Data Use" screen with data sharing already checked. Start agy once in the seat's agy home and make that choice before
+  the seat uses it.
+- **When agy carries on by itself,** after a background task finishes, it sends output or a permission request with no
+  prompt open. The runner treats that as a turn the agent started:
+  - the seat reads working while agy talks, and idle after 20 seconds of quiet;
+  - the permission request goes through OpenRig.
+
+  In the check, this also fired once right after a resume, harmlessly.
+- **The credential:** the runner holds the launch's activity credential and makes the reports, and agy and its tools
+  don't receive it. As with any runner, the credential identifies the reporting launch, not an independently verified
+  native conversation or model.
+- **Resume** uses `session/resume` only, because agy's `session/load` of an unknown id succeeds silently. A conversation
+  that won't reopen is reported missing only when every page of agy's own list was read and none names it. Any other
+  failure leaves the resume unconfirmed, and nothing new starts.
+- **Its base:** it's adapted from an earlier version of the [dsh example runner](#an-example-runner-dsh). It takes input
+  typed into the pane and doesn't use the runner channel.
+- **Quote each `limits:` item in your copy.** An unquoted item containing `: ` is read as a mapping, not text, and
+  OpenRig refuses the preset with "limits must be a list of non-empty strings".
+
+### The fallback: `agy-plain.yaml` and `openrig-agy-launch`
+
+The plain preset runs agy's own terminal UI under whatever sign-in the seat's agy home has, and doesn't use `agy acp`. It
+was checked once, with agy 1.5.13 and Gemini 4 Neon on one account.
 - **A fresh launch spends one small model turn.** agy allocates a conversation id only at its first prompt. So the
   launcher runs one headless turn (`agy -p "Reply with exactly: ready" --output-format json`), reads `conversation_id`
   from its JSON, reports it, then opens that conversation with `agy --conversation <id>`.
@@ -319,7 +365,7 @@ Google-supported integration, and it doesn't use `agy acp`.
   check, the seat read `working` while agy waited at its prompt; that's a suspected false positive, and its cause is
   unknown.
 
-Copy both and maintain them as your own.
+Copy what you use and maintain it as your own.
 
 ## An example: Pi's terminal UI
 

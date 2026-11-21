@@ -42,7 +42,7 @@ if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   id="$OPENRIG_RESUME_REF"
   plain_id "$id" || { echo "openrig-agy-launch: refusing an unusual conversation id" >&2; exit 2; }
   if [ ! -f "$store/conversations/$id.db" ]; then
-    report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"agy\",\"error\":\"missing\",\"producer\":\"$producer\"}"
+    report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy}\",\"error\":\"missing\",\"producer\":\"$producer\"}"
     echo "openrig-agy-launch: agy holds no conversation $id in $store; starting nothing" >&2
     exit 1
   fi
@@ -65,5 +65,5 @@ else
   # No usable id: report nothing (identity shows unavailable) and start agy on its own conversation.
   plain_id "$id" || exec "$AGY_BIN" "$@"
 fi
-report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"agy\",\"nativeRef\":\"$id\",\"producer\":\"$producer\"}"
+report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy}\",\"nativeRef\":\"$id\",\"producer\":\"$producer\"}"
 exec "$AGY_BIN" --conversation "$id" "$@"
