@@ -195,6 +195,31 @@ it.each([
   expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
 });
 
+it("with no packet root set, the request and the grant name the OpenRig home's runtime folder, and the grant keeps the previous root for this session only", async () => {
+  const { compactionPacketRoot, withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const { buildPostCompactRestorePrompt } = await import("../src/domain/claude-compaction-enforcer.js");
+  const { deriveCanonicalSessionName } = await import("../src/domain/session-name.js");
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "");
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "restore-packets-"))); roots.push(root);
+  const home = path.join(root, "home"), packets = path.join(home, "run", "compaction-restore");
+  const seat = deriveCanonicalSessionName("dev", "owner", "rig");
+  expect(compactionPacketRoot(home)).toBe(packets);
+  expect(compactionPacketRoot(path.relative(process.cwd(), home))).toBe(packets);
+  for (const sessionId of [CHILD, null]) {
+    const prompt = buildPostCompactRestorePrompt({ sessionName: seat, openrigHome: home, sessionId });
+    expect(prompt).toContain(`inspect the newest matching packet under ${packets}/ for `);
+    expect(prompt).not.toContain("/tmp/claude-compaction-restore");
+  }
+  const allow = JSON.parse(withManagedRestoreReads([], { openrigHome: home, session: seat, cwd: path.join(root, "project"),
+    nativeSessionId: CHILD })[1]!).permissions.allow as string[];
+  const files = ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"];
+  // An upgrade: a marker written before it still names a packet under the previous root, and the seat reads its own.
+  const expected = [...spellings(packets), ...spellings("/tmp/claude-compaction-restore")]
+    .flatMap(root => files.map(file => `Read(/${root}/${CHILD}-*/${file})`));
+  expect(allow.filter(rule => rule.includes(`/${CHILD}-*/`))).toEqual(expected);
+  expect(allow.some(rule => rule.includes(PARENT))).toBe(false);
+});
+
 it("both Claude launch paths grant the configured extra file the restore will name", async () => {
   const f = fixture();
   const custom = path.join(f.root, "elsewhere", "team-restore.md");

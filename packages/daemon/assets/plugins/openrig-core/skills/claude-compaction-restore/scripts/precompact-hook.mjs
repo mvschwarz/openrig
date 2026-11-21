@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 
 const skillRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
-// P6(C) injectable output-root: the packet base defaults to the shared
-// /tmp/claude-compaction-restore (production), but becomes per-run isolated when the
-// hermetic env-var OPENRIG_COMPACTION_OUT_ROOT is set — so concurrent writers with the
-// same injected clock + sessionId no longer collide on the same `${sessionId}-${stamp}`
-// dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = /tmp.
-const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
+// P6(C) injectable output-root: the packet base defaults to the OpenRig home's runtime
+// folder (production; restore-from-jsonl.mjs creates it owner-only and resolves the same
+// default), but becomes per-run isolated when the hermetic env-var
+// OPENRIG_COMPACTION_OUT_ROOT is set — so concurrent writers with the same injected clock +
+// sessionId no longer collide on the same `${sessionId}-${stamp}` dir. Mirrors the
+// injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = the home's folder.
+const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || path.join(getOpenRigHome(), "run", "compaction-restore");
 // After 25 s by default, spawnSync asks the restore script to stop (SIGTERM), inside this hook's 30 s timeout
 // (hooks/claude.json), and the manual-route note below is written once the script has exited. That's a request, not a
 // deadline: a script slow to exit, or blocked, can run past the hook's 30 s, and then the note is lost.
@@ -285,7 +286,7 @@ try {
   }
 
   const parsed = JSON.parse(result.stdout);
-  const baseRestore = `Pre-compaction restore seed packet prepared at ${parsed.outputDir}. This hook output is informational. After compaction, OpenRig may send a later normal user message asking you to restore from this packet; treat that later normal user message as the action request. The restore protocol is: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json" yourself when needed, read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then reply with "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
+  const baseRestore = `Pre-compaction restore seed packet prepared at ${parsed.outputDir}. This hook output is informational. After compaction, OpenRig may send a later normal user message asking you to restore from this packet; treat that later normal user message as the action request. The restore protocol is: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --json" yourself when needed (it writes under ${outRoot}), read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then reply with "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
   const markerPath = writePendingRestoreMarker(input, parsed, baseRestore, customMessage);
   emit({
     continue: true,

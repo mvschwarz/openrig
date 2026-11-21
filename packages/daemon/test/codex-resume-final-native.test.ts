@@ -49,8 +49,10 @@ async function finalObservation(output: string) {
       if (captures === 3) {
         // Two loop observations exercise a retry before the final read.
         expect(sleep).toHaveBeenCalledExactlyOnceWith(200);
-        // Release output only at that final boundary, avoiding timer races.
-        fs.writeFileSync(gate, output);
+        // Release output only at that final boundary, avoiding timer races. The fixture reads the file once it exists,
+        // so publish it whole: a plain write can be seen while still empty, and then the output never appears.
+        fs.writeFileSync(`${gate}.partial`, output);
+        fs.renameSync(`${gate}.partial`, gate);
         await expect.poll(() => nativeCapture(target, lines), { timeout: 5000 }).toContain(output);
       }
       return nativeCapture(target, lines);

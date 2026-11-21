@@ -23,7 +23,10 @@ function stripBinary(text) {
     (m) => `[base64 omitted: ~${m.length} bytes]`);
   return s;
 }
-const DEFAULT_OUT = "/tmp/claude-compaction-restore";
+// The OpenRig home's runtime folder, as the PreCompact hook resolves it (OPENRIG_COMPACTION_OUT_ROOT overrides both).
+// writeOutputs creates it owner-only.
+const DEFAULT_OUT = process.env.OPENRIG_COMPACTION_OUT_ROOT
+  || path.join(process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig"), "run", "compaction-restore");
 
 function parseArgs(argv) {
   const args = {
@@ -459,7 +462,9 @@ function nowIso() {
 function writeOutputs(summary, outRoot, staging) {
   const stamp = nowIso().replace(/[:.]/g, "-");
   const base = path.join(outRoot, `${summary.sessionId ?? "unknown-session"}-${stamp}`);
-  fs.mkdirSync(base, { recursive: true });
+  // Owner-only: a packet holds an extract of the conversation.
+  fs.mkdirSync(outRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
 
   const outputPaths = {
     dir: base,
@@ -489,7 +494,8 @@ async function main() {
   // The two text files are written while the transcript is read, before the packet's folder is named (its session id
   // comes from the transcript), so they start in a staging folder beside it. Packet readers match `<session id>-*`.
   const outRoot = path.resolve(args.out);
-  fs.mkdirSync(outRoot, { recursive: true });
+  // Owner-only from its first creation: the staging folder below is made inside it.
+  fs.mkdirSync(outRoot, { recursive: true, mode: 0o700 });
   // A handled stop part way still removes the staging folder: SIGTERM (the PreCompact hook's time limit) exits 143, and
   // SIGINT (a person's Ctrl-C on the manual route) exits 130. A stop that can't be handled (SIGKILL) or a failed removal
   // can still leave it.
