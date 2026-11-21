@@ -210,6 +210,7 @@ describe("agent pane activity classifier", () => {
       ["• Working (as requested), I updated the tests.", "", "› "],
       ["• Working... then I committed it.", "", "› "],
       ["• Working… then I committed it.", "", "› "],
+      ["• Working tree is clean (2 files committed).", "", "› "],
     ]) {
       const result = classifyPaneActivity(pane.join("\n"));
 
@@ -220,7 +221,8 @@ describe("agent pane activity classifier", () => {
 
   it("still reads a live Working row right above an empty prompt as active", () => {
     for (const status of ["⠋ Working", "Working…", "• Working", "Working...", "◦ Working (3s • esc to interrupt)",
-      "✻ Working… (12s)", "• Working ( 3s"]) {
+      "✻ Working… (12s)", "• Working ( 3s", "• Working on the test fixtures (6m 12s",
+      "• Working on the test fixtures (3s"]) {
       const result = classifyPaneActivity([status, "", "› "].join("\n"));
 
       expect(result.state, status).toBe("agent_active");
