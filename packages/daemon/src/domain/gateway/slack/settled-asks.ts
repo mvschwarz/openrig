@@ -44,8 +44,9 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
     if (at >= 0) text = text.slice(0, at) + text.slice(at + hint.length + 1);
     return [];
   });
+  // plain_text, as the settled labels below are: a chosen label's `*`, `_` or `~` shows as written, not as styling.
   return { text: status + "\n" + text,
-    blocks: [{ type: "context", block_id: STATUS_BLOCK, elements: [{ type: "mrkdwn", text: status }] }, ...blocks] };
+    blocks: [{ type: "context", block_id: STATUS_BLOCK, elements: [{ type: "plain_text", text: status }] }, ...blocks] };
 }
 
 /** What an episode's card may name (C8). The answers are the item's, and a re-park's click writes over an earlier park's,

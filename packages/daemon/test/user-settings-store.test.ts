@@ -111,7 +111,7 @@ describe("SettingsStore (User Settings v0)", () => {
 
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
-      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms",
+      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms", "daemon.identity_poll_interval_ms",
       // #3637 — how long a start waits for its child's readiness.
       "daemon.start_readiness_wait_seconds",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.

@@ -17,6 +17,14 @@ export function daemonStartCommandTimeoutMs(readinessWaitMs: number = DAEMON_STA
 export const DAEMON_START_READINESS_WAIT_MAX_SECONDS = Math.floor((2 ** 31 - 1 - DAEMON_START_CALLER_MARGIN_MS) / 1000);
 export const DAEMON_START_COMMAND_TIMEOUT_MS = daemonStartCommandTimeoutMs();
 export const DAEMON_HTTP_CONNECTION_GRACE_MS = 250;
+// A daemon whose listener failed to bind exits with this code (sysexits EX_UNAVAILABLE) after one
+// `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>` line, so a supervisor can tell a failed bind, which needs a
+// look before another start, from a crash. It skips the shutdown: no shutdown receipt and no recorded stop.
+export const DAEMON_LISTEN_FAILED_EXIT_CODE = 69;
+/** The guidance for a held daemon port, shared by `rig daemon start` and the daemon's own listen-failure line. */
+export function occupiedPortGuidance(port: number): string {
+  return `Address already in use (EADDRINUSE) on port ${port}. Inspect the listener before stopping it, or run 'rig daemon start --port <unused-port>'.`;
+}
 export const DAEMON_SHUTDOWN_RECEIPT = "daemon-shutdown.json";
 export interface DaemonShutdownReceipt {
   schema: "openrig.daemon-shutdown/v1";

@@ -15,7 +15,7 @@ import {
 export interface RiggedConfig {
   specs: { builtinsVisible: boolean };
   launch: { nonInterruptive: boolean; codexLoginShell: boolean };
-  daemon: { port: number; host: string; dbConflict?: "warn" | "stop"; seatPollIntervalMs?: number; startReadinessWaitSeconds?: number };
+  daemon: { port: number; host: string; dbConflict?: "warn" | "stop"; seatPollIntervalMs?: number; identityPollIntervalMs?: number; startReadinessWaitSeconds?: number };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
   host: { selected: string; name: string };
@@ -283,7 +283,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 
 const DEFAULTS = {
   launch: { nonInterruptive: false, codexLoginShell: false },
-  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn", seatPollIntervalMs: 1000, startReadinessWaitSeconds: 180 },
+  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn", seatPollIntervalMs: 1000, identityPollIntervalMs: 5000, startReadinessWaitSeconds: 180 },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
   host: { selected: "local", name: "localhost" },
@@ -458,6 +458,8 @@ export const VALID_KEYS = [
   "daemon.db_conflict",
   // #2687: the seat pollers' cadence; startup-only (read once when the daemon starts). Twin of the daemon key.
   "daemon.seat_poll_interval_ms",
+  // #3146: the seat identity reconciler's cadence; startup-only (read once when the daemon starts). Twin of the daemon key.
+  "daemon.identity_poll_interval_ms",
   // #3637: how long a start waits for its child's readiness (rig daemon start, rig start, rig up, the TUI); read by
   // each start, not by the running daemon. Twin of the daemon key.
   "daemon.start_readiness_wait_seconds",
@@ -636,6 +638,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "daemon.db_conflict": { primary: "OPENRIG_DAEMON_DB_CONFLICT" },
   "daemon.seat_poll_interval_ms": { primary: "OPENRIG_SEAT_POLL_INTERVAL_MS" },
+  "daemon.identity_poll_interval_ms": { primary: "OPENRIG_IDENTITY_POLL_INTERVAL_MS" },
   "daemon.start_readiness_wait_seconds": { primary: "OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
@@ -759,6 +762,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "daemon.host": ["daemon", "host"],
   "daemon.db_conflict": ["daemon", "dbConflict"],
   "daemon.seat_poll_interval_ms": ["daemon", "seatPollIntervalMs"],
+  "daemon.identity_poll_interval_ms": ["daemon", "identityPollIntervalMs"],
   "daemon.start_readiness_wait_seconds": ["daemon", "startReadinessWaitSeconds"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
@@ -1069,6 +1073,14 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
     // ceiling the structural observation's expiry allows (seat-activity-service.ts MAX_SEAT_POLL_INTERVAL_MS).
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1000 || value > 2000) {
       throw new Error("Invalid daemon.seat_poll_interval_ms: must be a whole number of milliseconds in [1000, 2000]");
+    }
+  },
+  "daemon.identity_poll_interval_ms": (raw, value) => {
+    // Startup-only: the identity reconciler reads it once when the daemon starts. Only slower than the 5 s default, up to
+    // a cap on the cadence of sweep attempts, not a freshness deadline (see the MAX_IDENTITY_POLL_INTERVAL_MS comment in
+    // seat-identity-reconciler.ts).
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 5000 || value > 30000) {
+      throw new Error("Invalid daemon.identity_poll_interval_ms: must be a whole number of milliseconds in [5000, 30000]");
     }
   },
   "transport.draft_delivery": (raw) => {
@@ -1401,6 +1413,7 @@ export class ConfigStore {
         host: v("daemon.host") as string,
         dbConflict: v("daemon.db_conflict") as "warn" | "stop",
         seatPollIntervalMs: v("daemon.seat_poll_interval_ms") as number,
+        identityPollIntervalMs: v("daemon.identity_poll_interval_ms") as number,
         startReadinessWaitSeconds: v("daemon.start_readiness_wait_seconds") as number,
       },
       host: {
