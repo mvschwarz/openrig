@@ -959,8 +959,9 @@ switch or restart because a report was refused.`)
 Each account is your label and a reference on the daemon's own machine: the absolute path of a file holding a Claude
 subscription token or API key, or a Codex home and the name of a login saved there (rig auth list --codex-home <home>
 lists them). Only the reference is kept: the file isn't read or copied, and no credential passes through OpenRig. Adding
-one checks it first, as rig provider switch does: the file exists, is a regular file and isn't empty (an API-key file must
-also be private, 0600 or 0400; a token file others can read is added with a warning), or the login is saved in that home. A refusal says why and stores nothing. A label is unique per provider, and the same label can name
+one checks it first, as rig provider switch does: the file exists, is a regular file and isn't empty (an API-key file
+must also be private, 0600 or 0400; a token file others can read is added with a warning), or the login is saved in
+that home. A refusal says why and stores nothing. A label is unique per provider, and the same label can name
 a Claude and a Codex account. A label is your name for a reference, not proof of the login a running seat uses.
 
 With --host, the command runs on that registered machine over its SSH entry, as this seat, and the reference is a path on

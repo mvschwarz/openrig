@@ -96,6 +96,11 @@ describe("provider account references", () => {
     expect(loose.ok && loose.warnings).toEqual([`the token file ${path.join(dir, "open")} can be read by group or others (mode 0644); 0600 or 0400 is recommended`]);
     const tight = repo.add({ provider: "claude", label: "tight", tokenFile: file("tight", 0o600) });
     expect(tight.ok && "warnings" in tight).toBe(false);
+    // Writable by group but readable by no one else: it can't be read, so there's nothing to warn about reading.
+    const writable = file("writable", 0o600);
+    fs.chmodSync(writable, 0o620);
+    const groupWrite = repo.add({ provider: "claude", label: "writable", tokenFile: writable });
+    expect(groupWrite.ok && "warnings" in groupWrite).toBe(false);
     expect(JSON.stringify([loose, tight])).not.toContain(CONTENT);
   });
 

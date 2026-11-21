@@ -107,7 +107,7 @@ export function accountRefWarnings(input: AccountRefInput): string[] {
   if (input.provider !== "claude" || !("tokenFile" in input)) return [];
   let mode: number;
   try { mode = fs.statSync(input.tokenFile).mode & 0o777; } catch { return []; }
-  return (mode & 0o077) !== 0
+  return (mode & 0o044) !== 0
     ? [`the token file ${input.tokenFile} can be read by group or others (mode ${mode.toString(8).padStart(4, "0")}); 0600 or 0400 is recommended`] : [];
 }
 
