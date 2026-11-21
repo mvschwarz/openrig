@@ -9,7 +9,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure } from "./domain/compaction-restore-notice.js";
+import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -69,6 +69,7 @@ import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { claudeConfigRootFor, declaredRuntimeHomes, seatRuntimeHome } from "./domain/seat-runtime-home.js";
+import { readWatchdogUsageLimitState } from "./domain/watchdog-usage-limit.js";
 import { seatRuntimeDir } from "./domain/seat-runtime-dir.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
@@ -115,6 +116,7 @@ import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { restoredRunnerHookEvidence } from "./routes/activity.js";
 import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
 import { replaceFile } from "./adapters/replace-file.js";
+import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
@@ -169,6 +171,7 @@ import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destina
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
@@ -1125,8 +1128,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const claudeCollectorAssetPath = nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
   // #2456: the adapters' guidance writes check and keep OpenRig's record of each managed block.
   const guidanceBlockRecords = managedBlockRecords(db);
+  let codexActivityRelayPath: string | undefined;
+  try {
+    codexActivityRelayPath = stageCodexActivityRelay({ stateDir: OPENRIG_HOME });
+  } catch (error) {
+    console.warn("Could not stage the Codex activity relay; using the shipped relay:", error);
+  }
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
-  const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
+  const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: codexActivityRelayPath ?? nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
   }, resolveManagedConfigSettings: async () => {
@@ -1601,7 +1610,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
     settlePermissionPrompt: (sessionName) => seatActivityService.settlePermissionPrompt(sessionName),
-    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
+    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId, runtimeAdaptersMap),
     sendVerify: attentionProbeSend(() => deps.sessionTransport),
     capture: async (session, opts) => {
       const transport = deps.sessionTransport;
@@ -2514,6 +2523,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       deliver: makeWatchdogDeliver({
         sessionTransport,
         outbox: outboxHandlerInstance,
+        readUsageLimitState: session => readWatchdogUsageLimitState({ db, activity: agentActivityStore,
+          structuralActivity: name => seatStructuralActivityService.getStructuralActivity(name) }, session),
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
@@ -2634,6 +2645,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           occupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
           // The enforcer is constructed below; read its shared instance at evaluation time.
           hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
+          escalateUnclaimed: (input) => escalateUnclaimedReminder(db, queueRepoInstance, input),
         }),
         // OPR.0.5.6.1 AM-F1 — the delivery engine's two timing legs on THIS
         // substrate. The gateway dispatch binds late (the subsystem is built
@@ -2732,16 +2744,88 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
         };
       };
-      const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
+      // #3634: a name is armed while it has an unarchived row or a running seat (the seats diagnoseRig reads, so a rig
+      // archived with --force keeps its live seats watched). A name with neither has nothing the job can wake.
+      const runningSeatNames = (rigName?: string) => (db.prepare(
+        `SELECT DISTINCT r.name AS name FROM nodes n
+           JOIN rigs r ON r.id = n.rig_id
+           JOIN sessions s ON s.node_id = n.id
+            AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+          WHERE s.status = 'running' AND s.session_name IS NOT NULL${rigName === undefined ? "" : " AND r.name = ?"}`,
+      ).all(...(rigName === undefined ? [] : [rigName])) as Array<{ name: string }>).map((row) => row.name);
+      const isWatched = (rigName: string) =>
+        rigRepo.findUnarchivedRigsByName(rigName).length > 0 || runningSeatNames(rigName).length > 0;
+      // Archive and delete retire the job with one of these reasons; arming a name first puts that same job back
+      // (same id and history), so re-creation under the same name and a rolled-back replacement keep it. The ensure
+      // then refreshes it, or registers one when there was nothing to put back.
+      const RETIRED_REASONS = ["rig archived", "rig deleted"] as const;
+      const warn = (message: string) => console.warn(message);
+      // Startup, unarchive and a running seat are nonfatal, as their ensure is: a failed put-back warns and the
+      // ensure still runs. Creation stays strict and lets the error through.
+      const arm = (
+        rigName: string,
+        ensure: (job: ReturnType<typeof parkedOwnerJob>) => unknown,
+        strict = false,
+      ) => {
+        try {
+          watchdogJobsRepoInstance.reviveRetired(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), RETIRED_REASONS);
+        } catch (error) {
+          if (strict) throw error;
+          warn(
+            `[watchdog] could not put back ${PARKED_OWNER_POLICY_NAME}/${makeRigAnchor(rigName)} and continued: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        ensure(parkedOwnerJob(rigName));
+      };
       // #3437: one rig's bad watchdog rows warn and never stop the daemon from starting.
-      for (const r of rigRows) {
-        watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(parkedOwnerJob(r.name), (message) => console.warn(message));
+      for (const name of [...new Set([...rigRepo.listUnarchivedRigNames(), ...runningSeatNames()])].sort()) {
+        arm(name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       }
       // R2 repair — born-armed (advisor-ruled): a rig created after startup gets
       // its supervisor job in the same act that creates it, never at the next
       // daemon restart.
       rigRepo.onRigCreated = (rig) => {
-        watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(parkedOwnerJob(rig.name), (message) => console.warn(message));
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(job, warn), true);
+      };
+      // #3634: archive and delete retire the active job in the same act (hooks on RigRepository, so the routes, the
+      // instantiator, teardown and the lifecycle service all reach it), once the name has no unarchived row and no
+      // running seat. A stopped job stays stopped. Unarchive re-arms; a bad watchdog row warns and never blocks it.
+      const retireWhenUnwatched = (rigName: string, reason: (typeof RETIRED_REASONS)[number]) => {
+        if (isWatched(rigName)) return;
+        for (const job of watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), null)) {
+          if (job.state === "active") watchdogJobsRepoInstance.markTerminal(job.jobId, reason);
+        }
+      };
+      rigRepo.onRigArchived = (rig) => retireWhenUnwatched(rig.name, "rig archived");
+      rigRepo.onRigDeleted = (rig) => retireWhenUnwatched(rig.name, "rig deleted");
+      rigRepo.onRigUnarchived = (rig) => {
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
+      };
+      // A seat runs (restore, launch or claim, with or without unarchive): its name is watched, so it is armed as at
+      // startup when it has no active or stopped job. A job archive or delete retired comes back (same id); a name with
+      // none gets one, also an unarchived name whose job was never registered (a rig created without the hook, or an
+      // ensure that only warned). A name with an active or stopped job is left untouched: the hook does not even call
+      // the ensure, so a seat transition writes nothing.
+      sessionRegistry.onSessionRunning = (nodeId) => {
+        const rig = db.prepare("SELECT r.name AS name FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
+          .get(nodeId) as { name: string } | undefined;
+        if (!rig) return;
+        // The hook runs after the seat's running row is written, so a failed read warns and leaves the name as it
+        // is (the next start arms it) instead of failing the status write.
+        let held: boolean;
+        try {
+          held = watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rig.name), null)
+            .some((job) => job.state === "active" || job.state === "stopped");
+        } catch (error) {
+          warn(
+            `[watchdog] could not read ${PARKED_OWNER_POLICY_NAME}/${makeRigAnchor(rig.name)} for a running seat and ` +
+            `left it for the next start: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
+        if (held) return;
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       };
     }
 
@@ -2888,6 +2972,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure),
           onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
           onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
+          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
           terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),

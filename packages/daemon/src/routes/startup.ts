@@ -361,7 +361,7 @@ async function reviewSelectedHistory(c: Context, retained = false) {
   // The saved snapshot still stands, but the seat's own record no longer matches it, most often because a /clear,
   // /resume or new conversation recorded a different conversation; refreshing would show the same saved one again.
   if (!state) return c.json({ ok: false, code: "selection_changed",
-    message: `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed runtime, resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
+    message: `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
   const forecast = buildRestorePlanPreview({ ...facts.rig, nodes: [facts.node] }, facts.snapshot,
     collectPreviewSessionRows(repo(c).db, { ...facts.rig, nodes: [facts.node] }, facts.snapshot), undefined, Date.now(), {},
     { nodeId, historySessionId: refs.historySessionId }).nodes[0]!;

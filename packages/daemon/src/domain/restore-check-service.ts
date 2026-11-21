@@ -1314,9 +1314,10 @@ export class RestoreCheckService {
   }
 
   private requiredClaudeActivityHookEvents(): string[] {
-    // PermissionRequest is an optional diagnostic. Older same-version plugin/settings bytes
+    // PermissionRequest and the elicitation pair are optional observations. Older same-version plugin/settings bytes
     // remain authoritative until normal release/projection; retain all prior readiness duties.
-    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => event !== "PermissionRequest");
+    const optional = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => !optional.has(event));
   }
 
   private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {

@@ -38,7 +38,7 @@ export function splitFrontmatter(content: string): {
   const opening = /^---[ \t]*\r?\n/.exec(content);
   if (!opening) return { frontmatter: {}, body: content };
   const rest = content.slice(opening[0].length);
-  const closing = /^---[ \t]*(?:\r?\n|(?![\s\S]))/m.exec(rest);
+  const closing = /(?<=^|\n)---[ \t]*(?:\r?\n|(?![\s\S]))/.exec(rest);
   if (!closing) return { frontmatter: {}, body: content };
   return {
     frontmatter: parseYamlSafely(rest.slice(0, closing.index)),
@@ -148,31 +148,39 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
-  if (!match) {
+  fs.writeFileSync(absPath, editFrontmatter(original, updates, absPath), "utf8");
+}
+
+export function editFrontmatter(original: string, updates: Record<string, unknown>, absPath: string, strict = false): string {
+  const opening = /^---[ \t]*\r?\n/.exec(original);
+  const rest = original.slice(opening?.[0].length ?? 0);
+  const closing = opening && /(?<=^|\n)---[ \t]*(?=\r?\n|(?![\s\S]))/.exec(rest);
+  if (!opening || !closing) {
+    if (strict && opening) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
-    const separator = original.startsWith("\n") ? "" : "\n";
-    fs.writeFileSync(absPath, `---\n${yaml}\n---\n${separator}${original}`, "utf8");
-    return;
+    const newline = original.includes("\r\n") ? "\r\n" : "\n";
+    const separator = original.startsWith(newline) ? "" : newline;
+    return `---${newline}${yaml}${newline}---${newline}${separator}${original}`;
   }
 
-  const originalBlock = match[1]!;
-  const blockStart = original.indexOf("\n") + 1;
+  const capturedBlock = rest.slice(0, closing.index);
+  const originalBlock = capturedBlock.replace(/\r?\n$/, "");
+  const blockStart = opening[0].length;
   const blockEnd = blockStart + originalBlock.length;
-  const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
+  const newline = (capturedBlock || opening[0]).endsWith("\r\n") ? "\r\n" : "\n";
   let block: string;
   try {
     block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
   } catch (error) {
     if (!(error instanceof ScopeCliError)) throw error;
+    if (strict) throw error;
     console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
     // Start again from the original block, including when a splice removed a used anchor.
     block = updateFrontmatterLines(originalBlock, updates);
-    const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
-    fs.writeFileSync(absPath, updated, "utf8");
-    return;
+    return `---\n${block}\n---` + rest.slice(closing.index + closing[0].length);
   }
-  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + original.slice(blockEnd), "utf8");
+  const separator = capturedBlock === "" && block !== "" ? newline : "";
+  return original.slice(0, blockStart) + block + separator + original.slice(blockEnd);
 }
 
 /** Keep main's line-based update for YAML that cannot use source-range splicing. */
@@ -308,6 +316,62 @@ export function readProjectMissionsRoot(projectRoot: string, warnings: string[])
   return projectMissionsRoot(projectRoot, projectManifest, warnings);
 }
 
+/** The project.yaml at `dir` as an object, or null when there's none or it doesn't parse. */
+function readProjectManifest(dir: string): Record<string, unknown> | null {
+  try {
+    const value = YAML.parse(fs.readFileSync(path.join(dir, "project.yaml"), "utf8")) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The nearest project.yaml at or above `from`, as its folder, or null. */
+function nearestProjectRoot(from: string): string | null {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "project.yaml"))) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+/** The project that declares `missionsRoot`: the nearest project.yaml at or above it, when its missions root is that
+ *  folder. */
+function owningProject(missionsRoot: string): { root: string; manifest: Record<string, unknown> | null } | null {
+  const target = path.resolve(missionsRoot);
+  const root = nearestProjectRoot(target);
+  if (!root) return null;
+  const manifest = readProjectManifest(root);
+  return projectMissionsRoot(root, manifest, []) === target ? { root, manifest } : null;
+}
+
+const PROJECT_ID_PREFIX_RE = /^[A-Z]{2,3}$/;
+
+/** The dot-ID prefix for missions minted in `missionsRoot`: its project.yaml's optional `scope.idPrefix` (2-3 uppercase
+ *  letters, such as OPS), so a project nested in another workspace doesn't repeat that workspace's ids. Absent, or
+ *  invalid (with a warning): OPR, as before. */
+export function projectIdPrefix(missionsRoot: string, warnings: string[] = []): string {
+  const owner = owningProject(missionsRoot);
+  const scope = owner?.manifest?.["scope"];
+  const value = scope !== null && typeof scope === "object" && !Array.isArray(scope)
+    ? (scope as Record<string, unknown>)["idPrefix"]
+    : undefined;
+  if (value === undefined) return DEFAULT_PROJECT_PREFIX;
+  if (typeof value === "string" && PROJECT_ID_PREFIX_RE.test(value)) return value;
+  warnings.push(`${path.join(owner!.root, "project.yaml")}: optional scope.idPrefix must be 2-3 uppercase letters (such as OPS); kept ${DEFAULT_PROJECT_PREFIX}`);
+  return DEFAULT_PROJECT_PREFIX;
+}
+
+/** The missions root of the project that encloses the one declaring `missionsRoot` (the next project.yaml above it), or
+ *  null when there's none. */
+export function enclosingMissionsRoot(missionsRoot: string): string | null {
+  const owner = owningProject(missionsRoot);
+  if (!owner || path.dirname(owner.root) === owner.root) return null;
+  const root = nearestProjectRoot(path.dirname(owner.root));
+  if (!root) return null;
+  const missions = projectMissionsRoot(root, readProjectManifest(root), []);
+  return missions && missions !== path.resolve(missionsRoot) ? missions : null;
+}
+
 /** Locate the missions root from an explicit workspace override or the typed
  * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
  * candidates, but selection comes from configuration. */
@@ -387,7 +451,7 @@ export function resolveMissionsRoot(opts: {
         }
       } catch (error) {
         const problem = error instanceof Error ? error.message : String(error);
-        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select explicitly with --project, --workspace, or a project: prefix.`);
+        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select a workspace explicitly with --workspace or OPENRIG_WORK_ROOT.`);
       }
     }
   }
@@ -733,22 +797,24 @@ export function nextSliceNN(missionAbsPath: string): number {
 
 /** Mint or read the dot-ID for a mission. If the mission's README has
  *  an `id:` field, return it. Otherwise infer from the folder name
- *  (release-X.Y.Z → OPR.X.Y.Z; otherwise escape band). */
+ *  (release-X.Y.Z → <PFX>.X.Y.Z; otherwise escape band), with the
+ *  project's prefix (projectIdPrefix; OPR unless declared). */
 export function ensureMissionId(
   mission: MissionInfo,
   missionsRoot: string,
 ): string {
   if (mission.id) return mission.id;
+  const prefix = projectIdPrefix(missionsRoot);
   // Try release-pattern first; if it matches, no peer scan needed.
   try {
-    const id = inferMissionDotId(mission.name, null);
+    const id = inferMissionDotId(mission.name, null, prefix);
     return id;
   } catch {
     // Fall through to escape-band path.
   }
   const peers = listMissions(missionsRoot).filter((m) => m.name !== mission.name);
-  const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id));
-  return inferMissionDotId(mission.name, ordinal);
+  const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id), prefix);
+  return inferMissionDotId(mission.name, ordinal, prefix);
 }
 
 /** Same as ensureMissionId, but ALSO writes the inferred id back into

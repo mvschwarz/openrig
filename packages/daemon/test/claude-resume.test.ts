@@ -1,5 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
@@ -30,6 +33,7 @@ function mockTmux(overrides?: {
     // A resumed Claude's drawn screen: Claude's process alone, with nothing drawn, only stands when the wait runs out.
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => DRAWN_CLAUDE),
     getPanePid: overrides?.getPanePid ?? vi.fn(async () => null),
+    setSessionEnv: vi.fn(async () => {}),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -40,6 +44,35 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it("delivers oversized composed settings by file when restoring a Claude seat", async () => {
+    const tmux = mockTmux();
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+    const adapter = new ClaudeResumeAdapter(tmux, { openrigHome, maxWaitMs: 1, sleep: async () => {} });
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
+    args[14] = { deny: Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`) };
+    const result = await adapter.resume(...args);
+    try {
+      const file = /--settings'? '([^']+\.json)'/.exec(vi.mocked(tmux.sendText).mock.calls[0]?.[1] ?? "")?.[1];
+      expect(file, JSON.stringify(result)).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(file!, "utf8")).permissions.deny).toEqual(args[14]!.deny);
+    } finally { fs.rmSync(openrigHome, { recursive: true, force: true }); }
+  });
+
+  it("checks the captured settings actually sent by a provider restore", async () => {
+    const tmux = mockTmux();
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+    const adapter = new ClaudeResumeAdapter(tmux, { openrigHome, maxWaitMs: 1, sleep: async () => {} });
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
+    args[16] = "/native/claude";
+    args[19] = { args: ["--settings", JSON.stringify({ custom: "x".repeat(131072) })], warnings: [] };
+    const result = await adapter.resume(...args);
+    try {
+      const file = /--settings' '([^']+\.json)'/.exec(vi.mocked(tmux.sendText).mock.calls[0]?.[1] ?? "")?.[1];
+      expect(file, JSON.stringify(result)).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(file!, "utf8"))).toEqual({ custom: "x".repeat(131072) });
+    } finally { fs.rmSync(openrigHome, { recursive: true, force: true }); }
+  });
+
   it("warning-only capture on a classic resume still dispatches the ordinary command", async () => {
     const tmux = mockTmux();
     const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
@@ -125,18 +158,19 @@ describe("ClaudeResumeAdapter", () => {
     });
     const wrapper = ["/wrapper", "--"];
     await adapter.resume("seat@rig", "claude_id", "original", "/repo", "floor", undefined, managed ? "acceptEdits" : undefined, "node",
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper);
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper, undefined, undefined, "successor-generation");
 
     if (managed) {
-      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper }, "acceptEdits");
+      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper, generation: "successor-generation" }, "acceptEdits");
       expect(command).not.toHaveBeenCalled();
     } else {
       expect(command).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec '/wrapper' '--' '/native tools/claude'"), {
-        runtime: "claude-code", nodeId: "node", launchWrapper: wrapper, claudeShellLookup: false,
+        runtime: "claude-code", nodeId: "node", generation: "successor-generation", launchWrapper: wrapper, claudeShellLookup: false,
       });
       expect(prepare).not.toHaveBeenCalled();
     }
     expect(tmux.sendShellCommand).toHaveBeenCalledOnce();
+    expect(tmux.setSessionEnv).toHaveBeenCalledWith("seat@rig", "OPENRIG_OCCUPANT_GENERATION", "successor-generation");
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
