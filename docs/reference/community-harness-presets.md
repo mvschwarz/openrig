@@ -295,7 +295,15 @@ CLI.
 - **Sender names come from the sending session.** A command run from an unattached operator shell can arrive as
   `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity.
 
-Copy both and maintain them as your own.
+On Windows, use the [Windows preset](community-harness-examples/cursor/cursor-windows.yaml) and
+[Node launcher](community-harness-examples/cursor/openrig-cursor-launch.mjs). Set the preset command to the full launcher
+path and set `OPENRIG_DAEMON_DIST` to the Windows-native daemon's built `dist` directory in the seat environment.
+The launcher locates a per-user Cursor Agent installation or takes its location from `OPENRIG_CURSOR_AGENT`.
+It uses the daemon's Windows Job for the finite chat-creation process, then opens Cursor in the pane with the seat's
+model and effort. Startup text goes through assisted pane input, and Cursor handles its tool approvals interactively.
+Resume requires a chat store created by a completed turn in the same working directory and Cursor configuration directory.
+
+Copy the launcher and preset for your platform and maintain them as your own.
 
 ## An example: Pi's terminal UI
 

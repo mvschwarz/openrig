@@ -1,0 +1,10 @@
+format: 1
+name: cursor
+command: node "C:/path/to/openrig-cursor-launch.mjs"
+launch_result: true
+resume: true
+startup_assisted: true
+passes_model: true
+limits:
+  - Cursor tool approvals remain interactive
+  - Resume requires the original seat config directory and working directory
