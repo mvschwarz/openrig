@@ -21,10 +21,10 @@ export function chatroomWatchTmuxArgs(rig: string): string[] {
     "rig", "chatroom", "watch", "--", tmuxArg(rig)];
 }
 
-/** The printed attach line. The session is quoted for a shell when it needs it, so a pasted line attaches to that exact
- *  session; a name that needs no quoting prints as it is. */
+/** The printed attach line. The session gets tmux's final-`;` escape, then is quoted for a shell when it needs it, so a
+ *  pasted line attaches to that exact session; a name that needs neither prints as it is. */
 export function chatroomAttachHint(session: string): string {
-  return `Attach with: tmux attach -t ${shellWord(session)}`;
+  return `Attach with: tmux attach -t ${shellWord(tmuxArg(session))}`;
 }
 
 /** tmux ends a command at an argument that ends in `;`, unless a `\` comes before it, so a final `;` gets that `\`. */

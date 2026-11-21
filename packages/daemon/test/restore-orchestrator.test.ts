@@ -2002,6 +2002,24 @@ describe("RestoreOrchestrator", () => {
     expect(codex.resume).toHaveBeenCalled();
   });
 
+  // A seat recreated after the snapshot runs under a new node id, the one its launch stamps as OPENRIG_NODE_ID. Its legacy
+  // Codex resume names that registered node and reads that node's home; the snapshot's id would fail the identity check.
+  it("a recreated Codex seat's legacy resume names its registered node and that node's home", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }], edges: [],
+      resumeType: "codex_id", resumeToken: "uuid-123", restorePolicy: "resume_if_possible" });
+    const savedId = snap.data.nodes[0]!.id;
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(savedId);
+    const live = rigRepo.addNode(snap.rigId, "worker", { role: "worker", runtime: "codex" });
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/live" }), live.id);
+    const codex = mockCodexResume();
+    await createOrchestrator({ codex }).restore(snap.id);
+    const calls = vi.mocked(codex.resume).mock.calls as unknown[][];
+    expect(calls).toHaveLength(1);
+    expect(live.id).not.toBe(savedId);
+    expect(calls[0]![11]).toBe("/homes/live");
+    expect(calls[0]![15]).toBe(live.id);
+  });
+
   it("a Codex seat with its own CODEX_HOME resumes with that home appended; a seat without one gets the call as before", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }, { logicalId: "plain", role: "worker", runtime: "codex" }],
