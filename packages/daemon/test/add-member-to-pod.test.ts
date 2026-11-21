@@ -72,6 +72,25 @@ describe("PodRigInstantiator.addMemberToPod", () => {
     expect(newNode!.podId).toBe(result.result.podId);
   });
 
+  it("Launch paths (`materializeStructured`, `launchMaterialized`, `addMemberToPod`) return the pool advisory in their warnings exactly once.", async () => {
+    // #3395 C7, the addMemberToPod case: a malformed pool block on the added member is one warning, never an error
+    const rig = await seedRigWithPod();
+    const advisory = "infra.server2 pool.max: must be at least min (4); pool not used";
+
+    const result = await setup.podInstantiator.addMemberToPod(
+      rig.id,
+      "infra",
+      { ...terminalMember("server2"), pool: { max: 2, min: 4 } },
+      ".",
+    );
+
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.node.status).toBe("launched");
+    expect(result.result.warnings.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+    expect(JSON.stringify(result).split(advisory).length - 1).toBe(1);
+  });
+
   function podRowsForRig(rigId: string) {
     return db.prepare("SELECT id, namespace FROM pods WHERE rig_id = ?").all(rigId) as Array<{ id: string; namespace: string }>;
   }

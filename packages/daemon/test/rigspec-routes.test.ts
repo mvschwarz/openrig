@@ -23,6 +23,7 @@ import nodePath from "node:path";
 import os from "node:os";
 import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 
 const VALID_YAML = `
 schema_version: 1
@@ -287,6 +288,79 @@ describe("Rigspec export routes", () => {
       expect((await jsonRes.text()).match(/"tasksMax":\d+/g)).toEqual(['"tasksMax":64']);
       expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(bad.id)).toEqual({ process_limits: "{not json" });
     }
+  });
+
+  /** dev.impl is the model of a seat pool whose agent dev.impl-s1 is live; dev.qa and arch.reviewer are ordinary. */
+  function seedPooledRig(name: string) {
+    const rig = rigRepo.createRig(name);
+    const pods = new PodRepository(db);
+    const dev = pods.createPod(rig.id, "dev", "Dev");
+    const arch = pods.createPod(rig.id, "arch", "Arch");
+    const member = { agentRef: "local:agents/impl", profile: "default", cwd: "." };
+    const model = rigRepo.addNode(rig.id, "dev.impl", { ...member, runtime: "claude-code", podId: dev.id,
+      pool: { spec: { max: 2, min: 0, dispatchAfterSeconds: 60, idleGraceSeconds: 300, cooldownSeconds: 60, dispatchTag: null, cwdTemplate: null, drain: false } } });
+    const qa = rigRepo.addNode(rig.id, "dev.qa", { ...member, runtime: "codex", podId: dev.id });
+    const reviewer = rigRepo.addNode(rig.id, "arch.reviewer", { ...member, runtime: "codex", podId: arch.id });
+    const agent = rigRepo.addNode(rig.id, "dev.impl-s1", { ...member, runtime: "claude-code", podId: dev.id });
+    new SeatPoolSlotsRepository(db).insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase: "live", at: "2026-11-18T00:00:00.000Z" });
+    return { rig, model, qa, reviewer, agent };
+  }
+
+  const headerWarnings = (res: Response) =>
+    JSON.parse(decodeURIComponent(res.headers.get("X-OpenRig-Export-Warnings") ?? "%5B%5D")) as Array<{ logicalId: string; reason: string }>;
+
+  it("An edge that touches a pool agent is left out of edges and named in both the YAML # Not carried line and the X-OpenRig-Export-Warnings header", async () => {
+    const { rig, model, qa, reviewer, agent } = seedPooledRig("pool-edges");
+    rigRepo.addEdge(rig.id, model.id, qa.id, "can_observe");
+    rigRepo.addEdge(rig.id, qa.id, agent.id, "delegates_to");
+    rigRepo.addEdge(rig.id, agent.id, reviewer.id, "escalates_to");
+    const edgeWarnings = [
+      { logicalId: "dev.impl-s1", reason: "escalates_to edge to arch.reviewer touches a seat pool agent; not carried" },
+      { logicalId: "dev.qa", reason: "delegates_to edge to dev.impl-s1 touches a seat pool agent; not carried" },
+    ];
+    const yamlRes = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(yamlRes.status).toBe(200);
+    expect(headerWarnings(yamlRes).filter((w) => w.reason.includes(" edge "))).toEqual(edgeWarnings);
+    const yaml = await yamlRes.text();
+    expect(yaml.split("\n").filter((line) => line.startsWith("# Not carried:") && line.includes(" edge "))).toEqual([
+      "# Not carried: the escalates_to edge from dev.impl-s1 to arch.reviewer, because it touches a seat pool agent, which an export leaves out.",
+      "# Not carried: the delegates_to edge from dev.qa to dev.impl-s1, because it touches a seat pool agent, which an export leaves out.",
+    ]);
+    const spec = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(spec.pods.find((p) => p.id === "dev")!.edges).toEqual([{ kind: "can_observe", from: "impl", to: "qa" }]);
+    expect(spec.edges).toEqual([]);
+    const jsonRes = await app.request(`/api/rigs/${rig.id}/spec.json`);
+    expect(jsonRes.status).toBe(200);
+    expect(headerWarnings(jsonRes).filter((w) => w.reason.includes(" edge "))).toEqual(edgeWarnings);
+    const json = await jsonRes.json() as import("../src/domain/types.js").RigSpec;
+    expect(json.pods.find((p) => p.id === "dev")!.edges).toEqual([{ kind: "can_observe", from: "impl", to: "qa" }]);
+    expect(json.edges).toEqual([]);
+  });
+
+  it.each(["{not json", JSON.stringify({ max: -1 })])("A stored block that can't be read (%s) is left out of the export and named in a # Not carried line and in the header, and the rest of the rig exports", async (stored) => {
+    const { rig, model } = seedPooledRig("pool-unreadable");
+    db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(stored, model.id);
+    const poolWarning = [{ logicalId: "dev.impl", reason: "pool can't be read; not carried" }];
+    const yamlRes = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(yamlRes.status).toBe(200);
+    expect(headerWarnings(yamlRes).filter((w) => w.reason.startsWith("pool"))).toEqual(poolWarning);
+    const yaml = await yamlRes.text();
+    expect(yaml.split("\n").filter((line) => line.startsWith("# Not carried:") && line.includes("pool"))).toEqual([
+      "# Not carried: dev.impl's pool, because the saved block can't be read; it stays stored as it is. Fix it by re-applying the spec " +
+        "with a pool block that can be used, or clear it with pool: {}.",
+    ]);
+    expect(yaml.split("\n").filter((line) => !line.startsWith("#") && /^\s*pool:/.test(line))).toEqual([]);
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const spec = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(spec.pods.find((p) => p.id === "dev")!.members.map((m) => m.id).sort()).toEqual(["impl", "qa"]);
+    expect(spec.pods.find((p) => p.id === "arch")!.members.map((m) => m.id)).toEqual(["reviewer"]);
+    const jsonRes = await app.request(`/api/rigs/${rig.id}/spec.json`);
+    expect(jsonRes.status).toBe(200);
+    expect(headerWarnings(jsonRes).filter((w) => w.reason.startsWith("pool"))).toEqual(poolWarning);
+    const json = await jsonRes.json() as import("../src/domain/types.js").RigSpec;
+    expect(json.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "impl")?.pool).toBeUndefined();
+    expect(db.prepare("SELECT pool FROM nodes WHERE id = ?").get(model.id)).toEqual({ pool: stored });
   });
 });
 

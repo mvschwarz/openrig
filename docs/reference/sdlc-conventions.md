@@ -205,7 +205,11 @@ commit. Evidence capture (`proof add`), policy acceptance, higher outcome
 judgment and publication are distinct. This optional component does not select
 Part B or add a mandatory review gate.
 
-A judgment binds the slice's path, the item's text and the policy. Moving or
+A judgment binds the slice's path, the item's text and the policy. A policy edit
+that keeps the judging actor listed and `everyJudge` unchanged, such as adding a
+judge, leaves the judgment current; removing its actor or toggling `everyJudge`
+does not. A judgment recorded by an earlier release doesn't carry the
+`everyJudge` it was recorded under, so any policy edit still reopens it. Moving or
 renaming a slice (`rig scope slice move`, default moving `rig scope slice close`,
 or by hand) reopens its judged items:
 `rig proof show` reports each as `unknown`, and each needs a new judgment on its
