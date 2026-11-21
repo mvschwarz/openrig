@@ -293,8 +293,18 @@ function recordPacketJob(input, packetJob) {
   const p = sentinelPath(input);
   try {
     const sentinel = JSON.parse(fs.readFileSync(p, "utf8"));
+    // Only into this build's sentinel: an overlapping hook for the seat may have written its own since.
+    if (sentinel.packetJob?.jobId !== packetJob.jobId) return;
     writeJsonAtomic(p, { ...sentinel, packetJob });
   } catch { /* the sentinel is written first; without it the bridge stays as it was */ }
+}
+
+// The seat's marker from an earlier compaction moves aside as superseded, its bytes kept. Every reader of the marker file
+// (the bridge, the restore request's instruction to the agent, the rebuild priming chain, refocus) then takes its missing-marker
+// route until this build publishes, instead of finding the earlier packet.
+function supersedeEarlierMarker(input) {
+  const markerPath = pendingMarkerPath(input);
+  try { fs.renameSync(markerPath, markerPath.replace(/\.json$/, ".superseded.json")); } catch { /* no earlier marker */ }
 }
 
 function isCurrentJob(input, jobId) {
@@ -345,6 +355,7 @@ try {
   const jobId = randomUUID();
   const { jobPath, resultPath, reportPath } = packetJobPaths(input, jobId);
   writeExpectedSentinel(input, { jobId, resultPath, reportPath }); // R5: sentinel FIRST, before the packet + marker (catches hook-died-partway)
+  supersedeEarlierMarker(input);
   const args = [restoreScript, "--out", outRoot, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.transcript_path && input.transcript_path.endsWith(".jsonl") && fs.existsSync(input.transcript_path)) {

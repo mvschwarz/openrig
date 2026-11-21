@@ -401,7 +401,8 @@ setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, 
     expect(JSON.parse(readFileSync(sentinel().packetJob.resultPath, "utf8"))).toMatchObject({ ok: true });
   });
 
-  // An earlier compaction of the same conversation leaves its marker on disk, and nothing removes it.
+  // A marker from another build in the seat's marker file after the new sentinel (an earlier compaction's, written in place
+  // after the hook moved the file aside): the bridge still counts only the current build's.
   function writeEarlierMarker(delivered: boolean): void {
     writeFileSync(markerFile(), JSON.stringify({
       version: 1, outputDir: join(tmpDir, "packets", "earlier-packet"), transcriptPath: join(tmpDir, "transcript.jsonl"),
@@ -475,6 +476,31 @@ setTimeout(() => { const dir = path.join(out, first ? "packet-a" : "packet-b"); 
     // And A's marker landing after B was delivered is no compaction's marker, so it's never delivered.
     writeFileSync(markerPath, JSON.stringify(resultA.marker));
     expect(runBridge(openrigHome).stdout).toBe("");
+  });
+
+  it("the hook moves an earlier compaction's marker aside, so the marker file is absent while the new build runs, and keeps its bytes", async () => {
+    runHook(openrigHome, true); // an earlier compaction, built within the wait
+    const marker = markerFile();
+    expect(bridgeContext()).toContain("OpenRig compaction restore packet is available");
+    const earlier = readFileSync(marker, "utf8");
+    const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
+const out = process.argv[process.argv.indexOf("--out") + 1];
+setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 1500);
+`);
+    runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(marker.replace(/\.json$/, ".superseded.json"), "utf8")).toBe(earlier);
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true), { timeout: 15_000, interval: 100 });
+    expect(readJson(marker)).toMatchObject({ jobId: sentinel().packetJob.jobId, outputDir: join(tmpDir, "packets", "late-packet") });
+  });
+
+  it("restore-from-jsonl --until-byte 0 reads an empty prefix, not the whole transcript", () => {
+    const transcript = join(tmpDir, "zero.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ sessionId: "zero", cwd: tmpDir, message: { role: "user", content: "written after the bound" } })}\n`);
+    const script = join(dirname(HOOK_SCRIPT), "restore-from-jsonl.mjs");
+    const run = spawnSync(process.execPath, [script, "--out", join(tmpDir, "zero-out"), "--json", "--until-byte", "0", transcript], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(readFileSync(JSON.parse(run.stdout).narrative, "utf8")).not.toContain("written after the bound");
   });
 
   it("restore-from-jsonl --until-byte reads only the transcript as it was at that size", () => {

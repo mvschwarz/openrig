@@ -52,6 +52,7 @@ function parseArgs(argv) {
 // The transcript is read a line at a time: a long-lived seat's JSONL runs to gigabytes, past the longest string Node can
 // make (about 512 MB), so the whole file is never read into one string.
 async function* readJsonLines(file, untilByte = null) {
+  if (untilByte === 0) return; // an explicit bound of 0 is an empty prefix; an absent one reads the whole file
   const bounded = Number.isInteger(untilByte) && untilByte > 0 ? { end: untilByte - 1 } : {};
   const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", ...bounded }), crlfDelay: Infinity });
   let index = 0;
