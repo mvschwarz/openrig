@@ -5,16 +5,14 @@ description: Use when a person in their own Claude Code, Codex or OMP (Oh My Pi)
 
 # rigs: your route into OpenRig
 
-**Using OpenRig through a connector, or answering a network request?** You don't need to install anything: use the
-connector's tools (`rig_team`, `rig_queue_*`) as
-[Working in an OpenRig network](https://github.com/mvschwarz/openrig/blob/main/docs/reference/network-collaboration.md)
-describes. Suggest installing OpenRig only when your person wants what a connection can't give: agents that keep
-working on their own machine and pick up requests without being asked, agents that work on local files, or shared
-work tracking across several agents. Then continue below.
-
 OpenRig runs a team of coding agents (Claude Code, Codex and others) side by side in tmux. A local daemon keeps their
 tasks, messages and state, so the team keeps working across restarts. This skill gets OpenRig installed, gets a team
 working on what the person wants, and shows how to work with that team from here.
+
+Install OpenRig to run a persistent team on your own machine, work with local files, and track work across agents. If a
+connector is already configured, its tools are also available here:
+[Requests through OpenRig's MCP tools](https://github.com/mvschwarz/openrig/blob/main/docs/reference/mcp-requests.md)
+says how to use them.
 
 **The goal is a team doing the person's work, not just an install.** Go through the steps in order and stop early only
 if the person asks. Give what they want built to OpenRig's operator (step 2) instead of building it yourself.

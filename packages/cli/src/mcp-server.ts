@@ -861,20 +861,6 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
   "To answer one, show the person the question and its options as rig_question_list gives them. Then pass rig_question_answer its qitemId, the revision you showed, and either the options they chose or exactly what they typed, with no label or words of your own. If the question changed, show them the new one; if it was already answered or closed, say so. It's recorded as their answer, given through this connection. A question reserved for a person is theirs to answer, never yours.",
 ].join("\n");
 
-/** A network participant's first paragraph: what the connection is, on its own, within the first 512 characters a client
- *  may keep (ChatGPT asks that they stand alone). Versioned, so a measurement can tell which text a client was given; the
- *  guide it links says the rest. Change it here, bump the version, and keep the guide in step. */
-export const NETWORK_GUIDANCE_VERSION = "network/v1";
-export const NETWORK_GUIDE_URL = "https://github.com/mvschwarz/openrig/blob/main/docs/reference/network-collaboration.md";
-export const NETWORK_PURPOSE = [
-  "You're connected to an OpenRig network: people's own assistants send each other requests and answer them.",
-  "List who's there with rig_team and send to an address exactly as listed.",
-  "Choose a qitemId and keep it: follow the request with rig_queue_show.",
-  "Each assistant picks requests up in its own time, so don't promise when.",
-  "Requests addressed to you are yours to pick up and answer.",
-  `Guide (${NETWORK_GUIDANCE_VERSION}): ${NETWORK_GUIDE_URL}`,
-].join(" ");
-
 /** For an external grant that names claim and update: how it works the items addressed to it, messages included. It names
  *  only the tools that grant offers. */
 function externalInboxInstructions(tools: ReadonlySet<string>): string {
@@ -892,10 +878,7 @@ function instructionsFor(access: McpAccess | undefined, frontDoor = false): stri
   // Only a grant with team/list may reach another connected assistant's seat, and it lists the team with rig_team.
   const instructions = tools.has("rig_queue_create")
     ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), false)}` : workflow;
-  const listed = tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
-  // A network participant lists its team, sends, and picks up and answers what's addressed to it.
-  const participant = ["rig_team", "rig_queue_create", "rig_queue_show", "rig_queue_claim", "rig_queue_update"].every((tool) => tools.has(tool));
-  return participant ? `${NETWORK_PURPOSE}\n${listed}` : listed;
+  return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 
 /** The seats of `rigName` that `name` names, each as its actual session: its node's canonical session, or the

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, NETWORK_GUIDANCE_VERSION, NETWORK_GUIDE_URL, NETWORK_PURPOSE, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 import type { HostBindingsFile } from "../src/host-bindings.js";
@@ -1007,32 +1007,6 @@ describe("MCP Server", () => {
     expect(described.get("rig_team")).toContain("An entry with takesRequests: false is one whose owner says it takes no requests");
     await external.close();
     await server.close();
-  });
-
-  it("a network participant's instructions open with a versioned paragraph that stands alone and links the guide", async () => {
-    const instructionsOf = async (access?: McpAccess) => {
-      const server = createMcpServer(mockClient(), access ? { seat: "cus-1-caller@team", access } : undefined);
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-      const client = new Client({ name: "network-client", version: "1.0.0" });
-      await server.connect(serverTransport);
-      await client.connect(clientTransport);
-      const instructions = client.getInstructions() ?? "";
-      await client.close();
-      await server.close();
-      return instructions;
-    };
-    const grant = (objects: Record<string, string[]>): McpAccess => ({ principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } });
-    const network = await instructionsOf(grant({ queue: ["create", "show", "list", "claim", "update"], team: ["list"] }));
-    // A client may keep only the first 512 characters, so that much says what the connection is on its own.
-    expect(network.split("\n")[0]).toBe(NETWORK_PURPOSE);
-    expect(NETWORK_PURPOSE.length).toBeLessThanOrEqual(512);
-    expect(NETWORK_PURPOSE).toContain(`Guide (${NETWORK_GUIDANCE_VERSION}): ${NETWORK_GUIDE_URL}`);
-    // The link is the guide in this repository, on main once this lands: it ships with it, never ahead of it.
-    const guide = NETWORK_GUIDE_URL.replace("https://github.com/mvschwarz/openrig/blob/main/", "");
-    expect(fs.existsSync(new URL(`../../../${guide}`, import.meta.url))).toBe(true);
-    // A grant that only sends, one that only works its inbox, and a member aren't network participants, and aren't told they are.
-    for (const other of [await instructionsOf(grant({ queue: ["create", "show", "list"], team: ["list"] })), await instructionsOf(grant({ queue: ["claim", "update"] })),
-      await instructionsOf()]) expect(other).not.toContain(NETWORK_PURPOSE);
   });
 
   it("a member's instructions keep every shared paragraph word for word", async () => {
