@@ -257,6 +257,8 @@ function world(options: WorldOptions = {}) {
   /** The Codex home each resume proof was asked to read. */
   const proofHomes: Array<string | undefined> = [];
   const builds: Array<{ running?: unknown; launchWrapper?: string[]; launchShell?: string }> = [];
+  /** Whether each resume command was built as a preview (one that may not write the Codex config). */
+  const previews: boolean[] = [];
   const wrapperEnv = options.realResumeBuilder === "env"
     ? (() => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-inplace-wrapper-"));
@@ -290,7 +292,8 @@ function world(options: WorldOptions = {}) {
     : null;
   const codex = {
     runtime: "codex",
-    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string }) {
+    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string; preview?: boolean }) {
+      previews.push(opts.preview === true);
       builds.push({
         running: opts.running,
         ...(binding.launchWrapper ? { launchWrapper: binding.launchWrapper } : {}),
@@ -302,6 +305,7 @@ function world(options: WorldOptions = {}) {
           resumeToken: opts.resumeToken,
           running: opts.running,
           ...(opts.launchShell !== undefined ? { launchShell: opts.launchShell } : {}),
+          ...(opts.preview ? { preview: true } : {}),
         });
       }
       const running = opts.running;
@@ -368,7 +372,7 @@ function world(options: WorldOptions = {}) {
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux, respawnOpts,
+  return { db, service, node, session, calls, launches, proofHomes, builds, previews, events, sessionRegistry, tmux, respawnOpts,
     wrapperBinDir: wrapperEnv?.binDir,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
@@ -385,6 +389,14 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it("plan builds its resume command as a preview, which leaves the Codex config alone; the restart itself doesn't", async () => {
+    const w = world({});
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true });
+    expect(w.previews).toEqual([true]);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "new account" })).toMatchObject({ ok: true });
+    expect(w.previews).toEqual([true, false]);
+  });
+
   it("plan reports activity, child processes and settings, and changes nothing", async () => {
     const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),
