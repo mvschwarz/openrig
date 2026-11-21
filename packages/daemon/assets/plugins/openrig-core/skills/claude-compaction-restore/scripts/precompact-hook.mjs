@@ -14,6 +14,12 @@ const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 // sessionId no longer collide on the same `${sessionId}-${stamp}` dir. Mirrors the
 // injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = the home's folder.
 const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || path.join(getOpenRigHome(), "run", "compaction-restore");
+// After 25 s by default, spawnSync asks the restore script to stop (SIGTERM), inside this hook's 30 s timeout
+// (hooks/claude.json), and the manual-route note below is written once the script has exited. That's a request, not a
+// deadline: a script slow to exit, or blocked, can run past the hook's 30 s, and then the note is lost.
+// OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS sets another positive value (tests shorten it); it isn't capped at the default.
+const timeoutOverride = Number(process.env.OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS);
+const restoreTimeoutMs = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 25_000;
 const defaultRestoreInstruction =
   "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
 
@@ -266,9 +272,12 @@ try {
 
   const customMessage = readClaudeCompactionMessage();
 
-  const result = spawnSync(process.execPath, args, { encoding: "utf8" });
+  const result = spawnSync(process.execPath, args, { encoding: "utf8", timeout: restoreTimeoutMs });
   if (result.status !== 0) {
-    const baseFailure = `Claude compaction restore packet generation failed: ${(result.stderr || result.stdout || "unknown error").trim()}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
+    const reason = result.error?.code === "ETIMEDOUT"
+      ? `asked to stop after ${restoreTimeoutMs / 1000} s, to try to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer)`
+      : (result.stderr || result.stdout || "unknown error").trim();
+    const baseFailure = `Claude compaction restore packet generation failed: ${reason}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
     emit({
       continue: true,
       systemMessage: buildSystemMessage(baseFailure, customMessage),
