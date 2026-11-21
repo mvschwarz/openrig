@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { DAEMON_START_COMMAND_TIMEOUT_MS } from "@openrig/daemon/daemon-shutdown";
 import { pageReadKey } from "./page-read.js";
 import { completeCommand } from "./commands/completion.js";
 import { resolveTimeZone } from "./time.js";
@@ -32,7 +31,7 @@ import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.
 import { driveRestoreLifecycle, buildRestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
 import { restoreKeyAction, type RestoreInputEvent } from "./crash-cart/restore-input.js";
 import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-click-gate.js";
-import { daemonStartArgs } from "./crash-cart/start-daemon.js";
+import { daemonStartArgs, daemonStartTimeoutMs } from "./crash-cart/start-daemon.js";
 import { readLocal } from "./local-reading.js";
 import { replyAct, opensOnDefaultFeed, actingAs, answerRequest } from "./attention/attention-model.js";
 import { decidePairRequest } from "./config/pairing.js";
@@ -71,6 +70,16 @@ async function run(): Promise<void> {
       timeReadWarning = !!err || stderr.includes("ui.timezone");
       if (err) return resolve(null);
       try { resolve(JSON.parse(stdout).value); } catch { resolve(null); }
+    });
+  });
+  // #3637: each start reads the wait the `rig daemon start` it runs will use, from that same CLI (`viaPathRig` for
+  // the start that runs the bare `rig`), so the TUI never ends it first.
+  const startTimeoutMs = (viaPathRig = false): Promise<number> => new Promise<number>((resolve) => {
+    const configArgs = ["config", "get", "daemon.start_readiness_wait_seconds", "--json"];
+    execFile(viaPathRig ? "rig" : cliExecutable, viaPathRig ? configArgs : cliArgs(configArgs), { cwd: helperCwd(), timeout: 5000, maxBuffer: 8192 }, (err, stdout) => {
+      let value: unknown = null;
+      if (!err) { try { value = JSON.parse(stdout).value; } catch { value = null; } }
+      resolve(daemonStartTimeoutMs(value));
     });
   });
   const view = createViewState({ instanceId, getSnapshot: () => snapshot, timeZoneWarning: "Reading configured timezone…" });
@@ -253,12 +262,12 @@ async function run(): Promise<void> {
     });
   if (client) startup = new StartupController({
     client, home: process.env["OPENRIG_HOME"] ?? "default local instance", probe: runCrashCartVerb,
-    startDaemon: () => new Promise<void>((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout: DAEMON_START_COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
+    startDaemon: () => startTimeoutMs().then((timeout) => new Promise<void>((resolve, reject) => {
+      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout }, (error, stdout, stderr) => {
         if (error) reject(new Error(`Daemon start did not confirm completion: ${stderr.trim() || stdout.trim() || error.message}`));
         else resolve();
       });
-    }),
+    })),
     onChange: () => {
       draw();
       // Skip during the probe must remain skipped, but can start reads when
@@ -346,9 +355,9 @@ async function run(): Promise<void> {
     const daemonClient = client;
     restoreCancelRequested = false;
     restoreScrollOffset = 0;
-    new Promise<void>((resolve, reject) =>
-      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout: DAEMON_START_COMMAND_TIMEOUT_MS }, (err) => (err ? reject(err) : resolve())),
-    )
+    startTimeoutMs(true).then((timeout) => new Promise<void>((resolve, reject) =>
+      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout }, (err) => (err ? reject(err) : resolve())),
+    ))
       .then(() => pollRestore(daemonClient))
       .catch((e: unknown) => {
         crashCartOpts = { ...crashCartOpts, restore: undefined };
@@ -384,7 +393,7 @@ async function run(): Promise<void> {
       startingDaemon = true;
       crashCartOpts = { ...crashCartOpts, starting: client!.baseUrl };
       draw();
-      execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout: DAEMON_START_COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
+      void startTimeoutMs().then((timeout) => execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout }, (error, stdout, stderr) => {
         startingDaemon = false;
         if (error) {
           crashCartOpts = { unavailable: `Daemon start did not confirm completion. Retry reads actual state before another attempt. ${stderr.trim() || stdout.trim() || error.message}` };
@@ -395,7 +404,7 @@ async function run(): Promise<void> {
           // Daemon only: no seat was started. Start and return lists the rigs, with a kernel first if there is one, to bring one back.
           if (startup) view.dispatch({ type: "notice", message: "Daemon started; this start didn't start any seats. Press S to choose seats to bring back; a kernel, if you have one, is listed first." });
         }
-      });
+      }));
       return;
     }
     if (action === "restore") {

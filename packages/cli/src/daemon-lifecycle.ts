@@ -252,6 +252,8 @@ export interface StartOptions {
   // into the daemon process env as OPENRIG_NO_KERNEL.
   skipKernelBoot?: boolean;
   allowDbConflict?: boolean;
+  /** #3637: how long this start waits for its child's readiness (daemon.start_readiness_wait_seconds); 180 s when unset. */
+  readinessWaitSeconds?: number;
 }
 
 export interface LifecycleDeps {
@@ -322,7 +324,7 @@ const DEFAULT_DB = "openrig.sqlite";
 // bounded, but do not kill a healthy daemon during first-boot slack.
 // #1786: one elapsed deadline, started when the readiness loop begins (after the
 // child is spawned and its handlers are attached), covers every primary probe,
-// listener check and backoff in one 180-second owned-child wait. Each probe
+// listener check and backoff in one owned-child wait of daemon.start_readiness_wait_seconds (default 180 s). Each probe
 // may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
 // in a second is accepted, but no probe timer outlives the deadline (a 2s startup
 // ceiling, not a universal header wait). The deadline only stops new probes and
@@ -741,6 +743,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   // (loopback + tailscale auto-detect).
   const explicitHost = opts.host;
   const probeHost = explicitHost ?? DEFAULT_HOST;
+  const readinessWaitMs = opts.readinessWaitSeconds !== undefined ? opts.readinessWaitSeconds * 1000 : STARTUP_READINESS_DEADLINE_MS;
 
   // Check if already running
   const existing = readState(deps);
@@ -889,7 +892,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
     const readinessStartedAt = Date.now();
-    deadline = readinessStartedAt + STARTUP_READINESS_DEADLINE_MS;
+    deadline = readinessStartedAt + readinessWaitMs;
     let nextProgressAt = readinessStartedAt + STARTUP_PROGRESS_INTERVAL_MS;
     // Since when only listeners other than the probed one have been uncertain, round after round.
     let secondaryOnlySince: number | null = null;
@@ -928,7 +931,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       if (unverified === null || unverified.some((host) => formatDaemonHostForUrl(host) === formatDaemonHostForUrl(probeHost))) secondaryOnlySince = null;
       else if (Date.now() - (secondaryOnlySince ??= Date.now()) >= STARTUP_SECONDARY_GRACE_MS) break;
       if (remaining() > 0 && Date.now() >= nextProgressAt) {
-        console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${STARTUP_READINESS_DEADLINE_MS / 1000}s limit). This start has not published readiness.`);
+        console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${readinessWaitMs / 1000}s limit). This start has not published readiness.`);
         nextProgressAt = Date.now() + STARTUP_PROGRESS_INTERVAL_MS;
       }
       await Promise.race([new Promise((resolve) => setTimeout(resolve, Math.min(HEALTHZ_DELAY_MS, remaining()))), failed]);

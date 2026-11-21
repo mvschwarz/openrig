@@ -89,7 +89,8 @@ Examples:
   rig config init-workspace                  # scaffold a repo-ready project workspace
 
 Keys:
-  daemon.*               port, host, seat_poll_interval_ms (startup-only seat-pollers cadence, 1000–2000; default 1000)
+  daemon.*               port, host, seat_poll_interval_ms (startup-only seat-pollers cadence, 1000–2000; default 1000),
+                         start_readiness_wait_seconds (how long a start waits for its child's readiness, 1–600; default 180)
   db.path
   transcripts.*          enabled, path, lines, poll_interval_seconds
                          (lines/poll_interval set scrollback CAPTURE depth + cadence.

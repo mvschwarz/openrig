@@ -273,6 +273,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             // check in startup.ts honors the flag.
             skipKernelBoot: skipKernel,
             allowDbConflict: opts.allowDbConflict,
+            readinessWaitSeconds: config.daemon.startReadinessWaitSeconds,
           },
           getDeps(),
         );

@@ -1,3 +1,16 @@
+import { DAEMON_START_READINESS_WAIT_MAX_SECONDS, daemonStartCommandTimeoutMs } from "@openrig/daemon/daemon-shutdown";
+
+/** #3637: the TUI's budget for a `rig daemon start` whose readiness wait is the resolved
+ * daemon.start_readiness_wait_seconds (`rig config get … --json`'s value). A value that can't be read falls back to the
+ * longest accepted wait: the CLI keeps its own deadline, so a longer backstop never lengthens a start, and a shorter
+ * one could end a start that is still within its wait. */
+export function daemonStartTimeoutMs(setting: unknown): number {
+  const seconds = typeof setting === "number" && Number.isInteger(setting) && setting >= 1 && setting <= DAEMON_START_READINESS_WAIT_MAX_SECONDS
+    ? setting
+    : DAEMON_START_READINESS_WAIT_MAX_SECONDS;
+  return daemonStartCommandTimeoutMs(seconds * 1000);
+}
+
 /** Starting a local instance must never silently target the default daemon or
  * launch kernel occupants before the user has selected them. */
 export function daemonStartArgs(target: string): string[] {

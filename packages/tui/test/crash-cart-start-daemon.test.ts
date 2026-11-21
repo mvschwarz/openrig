@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import * as lifecycleBudget from "../../daemon/src/daemon-shutdown.js";
 import { describe, it, expect } from "vitest";
-import { daemonStartArgs } from "../src/crash-cart/start-daemon.js";
+import { daemonStartArgs, daemonStartTimeoutMs } from "../src/crash-cart/start-daemon.js";
 import { resolveCrashCartKey } from "../src/crash-cart/keys.js";
 
 describe("local startup target", () => {
@@ -42,9 +42,26 @@ describe("daemon start caller budget", () => {
     expect(source).toContain("DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS");
   });
 
+  it("bounds a start by the resolved daemon.start_readiness_wait_seconds plus probe, cleanup and margin", () => {
+    const budget = lifecycleBudget as unknown as Record<string, number>;
+    const margin = budget.DAEMON_START_PROBE_TIMEOUT_MS! + budget.DAEMON_STOP_WAIT_MS! + 5_000;
+    expect(daemonStartTimeoutMs(180)).toBe(budget.DAEMON_START_COMMAND_TIMEOUT_MS);
+    expect(daemonStartTimeoutMs(30)).toBe(30_000 + margin);
+    expect(daemonStartTimeoutMs(600)).toBe(600_000 + margin);
+  });
+
+  it.each([null, undefined, "240", 0, 601, 1.5])("falls back to the longest accepted wait when the setting reads %s", (setting) => {
+    // A shorter backstop could end a start the CLI is still waiting on; the CLI keeps its own deadline.
+    expect(daemonStartTimeoutMs(setting)).toBe(daemonStartTimeoutMs(600));
+  });
+
   it("uses that timeout for all three asynchronous TUI daemon-start calls", () => {
     const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-    expect(source.match(/timeout: DAEMON_START_COMMAND_TIMEOUT_MS/g)).toHaveLength(3);
+    expect(source.match(/startTimeoutMs\((?:true)?\)\.then\(\(timeout\) =>/g)).toHaveLength(3);
+    // The restore start runs the bare `rig`, so it reads the wait from the bare `rig` too.
+    expect(source).toMatch(/startTimeoutMs\(true\)\.then\(\(timeout\) => new Promise<void>\(\(resolve, reject\) =>\s+execFile\("rig", \["daemon", "start"\]/);
+    expect(source.match(/\{ cwd: helperCwd\(\), timeout \}/g)).toHaveLength(3);
+    expect(source).not.toMatch(/DAEMON_START_COMMAND_TIMEOUT_MS/);
     expect(source).not.toMatch(/execFileSync/);
   });
 });

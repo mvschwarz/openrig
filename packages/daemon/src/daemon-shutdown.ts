@@ -4,10 +4,15 @@ export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 export const DAEMON_STOP_WAIT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS + 2_000;
 // Shared lifecycle budgets: an async command caller must outlive the owned-child
 // readiness wait, one probe, shutdown cleanup, and a small process/I/O margin.
+// The readiness wait is the default of daemon.start_readiness_wait_seconds; the setting takes 1 to the max.
 export const DAEMON_START_READINESS_WAIT_MS = 180_000;
+export const DAEMON_START_READINESS_WAIT_MAX_SECONDS = 600;
 export const DAEMON_START_PROBE_TIMEOUT_MS = 2_000;
-export const DAEMON_START_COMMAND_TIMEOUT_MS = DAEMON_START_READINESS_WAIT_MS
-  + DAEMON_START_PROBE_TIMEOUT_MS + DAEMON_STOP_WAIT_MS + 5_000;
+/** The budget of an async caller of a start whose readiness wait is `readinessWaitMs`. */
+export function daemonStartCommandTimeoutMs(readinessWaitMs: number = DAEMON_START_READINESS_WAIT_MS): number {
+  return readinessWaitMs + DAEMON_START_PROBE_TIMEOUT_MS + DAEMON_STOP_WAIT_MS + 5_000;
+}
+export const DAEMON_START_COMMAND_TIMEOUT_MS = daemonStartCommandTimeoutMs();
 export const DAEMON_HTTP_CONNECTION_GRACE_MS = 250;
 export const DAEMON_SHUTDOWN_RECEIPT = "daemon-shutdown.json";
 export interface DaemonShutdownReceipt {
