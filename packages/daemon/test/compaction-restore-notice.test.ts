@@ -12,7 +12,8 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure } from "../src/domain/compaction-restore-notice.js";
+import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown } from "../src/domain/compaction-restore-notice.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 import type { PreparationFailure, RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
 
 // Keep the host's receiving-agent setting out of these isolated queue fixtures.
@@ -125,7 +126,51 @@ it.each(["target_activity_unknown", "input_box_not_empty"])("a person's notice n
     // A --skip-map compaction has no map to name (owedRestore.mapPath is absent), so the route without one is in words.
     expect(row.body).toContain("If it showed none, because this compaction skipped its map, ask the seat to restore from its restore-pending marker, or from its own transcript if the marker is missing.");
     expect(row.body.includes("inspect the pane and clear or submit that text")).toBe(reason === "input_box_not_empty");
+    // An uptake notice to a person keeps the map on the host too.
+    await reportRestoreUptakeUnknown(db, queue, { sessionName: failure.sessionName, attemptId: "person-uptake", mapPath: failure.mapPath,
+      doneAt: "2026-01-01T00:10:00.000Z", waitedMinutes: 30 });
+    const uptake = queue.getById("qitem-compaction-uptake-person-uptake")!;
+    expect(uptake.destinationSession).toBe(human.address);
+    expect(uptake.evidenceRef).toBeNull();
+    for (const text of [uptake.body, uptake.summary]) {
+      expect(text).not.toContain(sessionId);
+      expect(text).not.toContain("/tmp/claude-compaction-restore");
+    }
+    expect(uptake.body).toContain("ask it to restore from its newest restore map.");
   } finally { selected.mockRestore(); db.close(); }
+});
+
+it("a restore whose uptake is unknown tells the seat's owner once, with its map, and never calls it failed", async () => {
+  const db = createDb();
+  migrate(db, ALL_MIGRATIONS);
+  try {
+    const rigs = new RigRepository(db), sessions = new SessionRegistry(db);
+    const rig = rigs.createRig("uptake-notice");
+    const ownerName = deriveCanonicalSessionName("dev", "owner", "uptake-notice");
+    const seatName = deriveCanonicalSessionName("dev", "writer", "uptake-notice");
+    const owner = rigs.addNode(rig.id, "owner", { runtime: "claude-code" });
+    const seat = rigs.addNode(rig.id, "writer", { runtime: "claude-code" });
+    sessions.registerSession(owner.id, ownerName);
+    sessions.updateBinding(owner.id, { tmuxSession: ownerName });
+    sessions.registerSession(seat.id, seatName);
+    rigs.addEdge(rig.id, owner.id, seat.id, "delegates_to");
+    const send = vi.fn(async () => ({ ok: true, verified: true }));
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }), transport: { send } });
+    const unknown = { sessionName: seatName, attemptId: "attempt-up", mapPath: "/maps/attempt-up/RESTORE-MAP.md", doneAt: "2026-11-21T03:00:00.000Z", waitedMinutes: 30 };
+    await reportRestoreUptakeUnknown(db, queue, unknown);
+    await reportRestoreUptakeUnknown(db, queue, unknown);
+    const row = queue.getById("qitem-compaction-uptake-attempt-up")!;
+    expect(row.destinationSession).toBe(ownerName);
+    expect(row.summary).toBe(`Managed restore for ${seatName}: uptake unknown (no restore note 30 minutes after the audit was sent)`);
+    expect(row.body).toContain("the last at 2026-11-21T03:00:00.000Z");
+    expect(row.body).toContain("whether the seat took up the restore is unknown");
+    expect(row.body).toContain("OpenRig resends nothing.");
+    expect(row.body).toContain("send it a restore request naming this map: /maps/attempt-up/RESTORE-MAP.md.");
+    expect(row.body).not.toMatch(/undeliverable|restore failed/);
+    expect(row.evidenceRef).toBe("/maps/attempt-up/RESTORE-MAP.md");
+    expect(row.tags).toEqual(expect.arrayContaining(["restore-uptake", "attempt:attempt-up"]));
+    expect(send).toHaveBeenCalledTimes(1);
+  } finally { db.close(); }
 });
 
 it("preparation loop finds its owner once across attempts and honors the owner's disposition", async () => {
