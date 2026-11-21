@@ -178,6 +178,7 @@ edges:
 | `summary` | string | no | — | Human-readable description. Shown in the spec library, review surfaces and `rig specs preview` (in `rig specs show` only with `--json`). |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
 | `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
+| `seat_slice` | string | no | — | Linux/systemd hosts only, opt-in. `rig` starts every seat the rig launches, with or without `process_limits`, in a systemd user scope beneath the rig's own slice, `openrigseats-<rig>.slice` under `openrigseats.slice`, so a weight you set on that slice in your user manager covers the whole rig. `rig` is the only value; omit the key to keep today's launch paths. OpenRig sets no CPU weight. See "Seat grouping by rig" below. |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `env` | map | no | — | Launch environment for every seat in the rig: `NAME: value` pairs. A member's own `env` overrides it name by name. Names match `^[A-Z_][A-Z0-9_]*$`, names starting `OPENRIG_` are reserved, and values must be non-empty strings (quote numbers and booleans). Values are not secret. See "Launch environment" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's `AGENTS.md` and a fresh Codex 0.164.0+ seat normally gets launch developer instructions; a link, a conflicting or unreadable Codex config layer, or a resume keeps the repository file. See [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences). See "Choosing the Claude instruction file" below. |
@@ -1133,7 +1134,7 @@ members:
   before. `tasks_max` and `memory_max` are the only supported keys; any other key, such as a CPU limit, is refused by
   name rather than accepted and ignored.
 - **The boundary:** The seat's pane command starts in a transient `systemd-run --user --scope` of its own, in
-  `openrigseats.slice`, with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
+  `openrigseats.slice` (beneath its rig's slice there when the rig sets `seat_slice: rig`), with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
   seat's processes leave the terminal server's scope:
   a limit an operator put on that scope no longer covers this seat. The other seats, the daemon and the terminal server
   stay where they were, outside this seat's limit. Processes the seat itself starts through `systemd-run --user` land
@@ -1243,6 +1244,52 @@ members:
   The stored value stays as it is, and the export names the seat: a `# Not carried:` line at the top of the YAML (which
   `rig export` prints) with how to fix or clear it, and the `X-OpenRig-Export-Warnings` header on YAML and JSON (which
   `rig spec show --json` prints as a warning).
+
+### Seat grouping by rig (`seat_slice`, Linux/systemd)
+
+Set `seat_slice: rig` at the top of a rig spec to start every seat that rig launches in a scope beneath a slice of the
+rig's own, so the systemd user manager can share the machine between rigs rather than between seats:
+
+```yaml
+version: "0.2"
+name: alpha
+seat_slice: rig
+pods: [...]
+```
+
+- **The slice names:** a grouped seat's scope goes in `openrigseats-<rig>.slice`. A dash in a slice name is nesting to
+  systemd, so that slice sits directly beneath `openrigseats.slice`, the slice the scopes of seats with
+  `process_limits` already use. The rig's name is escaped as `systemd-escape` escapes a string (systemd.unit(5),
+  "String escaping"): every byte other than an ASCII letter, digit, `:`, `_` or `.` becomes `\xNN`, and so does a
+  leading `.`. Unlike `systemd-escape`, a `/` is escaped too (`\x2f`), so a rig name never adds a level. Rig `alpha`
+  uses `openrigseats-alpha.slice`; rig `lab-b` uses `openrigseats-lab\x2db.slice` (`systemd-escape lab-b` prints the
+  escaped part). Its cgroup is `<user manager>/openrigseats.slice/openrigseats-<escaped rig>.slice/`.
+- **Every seat, with or without limits:** a seat with `process_limits` gets its scope, with the same limits, checked the
+  same way, beneath the rig's slice instead of directly in `openrigseats.slice`. A seat without limits, which otherwise
+  starts in the terminal server's process tree, gets a scope with no limit beneath the rig's slice. Fresh launches,
+  restores, relaunches, respawns and a restart in place's respawn all start the seat there. A grouped seat without limits
+  also leaves the terminal server's scope, so any limit on that scope no longer covers it.
+- **Weights are yours:** OpenRig sets no CPU weight, quota or other property on any slice; it only names the slice
+  when it starts a scope. Give the rigs their shares in your systemd user manager, at run time or in a drop-in, for
+  example `systemctl --user set-property openrigseats-alpha.slice CPUWeight=200`, or
+  `~/.config/systemd/user/openrigseats-alpha.slice.d/weight.conf` with `[Slice]` and `CPUWeight=200`. A weight takes
+  effect only where the cpu controller is delegated to the user manager (see
+  `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers`).
+- **When it takes effect:** the rig stores the setting when it is created from its spec, as it does its other top-level
+  keys, and each seat launch reads it. A seat starts beneath the rig's slice at its next launch. OpenRig never moves or
+  restarts a running seat for it. A rig created from a spec without the key keeps its seats ungrouped; to group them,
+  add the key and create the rig from the spec again (`rig up <spec>` replaces a stopped rig of that name with a new
+  one).
+- **Where grouping can't be applied:** the seat starts on today's path (the ungrouped scope in `openrigseats.slice` for a
+  seat with `process_limits`, with every limit checked and applied as without grouping; the terminal server's process
+  tree for a seat without), and the launch returns the warning `seat_slice requested, grouping not applied: <reason>`.
+  Grouping never refuses a launch. That covers a host without systemd or cgroup v2, a user manager that won't start
+  the scope (a masked slice, for example), a rig name whose slice name would exceed 255 characters, and a grouped scope
+  that fails after its check passed. The seat starts again on the ungrouped path only when its command is confirmed not
+  to have started; an unconfirmed start warns and stands, without another start. The next launch tries the rig's slice again.
+- **Status:** `rig seat status` reports `process_limits` as before; the scope it names sits beneath the rig's slice when
+  the seat is grouped. To see a seat's placement, read its pane process's cgroup (`cat /proc/<pid>/cgroup`) or
+  `systemctl --user status openrigseats-<rig>.slice`.
 
 ### Status line throttle (`runtime: claude-code`)
 

@@ -68,7 +68,7 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "seat_slice", "env",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
@@ -203,6 +203,11 @@ export class RigSpecSchema {
       errors.push("non_interruptive: must be a boolean");
     }
 
+    // #80: opt-in grouping of the rig's seat scopes beneath its own slice; `rig` is the one value.
+    if (obj["seat_slice"] !== undefined && obj["seat_slice"] !== "rig") {
+      errors.push('seat_slice: must be "rig" (omit it to keep seats ungrouped)');
+    }
+
     // Launch environment for every seat in the rig; a member's own env overrides it.
     if (obj["env"] !== undefined) errors.push(...validateSeatEnv(obj["env"], "env"));
 
@@ -284,6 +289,7 @@ export class RigSpecSchema {
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
+      ...(raw["seat_slice"] === "rig" ? { seatSlice: "rig" as const } : {}),
       env: normalizeSeatEnv(raw["env"]),
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,

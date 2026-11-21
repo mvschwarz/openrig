@@ -851,6 +851,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // #3253: a seat's own process limits (rig spec `process_limits`), read from its node at each launch.
   tmuxAdapter.seatProcessLimits = (nodeId) => rigRepo.getNodeProcessLimits(nodeId);
+  // #80: the rig whose slice a seat's new scopes go beneath (rig spec `seat_slice: rig`), read at each launch.
+  tmuxAdapter.seatSliceRig = (nodeId) => rigRepo.getNodeSeatSliceRig(nodeId);
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
     platform: opts?.tmuxOptionPlatform,
