@@ -7,11 +7,11 @@ import Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { deriveSessionName } from "../src/domain/session-name.js";
-const live = vi.hoisted(() => ({ original: false, reason: "The exact current native identity is unavailable", afterResolve: undefined as (() => void) | undefined }));
+const live = vi.hoisted(() => ({ original: false, reason: "The exact current native identity is unavailable", code: undefined as string | undefined, afterResolve: undefined as (() => void) | undefined }));
 vi.mock("../src/domain/expected-conversation.js", async original => ({
   ...await original<typeof import("../src/domain/expected-conversation.js")>(),
   resolveExpectedConversation: vi.fn(async () => {
-    if (!live.original) throw new Error(live.reason);
+    if (!live.original) throw Object.assign(new Error(live.reason), live.code ? { code: live.code } : {});
     live.afterResolve?.();
     return { assertCurrent() {}, generation: "fixture-generation", pane: "%1" };
   }),
@@ -24,7 +24,7 @@ describe("opt-in original conversation resume", () => {
   let setup: ReturnType<typeof createTestApp>;
   const token = "banked-private-native-original";
   beforeEach(() => {
-    live.original = false; live.afterResolve = undefined; live.reason = "The exact current native identity is unavailable";
+    live.original = false; live.afterResolve = undefined; live.reason = "The exact current native identity is unavailable"; live.code = undefined;
     db = createFullTestDb();
     setup = createTestApp(db, { listProcesses: async () => [
       { pid: 1234, ppid: 1, command: "zsh" },
@@ -230,6 +230,65 @@ describe("opt-in original conversation resume", () => {
     expect(r.status).toBe(409);
     expect(await r.json()).toMatchObject({ ok: false, partial: true, code: "resume_unconfirmed" });
     expect(db.prepare("SELECT account_home FROM nodes WHERE id=?").get(f.node.id)).toEqual({ account_home: "/changed-after-identity" });
+  });
+
+  describe("the preview compares the seat's current conversation with the saved one, not only the saved history row", () => {
+    const preview = async (f: ReturnType<typeof fixture>) => {
+      const r = await request(f.path + `?snapshotId=${f.refs.snapshotId}&historySessionId=${f.refs.historySessionId}`);
+      return { status: r.status, body: await r.json() as Record<string, any> };
+    };
+    // Another conversation launched in the seat since the snapshot: its newer session row names it, the saved row is unchanged.
+    const launchedSince = (f: ReturnType<typeof fixture>, conversation: string | null) => {
+      const later = setup.sessionRegistry.registerSession(f.node.id, f.source.sessionName);
+      if (conversation) db.prepare("UPDATE sessions SET resume_type='claude_name',resume_token=? WHERE id=?").run(conversation, later.id);
+    };
+    // The seat runs an agent now: a live terminal whose foreground is Claude.
+    const running = () => { setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "present" as const })); };
+
+    it("answers selection_changed when a newer session row names another conversation", async () => {
+      const f = fixture(); launchedSince(f, "post-clear-other-conversation");
+      const { status, body } = await preview(f);
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ ok: false, code: "selection_changed" });
+      expect(body.message).toContain("This seat's record changed since it was saved");
+      expect(JSON.stringify(body)).not.toContain(token); expect(JSON.stringify(body)).not.toContain("post-clear-other-conversation");
+    });
+
+    it("answers current_conversation_unknown when a newer session row records no conversation", async () => {
+      const f = fixture(); launchedSince(f, null);
+      const { status, body } = await preview(f);
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ ok: false, code: "current_conversation_unknown" });
+    });
+
+    it("still previews the saved one when a newer session row resumed that same conversation", async () => {
+      const f = fixture(); launchedSince(f, token);
+      expect((await preview(f)).status).toBe(200);
+    });
+
+    it("answers selection_changed when a /clear moved the running agent's identity while the saved history row is unchanged", async () => {
+      const f = fixture(); running();
+      live.code = "expected_identity_mismatch"; live.reason = "The current native conversation differs from the expected original.";
+      const { status, body } = await preview(f);
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ ok: false, code: "selection_changed", identityEvidence: { code: "expected_identity_mismatch" } });
+      expect(db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.source.id)).toEqual({ resume_token: token });
+      expect(JSON.stringify(body)).not.toContain(token);
+    });
+
+    it("answers current_conversation_unknown, never a 200 naming the saved one, when the running agent's identity can't be established", async () => {
+      const f = fixture(); running();
+      const { status, body } = await preview(f);
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ ok: false, code: "current_conversation_unknown",
+        identityEvidence: { code: "expected_identity_unavailable", detail: "The exact current native identity is unavailable" } });
+      expect(body).not.toHaveProperty("forecast");
+    });
+
+    it("previews the saved one while the running agent is proved to be that conversation", async () => {
+      const f = fixture(); running(); live.original = true;
+      expect((await preview(f)).status).toBe(200);
+    });
   });
 
   it("names the missing fresh native evidence after a reported successful resume", async () => {

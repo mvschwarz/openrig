@@ -420,7 +420,12 @@ It resumes only while the seat's recorded session still names the banked convers
 or new conversation in that seat normally records a different one, and so does a changed resume type or
 restore policy. After that, the preview answers `selection_changed` with "This seat's record changed since it
 was saved", naming `rig snapshot <rig>` to save the current conversation, and a resume request returns a
-partial `selection_changed` result. A changed runtime is refused earlier: the preview answers
+partial `selection_changed` result. The preview compares the seat's current conversation, not only the saved
+history row: a session launched since the snapshot that names another conversation, or a running agent whose
+proved native identity is another one, also answers `selection_changed`. When the current conversation can't
+be established (a newer session that records none, or a running agent whose identity can't be proved), the
+preview answers `current_conversation_unknown`, with `identityEvidence` for a running agent, and returns no
+`revision`. A changed runtime is refused earlier: the preview answers
 `source_unavailable`, also naming `rig snapshot <rig>`, and a resume request returns a partial
 `original_changed` result.
 

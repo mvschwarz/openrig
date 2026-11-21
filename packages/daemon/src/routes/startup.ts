@@ -343,6 +343,43 @@ function redactDiagnostic(value: string | null | undefined, tokens: readonly str
   return tokens.reduce((text, token) => text.replaceAll(token, "[redacted]"), value);
 }
 
+type CurrentOriginal = { kind: "same" }
+  | { kind: "changed" | "unknown"; message: string; identityEvidence?: { code: string; detail: string } };
+
+/** For the original-only preview: whether the seat's current conversation is still the banked one. The selected history
+ *  row can keep its token while the seat has moved on, so it isn't enough by itself. A newer session row (a launch since
+ *  the snapshot) is what the seat's record names now, and a running agent's proved native identity is what it runs now.
+ *  Another conversation is `changed`; one that can't be established is `unknown`, never read as the banked one. */
+async function currentOriginal(c: Context, rigName: string, node: Node, refs: HistoryRefs, snapshot: Snapshot,
+  observed: { state: string; sessionName: string }): Promise<CurrentOriginal> {
+  const banked = snapshot.data.sessions.find(row => row.nodeId === node.id && row.id === refs.historySessionId)?.resumeToken ?? null;
+  const newest = repo(c).db.prepare("SELECT id, resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as
+    { id: string; resume_token: string | null } | undefined;
+  if (newest && newest.id !== refs.historySessionId) {
+    if (!newest.resume_token) return { kind: "unknown", message: `This seat was launched again since it was saved, and that launch hasn't recorded which conversation it runs, so this preview can't tell whether it's still the saved one. Check the seat with rig seat status ${observed.sessionName}; to save its current conversation, run rig snapshot ${rigName}.` };
+    if (newest.resume_token !== banked) return { kind: "changed", message: recordChanged(rigName) };
+  }
+  // Only a running agent has a current conversation to compare; a stopped seat or an idle shell is the record's to say.
+  if (observed.state !== "running" || (node.runtime !== "claude-code" && node.runtime !== "codex")) return { kind: "same" };
+  const unknownRunning = `This seat is running, and its current conversation couldn't be established, so this preview can't say whether it's still the saved one. identityEvidence says why; check the seat with rig seat status ${observed.sessionName}.`;
+  if (!banked) return { kind: "unknown", message: unknownRunning };
+  try {
+    await resolveExpectedConversation({ nodeId: node.id, sessionName: observed.sessionName, runtime: node.runtime, nativeId: banked },
+      sessions(c), tmux(c), dep<ContextUsageStore | undefined>(c, "contextUsageStore"));
+    return { kind: "same" };
+  } catch (error) {
+    const code = (error as { code?: string }).code ?? "expected_identity_unavailable";
+    const identityEvidence = { code, detail: redactDiagnostic(error instanceof Error ? error.message : String(error), [banked]) ?? "Current native identity could not be read." };
+    return code === "expected_identity_mismatch"
+      ? { kind: "changed", identityEvidence, message: `This seat is running a different conversation from the saved one, or its occupant changed while it was read, so the saved conversation can't be resumed from here. Refresh the review; to save the current conversation, run rig snapshot ${rigName}.` }
+      : { kind: "unknown", identityEvidence, message: unknownRunning };
+  }
+}
+
+function recordChanged(rigName: string): string {
+  return `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${rigName}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.`;
+}
+
 // The list/validate contract supplies both references. This review adds the
 // consent revision for precisely one captured row, without native preparation.
 async function reviewSelectedHistory(c: Context, retained = false) {
@@ -360,12 +397,16 @@ async function reviewSelectedHistory(c: Context, retained = false) {
   if (!facts) return c.json({ ok: false, code: "selection_changed", message: "The selected source changed. Refresh the history list." }, 409);
   // The saved snapshot still stands, but the seat's own record no longer matches it, most often because a /clear,
   // /resume or new conversation recorded a different conversation; refreshing would show the same saved one again.
-  if (!state) return c.json({ ok: false, code: "selection_changed",
-    message: `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
+  if (!state) return c.json({ ok: false, code: "selection_changed", message: recordChanged(facts.rig.rig.name) }, 409);
   const forecast = buildRestorePlanPreview({ ...facts.rig, nodes: [facts.node] }, facts.snapshot,
     collectPreviewSessionRows(repo(c).db, { ...facts.rig, nodes: [facts.node] }, facts.snapshot), undefined, Date.now(), {},
     { nodeId, historySessionId: refs.historySessionId }).nodes[0]!;
   const observed = await observeSeat(c, facts.rig, facts.node);
+  if (retained) {
+    const current = await currentOriginal(c, facts.rig.rig.name, facts.node, refs, facts.snapshot, observed);
+    if (current.kind !== "same") return c.json({ ok: false, code: current.kind === "changed" ? "selection_changed" : "current_conversation_unknown",
+      message: current.message, ...(current.identityEvidence ? { identityEvidence: current.identityEvidence } : {}) }, 409);
+  }
   const checked = selectedState(c, rigId, nodeId, refs, facts.snapshot);
   if (checked && "permissionUnavailable" in checked) return c.json({ ok: false, code: "permission_unavailable",
     message: "The selected seat's saved permission choice needs repair before launch." }, 409);
