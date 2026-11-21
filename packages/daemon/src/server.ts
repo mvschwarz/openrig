@@ -1001,8 +1001,8 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
-    // A page never carries a configured token: anyone who can reach the daemon can load one. A person who holds the
-    // tokens gives them to the UI once, in its address (?termToken=…&mcToken=…), and the page keeps them in that browser.
+    // The page is served as built. The UI takes its tokens from its address (?termToken=…&mcToken=…), given once by the
+    // person who holds them, and keeps them in that browser.
     return c.html(fs.readFileSync(uiIndexPath, "utf-8"));
   });
 

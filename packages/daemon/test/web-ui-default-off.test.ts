@@ -114,7 +114,7 @@ describe("web UI default off (ui.enabled)", () => {
     expect((await app.request("/assets/app.js")).status).toBe(200);
   });
 
-  it("puts no configured token in any page, the routed fallback or a file served directly", async () => {
+  it("serves the UI's pages as built, with no configured token in them", async () => {
     const MC_TOKEN = "web-ui-mission-control-token";
     const app = createApp(fixture({ webUiEnabled: true, terminalBearerToken: TOKEN, missionControlBearerToken: MC_TOKEN }));
     for (const path of ["/", "/specs", "/rigs/rig-1/nodes/dev.impl", "/index.html", "/assets/app.js", "/?termToken=other"]) {

@@ -1,6 +1,5 @@
-// The daemon puts no token in its pages, so a person who holds them gives them to the UI in its address once:
-// ?termToken=…&mcToken=…. The page keeps them in this browser, takes them out of the address, and its protected
-// requests carry them.
+// A person who holds the daemon's tokens gives them to the UI in its address once: ?termToken=…&mcToken=…. The page
+// keeps them in this browser, takes them out of the address, and its protected requests carry them.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MISSION_CONTROL_BEARER_STORAGE_KEY,
@@ -55,5 +54,5 @@ describe("the UI's credential entry", () => {
     expect(terminalAuthHeaders().Authorization).toBe(`Bearer ${TERM}`);
     expect(missionControlAuthHeaders().Authorization).toBe(`Bearer ${MC}`);
     expect(window.location.search).toBe("");
-  });
+  }, 20_000); // the entry's first import compiles its styles, which took over 5 s on a loaded machine
 });
