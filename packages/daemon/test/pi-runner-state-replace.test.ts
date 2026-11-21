@@ -7,8 +7,8 @@ import { piSeatPaths, type PiRunnerState } from "../src/adapters/pi-runner-proto
 
 // On these two paths, the launch-error exit record and the OMP sidecar write, the real runner entry
 // replaces runner-state.json (temporary file + rename, mode 0600) instead of truncating it in place.
-// The fixture pre-creates the record as 0644: an in-place write would keep that inode and mode,
-// whatever the umask; the helper's rename gives a new inode with mode 0600.
+// Keep the original file open as startup stamps it with the pending record. After
+// an atomic replacement the open handle still sees pending, even after more writes.
 const RUNNER = nodePath.join(__dirname, "..", "src", "adapters", "pi-runner.ts");
 const FAKE_OMP = String.raw`
 const argv = process.argv.slice(2), sessionFile = argv[argv.indexOf("--session") + 1] || process.env.FAKE_SESSION;
@@ -20,9 +20,15 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
 `;
 
 let root: string | null = null;
-afterEach(() => { if (root) fs.rmSync(root, { recursive: true, force: true }); root = null; });
+let priorRecord: number | undefined;
+afterEach(() => {
+  if (priorRecord !== undefined) fs.closeSync(priorRecord);
+  priorRecord = undefined;
+  if (root) fs.rmSync(root, { recursive: true, force: true });
+  root = null;
+});
 
-function seatWithPriorRecord(withOmp: boolean): { bin: string; stateRoot: string; sidecar: string; seatDir: string; sessionFile: string; ino: number } {
+function seatWithPriorRecord(withOmp: boolean): { bin: string; stateRoot: string; sidecar: string; seatDir: string; sessionFile: string; priorRecordFd: number } {
   root = fs.realpathSync(fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-runner-state-")));
   const bin = nodePath.join(root, "bin");
   fs.mkdirSync(bin);
@@ -38,7 +44,8 @@ function seatWithPriorRecord(withOmp: boolean): { bin: string; stateRoot: string
   fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: "s" })}\n`);
   fs.writeFileSync(seat.runnerStatePath, JSON.stringify({ ready: false, updatedAt: "2026-11-17T00:00:00Z", lastEntryId: "e-1" }));
   fs.chmodSync(seat.runnerStatePath, 0o644);
-  return { bin, stateRoot, sidecar: seat.runnerStatePath, seatDir, sessionFile, ino: fs.statSync(seat.runnerStatePath).ino };
+  priorRecord = fs.openSync(seat.runnerStatePath, "r");
+  return { bin, stateRoot, sidecar: seat.runnerStatePath, seatDir, sessionFile, priorRecordFd: priorRecord };
 }
 
 function runOmpRunner(path: string, stateRoot: string, sessionFile: string) {
@@ -54,29 +61,30 @@ function runOmpRunner(path: string, stateRoot: string, sessionFile: string) {
   return { child, closed, output: () => output };
 }
 
-function expectReplacedByHelper(sidecar: string, seatDir: string, priorIno: number): void {
+function expectReplacedByHelper(sidecar: string, seatDir: string, priorRecordFd: number): void {
   const stat = fs.statSync(sidecar);
   expect(stat.mode & 0o777).toBe(0o600);
-  expect(stat.ino).not.toBe(priorIno);
+  const pending = JSON.parse(fs.readFileSync(priorRecordFd, "utf8"));
+  expect(pending).toEqual({ ready: false, launchId: "launch-1", lastEntryId: "e-1", updatedAt: expect.any(String) });
   expect(fs.readdirSync(seatDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 }
 
-describe.skipIf(process.platform === "win32")("runner-state.json is replaced, never written in place", () => {
+describe.skipIf(process.platform === "win32")("final runner-state.json records replace the pending file", () => {
   it("the launch-error exit record (the runtime executable does not resolve)", async () => {
     // Given a prior 0644 record and a PATH that is only an empty directory, so `omp` cannot resolve on any host.
-    const { bin, stateRoot, sidecar, seatDir, sessionFile, ino } = seatWithPriorRecord(false);
+    const { bin, stateRoot, sidecar, seatDir, sessionFile, priorRecordFd } = seatWithPriorRecord(false);
     const run = runOmpRunner(bin, stateRoot, sessionFile);
     await run.closed;
     // Then the runner exits 127 and records it through the helper, keeping the durable cursor.
     expect(run.child.exitCode, run.output()).toBe(127);
     const state = JSON.parse(fs.readFileSync(sidecar, "utf8")) as PiRunnerState;
     expect(state).toMatchObject({ ready: false, launchId: "launch-1", lastEntryId: "e-1", exited: { code: 127 } });
-    expectReplacedByHelper(sidecar, seatDir, ino);
+    expectReplacedByHelper(sidecar, seatDir, priorRecordFd);
   }, 20_000);
 
   it("the OMP sidecar record (writeSidecar)", async () => {
     // Given a prior 0644 record and an `omp` that answers ready and get_state.
-    const { bin, stateRoot, sidecar, seatDir, sessionFile, ino } = seatWithPriorRecord(true);
+    const { bin, stateRoot, sidecar, seatDir, sessionFile, priorRecordFd } = seatWithPriorRecord(true);
     const run = runOmpRunner(`${bin}:/usr/bin:/bin`, stateRoot, sessionFile);
     try {
       // When the core reports the seat ready (the readiness wait, not a timing race).
@@ -88,7 +96,7 @@ describe.skipIf(process.platform === "win32")("runner-state.json is replaced, ne
       // Then the ready record went through the helper.
       expect(state?.ready, run.output()).toBe(true);
       expect(state?.launchId).toBe("launch-1");
-      expectReplacedByHelper(sidecar, seatDir, ino);
+      expectReplacedByHelper(sidecar, seatDir, priorRecordFd);
     } finally {
       run.child.kill();
       await run.closed;
