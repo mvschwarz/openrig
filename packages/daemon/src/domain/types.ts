@@ -809,6 +809,7 @@ export interface SeatIdentityVerdict {
     | "pane_pid_gone"
     | "binding_pane_missing"
     | "session_missing"
+    | "session_missing_tmux_unavailable"
     | "pane_exited"
     | "tmux_unavailable"
     | null;
@@ -825,10 +826,11 @@ export interface SeatIdentityVerdict {
   observedAt: string;
 }
 
-/** Only a confirmed missing session proves the seat is no longer running.
+/** Only a confirmed missing session proves the seat is no longer running. A later unreadable sample
+ * retains that evidence and notes its uncertainty; it is not a new absence observation.
  * Callers must first gate the verdict to the current session and binding. */
 export function identityVerdictConfirmsSessionMissing(verdict: SeatIdentityVerdict | null | undefined): boolean {
-  return verdict?.reason === "session_missing";
+  return verdict?.reason === "session_missing" || verdict?.reason === "session_missing_tmux_unavailable";
 }
 
 /** Positive executor absence only. Unknown identity or an unreadable pane never proves an exit.

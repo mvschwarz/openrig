@@ -787,8 +787,8 @@ export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: strin
 
 /** Current positive stopped-executor evidence, without conflating a retained pane with a missing session. */
 export function nodeExecutorStoppedReason(db: Database.Database, nodeId: string): "session_missing" | "pane_exited" | null {
-  const reason = currentIdentityVerdict(db, nodeId)?.reason;
-  return reason === "session_missing" || reason === "pane_exited" ? reason : null;
+  const verdict = currentIdentityVerdict(db, nodeId);
+  return identityVerdictConfirmsSessionMissing(verdict) ? "session_missing" : verdict?.reason === "pane_exited" ? "pane_exited" : null;
 }
 
 export function nodeExecutorConfirmedStopped(db: Database.Database, nodeId: string): boolean {
