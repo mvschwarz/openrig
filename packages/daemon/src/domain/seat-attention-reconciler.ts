@@ -201,51 +201,69 @@ export async function rebindAndVerifyPaneIdentity(input: {
   }
 
   const pane = panes[0]!;
+  const unreadablePid = `PID of tmux pane '${printable(pane.id)}' could not be read`;
   let pid: number | null;
   let command: string | null;
   try {
     pid = await input.tmux.getPanePid(pane.id);
+    // The adapter returns null after a read failure. Only the pane listing above proves absence.
+    if (pid === null) return unavailable(unreadablePid);
     command = await input.tmux.getPaneCommand(pane.id);
+    if (command === null) return unavailable(`foreground command of tmux pane '${printable(pane.id)}' could not be read`);
     observedAt = now();
   } catch (error) {
     return unavailable(error);
   }
   let runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
-  const normalizedCommand = command?.trim().toLowerCase() ?? "";
+  const normalizedCommand = command.trim().toLowerCase();
   let lineageMatch: ProcessRow | null = null;
   const expectedResumeToken = input.expectedResumeToken ?? null;
   const strictNativeLineage = input.requireExactResumeLineage === true
     && expectedResumeToken !== null
     && (input.runtime === "claude-code" || input.runtime === "codex");
-  const claudeWrapper = pid !== null && input.runtime === "claude-code"
+  const claudeWrapper = input.runtime === "claude-code"
     && runtimeMatch === "mismatch" && isShellForeground(normalizedCommand);
   // A native install may report its version as the pane label. This selects
   // exact process verification; the label itself is never identity evidence.
-  const claudeVersionLabel = pid !== null && input.runtime === "claude-code"
+  const claudeVersionLabel = input.runtime === "claude-code"
     && input.requireExactResumeLineage !== true
     && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(normalizedCommand);
   const claudeProcessProof = claudeWrapper || claudeVersionLabel;
+  let nativePidUnreadable = false;
+  const observationTmux = {
+    getPanePid: async (target: string) => {
+      const observedPid = await input.tmux.getPanePid(target);
+      if (observedPid === null) nativePidUnreadable = true;
+      return observedPid;
+    },
+  };
   const recheckPane = async () => {
     try {
       const currentPanes = await input.tmux.listPanes(input.sessionName);
+      if (currentPanes.length !== 1 || currentPanes[0]?.id !== pane.id) {
+        return { ok: true as const, sameProcess: false };
+      }
       const currentPid = await input.tmux.getPanePid(pane.id);
-      return { ok: true as const, panes: currentPanes, pid: currentPid };
+      if (currentPid === null || (currentPid === pid && nativePidUnreadable)) {
+        return { ok: false as const, error: unreadablePid };
+      }
+      return { ok: true as const, sameProcess: currentPid === pid };
     } catch (error) { return { ok: false as const, error }; }
   };
   if (input.runtime === "codex") {
     // A shell/Node label describes the wrapper, not the native occupant.
     runtimeMatch = "match";
-    const native = await verifyCodexPaneProcess({ target: pane.id, tmux: input.tmux,
+    const native = await verifyCodexPaneProcess({ target: pane.id, tmux: observationTmux,
       listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
       requireResume: input.requireExactResumeLineage === true, requireArgv: true });
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);
-    if (native?.panePid === pid && current.pid === pid && current.panes.length === 1 && current.panes[0]?.id === pane.id) lineageMatch = native.process;
+    if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
   } else if (claudeProcessProof) {
     // A known token always requires exact proof. Only non-strict, tokenless
     // wrappers and version labels may use runtime occupancy; this never proves resume continuity.
     runtimeMatch = "match";
-    const observation = { target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses,
+    const observation = { target: pane.id, tmux: observationTmux, listProcesses: input.listProcesses,
       selectedExecutable: input.launchedExecutable?.path, scriptLaunch: input.launchedExecutable?.isScript };
     const native = expectedResumeToken !== null
       ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
@@ -253,8 +271,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
       : !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);
-    if (native?.panePid === pid && current.pid === pid && current.panes.length === 1 && current.panes[0]?.id === pane.id) lineageMatch = native.process;
-  } else if (pid !== null && runtimeMatch === "match" && strictNativeLineage) {
+    if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
+  } else if (runtimeMatch === "match" && strictNativeLineage) {
     try {
       lineageMatch = findExactNativeResumeProcess(
         // Full rows (process group, OS executable): the strict finder's launcher rules need them.
@@ -268,7 +286,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
       if (lineageMatch) {
         const current = await recheckPane();
         if (!current.ok) return unavailable(current.error);
-        if (current.panes.length !== 1 || current.panes[0]?.id !== pane.id || current.pid !== pid) lineageMatch = null;
+        if (!current.sameProcess) lineageMatch = null;
       }
     } catch {
       // Missing process evidence is ambiguity, never positive identity.
@@ -281,28 +299,24 @@ export async function rebindAndVerifyPaneIdentity(input: {
   // counts: the selection recorded on the session being rebound.
   const selected = (input.db.prepare(`SELECT ${sessionCommunityHarnessSelect(input.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1`)
     .get(input.nodeId, input.sessionName) as { community_harness: string | null } | undefined)?.community_harness;
-  const unconfirmed = pid !== null && runtimeMatch !== "mismatch" && !runtimeAmbiguous && !!communityHarnessOf(selected, input.runtime);
+  const unconfirmed = runtimeMatch !== "mismatch" && !runtimeAmbiguous && !!communityHarnessOf(selected, input.runtime);
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
-    verdict: pid === null
-      ? "pane_missing"
-      : runtimeMatch === "mismatch" || runtimeAmbiguous
-        ? "mismatch"
-        : unconfirmed ? "unconfirmed" : "verified",
+    verdict: runtimeMatch === "mismatch" || runtimeAmbiguous
+      ? "mismatch"
+      : unconfirmed ? "unconfirmed" : "verified",
     evidenceSource: "pane_process",
-    reason: pid === null
-      ? "pane_pid_gone"
-      : runtimeMatch === "mismatch"
-        ? "process_identity_mismatch"
-        : runtimeAmbiguous
-          ? "process_identity_ambiguous"
+    reason: runtimeMatch === "mismatch"
+      ? "process_identity_mismatch"
+      : runtimeAmbiguous
+        ? "process_identity_ambiguous"
         : unconfirmed ? "process_identity_unconfirmed" : null,
     evidence: {
       registeredPane: pane.id,
       observedPid: lineageMatch?.pid ?? pid,
       observedPanePid: pid,
       observedCommand: lineageMatch?.command ?? command,
-      matchedLayer: pid === null || runtimeAmbiguous || unconfirmed ? null : 1,
+      matchedLayer: runtimeAmbiguous || unconfirmed ? null : 1,
     },
     sessionName: input.sessionName,
     observedAt,
@@ -318,9 +332,6 @@ export async function rebindAndVerifyPaneIdentity(input: {
   });
   identityStore.upsert(verdict);
 
-  if (verdict.verdict === "pane_missing") {
-    return { ok: false, reason: "identity_unverified", detail: `tmux pane '${printable(pane.id)}' has no live process` };
-  }
   if (verdict.verdict === "mismatch") {
     if (runtimeAmbiguous) {
       // A process check ran for Codex, a Claude launch wrapper or version label, and an exact-resume Claude: name the part that failed.
@@ -340,17 +351,17 @@ export async function rebindAndVerifyPaneIdentity(input: {
         ok: false,
         reason: "identity_unverified",
         detail: failedCheck
-          ? `tmux pane '${printable(pane.id)}' (foreground command '${printable(command ?? "unknown")}') did not pass the process check for runtime '${input.runtime}': ${failedCheck}`
-          : `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' does not positively identify runtime '${input.runtime}'`,
+          ? `tmux pane '${printable(pane.id)}' (foreground command '${printable(command)}') did not pass the process check for runtime '${input.runtime}': ${failedCheck}`
+          : `tmux pane '${printable(pane.id)}' foreground command '${printable(command)}' does not positively identify runtime '${input.runtime}'`,
       };
     }
     return {
       ok: false,
       reason: "identity_unverified",
-      detail: `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' contradicts runtime '${input.runtime ?? "unknown"}'`,
+      detail: `tmux pane '${printable(pane.id)}' foreground command '${printable(command)}' contradicts runtime '${input.runtime ?? "unknown"}'`,
     };
   }
-  return { ok: true, pane: pane.id, pid: pid!, command,
+  return { ok: true, pane: pane.id, pid, command,
     ...(lineageMatch ? { nativeProcess: { pid: lineageMatch.pid, ...(lineageMatch.startedAt ? { startedAt: lineageMatch.startedAt } : {}) } } : {}) };
 }
 

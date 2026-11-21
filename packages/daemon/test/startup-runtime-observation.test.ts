@@ -15,7 +15,8 @@ describe("startup completion observes its runtime instead of inheriting cached i
   beforeEach(() => { db = createFullTestDb(); });
   afterEach(() => { vi.restoreAllMocks(); db.close(); });
 
-  function fixture(runtime: "claude-code" | "codex" | "terminal", state: "runtime" | "shell" | "missing" | "unreadable" | "version" | "rebound") {
+  function fixture(runtime: "claude-code" | "codex" | "terminal", state: "runtime" | "shell" | "missing" | "unreadable" |
+    "pid-unreadable" | "proof-pid-unreadable" | "command-unreadable" | "version" | "rebound") {
     const repo = new RigRepository(db);
     const registry = new SessionRegistry(db);
     const bus = new EventBus(db);
@@ -34,14 +35,22 @@ describe("startup completion observes its runtime instead of inheriting cached i
     };
     store.upsert(cached);
     let launchCompleted = false;
+    let pidReads = 0;
     const command = state === "shell" || runtime === "terminal" ? "bash"
       : state === "version" ? "2.1.89" : runtime === "claude-code" ? "claude" : "codex";
     const tmux = new TmuxAdapter(async (cmd) => {
       if (!launchCompleted) throw new Error("runtime observation preceded launch completion");
       if (state === "unreadable") throw new Error("fixture transport unavailable");
       if (cmd.includes("list-panes")) return state === "missing" ? "" : state === "rebound" ? "%2|0|/project|80|24|1" : "%1|0|/project|80|24|1";
-      if (cmd.includes("#{pane_pid}")) return state === "rebound" && cmd.includes("%2") ? "84" : "42";
-      if (cmd.includes("#{pane_current_command}")) return state === "rebound" ? (cmd.includes("%2") ? "codex" : "bash") : command;
+      if (cmd.includes("#{pane_pid}")) {
+        pidReads++;
+        if (state === "pid-unreadable" || (state === "proof-pid-unreadable" && pidReads === 2)) throw new Error("fixture PID read failed");
+        return state === "rebound" && cmd.includes("%2") ? "84" : "42";
+      }
+      if (cmd.includes("#{pane_current_command}")) {
+        if (state === "command-unreadable") throw new Error("fixture command read failed");
+        return state === "rebound" ? (cmd.includes("%2") ? "codex" : "bash") : command;
+      }
       throw new Error(`Unexpected fixture command: ${cmd}`);
     });
     const adapter: RuntimeAdapter = {
@@ -67,6 +76,16 @@ describe("startup completion observes its runtime instead of inheriting cached i
     return { start, store, cached, bus, node, session, tmux, registry };
   }
 
+  it("keeps a transient null in the native Codex proof unavailable when the pane still matches", async () => {
+    const f = fixture("codex", "proof-pid-unreadable");
+    const result = await f.start(false);
+
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready",
+      submission: { reasons: expect.arrayContaining([expect.stringContaining("Startup runtime observation is unavailable")]) } });
+    expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "mismatch", reason: "tmux_unavailable" });
+    expect(getLatestStartupFailedEvent(db, f.node.id, f.session.id)).toBeNull();
+  });
+
   for (const isRestore of [false, true]) {
     for (const runtime of ["claude-code", "codex"] as const) {
       it.each(["shell", "missing"] as const)(`${runtime}, restore=${isRestore}: cached verified cannot certify %s`, async state => {
@@ -88,6 +107,18 @@ describe("startup completion observes its runtime instead of inheriting cached i
         expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: runtime === "codex" ? "mismatch" : "tmux_unavailable", reason: "tmux_unavailable" });
         expect(getLatestStartupFailedEvent(db, f.node.id, f.session.id)).toBeNull();
         expect(db.prepare("SELECT seq FROM events WHERE type = 'node.startup_ready' AND node_id = ?").all(f.node.id)).toHaveLength(1);
+      });
+
+      it.each(["pid-unreadable", "command-unreadable"] as const)(`${runtime}, restore=${isRestore}: adapter maps %s to an unknown observation`, async state => {
+        const f = fixture(runtime, state);
+        const result = await f.start(isRestore);
+
+        expect(result).toMatchObject({ ok: true, startupStatus: "ready",
+          submission: { reasons: expect.arrayContaining([expect.stringContaining("Startup runtime observation is unavailable")]) } });
+        expect(f.store.getForNode(f.node.id)).toMatchObject({
+          verdict: runtime === "codex" ? "mismatch" : "tmux_unavailable", reason: "tmux_unavailable",
+        });
+        expect(getLatestStartupFailedEvent(db, f.node.id, f.session.id)).toBeNull();
       });
 
       it(`${runtime}, restore=${isRestore}: publishes a new positive observation before success`, async () => {

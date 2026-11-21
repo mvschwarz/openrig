@@ -51,10 +51,11 @@ export class SeatIdentityStore {
   /** Upsert one node's verdict by observation time, so an older sweep finishing late cannot replace a new launch's
    *  completion observation. The current verdict is replaced, pids included. The
    *  last observed process (`evidence_*`, with its own time) is refreshed only by a verdict that carries a pid; one
-   *  without a pid keeps it for the same session and clears it for another. */
-  upsert(v: SeatIdentityVerdict): void {
+   *  without a pid keeps it for the same session and clears it for another.
+   *  Returns whether the observation was accepted. */
+  upsert(v: SeatIdentityVerdict): boolean {
     const observedProcess = v.evidence.observedPid != null || v.evidence.observedPanePid != null;
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO seat_identity_verdicts
         (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid, observed_command, matched_layer, session_name, observed_at,
          evidence_pid, evidence_pane_pid, evidence_at)
@@ -94,6 +95,7 @@ export class SeatIdentityStore {
       evidence_pane_pid: observedProcess ? v.evidence.observedPanePid ?? null : null,
       evidence_at: observedProcess ? v.observedAt : null,
     });
+    return result.changes > 0;
   }
 
   /** Read all verdicts for the nodes of a rig, keyed by node_id. Defensive. */
