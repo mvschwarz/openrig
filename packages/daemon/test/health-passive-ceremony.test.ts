@@ -154,8 +154,58 @@ it("neither recursive diagnosis traffic nor prose closures become product progre
   expect(t.projection.list().records).toHaveLength(1);
   expect(t.projection.list().records[0]!.ceremony!.transitionIds).toHaveLength(30);
   t.time("2026-09-05T13:00:00Z");
-  expect(t.projection.list().records[0]!.freshness.state).toBe("stale");
-  expect((await t.service.evaluate("system:health", true)).actions.every((a) => a.action !== "create" && a.action !== "represent")).toBe(true);
+  // A quiet lineage is read successfully, so the read is fresh; its last activity does not move.
+  const quiet = t.projection.list().records[0]!;
+  expect(quiet.freshness.state).toBe("fresh");
+  expect(quiet.lastObservedAt).toBe("2026-09-05T12:00:29.000Z");
+  // An existing occurrence is not re-presented for a lineage that stayed quiet.
+  const actions = (await t.service.evaluate("system:health", true)).actions;
+  expect(actions.map((a) => a.action)).toEqual(["deferred"]);
+  expect(t.send).toHaveBeenCalledTimes(1); expect(t.service.list()).toHaveLength(1);
+});
+
+it("admits a quiet unassessed lineage once; repeated reads of unchanged evidence do not summon the owner again", async () => {
+  const t = await setup();
+  t.time("2026-09-05T13:00:00Z");
+  expect(t.projection.list().records[0]).toMatchObject({ status: "indeterminate", freshness: { state: "fresh" }, ceremony: { stage: "needs-diagnosis" } });
+  expect((await t.service.evaluate("system:health", true)).actions.map((a) => a.action)).toEqual(["create"]);
+  for (let i = 0; i < 3; i++) {
+    t.time(`2026-09-05T${14 + i}:00:00Z`);
+    expect((await t.service.evaluate("system:health", true)).actions.map((a) => a.action)).toEqual(["deferred"]);
+  }
+  expect(t.send).toHaveBeenCalledTimes(1); expect(t.service.list()).toHaveLength(1);
+});
+
+it("a matching false-positive assessment recorded after the lineage went quiet clears it; changed evidence reopens it", async () => {
+  const t = await setup(); const id = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.time("2026-09-05T13:00:00Z");
+  t.dispose(id, t.assessment("false-positive"));
+  expect(t.projection.list({ status: "cleared" }).records[0]).toMatchObject({ status: "cleared", freshness: { state: "fresh" }, lastObservedAt: "2026-09-05T12:00:29.000Z", ceremony: { stage: "cleared" } });
+  writeFileSync(t.proof, "Evidence changed after the assessment");
+  expect(t.projection.list().records[0]).toMatchObject({ status: "indeterminate", ceremony: { stage: "indeterminate" } });
+});
+
+it("a quiet lineage is never confirmed, even by an established assessment at the confirming ratio", async () => {
+  const t = await setup(); const id = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.time("2026-09-05T13:00:00Z");
+  t.dispose(id, t.assessment());
+  expect(t.projection.list().records[0]).toMatchObject({ status: "indeterminate", severity: "info", ceremony: { stage: "indeterminate" } });
+  expect(t.projection.list({ status: "active" }).records).toEqual([]);
+});
+
+it("incomplete or unavailable evidence stays indeterminate after the lineage went quiet", async () => {
+  const t = await setup(); const id = (await t.service.evaluate("system:health", true)).actions[0]!.qitemId;
+  t.time("2026-09-05T13:00:00Z");
+  t.dispose(id, t.assessment("false-positive"));
+  expect(t.projection.list({ status: "cleared" }).records).toHaveLength(1);
+  // Retention clips the opening transition: the cleared interval is no longer fully readable.
+  t.db.prepare("UPDATE queue_transitions SET ts = '2026-09-01T00:00:00.000Z' WHERE transition_id = 1").run();
+  expect(t.projection.list({ status: "cleared" }).records).toEqual([]);
+  expect(t.projection.list().records[0]).toMatchObject({ status: "indeterminate", ceremony: { stage: "indeterminate" } });
+  // A failed read reports the source unavailable and clears nothing.
+  vi.spyOn(t.source, "read").mockImplementation(() => { throw new Error("health_passive_queue_window_truncated"); });
+  expect(t.projection.list({ status: "cleared" }).records).toEqual([]);
+  expect(t.projection.coverage()).toEqual([expect.objectContaining({ status: "unavailable", reason: "health_passive_queue_window_truncated" })]);
 });
 
 
