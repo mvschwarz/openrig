@@ -26,6 +26,7 @@ function makeAdapter(opts: {
   limits?: Record<string, { tasksMax?: number; memoryMax?: number }>;
   /** What a probe beneath a rig slice prints or throws (default: its own cgroup path beneath that slice). */
   groupedProbe?: Answer;
+  defaultCommand?: string;
   /** tmux's session and global environment listings. */
   sessionEnv?: string; globalEnv?: string } = {}) {
   const shellCalls: string[] = [];
@@ -52,6 +53,7 @@ function makeAdapter(opts: {
     argvCalls.push(args);
     if (args.includes("show-environment")) return (args.includes("-g") ? opts.globalEnv : opts.sessionEnv) ?? "";
     if (args.some(arg => arg.includes("default-shell"))) return "/bin/bash";
+    if (args.includes("default-command")) return opts.defaultCommand ?? "";
     if (args.includes("#{pane_pid}")) return "4321";
     const capped = args.includes("source-file") ? writes.at(-1)?.includes("#{session_id} #{pid} #{start_time}") : args.some(arg => arg.includes("#{session_id} #{pid}"));
     if (capped) return "%1 $3 4242 1700000000";
@@ -203,6 +205,22 @@ describe("grouping that can't be applied: today's path, reported, never a refusa
 });
 
 describe("a grouped scope that fails after its check passed starts again on today's path", () => {
+  it("reports both notices when the recovery limit is invalid", async () => {
+    const h = makeAdapter({ sliceRigs: { "node-a": "alpha" } });
+    h.adapter.seatProcessLimits = () => { throw new Error("stored process_limits is invalid"); };
+    const result = await h.adapter.createSession("impl-a@alpha", "/work", A, { processLimitsMode: "recovery" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      processLimits: { state: "not_applied" },
+      warnings: expect.arrayContaining([
+        expect.stringContaining("process_limits requested, not applied"),
+        expect.stringContaining("seat_slice requested, grouping not applied"),
+      ]),
+    });
+    expect(h.seatScopes()).toEqual([]);
+  });
+
   it("reports both missing scope properties when a grouped, limited recovery cannot prepare its environment", async () => {
     const h = makeAdapter({ sliceRigs: { "node-a": "alpha" }, limits: { "node-a": { tasksMax: 256 } } });
     vi.spyOn(h.adapter, "getDefaultShell").mockResolvedValue(null);
@@ -229,6 +247,40 @@ describe("a grouped scope that fails after its check passed starts again on toda
       throw new Error(`ENOENT: ${p}`);
     };
   }
+
+  it("reports both notices when the ungrouped recovery scope also fails before the command", async () => {
+    const h = makeAdapter({ sliceRigs: { "node-a": "alpha" }, limits: { "node-a": { tasksMax: 256 } },
+      groupedProbe: fail("Failed to start transient scope unit: Access denied") });
+    failFirstStart(h);
+    const result = await h.adapter.createSession("impl-a@alpha", "/work", A, { processLimitsMode: "recovery" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      processLimits: { state: "not_applied" },
+      warnings: expect.arrayContaining([
+        expect.stringContaining("process_limits requested, not applied"),
+        expect.stringContaining("seat_slice requested, grouping not applied"),
+      ]),
+    });
+    expect(h.seatScopes().map(sliceOf)).toEqual(["openrigseats.slice"]);
+    expect(h.tmuxCalls("respawn-pane")).toHaveLength(1);
+  });
+
+  it.each([
+    { defaultCommand: 'printf "%s" "seat boot"; exec /bin/bash', expected: `'printf "%s" "seat boot"; exec /bin/bash'` },
+    { defaultCommand: "", expected: "'/bin/bash' '-l'" },
+  ])("explicitly starts the intended command in a kept pane if retry setup fails (default-command=$defaultCommand)", async ({ defaultCommand, expected }) => {
+    const h = makeAdapter({ sliceRigs: { "node-a": "alpha" }, defaultCommand });
+    failFirstStart(h);
+    vi.spyOn(h.adapter, "getDefaultShell").mockResolvedValueOnce("/bin/bash").mockResolvedValue(null);
+    const result = await h.adapter.createSession("impl-a@alpha", "/work", A);
+
+    expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("grouping not applied")]) });
+    expect(h.seatScopes().map(sliceOf)).toEqual(["openrigseats-alpha.slice"]);
+    const retries = h.tmuxCalls("respawn-pane");
+    expect(retries).toHaveLength(1);
+    expect(retries[0]?.trim().endsWith(` ${expected}`)).toBe(true);
+  });
 
   it("a fresh launch of a limited seat is not refused: it starts again in the ungrouped scope with its limit", async () => {
     const h = makeAdapter({ sliceRigs: { "node-a": "alpha" }, limits: { "node-a": { tasksMax: 256 } } });

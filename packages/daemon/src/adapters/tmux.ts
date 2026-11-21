@@ -101,6 +101,8 @@ export type ProcessLimitsMode = "fresh" | "recovery";
  *  uncapped retry of a recovery) why the capped start failed. */
 interface ScopeNotices { processLimits?: SeatProcessLimitsNotice; capped?: boolean; requested?: SeatProcessLimits;
   marker?: string; failedStart?: SeatProcessLimitsProblem;
+  /** The command a failed scope's kept pane must start on retry. An empty command selects a login shell. */
+  replacement?: { command: string; shell: string };
   /** #80: the rig slice this launch's scope goes beneath (a seat with or without a limit). */
   groupedSlice?: string;
   /** #80: why the grouped start failed, for the retry on the ungrouped path. */
@@ -1311,10 +1313,14 @@ export class TmuxAdapter {
     // grouping never refuses a launch, skips a limit check or drops a limit.
     const grouping = this.launchGrouping(seatEnv.OPENRIG_NODE_ID, notices, warnings);
     const groupingNotApplied = grouping.notApplied;
+    const recoverWithoutScope = (problem: SeatProcessLimitsProblem) => {
+      notApplied(problem);
+      if (grouping.slice) groupingNotApplied("the seat's limit could not be applied, so the recovery goes on without a scope");
+    };
     let grouped = false;
     if (lookup) {
-      if ("invalid" in lookup) notApplied({ kind: "invalid", reason: lookup.invalid });
-      else if (notices?.failedStart) notApplied({ ...notices.failedStart, requested: { ...lookup.limits } });
+      if ("invalid" in lookup) recoverWithoutScope({ kind: "invalid", reason: lookup.invalid });
+      else if (notices?.failedStart) recoverWithoutScope({ ...notices.failedStart, requested: { ...lookup.limits } });
       else {
         const outcome = await this.seatScopeGrouped(lookup.limits, seatEnv, policy, grouping);
         if (outcome.ok) { seatScope = outcome.prefix; limited = true; grouped = outcome.grouped; }
@@ -1378,7 +1384,10 @@ export class TmuxAdapter {
         DBUS_SESSION_BUS_ADDRESS: selected.DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR: selected.XDG_RUNTIME_DIR })] : [];
       if (notices) {
         notices.capped = limited && seatScope.length > 0;
-        if (marker) notices.marker = marker;
+        if (marker) {
+          notices.marker = marker;
+          notices.replacement = { command, shell };
+        }
         if (limited && marker) notices.requested = { ...(lookup as { limits: SeatProcessLimits }).limits };
         if (groupedSlice) notices.groupedSlice = groupedSlice;
       }
@@ -2189,11 +2198,14 @@ export class TmuxAdapter {
     // never stops for the limit: when systemd-run fails after the check passed, the pane's command exits before
     // entering the scope, and the seat starts again without the limit, with the warning (in the same pane when tmux
     // kept it, else in a new session of the same name); when the start can't be told, nothing is run again.
-    // In the same pane when tmux kept it, else in a new session of the same name.
     const startAgain = async (more: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string }) => {
       const kept = await this.probeSession(name).catch(() => ({ state: "unknown" as const }));
       if (kept.state !== "present") return this.createSessionUnchecked(name, cwd, env, more);
-      const retried = await this.respawnPaneUnchecked(created, undefined, { ...(cwd != null ? { cwd } : {}), env: seatEnv, ...more });
+      const replacement = notices.replacement;
+      const retried = await this.respawnPaneUnchecked(created, replacement?.command, {
+        ...(cwd != null ? { cwd } : {}), env: seatEnv, ...more,
+        ...(replacement ? { retryLoginShell: replacement.shell } : {}),
+      });
       if (!retried.ok && retried.processLimits) {
         return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(retried.processLimits), await this.removeRefusedSession(name, made));
       }
@@ -2688,7 +2700,7 @@ export class TmuxAdapter {
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode; keepLimitOf?: string;
-      groupSeatOf?: string; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string }): Promise<TmuxResult> {
+      groupSeatOf?: string; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string; retryLoginShell?: string }): Promise<TmuxResult> {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
@@ -2704,15 +2716,15 @@ export class TmuxAdapter {
         ? await this.keptScopeCommand(bareSeat, exact, command, warnings, notices, Boolean(opts?.keepLimitOf))
         : await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings, opts?.processLimitsMode, notices);
     } catch (error) { if (error instanceof SeatProcessLimitsNotApplied) return processLimitsNotAppliedResult(error); throw error; }
-    // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
-    if (scopedCommand) argv.push(...scopedCommand);
-    else if (command != null && command.length > 0) argv.push(command);
+    // A configured command remains one argument for tmux's shell. An explicit login shell on retry
+    // replaces the failed wrapper even when the scoped launch environment could not be prepared.
+    const launchArgv = scopedCommand ?? (command ? [command] : opts?.retryLoginShell ? [opts.retryLoginShell, "-l"] : []);
+    argv.push(...launchArgv);
     const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
     const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
-    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
-    else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
+    legacyRespawn.push(...launchArgv.map(quote));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
