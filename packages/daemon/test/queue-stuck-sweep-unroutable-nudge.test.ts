@@ -13,6 +13,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import type { RosterMember } from "../src/domain/rosters.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { isTmuxBoundSession, wireTerminalReachability } from "../src/domain/terminal-server-seats.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { recoveryTag } from "../src/domain/queue-recovery.js";
 import * as stuckSweep from "../src/domain/queue-stuck-sweep.js";
 import {
@@ -1944,5 +1945,375 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(orphanStatus2.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
     expect(orphanLogs2.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
     expect(queue.listTransitions(orphanRow.qitemId)).toHaveLength(orphanTransitionsBefore + 1);
+  });
+
+  function setupTopologyBackedQueue(opts: { excludeArchived?: boolean } = {}): void {
+    const rigs = new RigRepository(db);
+    const validateRig = makeTopologyDestinationCheck({
+      findRigsByName: (name) => (opts.excludeArchived ? rigs.findUnarchivedRigsByName(name) : rigs.findRigsByName(name)),
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
+    queue = new QueueRepository(db, bus, {
+      validateRig,
+      canRecordDestination: makeQueueRecordingCheck(validateRig),
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: {
+        send: async (destination, text) => {
+          nudgesSent.push({ destination, text });
+          return { ok: true, verified: true, sent: true, inputPhase: "written" };
+        },
+      },
+    });
+    queue.attachOutbox(new OutboxHandler(db));
+  }
+
+  it.each([
+    {
+      label: "claimed (in-progress via claim)",
+      expectedState: "in-progress" as const,
+      expectClaimed: true,
+      prepare: (noticeId: string) => {
+        queue.claim({ qitemId: noticeId, destinationSession: "lead@origin" });
+      },
+    },
+    {
+      label: "claimed (returned to pending with claimedAt preserved)",
+      expectedState: "pending" as const,
+      expectClaimed: true,
+      prepare: (noticeId: string) => {
+        queue.claim({ qitemId: noticeId, destinationSession: "lead@origin" });
+        queue.update({
+          qitemId: noticeId,
+          actorSession: "lead@origin",
+          state: "pending",
+          transitionNote: "returned to pending while retaining claim",
+        });
+      },
+    },
+    {
+      label: "in-progress (unclaimed via update)",
+      expectedState: "in-progress" as const,
+      expectClaimed: false,
+      prepare: (noticeId: string) => {
+        queue.update({
+          qitemId: noticeId,
+          actorSession: "lead@origin",
+          state: "in-progress",
+          transitionNote: "working on notice without claim timestamp",
+        });
+      },
+    },
+    {
+      label: "blocked (unclaimed via update)",
+      expectedState: "blocked" as const,
+      expectClaimed: false,
+      prepare: (noticeId: string) => {
+        queue.update({
+          qitemId: noticeId,
+          actorSession: "lead@origin",
+          state: "blocked",
+          blockedOn: "waiting-on-external-review",
+          transitionNote: "parked on external review",
+        });
+      },
+    },
+  ])("keeps refreshed behavior without handoff or partial reporting when a $label #514 notice sits on a removed rig", async ({ expectedState, expectClaimed, prepare }) => {
+    seedSeat("origin", "coord.lead", "lead@origin");
+    seedSeat("ops", "coord.operator", "operator@ops");
+    seedSeat("retired", "work.parked", "parked@retired", { running: false, bound: false });
+    setupTopologyBackedQueue();
+
+    const now = new Date("2026-11-21T06:00:00.000Z");
+    await createNoNudge("lead@origin", "parked@retired", "Unreachable task on retired rig", 90, now);
+
+    // Pass 1: creates open #514 notice at lead@origin.
+    const pass1 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass1.outcome).toBe("findings");
+    const noticeTag = unroutableNoticeTag("lead@origin", "parked@retired");
+    const [notice] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag));
+    expect(notice).toBeDefined();
+    expect(notice!.destinationSession).toBe("lead@origin");
+
+    // Transition the notice into the protected state before the recipient rig is removed.
+    prepare(notice!.qitemId);
+    const prepared = queue.getByIdOrThrow(notice!.qitemId);
+    expect(prepared.state).toBe(expectedState);
+    if (expectClaimed) expect(prepared.claimedAt).not.toBeNull();
+    else expect(prepared.claimedAt).toBeNull();
+
+    db.prepare("DELETE FROM rigs WHERE name = 'origin'").run();
+    expect(queue.acceptsDestination("lead@origin")).toBe(false);
+
+    const transitionsBefore = queue.listTransitions(notice!.qitemId).length;
+    const tsBefore = prepared.tsUpdated;
+    const groupKey = `lead@origin${UNROUTABLE_NOTICE_SEPARATOR}parked@retired`;
+
+    // Pass 2 (with reachable fallback): must keep refreshed behavior and must not hand off or nudge.
+    nudgesSent = [];
+    const logs2: string[] = [];
+    const status2 = createStuckSweepStatus();
+    const pass2 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status2,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs2.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass2.outcome).toBe("findings");
+    expect(status2.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(pass2.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: groupKey,
+      findingQitemId: notice!.qitemId,
+      action: "refreshed",
+    }]);
+    expect(nudgesSent).toHaveLength(0);
+    expect(logs2.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({
+      state: expectedState,
+      destinationSession: "lead@origin",
+      claimedAt: prepared.claimedAt,
+      tsUpdated: tsBefore,
+    });
+    expect(unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag))).toHaveLength(1);
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // Pass 3 (with no fallback): must still stay refreshed, never partial/unreported or gap-logged.
+    nudgesSent = [];
+    const logs3: string[] = [];
+    const status3 = createStuckSweepStatus();
+    const pass3 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status3,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs3.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass3.outcome).toBe("findings");
+    expect(status3.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(pass3.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: groupKey,
+      findingQitemId: notice!.qitemId,
+      action: "refreshed",
+    }]);
+    expect(nudgesSent).toHaveLength(0);
+    expect(logs3.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({
+      state: expectedState,
+      destinationSession: "lead@origin",
+      claimedAt: prepared.claimedAt,
+      tsUpdated: tsBefore,
+    });
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+  });
+
+  it("keeps refreshed behavior for a delivery-held pending #514 notice on a removed rig until drain and terminal holds lift", async () => {
+    const origin = seedSeat("origin", "coord.lead", "lead@origin");
+    seedSeat("ops", "coord.operator", "operator@ops");
+    seedSeat("retired", "work.parked", "parked@retired", { running: false, bound: false });
+    setupTopologyBackedQueue({ excludeArchived: true });
+
+    const now = new Date("2026-11-21T06:00:00.000Z");
+    await createNoNudge("lead@origin", "parked@retired", "Unreachable task on retired rig", 90, now);
+
+    // Pass 1: creates unclaimed pending #514 notice at lead@origin.
+    const pass1 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass1.outcome).toBe("findings");
+    const noticeTag = unroutableNoticeTag("lead@origin", "parked@retired");
+    const [notice] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag));
+    expect(notice).toBeDefined();
+    expect(notice!).toMatchObject({ state: "pending", claimedAt: null, destinationSession: "lead@origin" });
+
+    // Start a persisted rig delivery drain and archive the rig so its destination is unaccepted while the drain holds it.
+    const jobs = new WatchdogJobsRepository(db);
+    queue.deliveryDrains.begin(
+      origin.rigId,
+      { drainId: "drain-origin", owner: "operator@ops", reviewAt: new Date(now.getTime() + 3_600_000).toISOString() },
+      jobs,
+    );
+    db.prepare("UPDATE rigs SET archived_at = '2026-11-21T06:00:00.000Z' WHERE name = 'origin'").run();
+    expect(queue.acceptsDestination("lead@origin")).toBe(false);
+    expect(queue.deliveryDrains.drainHolds("lead@origin")).toBe(true);
+    expect(queue.deliveryDrains.holds("lead@origin")).toBe(true);
+
+    const transitionsBefore = queue.listTransitions(notice!.qitemId).length;
+    const tsBefore = queue.getByIdOrThrow(notice!.qitemId).tsUpdated;
+    const groupKey = `lead@origin${UNROUTABLE_NOTICE_SEPARATOR}parked@retired`;
+
+    // Pass 2 (rig drain active, reachable fallback): keeps refreshed behavior with zero handoff/nudges.
+    nudgesSent = [];
+    const status2 = createStuckSweepStatus();
+    const pass2 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status2,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass2.outcome).toBe("findings");
+    expect(status2.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(pass2.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: groupKey,
+      findingQitemId: notice!.qitemId,
+      action: "refreshed",
+    }]);
+    expect(nudgesSent).toHaveLength(0);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({
+      state: "pending",
+      claimedAt: null,
+      destinationSession: "lead@origin",
+      tsUpdated: tsBefore,
+    });
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // Pass 3 (rig drain active, no fallback): still refreshed, zero partial/unreported or gap logs.
+    const logs3: string[] = [];
+    const status3 = createStuckSweepStatus();
+    const pass3 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status3,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs3.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass3.outcome).toBe("findings");
+    expect(status3.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(pass3.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: groupKey,
+      findingQitemId: notice!.qitemId,
+      action: "refreshed",
+    }]);
+    expect(logs3.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // Switch from persisted rig drain to a terminal-server hold and hard-delete the origin rig.
+    let terminalHeld = true;
+    queue.deliveryDrains.attachTerminalHold(
+      (session) => terminalHeld && session === "lead@origin",
+      () => terminalHeld,
+    );
+    queue.deliveryDrains.end(origin.rigId, "drain-origin", jobs);
+    db.prepare("DELETE FROM rigs WHERE name = 'origin'").run();
+    expect(queue.acceptsDestination("lead@origin")).toBe(false);
+    expect(queue.deliveryDrains.drainHolds("lead@origin")).toBe(false);
+    expect(queue.deliveryDrains.heldByTerminalServer("lead@origin")).toBe(true);
+    expect(queue.deliveryDrains.holds("lead@origin")).toBe(true);
+
+    // Pass 4 (terminal hold active, reachable fallback): still refreshed with zero handoff/nudges.
+    nudgesSent = [];
+    const status4 = createStuckSweepStatus();
+    const pass4 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status4,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass4.outcome).toBe("findings");
+    expect(status4.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(pass4.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: groupKey,
+      findingQitemId: notice!.qitemId,
+      action: "refreshed",
+    }]);
+    expect(nudgesSent).toHaveLength(0);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({
+      state: "pending",
+      claimedAt: null,
+      destinationSession: "lead@origin",
+      tsUpdated: tsBefore,
+    });
+
+    // Pass 5 (terminal hold active, no fallback): still refreshed, zero partial/unreported or gap logs.
+    const logs5: string[] = [];
+    const status5 = createStuckSweepStatus();
+    const pass5 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status5,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs5.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass5.outcome).toBe("findings");
+    expect(status5.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(logs5.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // Release the terminal hold while origin stays deleted: sweep must now hand off the notice to operator@ops.
+    terminalHeld = false;
+    expect(queue.deliveryDrains.holds("lead@origin")).toBe(false);
+    expect(queue.acceptsDestination("lead@origin")).toBe(false);
+    nudgesSent = [];
+    const status6 = createStuckSweepStatus();
+    const pass6 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status6,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass6.outcome).toBe("findings");
+    expect(status6.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 1 });
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("handed-off");
+    const openAfterRelease = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag));
+    expect(openAfterRelease).toHaveLength(1);
+    expect(openAfterRelease[0]!).toMatchObject({
+      destinationSession: "operator@ops",
+      handedOffFrom: notice!.qitemId,
+      evidenceRef: notice!.evidenceRef,
+    });
+    expect(nudgesSent.some((n) => n.destination === "operator@ops")).toBe(true);
   });
 });
