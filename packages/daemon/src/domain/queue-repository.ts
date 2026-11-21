@@ -880,9 +880,11 @@ const BARE_QITEM_ID = /^qitem-[^@]*$/;
  *  chain_of_record arm reads only successors whose id or destination is one of them, through the primary key and the
  *  destination index, instead of every row's chain. A seat target's chained rows are read through the creation index,
  *  only from a day before the oldest source that names a seat: no writer chains a row that didn't exist yet, though a
- *  caller's own chainOfRecord on create could. A source more than a week old (or undated) leaves its seat targets
- *  uncovered, so one old source can't widen that read for the rest. Any other source or target keeps the per-row query,
- *  so every answer is the per-row query's. For a covered source and
+ *  caller's own chainOfRecord on create can name an id before it exists. So for a covered seat target, a "yes" is the
+ *  per-row query's and a "no" is a candidate the caller confirms live before acting on it (the stuck sweep does, before
+ *  it creates or keeps a custody finding). A source more than a week old (or undated) leaves its seat targets
+ *  uncovered, so one old source can't widen that read for the rest. Any other source or target keeps the per-row query.
+ *  For a covered source and
  *  target, a snapshot from its first has() until invalidate(): the caller
  *  invalidates it whenever other code could have run. Any other target is read as it is now. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn for a
  *  covered source and target. builtMs() is how long the build of the index as it is now took (0 while it is not built),

@@ -244,13 +244,14 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
     let first: Awaited<ReturnType<typeof runStuckSweep>> | undefined;
     expect(await countPrepared(perRowSuccessor, async () => { first = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); })).toBe(2 * 130);
     expect(first?.findings.filter((f) => f.action === "created")).toHaveLength(130);
-    // steady pass (the usual one): the routing loop finds each open finding through the batched recovery index.
-    // (A create re-reads its own new row, which can ask for that row's recovery; a steady pass creates nothing.)
+    // steady pass (the usual one): the routing loop finds each open finding through the batched recovery index, and
+    // confirms each open custody finding live before keeping it, as a create does: the batch's "no successor" reads a
+    // seat's chained rows only from its sources' creation, so it's a candidate, not a verdict. Two point queries each.
     let second: Awaited<ReturnType<typeof runStuckSweep>> | undefined;
     const recoveryQueries = await countPrepared(perRowRecovery, async () => {
-      expect(await countPrepared(perRowSuccessor, async () => { second = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); })).toBe(0);
+      expect(await countPrepared(perRowSuccessor, async () => { second = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); })).toBe(2 * 130);
     });
-    expect(recoveryQueries).toBe(0);
+    expect(recoveryQueries).toBeLessThanOrEqual(130); // at most the live re-read of each confirmed row
     expect(second?.findings.filter((f) => f.action === "refreshed")).toHaveLength(130);
   });
 
@@ -268,6 +269,23 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
     // Only the one finding it creates re-checks its own source live (two point queries); the rest come from the index.
     expect(await countPrepared(perRowSuccessor, async () => { result = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); })).toBe(2);
     expect(result!.findings.filter((f) => f.action === "created").map((f) => f.qitemId)).toEqual(["qitem-k4"]);
+  });
+
+  it("keeps no custody finding open on the batch's bounded read: a successor chained before its source closes it", async () => {
+    const created = recent();
+    row("qitem-pre", { state: "done", created, updated: created, closureReason: "handed_off_to", closureTarget: "seat-p@r" });
+    const first = await runStuckSweep({ db, queueRepo: repo, log: () => {} });
+    const finding = first.findings.find((f) => f.qitemId === "qitem-pre" && f.action === "created");
+    expect(finding).toBeDefined();
+    // A caller's own chainOfRecord can name an id before it exists: this row, made two days before its source, is outside
+    // the batch's read (which says "no") and is found by the per-row query (which says "yes").
+    row("s-pre", { chain: JSON.stringify(["qitem-pre"]), destination: "seat-p@r", created: new Date(Date.parse(created) - 2 * 86_400_000).toISOString() });
+    expect(createLinkedSuccessorLookup(db, ["qitem-pre"]).has("qitem-pre", "seat-p@r")).toBe(false);
+    expect(hasLinkedSuccessor(db, "qitem-pre", "seat-p@r")).toBe(true);
+    const second = await runStuckSweep({ db, queueRepo: repo, log: () => {} });
+    expect(second.findings.filter((f) => f.qitemId === "qitem-pre" && f.action === "refreshed")).toEqual([]);
+    expect(second.findings.filter((f) => f.qitemId === "qitem-pre" && f.action === "closed")).toHaveLength(1);
+    expect(repo.getById(finding!.findingQitemId)?.state).toBe("done");
   });
 
   it("finds the same thing on a second pass: the open findings are refreshed, not duplicated", async () => {

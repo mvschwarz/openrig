@@ -1614,6 +1614,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         && finding.destinationSession === c.route
         && (finding.tags ?? []).includes(findingDedupTag("unclaimed-obligation", c.row.qitemId)) ? finding.qitemId : null;
     };
+    /** The batch successor index reads a seat's chained rows only from its oldest seat-naming source's creation, so its
+     *  "no successor" is a candidate, not a verdict: a custody finding it would keep open is confirmed on the row as it is
+     *  now, as a new one already is before it's created. True when the row no longer qualifies, so nothing is kept. */
+    const keptOnBoundedRead = (c: Candidate): boolean =>
+      c.kind === "dangling-closure" && !successorsPerRow && freshCandidate(c.kind, c.row.qitemId) === null;
     const unclaimedBacklog = new Map<string, Candidate[]>();
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       if (dueToYield()) await yieldLoop();
@@ -1642,6 +1647,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         && !["pending", "in-progress", "blocked"].includes(sharedRow.state)
         && evidenceIsNewer(c.row.closureRequiredAt ?? "", sharedRow.tsUpdated);
       if (shared && !renewedDeadline) {
+        if (keptOnBoundedRead(c) && ["pending", "in-progress", "blocked"].includes(shared.state)) continue;
         const existingTags = sharedRow?.tags ?? [];
         for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
         // Keep the original evidence as history, but do not leave it presented as
@@ -1684,6 +1690,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         | undefined;
       const existingIsOpen = existing && ["pending", "in-progress", "blocked"].includes(existing.state);
       if (existing && existingIsOpen) {
+        if (keptOnBoundedRead(c)) { liveDedupTags.delete(dedupTag); continue; }
         // Age is derived at read time; an unchanged scan is not a transition.
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
       } else if (renewedDeadline || !existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
