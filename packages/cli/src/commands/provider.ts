@@ -1,7 +1,9 @@
 import { accountHomePlanMatches } from "../lib/account-home-switch.js";
 import fs from "node:fs";
 import { Command } from "commander";
-import { DaemonClient, DaemonTimeoutError } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../client.js";
+import { shellQuote } from "../cross-host-executor.js";
+import { requestMayHaveArrived } from "../remote-host-ops.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -1095,7 +1097,12 @@ that machine. Only the command and its output cross the connection.`);
     console.log(`Applied plan ${report.digest} on ${report.daemon}: rig ${report.rig}'s ${report.provider} seats to ${report.account.label} (${report.account.reference}).`);
     for (const r of report.results) {
       console.log(`${r.seat}: ${kindWords(r.kind)}: ${r.detail}`);
-      if (r.activity === "running" || r.activity === "needs_input") console.log(`  it was ${r.activity === "running" ? "working" : "waiting for input"} when it was reached: work in flight, including background commands, didn't carry over`);
+      // Only a seat the apply relaunched or restarted, or may have, lost what it was doing.
+      const restarted = r.kind === "switched" || r.kind === "pending_successor" || r.kind === "unknown";
+      if (restarted && (r.activity === "running" || r.activity === "needs_input")) {
+        console.log(`  it was ${r.activity === "running" ? "working" : "waiting for input"} when it was reached: work in flight, including background commands, `
+          + `${r.kind === "unknown" ? "may not have carried over" : "didn't carry over"}`);
+      }
       if (r.recovery) console.log(`  recovery: ${r.recovery}`);
     }
     for (const p of report.otherRigPeers) console.log(`${p.seat} (rig ${p.rig}): not restarted; it shares ${p.home}, so restart it yourself: ${p.command}`);
@@ -1140,13 +1147,21 @@ status shows each seat against it. It exits 1 when any seat failed or is unknown
         ?? (opts.plan !== undefined && !opts.apply ? "--plan names the plan to apply: add --apply." : null)
         ?? (opts.plan !== undefined && !/^[0-9a-f]{12}$/.test(opts.plan) ? "--plan is the 12-character digest the plan showed." : null);
       if (problem) return refusal(`${problem} Nothing changed.`);
-      const again = `rig provider assign ${rig} --provider ${opts.provider} --account ${opts.account}${opts.includeOverrides ? " --include-overrides" : ""}`
-        + `${opts.accountHome !== undefined ? ` --account-home ${opts.accountHome}` : ""}`;
+      // The printed command is copied into a shell: a value with a space or a quote in it is quoted.
+      const arg = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : shellQuote(value);
+      const again = `rig provider assign ${arg(rig)} --provider ${arg(opts.provider!)} --account ${arg(opts.account!)}${opts.includeOverrides ? " --include-overrides" : ""}`
+        + `${opts.accountHome !== undefined ? ` --account-home ${arg(opts.accountHome)}` : ""}`;
       if (opts.host) {
-        return onHost(opts.host, ["provider", "assign", rig, "--provider", opts.provider!, "--account", opts.account!,
+        const host = opts.host;
+        await onHost(host, ["provider", "assign", rig, "--provider", opts.provider!, "--account", opts.account!,
           ...(opts.includeOverrides ? ["--include-overrides"] : []), ...(opts.accountHome !== undefined ? ["--account-home", opts.accountHome] : []),
           ...(opts.apply ? ["--apply", "--plan", opts.plan!] : []), ...(opts.json ? ["--json"] : [])],
-        { json: opts.json, ...(opts.apply ? { changes: `${again} --host ${opts.host} (its plan shows each seat's last result)` } : {}) });
+        { json: opts.json, ...(opts.apply ? { changes: `${again} --host ${arg(host)} (its plan shows each seat's last result)` } : {}) });
+        // The plan printed there names its apply command as that machine runs it; from here it needs --host too.
+        if (!opts.apply && !opts.json && !process.exitCode) {
+          console.log(`This plan is on ${host}. To apply it from this machine: ${again} --host ${arg(host)} --apply --plan <the digest above>`);
+        }
+        return;
       }
       const client = await getClient(getDeps());
       if (!client) { process.exitCode = 1; return; }
@@ -1175,10 +1190,13 @@ status shows each seat against it. It exits 1 when any seat failed or is unknown
           plan: opts.plan, ...(opts.includeOverrides ? { includeOverrides: true } : {}), ...(opts.accountHome !== undefined ? { accountHome: opts.accountHome } : {}) },
         { timeoutMs: SWITCH_TIMEOUT_MS * Math.max(1, changing) + 30_000 });
       } catch (err) {
-        if (!(err instanceof DaemonTimeoutError)) throw err;
+        // A connection that failed before the request left is a plain failure; once it may have arrived, the daemon may be
+        // applying it, so the outcome is unknown.
+        if (!(err instanceof DaemonConnectionError) || !requestMayHaveArrived(err)) throw err;
+        const lost = err instanceof DaemonTimeoutError ? "The CLI timed out waiting for the daemon" : "The CLI lost the connection to the daemon before its answer";
         if (opts.json) console.log(JSON.stringify({ ok: false, code: "apply_outcome_unknown", digest: opts.plan, check: again,
-          message: "The CLI timed out waiting for the daemon; the apply may still be running. Don't run it again: each seat's result shows in the plan as it lands." }));
-        console.error(`The CLI timed out waiting for the daemon. The apply may still be running, seat by seat, so don't run it again: `
+          message: `${lost}; the apply may still be running. Don't run it again: each seat's result shows in the plan as it lands.` }));
+        console.error(`${lost}. The apply may still be running, seat by seat, so don't run it again: `
           + `a second apply to the rig is refused while one runs. Each seat's result shows in the plan as it lands: ${again}`);
         process.exitCode = 1;
         return;

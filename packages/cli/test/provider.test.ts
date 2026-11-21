@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { providerCommand } from "../src/commands/provider.js";
-import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -685,6 +685,56 @@ describe("rig provider assign (#3625 slices 2 and 3: the plan, and applying it)"
     try { await providerCommand(deps).parseAsync(["node", "rig", "assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab", "--json"]); }
     finally { console.log = origLog; console.error = origErr; process.exitCode = undefined; }
     expect(JSON.parse(stdout[0]!)).toMatchObject({ ok: false, code: "apply_outcome_unknown", digest: "0123456789ab", check: "rig provider assign fleet --provider codex --account team" });
+  });
+
+  // Review findings on #3679: what the apply's output says, the printed command, --host, and a lost connection.
+  const fake = (post: () => Promise<unknown>, plan: unknown = PLAN) => ({ ...runningDeps(1), clientFactory: () => ({
+    get: async () => ({ status: 200, data: { ok: true, plan } }), post }) as never });
+  const reportWith = (results: unknown[]) => async () => ({ status: 200, data: { ok: true, report: { ...REPORT, results, otherRigPeers: [] } } });
+
+  it("says work didn't carry over only for a seat it relaunched or restarted, and may not have for an unknown one", async () => {
+    const result = (seat: string, kind: string, activity: string) => ({ seat, kind, detail: "d", activity, at: "t" });
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], fake(reportWith([
+      result("kept@fleet", "unchanged", "running"), result("refused@fleet", "failed_before_effect", "needs_input"), result("mac@fleet", "unsupported", "running"),
+      result("moved@fleet", "switched", "running"), result("lost@fleet", "unknown", "needs_input")])));
+    expect(logs.filter((l) => l.startsWith("  it was"))).toEqual([
+      "  it was working when it was reached: work in flight, including background commands, didn't carry over",
+      "  it was waiting for input when it was reached: work in flight, including background commands, may not have carried over",
+    ]);
+    expect(logs[logs.indexOf("moved@fleet: switched: d") + 1]).toMatch(/^  it was working/);
+  });
+
+  it("quotes a value with a space in the apply command it prints", async () => {
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--account-home", "/homes/My Team"], fake(async () => undefined));
+    expect(logs.at(-1)).toBe("A plan only: nothing was changed. Apply exactly this plan with: rig provider assign fleet --provider codex --account team --account-home '/homes/My Team' --apply --plan 0123456789ab");
+  });
+
+  it("with --host, the plan is that machine's, and the apply command from here keeps --host; the remote command never gets it", async () => {
+    const argvs: Array<readonly string[]> = [];
+    const remote = { host: { hostRegistryLoader: () => ({ ok: true as const, registry: { hosts: [{ id: "vm-a", transport: "ssh" as const, target: "vm-a.local" }] } }),
+      crossHostRun: async (_h: unknown, argv: readonly string[]) => { argvs.push(argv); return { ok: true as const, failedStep: "none" as const, stdout: "", stderr: "", remoteExitCode: 0 }; },
+      selfHostId: async () => undefined } } as never;
+    const runOn = async (args: string[]) => {
+      const logs: string[] = [];
+      const origLog = console.log, origErr = console.error;
+      console.log = (...a: unknown[]) => logs.push(a.join(" ")); console.error = () => {};
+      try { await providerCommand(runningDeps(1), remote).parseAsync(["node", "rig", ...args]); }
+      finally { console.log = origLog; console.error = origErr; process.exitCode = undefined; }
+      return logs;
+    };
+    expect(await runOn(["assign", "fleet", "--provider", "codex", "--account", "team", "--host", "vm-a"])).toEqual([
+      "This plan is on vm-a. To apply it from this machine: rig provider assign fleet --provider codex --account team --host vm-a --apply --plan <the digest above>"]);
+    expect(argvs.at(-1)).toEqual(["rig", "provider", "assign", "fleet", "--provider", "codex", "--account", "team"]);
+    expect(await runOn(["assign", "fleet", "--provider", "codex", "--account", "team", "--host", "vm-a", "--json"])).toEqual([]);
+  });
+
+  it("a connection lost after the apply was sent is an unknown outcome; one refused before it left is a plain failure", async () => {
+    const lost = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"],
+      fake(async () => { throw new DaemonConnectionError("socket hang up", "ECONNRESET"); }));
+    expect(lost.exitCode).toBe(1);
+    expect(lost.logs.join("\n")).toContain("The CLI lost the connection to the daemon before its answer. The apply may still be running, seat by seat, so don't run it again");
+    await expect(run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"],
+      fake(async () => { throw new DaemonConnectionError("connect ECONNREFUSED", "ECONNREFUSED"); }))).rejects.toThrow("ECONNREFUSED");
   });
 });
 
