@@ -897,8 +897,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   `rig daemon start --allow-db-conflict` allows one deliberate start. A start still in progress reads
   `Daemon starting: launch reserved by pid N since T; not listening yet` in `rig daemon status`, not stopped.
   A start reservation left from an earlier boot, or one whose recorded launcher and child are both
-  gone in the same pid namespace, is archived by the next start; one that `rig daemon stop` retained
-  after a shutdown it couldn't verify stays. Don't clear it by hand.
+  gone in the same pid namespace, is archived by the next start. One that `rig daemon stop` retained
+  after a shutdown it couldn't verify stays until someone inspects the shutdown receipt and daemon.log
+  and archives it, as the start error says; otherwise don't clear it by hand.
 - **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
   activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
   so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.

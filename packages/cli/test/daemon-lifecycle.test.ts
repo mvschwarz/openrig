@@ -2327,7 +2327,10 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     expect(fs.existsSync(lockFile())).toBe(false);
     const archived = fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock.stopped-"));
     expect(archived).toHaveLength(1);
-    expect(fs.readFileSync(path.join(home, archived[0]!), "utf8")).toBe(raw);
+    // The archive is the reservation stop read, with the mark it set before the signal.
+    const archivedText = fs.readFileSync(path.join(home, archived[0]!), "utf8");
+    expect(archivedText.startsWith(raw)).toBe(true);
+    expect(JSON.parse(archivedText.slice(raw.length))).toMatchObject({ retainedBy: "stop", reason: "stopping" });
   });
 
   it("stops the child when the listener answers with the child's own PID", async () => {
@@ -2527,15 +2530,31 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     for (const [receipt, reason] of [[timedOut, "incomplete-shutdown"], [null, "no-receipt"]] as const) {
       const deps = reservedDeps({ receipt });
       const raw = validLock();
-      expect((await stop(deps)) as Error).toBeInstanceOf(Error);
-      expect(deps.retainStartReservation).toHaveBeenCalledWith(lockFile(), raw, reason);
+      const outcome = (await stop(deps)) as Error;
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome.message).toMatch(/start reservation retained/);
       const kept = fs.readFileSync(lockFile(), "utf8");
       expect(kept.startsWith(raw)).toBe(true);
-      expect(JSON.parse(kept.slice(raw.length))).toMatchObject({ retainedBy: "stop", reason });
+      expect(kept.slice(raw.length).trim().split("\n").map((line) => JSON.parse(line).reason)).toEqual(["stopping", reason]);
       expect(() => nextStart()).toThrow(/already reserved/);
       expect(fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock."))).toEqual([]);
       fresh();
     }
+  });
+
+  it("a start that runs while stop verifies the shutdown refuses, though both PIDs are already gone", async () => {
+    const deps = reservedDeps({ receipt: null });
+    const kill = deps.kill;
+    let during: unknown;
+    deps.kill = vi.fn((pid: number, signal: string) => {
+      const sent = kill(pid, signal);
+      // The child is gone and the launcher is dead; stop hasn't verified anything yet.
+      try { acquireDaemonStartLock(home, { bootId: "boot-A", bootedAtMs: Date.parse(STARTED_AT) - 60_000, processLiveness: () => "dead", pidNamespace: "host" }); } catch (error) { during = error; }
+      return sent;
+    });
+    expect((await stop(deps)) as Error).toBeInstanceOf(Error);
+    expect((during as Error).message).toMatch(/already reserved/);
+    expect(fs.existsSync(lockFile())).toBe(true);
   });
 
   it("a later stop still reads a reservation an earlier stop retained, and releases it after a clean shutdown", async () => {

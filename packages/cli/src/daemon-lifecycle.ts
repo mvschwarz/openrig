@@ -296,8 +296,8 @@ export interface LifecycleDeps {
   /** #3315 — release a spent start reservation still holding exactly `raw` (production: archiveSpentReservation);
    *  returns where it went, or undefined when it was left in place. Absent = stop never releases one. */
   releaseStartReservation?: (file: string, raw: string) => string | undefined;
-  /** #3637: records on the reservation that stop retained it after a shutdown it couldn't verify (`markReservationRetained`). */
-  retainStartReservation?: (file: string, raw: string, reason: string) => boolean;
+  /** #3637: records on the reservation that stop is stopping or retained it (`markReservationRetained`); returns its new text. */
+  retainStartReservation?: (file: string, raw: string, reason: string) => string | undefined;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -1039,7 +1039,8 @@ interface StartReservation {
   startToken?: string; pidNamespace?: string; endpoint?: string;
 }
 
-/** #3315 — the strict read stop acts on: exactly the launcher record and the one child record startDaemon writes. */
+/** #3315 — the strict read stop acts on: exactly the launcher record and the one child record startDaemon writes,
+ *  then only the retention records an earlier stop appended (#3637). */
 function readStartReservation(deps: LifecycleDeps, file: string): StartReservation | "absent" | "malformed" {
   const raw = deps.exists(file) ? deps.readFile(file) : null;
   if (raw === null) return "absent";
@@ -1090,7 +1091,7 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const r = readStartReservation(deps, file);
   if (r === "absent") return undefined;
   const refuse = (why: string) => ({ refusal: `Start reservation ${file} not used: ${why}; no signal sent.` });
-  if (r === "malformed") return refuse("it is not a launcher record followed by one child record");
+  if (r === "malformed") return refuse("it is not a launcher record followed by one child record (and any stop retention records)");
   if (deps.exists(resolveLifecycleFile(deps, "daemon.json"))) {
     return refuse("a daemon.json is present but unreadable, and nothing ties it to the reserved child");
   }
@@ -1158,6 +1159,13 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const after = childIdentity(" after the listener check");
   if (after) return refuse(after);
 
+  // #3637: mark it before the signal, so no start archives it while this stop verifies the shutdown.
+  let current = r.raw;
+  if (deps.retainStartReservation) {
+    const marked = deps.retainStartReservation(file, current, "stopping");
+    if (marked === undefined) return refuse("the reservation changed while stop was checking it");
+    current = marked;
+  }
   const notBefore = Date.now();
   deps.kill(r.childPid, "SIGTERM");
   const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
@@ -1168,27 +1176,35 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const effect = await ctx.listener();
   const observation = `targeted ${ctx.target}; checked ${ctx.check}; start-reservation child PID ${r.childPid} ${present ? "present" : "absent"}; listener ${effect}; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
   // #3637: each retention below is recorded on the reservation, so a later start keeps refusing it.
-  const retain = (reason: string): void => { deps.retainStartReservation?.(file, r.raw, reason); };
+  // Each retention below is recorded on the reservation, so a later start keeps refusing it; the error says when the
+  // record couldn't be written (the reservation changed meanwhile).
+  const retained = (reason: string): string => {
+    if (!deps.retainStartReservation) return "start reservation retained";
+    const next = deps.retainStartReservation(file, current, reason);
+    if (next === undefined) return `start reservation changed while stop was verifying (inspect ${file})`;
+    current = next;
+    return "start reservation retained";
+  };
   if (present) {
-    retain("not-exited");
+    const kept = retained("not-exited");
     throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
-      (effect === "responding" ? " (still listening)" : "") + "; start reservation retained.");
+      (effect === "responding" ? " (still listening)" : "") + `; ${kept}.`);
   }
   if (effect !== "refused") {
-    retain("listener-unverified");
-    throw new Error(`Daemon stop verification is unverified: ${observation}; start reservation retained.`);
+    const kept = retained("listener-unverified");
+    throw new Error(`Daemon stop verification is unverified: ${observation}; ${kept}.`);
   }
   const { receipt, receiptPath } = readShutdownReceipt(deps, path.join(home, "daemon.json"));
   if (!(receipt?.pid === r.childPid && Date.parse(receipt.startedAt) >= notBefore)) {
-    retain("no-receipt");
-    throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); start reservation retained. Inspect ${path.join(home, "daemon.log")}.`);
+    const kept = retained("no-receipt");
+    throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); ${kept}. Inspect ${path.join(home, "daemon.log")}.`);
   }
   if (!isCleanShutdown(receipt)) {
-    retain("incomplete-shutdown");
-    throw new Error(`Daemon stopped with incomplete shutdown: ${receipt.outcome}; phase=${receipt.phase}; ${observation}. Pending effects are unverified; start reservation retained; inspect ${receiptPath}.`);
+    const kept = retained("incomplete-shutdown");
+    throw new Error(`Daemon stopped with incomplete shutdown: ${receipt.outcome}; phase=${receipt.phase}; ${observation}. Pending effects are unverified; ${kept}; inspect ${receiptPath}.`);
   }
   // Both PIDs it names are gone: release the reservation, unless it changed meanwhile.
-  const released = liveness(r.launcherPid) === "dead" ? deps.releaseStartReservation?.(file, r.raw) : undefined;
+  const released = liveness(r.launcherPid) === "dead" ? deps.releaseStartReservation?.(file, current) : undefined;
   if (!released) console.warn(`Start reservation ${file} was not released; inspect it before 'rig daemon start'.`);
   return "stopped";
 }
