@@ -1662,6 +1662,9 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     const result = await f.send("active-client", reminder, { verify: false });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
     expect(result.error).toContain("a terminal client was active since it was pasted");
+    // The hold says its own reason: the input was read, and the client activity is why it isn't taken as ours.
+    expect(result).toMatchObject({ inputReadFailure: { check: "draft-aware", status: "text", confidence: null, reason: "client_activity_since_paste",
+      timedOut: null, cursor: { present: true, valid: true, atEnd: true } } });
     expect(stagedReads).toBe(7 + 2);
     expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
     expect(f.bodies.a).toBe(reminder);
