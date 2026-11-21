@@ -264,6 +264,7 @@ describe("a reply in a thread OpenRig's own machinery posted reaches a seat that
     map.open({ threadTs: "T-ALERT", channel: "C-OPS", human: "mike@external", seat: "daemon@kernel", conversationId: "q-alert" });
     map.open({ threadTs: "T-SWEEP", channel: "C-OPS", human: "mike@external", seat: "stuck-sweep@system", conversationId: "q-sweep" });
     map.open({ threadTs: "T-HEALTH", channel: "C-OPS", human: "mike@external", seat: "system:health", conversationId: "q-health" });
+    map.open({ threadTs: "T-SYSRIG", channel: "C-OPS", human: "mike@external", seat: "worker@system", conversationId: "q-sysrig" });
     map.open({ threadTs: "T-SEAT", channel: "C-OPS", human: "mike@external", seat: "dev-driver@v-openrig-build", conversationId: "q-seat" });
     map.recordPart({ messageTs: "P-ALERT", channel: "C-OPS", threadTs: "T-SEAT", seat: "daemon@kernel", conversationId: "q-alert" });
     const asked: (string | undefined)[] = [];
@@ -295,6 +296,12 @@ describe("a reply in a thread OpenRig's own machinery posted reaches a seat that
     expect(route(reply("T-ALERT"))).toMatchObject({ destination: "operator-agent@kernel", routeClass: "closed-thread" });
     expect(route(reply("T-SWEEP"))).toMatchObject({ destination: "operator-agent@kernel", correlationQitemId: "q-sweep" });
     expect(route(reply("T-HEALTH"))).toMatchObject({ destination: "operator-agent@kernel", correlationQitemId: "q-health" });
+  });
+
+  it("a seat in a rig named system keeps the replies to its own thread", () => {
+    const { route, asked } = setup("operator-agent@kernel");
+    expect(route(reply("T-SYSRIG"))).toMatchObject({ destination: "worker@system", routeClass: "existing-thread", correlationQitemId: "q-sysrig" });
+    expect(asked).toEqual([]);
   });
 
   it("a reaction on an alert posted into another seat's thread reaches the channel's reader", () => {

@@ -18,10 +18,17 @@ import type { SlackEvent } from "./inbound.js";
 import type { ThreadSeatMap } from "./thread-seat-map.js";
 import { isOpenRigSender } from "../../../lib/pane-envelope.js";
 
-/** OpenRig's own machinery (the daemon, a subsystem actor such as `system:health`, or a `@system` actor): it posts, such
- *  as a wake escalation's or a health finding's alert, but no seat behind it reads a reply. */
+/** The daemon's own `…@system` actors, by exact name. Not the suffix: a rig may be named `system`, and its seats
+ *  (`worker@system`) are real readers of their own threads. */
+const OPENRIG_SYSTEM_ACTORS: ReadonlySet<string> = new Set([
+  "daemon@system", "watchdog@system", "stuck-sweep@system", "wake-ladder@system", "queue@system",
+  "claim@system", "outbox@system", "model-monitor@system", "slack-gateway@system",
+]);
+
+/** OpenRig's own machinery (the daemon, a subsystem actor such as `system:health`, or one of its `@system` actors): it
+ *  posts, such as a wake escalation's or a health finding's alert, but no seat behind it reads a reply. */
 function isOpenRigMachinery(seat: string): boolean {
-  return isOpenRigSender(seat) || seat.endsWith("@system");
+  return isOpenRigSender(seat) || OPENRIG_SYSTEM_ACTORS.has(seat);
 }
 
 /** Who reads a person's reply in a thread recorded for `seat` in `channel`. A thread OpenRig's machinery posted goes where
