@@ -19,6 +19,7 @@ import * as path from "node:path";
 import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
 import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
+import { cooperativeReadFile, readRowsCooperatively } from "../execution-candidate-reader.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
@@ -262,6 +263,43 @@ interface MembershipIndex {
   knownSlices: Set<string>;
 }
 
+type TypedMembershipRow = { qitem_id: string; tags: string | null };
+type FallbackMembershipRow = { qitem_id: string; body: string; tags?: string | null };
+/** The rows one membership build asks for next. A fallback scan's rows arrive in rowid-ordered batches, then null. */
+type MembershipScan = { kind: "typed" } | { kind: "fallback"; tagsColumnPresent: boolean };
+type MembershipBuild = Generator<MembershipScan, MembershipIndex, Iterable<TypedMembershipRow> | Iterable<FallbackMembershipRow> | null>;
+
+const TYPED_MEMBERSHIP_SQL = `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`;
+const FALLBACK_MEMBERSHIP_SQL = `SELECT qitem_id, body, tags FROM queue_items`;
+const FALLBACK_BODY_MEMBERSHIP_SQL = `SELECT qitem_id, body FROM queue_items`;
+// The same scans one rowid window at a time, for readRowsCooperatively. The typed window carries ts_created so the
+// rows can be put in TYPED_MEMBERSHIP_SQL's order afterwards.
+const WINDOW = `queue_items.rowid > ? AND queue_items.rowid <= ?`;
+const TYPED_MEMBERSHIP_WINDOW_SQL = `SELECT qitem_id, tags, ts_created FROM queue_items WHERE ${WINDOW} AND tags LIKE '%slice:%'`;
+const FALLBACK_MEMBERSHIP_WINDOW_SQL = `SELECT qitem_id, body, tags FROM queue_items WHERE ${WINDOW}`;
+const FALLBACK_BODY_MEMBERSHIP_WINDOW_SQL = `SELECT qitem_id, body FROM queue_items WHERE ${WINDOW}`;
+
+/** SQLite's ascending order for one column value: NULL, then numbers, then text by its UTF-8 bytes (BINARY), then
+ *  blobs by their bytes. */
+function compareSqliteValues(a: unknown, b: unknown): number {
+  const rank = (v: unknown) => v === null || v === undefined ? 0 : typeof v === "number" || typeof v === "bigint" ? 1 : typeof v === "string" ? 2 : 3;
+  const ra = rank(a), rb = rank(b);
+  if (ra !== rb) return ra - rb;
+  if (ra === 0) return 0;
+  if (ra === 1) return (a as number) < (b as number) ? -1 : (a as number) > (b as number) ? 1 : 0;
+  return Buffer.compare(Buffer.from(a as string | Buffer), Buffer.from(b as string | Buffer));
+}
+
+/** Puts windowed typed rows in TYPED_MEMBERSHIP_SQL's order: ts_created DESC, then qitem_id DESC. */
+function inTypedMembershipOrder(rows: Array<TypedMembershipRow & { ts_created: unknown }>): TypedMembershipRow[] {
+  return rows.sort((a, b) => compareSqliteValues(b.ts_created, a.ts_created) || compareSqliteValues(b.qitem_id, a.qitem_id));
+}
+
+function sameServedScope(a: Set<string> | null, b: Set<string> | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.size === b.size && [...a].every((name) => b.has(name));
+}
+
 // --- SQL-LIKE-equivalent matching -------------------------
 // SQLite LIKE semantics, replicated byte-for-byte (test-pinned):
 //   - ASCII-ONLY case folding (A-Z <-> a-z; æ vs Æ do NOT fold),
@@ -386,6 +424,8 @@ export class SliceIndexer {
   private detailCache: Map<string, CachedSlice> = new Map();
   // batch membership index (see MembershipIndex doc).
   private membershipIndex: MembershipIndex | null = null;
+  // An index read cooperatively for the next build with the same served scope (getCooperatively).
+  private preparedMembership: { served: Set<string> | null; index: MembershipIndex } | null = null;
   // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
   private idAliases: SliceIdAliases | null = null;
   private missionAliases: MissionIdAliases | null = null;
@@ -449,6 +489,7 @@ export class SliceIndexer {
     this.detailCache.clear();
     this.missionStatusCache = null;
     this.membershipIndex = null;
+    this.preparedMembership = null;
     this.idAliases = null;
     this.missionAliases = null;
   }
@@ -579,6 +620,42 @@ export class SliceIndexer {
     }
     this.detailCache.set(name, { record, expiresAt: now + this.cacheTtlMs });
     return record;
+  }
+
+  /** get(), for a route: when the record isn't cached, its membership scans are read first on their own read-only
+   *  connection, one rowid window at a time, yielding to the event loop between windows (readRowsCooperatively).
+   *  A standalone get() otherwise reads every queue row, bodies included, in one synchronous stretch. The record is
+   *  then built exactly as get() builds it, from that index. Inside an open withMembershipBatch scope, or when the
+   *  read can't run cooperatively (a transaction, a memory database or a non-WAL file), this is get(). */
+  async getCooperatively(name: string): Promise<SliceRecord | null> {
+    if (this.batchDepth > 0 || !this.isReady()) return this.get(name);
+    this.reconcileComposition();
+    const cached = this.detailCache.get(name);
+    const file = cached && cached.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
+    if (!file || !this.findSliceLocation(name)) return this.get(name);
+    const served = new Set([name]);
+    return this.withPreparedMembership(served, await this.readMembershipIndexCooperatively(file, served), () => this.get(name));
+  }
+
+  /** withMembershipBatch(), for a route whose batch starts with list(): when the listing isn't cached, the batch's
+   *  membership index is read first as getCooperatively reads it, then `fn` runs in the batch with that index. */
+  async withMembershipBatchCooperatively<T>(fn: () => T): Promise<T> {
+    if (this.batchDepth > 0 || !this.isReady()) return this.withMembershipBatch(fn);
+    this.reconcileComposition();
+    const file = this.listingCache && this.listingCache.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
+    if (!file) return this.withMembershipBatch(fn);
+    return this.withPreparedMembership(null, await this.readMembershipIndexCooperatively(file, null), () => this.withMembershipBatch(fn));
+  }
+
+  /** Runs `fn` with `index` as the next membership build for `served`. The await that read it is over, so nothing
+   *  else runs between here and that build; a cache drop in between (invalidate) discards it. */
+  private withPreparedMembership<T>(served: Set<string> | null, index: MembershipIndex, fn: () => T): T {
+    this.preparedMembership = { served, index };
+    try {
+      return fn();
+    } finally {
+      this.preparedMembership = null;
+    }
   }
 
   // Quiet reconciliation must notice new native membership before the legacy metadata TTL.
@@ -1386,7 +1463,56 @@ export class SliceIndexer {
     if (this.membershipIndex) {
       return this.membershipIndex;
     }
+    // A cooperative read made for this operation's scope serves its first build, once.
+    const prepared = this.preparedMembership;
+    if (prepared && sameServedScope(prepared.served, served)) {
+      this.preparedMembership = null;
+      this.membershipIndex = prepared.index;
+      return prepared.index;
+    }
 
+    // The same build as readMembershipIndexCooperatively, over synchronous statements on this connection.
+    const build = this.membershipBuild(served);
+    let step = build.next();
+    while (!step.done) {
+      if (step.value.kind === "typed") {
+        step = build.next(this.db.prepare(TYPED_MEMBERSHIP_SQL).iterate() as Iterable<TypedMembershipRow>);
+      } else {
+        const scan = this.db.prepare(step.value.tagsColumnPresent ? FALLBACK_MEMBERSHIP_SQL : FALLBACK_BODY_MEMBERSHIP_SQL);
+        build.next(scan.iterate() as Iterable<FallbackMembershipRow>);
+        step = build.next(null);
+      }
+    }
+    this.membershipIndex = step.value;
+    return this.membershipIndex;
+  }
+
+  /** The membership build readRowsCooperatively drives: the same scans, read on their own read-only connection one
+   *  rowid window at a time, yielding to the event loop between windows. Each scan is one read transaction, so the
+   *  fallback scan's snapshot can be newer than the typed scan's. A read or build failure propagates and nothing is
+   *  published; the caller hands the index to the next build (withPreparedMembership). */
+  private async readMembershipIndexCooperatively(file: string, served: Set<string> | null): Promise<MembershipIndex> {
+    const build = this.membershipBuild(served);
+    let step = build.next();
+    while (!step.done) {
+      if (step.value.kind === "typed") {
+        const typed = await readRowsCooperatively<TypedMembershipRow & { ts_created: unknown }>(file, "queue_items", TYPED_MEMBERSHIP_WINDOW_SQL, []);
+        step = build.next(inTypedMembershipOrder(typed.rows));
+      } else {
+        const sql = step.value.tagsColumnPresent ? FALLBACK_MEMBERSHIP_WINDOW_SQL : FALLBACK_BODY_MEMBERSHIP_WINDOW_SQL;
+        await readRowsCooperatively<FallbackMembershipRow>(file, "queue_items", sql, [], undefined, undefined, {
+          onWindow: (rows) => { build.next(rows); },
+        });
+        step = build.next(null);
+      }
+    }
+    return step.value;
+  }
+
+  /** One membership build (ensureMembershipIndex's doc above), as a generator that asks its driver for each scan's
+   *  rows: the typed scan's in TYPED_MEMBERSHIP_SQL's order, then the fallback scan's in rowid-ordered batches ending
+   *  with null. It reads frontmatter and builds the maps itself, so both drivers build the same index. */
+  private *membershipBuild(served: Set<string> | null): MembershipBuild {
     const typedBySlice = new Map<string, string[]>();
     const fallbackTermsBySlice = new Map<string, string[]>();
     const fallbackByTerm = new Map<string, string[]>();
@@ -1417,11 +1543,9 @@ export class SliceIndexer {
     // real fault, not a shape fact, and must not be laundered into a
     // "tags column missing" degrade nor allow a later fallback scan.
     if (!tableAbsent && tagsColumnPresent) {
-      const stmt = this.db.prepare(
-        `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`,
-      );
+      const typedRows = (yield { kind: "typed" }) as Iterable<TypedMembershipRow>;
       const scanOrder = new Map<string, number>();
-      for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
+      for (const r of typedRows) {
         if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
         scanOrder.set(r.qitem_id, scanOrder.size);
         for (const tagged of parseScopeTags(r.tags).slices) {
@@ -1521,11 +1645,12 @@ export class SliceIndexer {
       // propagates and NOTHING is published.
       const localBuckets = new Map<string, string[]>();
       for (const term of termList) localBuckets.set(term, []);
-      const scan = tagsColumnPresent
-        ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
-        : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
       let stamp = 0;
-      for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
+      for (
+        let batch = (yield { kind: "fallback", tagsColumnPresent }) as Iterable<FallbackMembershipRow> | null;
+        batch !== null;
+        batch = (yield { kind: "fallback", tagsColumnPresent }) as Iterable<FallbackMembershipRow> | null
+      ) for (const r of batch) {
         if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
         // A non-TEXT value (a BLOB) failed the build here before this matcher:
         // asciiFold/sqliteVisiblePrefix threw on it. The literal pass reads
@@ -1567,8 +1692,7 @@ export class SliceIndexer {
       for (const [term, ids] of localBuckets) fallbackByTerm.set(term, ids);
     }
 
-    this.membershipIndex = { typedBySlice, fallbackTermsBySlice, fallbackByTerm, knownSlices };
-    return this.membershipIndex;
+    return { typedBySlice, fallbackTermsBySlice, fallbackByTerm, knownSlices };
   }
 
   private discoverMissionIds(): Set<string> {
