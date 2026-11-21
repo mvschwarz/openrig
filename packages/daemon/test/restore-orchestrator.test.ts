@@ -2025,6 +2025,21 @@ describe("RestoreOrchestrator", () => {
       .toEqual({ resume_token: resumeToken });
   });
 
+  // The rollback of a blank session puts the seat's binding back as it was before the launch. For a recreated seat that's
+  // its live node, where the launch bound the new session; the snapshot's id holds no binding.
+  it("a recreated seat whose legacy resume fails after launch leaves no binding on its live node, and the next restore launches", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }], edges: [],
+      resumeType: "codex_id", resumeToken: "uuid-123", restorePolicy: "resume_if_possible" });
+    const { live } = recreate(snap, "codex");
+    const first = await createOrchestrator({ codex: mockCodexResume({ ok: false, code: "resume_failed", message: "no such thread" } as never) })
+      .restore(snap.id);
+    expect(first.ok && first.result.nodes[0]!.status).toBe("awaiting-decision");
+    expect(sessionRegistry.getBindingForNode(live.id)).toBeNull();
+    const second = await createOrchestrator({ codex: mockCodexResume() }).restore(snap.id);
+    expect(second.ok && second.result.nodes[0]).toMatchObject({ nodeId: live.id });
+    expect(second.ok && second.result.nodes[0]!.status).not.toBe("failed");
+  });
+
   it("restore_policy=resume_if_possible + claude_name -> Claude resume called", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
