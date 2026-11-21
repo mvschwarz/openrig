@@ -221,7 +221,8 @@ export function startWakeLadderScheduler(deps: {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
-  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
+  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">
+    & Partial<Pick<import("./domain/seat-activity-service.js").SeatActivityService, "codexPermissionState">>;
   agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   gatewaySubsystem?: { status?: () => { state?: unknown }; dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
@@ -253,6 +254,7 @@ export function startWakeLadderScheduler(deps: {
       readPermissionPrompts: makePermissionPromptReader({ db,
         getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
           order: runtime === "claude-code" ? "source" : "arrival" }),
+        getCodexPermissionState: (nodeId, raisedAt) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt),
       }),
       readPromptState: makePromptStateReader({
         db,
@@ -261,6 +263,7 @@ export function startWakeLadderScheduler(deps: {
           sessionName,
           order: runtime === "claude-code" ? "source" : "arrival",
         }),
+        getCodexPermissionState: (nodeId, raisedAt, after) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt, after),
       }),
       readPromptKind: makePromptKindReader({ db, getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId) }),
       ...(deps.providerService

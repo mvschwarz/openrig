@@ -204,6 +204,71 @@ With `needs-me.read` supported:
   or a host pairing request is answered in place, with no answer row. `answersFrom: "this-daemon"` says where they were
   read: an answer another host holds isn't among them, so an empty list isn't proof that nobody answered.
 
+### A companion app that shows a person what needs them and answers as them
+
+An app for the person a team asks questions, such as a phone app for reviewing and steering, can be built on the
+existing [Core app job](core-app.md). In that page's words, `/api/apps/v1` is "an instance-local, versioned facade for one
+job: see a structured human question, answer as a registered person, recover that submission, and follow its actual
+recorded answer and linked work". The steps below add no route and no promise; each inherits that page's rules and limits.
+
+1. **Reach the daemon.** Find it as in [Finding the daemon](#finding-the-daemon). A browser app also needs its exact
+   origin in `OPENRIG_ALLOWED_ORIGINS` in the daemon's environment, then a daemon restart. "A bearer token does not
+   override this" ([Browser access](browser-access.md)). An app that reaches the daemon by a name it doesn't recognise,
+   such as a custom DNS name or a proxy's domain, also needs that name in `OPENRIG_ALLOWED_HOSTS`; the machine's own
+   name, its IP addresses and its Tailscale name are recognised already.
+2. **Get the app its own credential.** The owner issues it for the registered people the app answers as:
+   `POST /api/apps/v1/credentials` with `{"appId", "actors": ["<person>@external"], "job": "human-answer",
+   "attribution": "app-attributed"}`, through the same owner gate as `/api/mission-control/action`. With no owner
+   bearer configured, that gate admits any request the daemon accepts, so on a tailnet bind any peer that passes
+   Host/Origin can issue one ([Access and identity](core-app.md#access-and-identity)). Store the one-time
+   `orapp_…` token as [Access and identity](core-app.md#access-and-identity) says. The credential "is not human login":
+   Core's claim is "person attributed by authenticated app X, never independent human authentication", and any
+   credential can read any person's questions and their linked results. Every read and write names one of the
+   credential's own actors (`?actor=`, or `actor` in an answer), and another returns 403: that says who's acting, not
+   what's visible.
+3. **Check support, then read what needs the person.** Every app call sends `Authorization: Bearer orapp_…`.
+   `GET /api/apps/v1/capabilities` returns `contract: openrig.core-app` and `version: 1`. An older daemon may return an
+   ordinary 404, which means the job is unavailable. `GET /api/apps/v1/needs-me?actor=<person>` lists the current
+   structured asks in that person's Feed perspective. `GET /api/apps/v1/requests/<requestId>?actor=<person>` gives one
+   in full: its body, the actual question and option ids, the answers so far, the opaque `decisionRevision` and the
+   episode. Show the options as they are: an ask with no structured questions has `answer: null` and an
+   `unsupportedReason`, and no questions are inferred from its text.
+4. **Submit the person's exact answer.** Save a random answer id and the exact payload first, then
+   `POST /api/apps/v1/answers/<answerId>` with `job`, `actor`, `requestId`, `questionId`, `episodeKey`,
+   `expectedRevision` and an `answer` of `{"kind": "option", "optionId"}` or `{"kind": "typed-reply", "text"}`
+   ([Discover, read and answer](core-app.md#discover-read-and-answer)). It goes "through the existing Mission Control
+   answer owner".
+   - **What the receipt says happened:** `outcome: recorded` is a partial choice. `outcome: answered` means the existing
+     answer owner accepted the whole answer. Read the receipt's `submission.replyQitemId` first, then its optional
+     `message`:
+     - **`replyQitemId` names a row, with no `message`:** the answer was returned to the asking agent as that new row,
+       which wakes it the way any new row does (a hosted member with no wake trigger reads it only when it next checks
+       its queue).
+     - **`replyQitemId` names a row, and `message` says "Already answered":** that row is the original return, and no
+       new reply was sent.
+     - **`replyQitemId` is null:** a runner's permission request, answered in place. Its `message` says whether the
+       answer went to the receiving agent, or is kept on the request, which is still waiting because no agent could read
+       it or the handoff couldn't complete. Show the kept one to the person: their answer is saved, and no agent has it
+       yet. A request the answer closed, with no receiving agent here, has no `message`.
+
+     Either way, `answered` "never proves a native effect".
+   - **Retries:** after an uncertain response, retry the same id and payload. Each 503 in
+     [the 503 table](core-app.md#discover-read-and-answer) says what's known about persistence, and
+     `app_job_unavailable` with no `submission` says nothing about an earlier attempt.
+5. **Follow it to its actual result.** `GET /api/apps/v1/requests/<requestId>/result?actor=<person>` reads the actual
+   return, permission and linked-work facts, separately from the receipt
+   (`GET /api/apps/v1/answers/<answerId>?actor=<person>`, the receipt's `links.self`).
+   `GET /api/apps/v1/events` carries only invalidations; reread on each one, and follow
+   [Refresh and interruption recovery](core-app.md#refresh-and-interruption-recovery) for polling and after a gap.
+   - "Never invent a revision or infer completion from an absent card."
+   - "A queue closure is that record's closure, never a claim of mission or product success."
+   - It's instance-local: another host's asks and answers aren't in it.
+
+**Read only, without an app credential:** `GET /api/attention?view=<person-id>&kind=action`
+([above](#what-needs-a-person-and-how-their-answers-link-back-team-operationsv1)) shows that person's asks with `revision`
+and `about`. It's a view, not proof of who's using the client, and it doesn't answer: `needs-me.answer` reads
+`not-supported` in `GET /api/team-operations/capabilities`.
+
 ### What a connection supports, and what happened to a delivery (`member-connection.v1`)
 
 `GET /api/member-connection/capabilities` lists each delivery route this daemon declares, with what it supports in four
@@ -261,6 +326,15 @@ What reads these declarations:
   states.
 - **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
   a missing, zero, negative or unparseable `limit` defaults to 20.
+- **A watchdog job's quiet count:** `GET /api/watchdog/<jobId>/status` (what `rig watchdog status` prints) returns
+  `quiet` beside `job` and `recentHistory`: `{ since, total, byReason, lastReason }`. It counts the quiet decisions
+  the engine made for that job: a policy's skip whose reason is in the engine's quiet set (a policy's own `not_due`
+  included) and the active-wake throttle's `active_wake_not_due`. It doesn't count scheduler ticks, loud skips,
+  delivered work, or the other evaluations that end without a history row (a job no longer active, a rig delivery
+  drain, a wake-accounting retry, a reminder held for its pass). It is kept in memory: `since` is when the daemon
+  started, and a restart counts again from zero. A job with no quiet decision yet reads `total: 0` and
+  `lastReason: null`. Two reads give a rate of quiet decisions; that rate alone doesn't show the scheduler's cadence
+  or health, and the loud outcomes stay in `recentHistory`.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body

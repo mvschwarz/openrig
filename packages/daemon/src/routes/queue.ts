@@ -14,7 +14,7 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
 import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
@@ -108,6 +108,38 @@ export function crossHostProvenanceTags(existing: string[] | undefined): string[
   const fromHost = `from-host:${osHostname()}`;
   const additions = [CROSS_HOST_TAG, fromHost].filter((t) => !base.includes(t));
   return [...base, ...additions];
+}
+
+/**
+ * #3018 — the identity a FORWARDING daemon relays to the host that keeps the record. The forwarded body
+ * carries only a `sourceSession`, so the receiving daemon fell back to `claimed:v1`; the CLI's
+ * `rig queue update --host` calls that host directly and already carries the sender header.
+ * The actor is re-stamped with THIS daemon's host suffix (the same value the forwarded body's
+ * sourceSession carries), and the relay/provenance markers keep the receiving hop from presenting a
+ * relayed actor as transport-verified (resolveRecordedProvenance records relay:v1). `Via` marks the
+ * request as another hop, so a loopback receiver doesn't read it as a direct local client. A request
+ * with no transport identity stays header-less: a body claim is never laundered into a relayed one.
+ */
+export function relayedSenderHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> | undefined {
+  const sender = transportSenderSession(c as Context);
+  const selfId = getSelfHostId();
+  if (!sender || !selfId) return undefined;
+  if (c.req.header(ORIGIN_UNKNOWN_HEADER) === "true") {
+    return {
+      [SENDER_IDENTITY_HEADER]: sender,
+      [ORIGIN_UNKNOWN_HEADER]: "true",
+      [RELAY_HEADER]: selfId,
+      via: selfId,
+      [IDENTITY_PROVENANCE_HEADER]: "origin-unknown:v1",
+    };
+  }
+  const relayedHere = !!c.req.header(RELAY_HEADER)?.trim();
+  return {
+    [SENDER_IDENTITY_HEADER]: stampSelfHostSuffix(sender),
+    [RELAY_HEADER]: selfId,
+    via: selfId,
+    [IDENTITY_PROVENANCE_HEADER]: relayedHere ? "claimed:v1" : "transport:v1",
+  };
 }
 
 /** Human requests: canonical human destination or human blocker, excluding
@@ -341,6 +373,8 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        // An update's expected state (--expect-state) no longer matches the row; nothing was written.
+        : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
@@ -421,6 +455,8 @@ export function queueRoutes(): Hono {
     hostId: string,
     path: string,
     forwardBody: Record<string, unknown>,
+    /** #3018: relay this daemon's resolved sender to the host that keeps the record (create only). */
+    relayIdentity = false,
   ): Promise<
     | { ok: true; payload: unknown; status: number }
     | { ok: false; response: Response }
@@ -456,12 +492,16 @@ export function queueRoutes(): Hono {
         "unsupported-transport",
       );
     }
+    const relay = relayIdentity ? relayedSenderHeaders(c) : undefined;
     const res = await remoteJsonRequest(resolved.host, path, {
       method: "POST",
       body: forwardBody,
       timeoutMs: QUEUE_FORWARD_TIMEOUT_MS,
       fetchImpl,
-      headers: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : undefined,
+      headers: {
+        ...(c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : {}),
+        ...(relay ?? {}),
+      },
     });
     if (res.ok) {
       // The origin daemon's structured response, verbatim — its row is the
@@ -815,7 +855,9 @@ export function queueRoutes(): Hono {
         sourceSession: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? sourceSession : stampSelfHostSuffix(sourceSession),
         tags: crossHostProvenanceTags(withRouteNotCarriedTag(body.tags, routeNotCarried)),
       };
-      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
+      // #3018: relay this daemon's resolved sender (relayedSenderHeaders), so the host that keeps the
+      // record writes a relayed actor instead of falling back to a bare body claim.
+      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody, true);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
@@ -1036,6 +1078,7 @@ export function queueRoutes(): Hono {
       actorSession?: string;
       classificationBinding?: unknown;
       state?: QueueState;
+      expectState?: QueueState | null;
       reopen?: boolean;
       closureRequiredAt?: string;
       transitionNote?: string;
@@ -1064,6 +1107,8 @@ export function queueRoutes(): Hono {
         qitemId,
         actorSession,
         state: body.state,
+        // Optional compare-and-set: the repository checks it inside the update's transaction.
+        expectState: body.expectState,
         reopen: body.reopen,
         closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
