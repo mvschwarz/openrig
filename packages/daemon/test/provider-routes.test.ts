@@ -388,7 +388,7 @@ describe("provider account reference routes (#3625)", () => {
       expect((await app.request("/api/provider/account-refs", { method: "POST", body: "[]", headers: { "content-type": "application/json" } })).status).toBe(400);
       expect((await app.request("/api/provider/account-refs", { method: "POST", body: "{", headers: { "content-type": "application/json" } })).status).toBe(400);
 
-      const unusable = await post(app, { provider: "claude", label: "open", tokenFile: open });
+      const unusable = await post(app, { provider: "claude", label: "open", apiKeyFile: open });
       expect(unusable.status).toBe(400);
       const refusal = await unusable.json();
       expect(refusal).toMatchObject({ ok: false, code: "reference_unusable" });

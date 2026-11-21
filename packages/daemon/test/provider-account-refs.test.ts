@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -68,7 +68,6 @@ describe("provider account references", () => {
     const home = codexHome(["work", "open"]);
     fs.chmodSync(path.join(home, "auth-profiles", "open.json"), 0o644);
     const refusals = [
-      repo.add({ provider: "claude", label: "open", tokenFile: file("open", 0o644) }),
       repo.add({ provider: "claude", label: "open-key", apiKeyFile: file("open-key", 0o644) }),
       repo.add({ provider: "claude", label: "missing", tokenFile: path.join(dir, "missing") }),
       repo.add({ provider: "claude", label: "empty", tokenFile: file("empty", 0o600, "") }),
@@ -77,19 +76,27 @@ describe("provider account references", () => {
       repo.add({ provider: "codex", label: "nohome", codexHome: path.join(dir, "nohome"), login: "work" }),
       repo.add({ provider: "codex", label: "open-login", codexHome: home, login: "open" }),
     ];
-    expect(refusals.map((r) => r.ok ? "ok" : r.code)).toEqual(Array(8).fill("reference_unusable"));
+    expect(refusals.map((r) => r.ok ? "ok" : r.code)).toEqual(Array(7).fill("reference_unusable"));
     const messages = refusals.map((r) => r.ok ? "" : r.message);
-    expect(messages[0]).toMatch(/must be private \(0600 or 0400\), and it is 0644\. Nothing was stored\.$/);
-    expect(messages[1]).toContain("the API-key file must be private (0600 or 0400)");
-    expect(messages[2]).toContain("doesn't exist");
-    expect(messages[3]).toContain("is empty");
-    expect(messages[4]).toContain("isn't a regular file");
-    expect(messages[5]).toContain(`no login named personal is saved in ${home} (rig auth list --codex-home ${home} lists them)`);
-    expect(messages[6]).toContain("doesn't exist");
+    expect(messages[0]).toContain("the API-key file must be private (0600 or 0400)");
+    expect(messages[1]).toContain("doesn't exist");
+    expect(messages[2]).toContain("is empty");
+    expect(messages[3]).toContain("isn't a regular file");
+    expect(messages[4]).toContain(`no login named personal is saved in ${home} (rig auth list --codex-home ${home} lists them)`);
+    expect(messages[5]).toContain("doesn't exist");
     // The switch only copies a 0600 saved login (rig auth switch), so a looser one is refused here too.
-    expect(messages[7]).toContain(`the saved login ${path.join(home, "auth-profiles", "open.json")} must be private (0600), and it is 0644`);
+    expect(messages[6]).toContain(`the saved login ${path.join(home, "auth-profiles", "open.json")} must be private (0600), and it is 0644`);
     expect(rows().n).toBe(0);
     expect(JSON.stringify(refusals)).not.toContain(CONTENT);
+  });
+
+  it("adds a subscription token file whatever its mode, as rig provider switch --token-file does, and warns when it's loose", () => {
+    const loose = repo.add({ provider: "claude", label: "open", tokenFile: file("open", 0o644) });
+    expect(loose).toMatchObject({ ok: true, account: { label: "open", kind: "claude_token_file" } });
+    expect(loose.ok && loose.warnings).toEqual([`the token file ${path.join(dir, "open")} can be read by group or others (mode 0644); 0600 or 0400 is recommended`]);
+    const tight = repo.add({ provider: "claude", label: "tight", tokenFile: file("tight", 0o600) });
+    expect(tight.ok && "warnings" in tight).toBe(false);
+    expect(JSON.stringify([loose, tight])).not.toContain(CONTENT);
   });
 
   it("follows a symlinked Claude file to a private regular file, as the launch does; a symlinked Codex login isn't one", () => {
@@ -106,26 +113,6 @@ describe("provider account references", () => {
     fs.symlinkSync(file("elsewhere.json", 0o600), path.join(home, "auth-profiles", "linked.json"));
     expect(repo.add({ provider: "codex", label: "linked", codexHome: home, login: "linked" })).toMatchObject({
       ok: false, code: "reference_unusable", message: expect.stringContaining("no login named linked is saved in") });
-  });
-
-  it("a file that goes away between the checks is refused, naming its kind", () => {
-    const realStat = fs.statSync;
-    for (const [kind, input] of [
-      ["API-key file", (f: string) => ({ provider: "claude" as const, label: "gone-key", apiKeyFile: f })],
-      ["token file", (f: string) => ({ provider: "claude" as const, label: "gone-token", tokenFile: f })],
-    ] as const) {
-      const f = file(`vanishing-${kind.length}`, 0o600);
-      let calls = 0;
-      // The first stat is the shared file check; the second, the privacy check, finds the file gone.
-      const spy = vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, o?: fs.StatSyncOptions) => {
-        if (p === f && ++calls === 2) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-        return realStat(p, o);
-      }) as typeof fs.statSync);
-      try {
-        expect(repo.add(input(f))).toEqual({ ok: false, code: "reference_unusable", message: `the ${kind} ${f} doesn't exist. Nothing was stored.` });
-      } finally { spy.mockRestore(); }
-    }
-    expect(rows().n).toBe(0);
   });
 
   it("refuses a malformed label, path or login name before looking at the filesystem", () => {

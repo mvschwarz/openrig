@@ -443,8 +443,11 @@ describe("rig provider account add|list|remove (#3625)", () => {
           return reply(200, { accounts: req.url.includes("provider=codex") ? [CODEX] : req.url.includes("empty") ? [] : [TOKEN, CODEX] });
         }
         if (req.method === "POST" && req.url === "/api/provider/account-refs") {
-          const sent = JSON.parse(body) as { provider: string; label: string };
-          if (sent.label === "open") return reply(400, { ok: false, code: "reference_unusable", message: "the token file /keys/open must be private (0600 or 0400), and it is 0644. Nothing was stored." });
+          const sent = JSON.parse(body) as { provider: string; label: string; apiKeyFile?: string };
+          if (sent.label === "open") return reply(400, { ok: false, code: "reference_unusable", message: "the API-key file must be private (0600 or 0400) and at most 8192 bytes. Nothing was stored." });
+          if (sent.label === "loose") return reply(201, { ok: true, account: { ...TOKEN, label: "loose", file: "/keys/loose" },
+            warnings: ["the token file /keys/loose can be read by group or others (mode 0644); 0600 or 0400 is recommended"] });
+          if (sent.apiKeyFile) return reply(201, { ok: true, account: { ...TOKEN, label: "api", kind: "claude_api_key_file", file: "/keys/api" } });
           return reply(201, { ok: true, account: sent.provider === "codex" ? CODEX : TOKEN });
         }
         if (req.method === "DELETE" && req.url === "/api/provider/account-refs/claude/max-1") return reply(200, { ok: true, account: TOKEN });
@@ -462,11 +465,17 @@ describe("rig provider account add|list|remove (#3625)", () => {
     expect(claude.exitCode).toBeFalsy();
     expect(seen.at(-1)).toMatchObject({ method: "POST", url: "/api/provider/account-refs" });
     expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "claude", label: "max-1", tokenFile: "/keys/max-1" });
-    expect(claude.logs).toEqual(["Added the claude account max-1: the token file /keys/max-1.", "Checked that the file exists, is private and isn't empty; it wasn't read."]);
+    expect(claude.logs).toEqual(["Added the claude account max-1: the token file /keys/max-1.", "Checked that the file exists and isn't empty; it wasn't read."]);
+
+    const loose = await run(["account", "add", "loose", "--provider", "claude", "--token-file", "/keys/loose"], runningDeps(port));
+    expect(loose.exitCode).toBeFalsy();
+    expect(loose.logs).toEqual(["Added the claude account loose: the token file /keys/loose.", "Checked that the file exists and isn't empty; it wasn't read.",
+      "Warning: the token file /keys/loose can be read by group or others (mode 0644); 0600 or 0400 is recommended."]);
 
     const key = await run(["account", "add", "api", "--provider", "claude", "--api-key-file", "/keys/api"], runningDeps(port));
     expect(key.exitCode).toBeFalsy();
     expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "claude", label: "api", apiKeyFile: "/keys/api" });
+    expect(key.logs.at(-1)).toBe("Checked that the file exists, is private and isn't empty; it wasn't read.");
 
     const codex = await run(["account", "add", "work", "--provider", "codex", "--codex-home", "/homes/codex-a", "--login", "work", "--json"], runningDeps(port));
     expect(codex.exitCode).toBeFalsy();
@@ -475,10 +484,10 @@ describe("rig provider account add|list|remove (#3625)", () => {
   });
 
   it("a refused add prints the daemon's reason and exits 1, in JSON too", async () => {
-    const human = await run(["account", "add", "open", "--provider", "claude", "--token-file", "/keys/open"], runningDeps(port));
+    const human = await run(["account", "add", "open", "--provider", "claude", "--api-key-file", "/keys/open"], runningDeps(port));
     expect(human.exitCode).toBe(1);
-    expect(human.logs).toEqual(["the token file /keys/open must be private (0600 or 0400), and it is 0644. Nothing was stored."]);
-    const json = await run(["account", "add", "open", "--provider", "claude", "--token-file", "/keys/open", "--json"], runningDeps(port));
+    expect(human.logs).toEqual(["the API-key file must be private (0600 or 0400) and at most 8192 bytes. Nothing was stored."]);
+    const json = await run(["account", "add", "open", "--provider", "claude", "--api-key-file", "/keys/open", "--json"], runningDeps(port));
     expect(json.exitCode).toBe(1);
     expect(JSON.parse(json.logs[0]!)).toMatchObject({ ok: false, code: "reference_unusable" });
   });

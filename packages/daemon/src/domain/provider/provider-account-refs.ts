@@ -41,7 +41,7 @@ export type AccountRefRefusal =
   /** An assignment uses the label (slice 02 adds assignments). */
   | "in_use";
 
-export type AccountRefAddResult = { ok: true; account: AccountRef } | { ok: false; code: AccountRefRefusal; message: string };
+export type AccountRefAddResult = { ok: true; account: AccountRef; warnings?: string[] } | { ok: false; code: AccountRefRefusal; message: string };
 export type AccountRefRemoveResult =
   | { ok: true; account: AccountRef }
   | { ok: false; code: AccountRefRefusal; message: string; usedBy?: string[] };
@@ -79,15 +79,10 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
     const ref = { label: input.label, tokenFile: apiKey ? input.apiKeyFile : input.tokenFile, ...(apiKey ? { kind: "api-key" as const } : {}) };
     const shape = claudeSeatTokenRefProblem(ref);
     if (shape) return invalid(shape);
+    // The switch's own check: the API-key file must be private; a subscription token file has no mode rule there, so it
+    // has none here (accountRefWarnings notes a loose one).
     const fileProblem = claudeSeatTokenFileProblem(ref);
     if (fileProblem) return unusable(fileProblem);
-    // A subscription token gets the API key's rule too: only its owner may read it.
-    const kind = apiKey ? "API-key file" : "token file";
-    let mode: number;
-    try { mode = fs.statSync(ref.tokenFile).mode & 0o777; } catch { return unusable(`the ${kind} ${ref.tokenFile} doesn't exist`); }
-    if (mode !== 0o600 && mode !== 0o400) {
-      return unusable(`the ${kind} ${ref.tokenFile} must be private (0600 or 0400), and it is ${mode.toString(8).padStart(4, "0")}`);
-    }
     return null;
   }
   if (!path.isAbsolute(input.codexHome) || /[\0\n\r]/.test(input.codexHome)) return invalid("the Codex home must be an absolute path on one line");
@@ -105,6 +100,16 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
   try { savedMode = fs.lstatSync(saved).mode & 0o777; } catch { return unusable(`the saved login ${saved} doesn't exist`); }
   if (savedMode !== 0o600) return unusable(`the saved login ${saved} must be private (0600), and it is ${savedMode.toString(8).padStart(4, "0")}`);
   return null;
+}
+
+/** What's worth knowing about a reference that would work: a subscription token file that group or others can read.
+ *  `rig provider switch --token-file` accepts it, so adding it does too. */
+export function accountRefWarnings(input: AccountRefInput): string[] {
+  if (input.provider !== "claude" || !("tokenFile" in input)) return [];
+  let mode: number;
+  try { mode = fs.statSync(input.tokenFile).mode & 0o777; } catch { return []; }
+  return (mode & 0o077) !== 0
+    ? [`the token file ${input.tokenFile} can be read by group or others (mode ${mode.toString(8).padStart(4, "0")}); 0600 or 0400 is recommended`] : [];
 }
 
 interface AccountRefRow {
@@ -167,7 +172,8 @@ export class ProviderAccountRefsRepository {
       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(input.provider, input.label, kind, file,
       input.provider === "codex" ? input.codexHome : null, input.provider === "codex" ? input.login : null,
       (this.opts.now ?? (() => new Date().toISOString()))());
-    return { ok: true, account: this.get(input.provider, input.label)! };
+    const warnings = accountRefWarnings(input);
+    return { ok: true, account: this.get(input.provider, input.label)!, ...(warnings.length ? { warnings } : {}) };
   }
 
   /** Removes the label, unless something still uses it. Seats already switched to it keep their own reference. */

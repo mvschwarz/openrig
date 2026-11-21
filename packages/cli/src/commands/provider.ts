@@ -952,11 +952,11 @@ switch or restart because a report was refused.`)
     .command("account")
     .description("Accounts this daemon knows by your label: a Claude token or API-key file, or a Codex login saved in a Codex home")
     .addHelpText("after", `
-Each account is your label and a reference on the daemon's own machine: the absolute path of a private (0600 or 0400) file
-holding a Claude subscription token or API key, or a Codex home and the name of a login saved there (rig auth list
---codex-home <home> lists them). Only the reference is kept: the file isn't read or copied, and no credential passes
-through OpenRig. Adding one checks it first: the file exists, is a regular file, is private and isn't empty, or the login
-is saved in that home. A refusal says why and stores nothing. A label is unique per provider, and the same label can name
+Each account is your label and a reference on the daemon's own machine: the absolute path of a file holding a Claude
+subscription token or API key, or a Codex home and the name of a login saved there (rig auth list --codex-home <home>
+lists them). Only the reference is kept: the file isn't read or copied, and no credential passes through OpenRig. Adding
+one checks it first, as rig provider switch does: the file exists, is a regular file and isn't empty (an API-key file must
+also be private, 0600 or 0400; a token file others can read is added with a warning), or the login is saved in that home. A refusal says why and stores nothing. A label is unique per provider, and the same label can name
 a Claude and a Codex account. A label is your name for a reference, not proof of the login a running seat uses.
 
 With --host, the command runs on that registered machine over its SSH entry, as this seat, and the reference is a path on
@@ -966,7 +966,7 @@ that machine. Only the command and its output cross the connection.`);
     .command("add <label>")
     .description("Add an account by label, after checking its reference on the daemon's machine")
     .option("--provider <p>", "claude or codex")
-    .option("--token-file <path>", "Claude: the absolute path of a 0600 or 0400 file holding a subscription token")
+    .option("--token-file <path>", "Claude: the absolute path of a file holding a subscription token (0600 or 0400 recommended)")
     .option("--api-key-file <path>", "Claude: the absolute path of a 0600 or 0400 file holding an API key")
     .option("--codex-home <dir>", "Codex: the Codex home the login is saved in")
     .option("--login <name>", "Codex: the saved login's name in that home")
@@ -987,7 +987,7 @@ that machine. Only the command and its output cross the connection.`);
       }
       const client = await getClient(getDeps());
       if (!client) { process.exitCode = 1; return; }
-      const res = await client.post<{ ok: boolean; account?: AccountRefView; code?: string; message?: string }>("/api/provider/account-refs", {
+      const res = await client.post<{ ok: boolean; account?: AccountRefView; warnings?: string[]; code?: string; message?: string }>("/api/provider/account-refs", {
         provider: opts.provider, label,
         ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}), ...(opts.apiKeyFile !== undefined ? { apiKeyFile: opts.apiKeyFile } : {}),
         ...(opts.codexHome !== undefined ? { codexHome: opts.codexHome } : {}), ...(opts.login !== undefined ? { login: opts.login } : {}),
@@ -1001,7 +1001,9 @@ that machine. Only the command and its output cross the connection.`);
       const added = res.data.account!;
       console.log(`Added the ${added.provider} account ${added.label}: ${describeRef(added)}.`);
       console.log(added.kind === "codex_saved_login" ? "Checked that the login is saved there; nothing was read or copied."
-        : "Checked that the file exists, is private and isn't empty; it wasn't read.");
+        : added.kind === "claude_api_key_file" ? "Checked that the file exists, is private and isn't empty; it wasn't read."
+          : "Checked that the file exists and isn't empty; it wasn't read.");
+      for (const warning of res.data.warnings ?? []) console.log(`Warning: ${warning}.`);
     });
 
   account

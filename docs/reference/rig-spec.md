@@ -882,7 +882,9 @@ rig provider account list
 rig provider account remove budget --provider claude
 ```
 
-- A Claude reference is the absolute path of a private (0600 or 0400) file holding a subscription token or an API key.
+- A Claude reference is the absolute path of a file holding a subscription token or an API key. As with
+  `rig provider switch`, an API-key file must be private (0600 or 0400); a subscription token file has no mode rule, and
+  one that group or others can read is added with a warning.
   A Codex reference is a Codex home and the name of a login saved there (`rig auth list --codex-home <home>` lists
   them).
 - Only the reference is stored. The file isn't read or copied, and no credential passes through OpenRig.

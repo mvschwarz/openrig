@@ -773,8 +773,8 @@ describe("provider account --host (runs on that machine's SSH entry)", () => {
   });
 
   it("the remote refusal comes back as its own output and exit status", async () => {
-    await account(["add", "open", "--provider", "claude", "--token-file", "/keys/open", "--host", "vm-a"],
-      { ok: false, failedStep: "remote-command-failed", stdout: "", stderr: "the token file /keys/open must be private (0600 or 0400), and it is 0644. Nothing was stored.\n", remoteExitCode: 1 } as CrossHostResult);
+    await account(["add", "open", "--provider", "claude", "--api-key-file", "/keys/open", "--host", "vm-a"],
+      { ok: false, failedStep: "remote-command-failed", stdout: "", stderr: "the API-key file must be private (0600 or 0400) and at most 8192 bytes. Nothing was stored.\n", remoteExitCode: 1 } as CrossHostResult);
     expect(captured.stderrWrites.join("")).toContain("must be private (0600 or 0400)");
     expect(process.exitCode).toBe(1);
   });
