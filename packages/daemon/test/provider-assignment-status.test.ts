@@ -252,6 +252,61 @@ describe("status for a Codex seat moved to a prepared home", () => {
   });
 });
 
+describe("a re-apply that changes nothing keeps a Codex seat on the apply that moved it", () => {
+  // The first apply's stored result is seeded as the service saves it (a real Codex switch or successor needs a seat's
+  // pane); the re-apply is the real one, through the plan and its digest.
+  async function reapply(accountHome?: string) {
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a", ...(accountHome ? { accountHome } : {}) };
+    const planned = await svc.assignmentPlan(request);
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.rows.map((r) => [r.seat, r.effect, r.asApplied])).toEqual([["c1@fleet", "unchanged", true]]);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: "lead@fleet" }, {});
+    if (!applied.ok) throw new Error(applied.message);
+    return applied.report.results.map((r) => [r.kind, r.detail]);
+  }
+  async function standing(accountHome?: string) {
+    const planned = await svc.assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a", ...(accountHome ? { accountHome } : {}) });
+    if (!planned.ok) throw new Error(planned.message);
+    const s = (await statusOf())["c1@fleet"]!;
+    return [planned.plan.rows[0]!.effect, s.state, s.asApplied, s.applied?.kind];
+  }
+  const codexHome = () => path.join(dir, ".codex");
+  function account() {
+    fs.mkdirSync(path.join(codexHome(), "auth-profiles"), { recursive: true });
+    fs.writeFileSync(path.join(codexHome(), "auth-profiles", "team.json"), CONTENT, { mode: 0o600 });
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome: codexHome(), login: "team" });
+    seat("c1", "fleet", "codex");
+  }
+  const moved = (kind: "switched" | "pending_successor", home: string, login: string | null) => {
+    const repo = new ProviderAccountAssignmentsRepository(db);
+    repo.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "the login team", requestedBy: "lead@fleet", at: "t" });
+    repo.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind, detail: "d", recovery: null,
+      activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: home, codexLogin: login } });
+  };
+
+  it("a seat on its home's login, switched in place", async () => {
+    account();
+    moved("switched", codexHome(), "team");
+    expect(await standing()).toEqual(["unchanged", "follows", true, "switched"]);
+    expect(await reapply()).toEqual([["unchanged", "still as the apply of team left its home"]]);
+    expect(await standing()).toEqual(["unchanged", "follows", true, "unchanged"]);
+    // And again: nothing to restart, still following.
+    expect(await reapply()).toEqual([["unchanged", "still as the apply of team left its home"]]);
+    expect(await standing()).toEqual(["unchanged", "follows", true, "unchanged"]);
+  });
+
+  it("a seat moved to a prepared account home", async () => {
+    account();
+    const prepared = path.join(dir, "prepared");
+    fs.mkdirSync(prepared);
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'c1'").run(prepared);
+    moved("pending_successor", prepared, null);
+    expect(await standing(prepared)).toEqual(["unchanged", "follows", true, "pending_successor"]);
+    expect(await reapply(prepared)).toEqual([["unchanged", expect.stringMatching(/^still as the apply of team left its home/)]]);
+    expect(await standing(prepared)).toEqual(["unchanged", "follows", true, "unchanged"]);
+  });
+});
+
 describe("status across hosts: the assignment on a host's seats", () => {
   const row = { seatSession: "a@fleet", rigName: "fleet", runtime: "claude-code", configured: { source: "claude_token", label: "max-2", note: "n" },
     allowance: { linked: false, reason: "r" } };
