@@ -318,7 +318,7 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(existsSync(join(tmpDir, "packets"))).toBe(false);
   });
 
-  it("stops a restore that runs past its time limit and gives the manual-route note, inside the hook's budget", () => {
+  it("asks a restore that runs past its time limit to stop, and gives the manual-route note once it has", () => {
     // The hook runs restore-from-jsonl.mjs from its own folder, so a copy beside a slow stand-in tests the time limit
     // without a multi-GB transcript.
     const scripts = join(tmpDir, "skill", "scripts");
@@ -331,7 +331,7 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(status).toBe(0);
     const payload = JSON.parse(stdout);
     expect(payload.continue).toBe(true);
-    expect(payload.systemMessage).toContain("Claude compaction restore packet generation failed: stopped after 0.5 s to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer). After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.");
+    expect(payload.systemMessage).toContain("Claude compaction restore packet generation failed: asked to stop after 0.5 s, to try to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer). After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.");
     // Only the expected sentinel, written first; no marker points at a packet that wasn't made.
     const pending = readdirSync(join(openrigHome, "compaction", "restore-pending"));
     expect(pending.length).toBe(1);
