@@ -207,8 +207,9 @@ export interface InboundDeps {
    *  `--reply-to` answer returns there. Absent: nothing is recorded. */
   recordArrivalThread?: (input: { qitemId: string; threadTs: string; channel: string }) => void;
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
-  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does.
+   *  `identityPrincipal`: the replying person's registered entity id, which a direct ask's close records. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean; identityPrincipal?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
   /** #193 — record a clicked answer on the decision the clicked message belongs to. */
   recordHumanAnswer?: RecordHumanAnswer;
   /** #193 — clicks whose continuation (reply row + resolve) failed; retried with the event
@@ -472,6 +473,7 @@ export class InboundRouter {
             decision: earlierAnswer ? humanAnswerText(earlierAnswer.body) : String(ev.text ?? "").trim() || "[file reply]",
             messageTs: ev.ts,
             typedReply: true,
+            ...(who.entityId ? { identityPrincipal: who.entityId } : {}),
           });
         } catch (e) {
           this.deps.log?.(`human reply continuation failed qitem=${route.correlationQitemId} ts=${ts}: ${(e as Error).message}`);
@@ -623,7 +625,8 @@ export class InboundRouter {
     const existing = parkOpen ? this.deps.queue.getEpisodeAnswer?.(qitemId, who.source) : this.deps.queue.getHumanAnswer?.(qitemId, who.source);
     if (existing) {
       try {
-        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body), messageTs: action?.action_ts });
+        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body), messageTs: action?.action_ts,
+          ...(who.entityId ? { identityPrincipal: who.entityId } : {}) });
         if (resolution === "not-applicable") {
           if (live) await acknowledge(CLICK_REPLIES.notClosed);
           return { status: "refused", reason: "resolve-not-applicable" };
@@ -650,7 +653,8 @@ export class InboundRouter {
       const reason = recorded?.reason ?? "answers-unavailable";
       // Another person's committed answer is the answer: a park on the person resumes with it through the resolver.
       if (recorded?.answeredBy) {
-        try { await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: "", messageTs: action?.action_ts }); }
+        try { await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: "", messageTs: action?.action_ts,
+          ...(who.entityId ? { identityPrincipal: who.entityId } : {}) }); }
         catch (e) { this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`); }
       }
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
@@ -685,7 +689,8 @@ export class InboundRouter {
         body: `${lines.join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${qitemId} (its humanAnswers field holds the same)\nRouted by openrig slack-inbound (button click).`,
       });
       // The click's own time, so a decision parked on this person resumes as a typed reply after its question would.
-      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; "), messageTs: action?.action_ts });
+      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; "), messageTs: action?.action_ts,
+        ...(who.entityId ? { identityPrincipal: who.entityId } : {}) });
     } catch (e) {
       this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`);
       if (live) await acknowledge("Your answers are recorded, but handing them back failed. OpenRig will retry.");

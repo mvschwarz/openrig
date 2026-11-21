@@ -514,6 +514,23 @@ describe("structured human questions (#193)", () => {
         recordedIdentity: { provenance: "gateway:slack:v1", principal: registry.entities[0]!.entityId } })]);
     });
 
+    const closes = () => repo.transitionLog.listForQitem(decisionId).filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+
+    it("answer trail: a typed Slack answer's close records the mapped person", async () => {
+      await typeReply("Use Postgres and ship this week");
+      expect(repo.getById(decisionId)?.state).toBe("done");
+      expect(closes()).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+    });
+
+    it("answer trail: a completed Slack click set's close records the mapped person", async () => {
+      await click("db", "pg");
+      await click("ship", "yes");
+      expect(repo.getById(decisionId)?.state).toBe("done");
+      expect(closes()).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+    });
+
     it("posts the buttons, records each click, and resolves back to the seat once every question is answered", async () => {
       expect(JSON.stringify(posts[0]?.blocks)).toContain("or-opt:pg");
 

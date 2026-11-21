@@ -496,6 +496,32 @@ describe("Daemon Lifecycle", () => {
     expect(deps.kill).not.toHaveBeenCalled();
   });
 
+  it("start: a child that exits with the daemon's listen-failure line reports that line", async () => {
+    vi.useFakeTimers();
+    let log = "Earlier daemon log\n";
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFile: vi.fn((p: string) => p === LOG_FILE ? log : null),
+      spawn: vi.fn(() => {
+        setTimeout(() => {
+          log += "OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433\n";
+          child.exitCode = 69;
+          child.emit("exit", 69, null);
+        }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({ port: 7433 }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
+
+    expect(error.message).toMatch(/exited before startup completed \(code 69/);
+    expect(error.message).toContain("OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433");
+    expect(error.message).not.toContain("See ");
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
+  });
+
   it("start reports the current child's database-conflict stop and one-start remedy", async () => {
     await import("@openrig/daemon/instance-initialization");
     vi.useFakeTimers();
