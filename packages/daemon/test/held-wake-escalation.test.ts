@@ -158,6 +158,36 @@ it.each([false, true])("a held Codex wake escalates to the orchestrator (activit
   expect((await refuseAndClimb(f, rebuilt ? "unknown" : "blocked")).targets).toContain("lead@r1001");
 });
 
+// The daemon restarted mid-turn after a Codex request, so the rebuilt oracle tracks none. Its own pane read answers the
+// row-less permission alert, as on the refusal path: a readable idle composer raises no alert, and an unreadable pane still
+// does (the hook's fail-safe reading). Through the production scheduler, with the rebuilt oracle and its structural read.
+it.each([["the idle composer", "./fixtures/input-box/codex-0.160.0/idle.txt", 0], ["an unreadable pane", null, 1]] as const)(
+  "a Codex request the rebuilt oracle doesn't track, at a seat with no work: %s gives the expected permission alerts", async (_, screen, alertCount) => {
+    const text = screen ? codexScreen(screen) : "unrecognized provider content";
+    const f = fixture("codex", undefined, text, true);
+    migrate(f.db, [queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    // The occupant as OpenRig records it, as in the native-choice cell below: the binding's pane and its verified process.
+    new SessionRegistry(f.db).updateBinding(f.node.id, { tmuxPane: "%5" });
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: "%5", observedPanePid: 4100, observedPid: 4101, observedCommand: "codex", matchedLayer: 1 },
+      sessionName: f.name, observedAt: f.clock.value.toISOString() });
+    await f.hook("PermissionRequest", null, 600_000);
+    f.reconstruct();
+    await f.structural!.pollSeat(f.name, new Map([[f.name, { text, capturedAt: f.clock.value, pane: { id: "%5", pid: 4100 } }]]),
+      "codex", null, f.clock.value);
+    await f.oracle().pollAllRunningTmuxSeats(f.db);
+    expect(f.oracle().codexPermissionState(f.node.id, f.store.getLatestForNode({ sessionName: f.name })?.eventAt)).toBeNull();
+    const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+    const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store,
+      seatActivityService: f.oracle() })!;
+    try {
+      await scheduler.runTickNow();
+      await scheduler.runTickNow();
+      expect(repo.list({ limit: 100 }).filter(r => r.tags?.includes("wake-prompt-refusal"))).toHaveLength(alertCount);
+      expect(f.paste).not.toHaveBeenCalled();
+    } finally { await scheduler.stop(); }
+  });
+
 // review50-r2 F2: a later, generation-valid clearing hook ends the held episode from the same evidence,
 // so the prompt alert retires and the parked owner can receive its next wake.
 it.each([["codex", "PermissionRequest", null, "Stop"], ["claude-code", "Notification", "permission_prompt", "Stop"],
