@@ -90,12 +90,12 @@ export async function noticeHarnessNotStarted(
     ];
     const rolledLines = rolled.length === 0 ? [] : [
       `${input.attempt} couldn't resume these seats' conversations. The blank session it launched for each was rolled back, so no`,
-      "agent is running in them, and nothing was relaunched. Each line gives the seat's own cause and how to start it:",
+      "agent is running in them, and nothing was relaunched. Each line gives the seat's own cause and the steps it offers:",
       ...rolled.map(line),
       "",
       "OpenRig's records can't tell a seat that was never used from one whose conversation is elsewhere (a moved account or",
       `folder). Restore the original conversation if you know where it is; \`rig restore-check --rig ${rig}\` names the fix for`,
-      "each seat. Otherwise the fresh launch in its line starts it without its original conversation.",
+      "each seat. Where a line offers a fresh launch, that starts the seat without its original conversation.",
     ];
     const summary = rolled.length === 0
       ? `${list.length} seat${list.length === 1 ? "" : "s"} left as a bare shell: no harness started (${input.attempt})`

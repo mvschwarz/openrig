@@ -213,4 +213,22 @@ describe("the grouped notice for seats left as bare shells", () => {
     expect(summaryOf(qitem_id)).toBe("2 seats with no agent running: 1 bare shell, 1 resume rolled back (restore attempt 12)");
   });
 
+  it("promises a rolled-back seat only the steps its cause offers: no fresh start for a seat with no saved startup context", async () => {
+    const lead = seat("crew", "lead", "lead@crew");
+    const a = seat("crew", "a", "a@crew");
+    rigs.addEdge(lead.rig.id, lead.node.id, a.node.id, "delegates_to");
+    // The pod-aware rollback's cause for a seat with no saved startup context, which offers no fresh launch.
+    const cause = "Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. This seat has no saved startup context, and no command records one for it yet, so no fresh start is offered here.";
+    await noticeHarnessNotStarted(db, queue, { rigId: lead.rig.id, attempt: "restore attempt 13",
+      seats: [{ nodeId: a.node.id, logicalId: "a", cause, rolledBack: true }] });
+
+    const { body } = notices()[0]!;
+    expect(body).toContain(`- a@crew: ${cause}`);
+    expect(body).toContain("Each line gives the seat's own cause and the steps it offers:");
+    expect(body).toContain("Restore the original conversation if you know where it is");
+    expect(body).toContain("Where a line offers a fresh launch, that starts the seat without its original conversation.");
+    expect(body).not.toContain("how to start it");
+    expect(body).not.toContain("Otherwise the fresh launch in its line");
+  });
+
 });

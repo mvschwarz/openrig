@@ -1928,7 +1928,7 @@ export class RestoreOrchestrator {
       for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
       return report;
     } catch (err) {
-      warnings.push(`Restore: the notice for the seats left as a bare shell wasn't recorded (${err instanceof Error ? err.message : String(err)}).`);
+      warnings.push(`Restore: the notice for the seats left with no agent running wasn't recorded (${err instanceof Error ? err.message : String(err)}).`);
       return undefined;
     }
   }
@@ -2597,6 +2597,7 @@ export class RestoreOrchestrator {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
+                  stage: "resume_rolled_back",
                   error: resumeWithoutContext
                     ? `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. ${noContextFresh}`
                     : `Original session unresumable: resume attempted but the runtime reported fresh continuity. The blank session was rolled back; no session is running. If that degradation is acceptable, start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
