@@ -22,7 +22,10 @@ An empty match set can still have more source records: check `page.hasMore` and
 options when continuing. Do not use `--start` with `--cursor`.
 
 `rig mcp serve` offers the events read as the `rig_telemetry_events` tool, with the
-same parameters and envelope; its `rigId` also takes a rig name.
+same parameters and envelope; its `rigId` also takes a rig name. A rig name is resolved
+to an id, but an explicitly empty `cursor`, `nodeId` or `rigId` is passed through to
+the daemon's reader, which rejects it with `telemetry_invalid_request` just as a
+direct HTTP read does.
 
 ## HTTP and envelope
 

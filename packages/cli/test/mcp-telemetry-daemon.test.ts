@@ -82,11 +82,9 @@ describe("rig_telemetry_events on the daemon's telemetry route", () => {
     expect(JSON.parse(malformed.text)).toMatchObject({ code: "telemetry_invalid_request" });
   });
 
-  it.each(["cursor", "nodeId", "rigId"])("ignores an empty %s and reports it alongside the page", async (name) => {
-    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)").run("alpha-id", "rig.stopped", "{}");
-    const baseline = await call({ start: "retained" });
-    const result = await call({ start: "retained", [name]: "" });
-    expect(result.isError).toBe(false);
-    expect(JSON.parse(result.text)).toMatchObject({ rows: JSON.parse(baseline.text).rows, note: `Ignored empty optional argument(s): ${name}.` });
+  it.each(["cursor", "nodeId", "rigId"])("forwards an empty %s to the daemon reader, which rejects it", async (name) => {
+    const result = await call({ [name]: "" });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.text)).toMatchObject({ code: "telemetry_invalid_request" });
   });
 });
