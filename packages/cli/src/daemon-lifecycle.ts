@@ -266,7 +266,8 @@ export interface LifecycleDeps {
   // /healthz body (event-loop evidence). Optional so existing mocks that
   // return `{ ok }` are unchanged; production (realDeps) supplies it.
   fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
-  /** Exclusive bind check used only after a no-state health probe times out. */
+  /** Exclusive bind check of the launch address: after a no-state health probe times out, and before spawning
+   *  over a daemon.json whose PID is dead or not an OpenRig daemon. */
   isPortOccupied?: (host: string, port: number) => Promise<boolean>;
   kill: (pid: number, signal: string) => boolean;
   readFile: (path: string) => string | null;
@@ -757,7 +758,11 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     if (pidState === "unresponsive") {
       throw new Error(`Existing daemon process (pid ${existing.pid} on port ${existing.port}) is unresponsive — recover it before starting a new daemon.`);
     }
-    // "dead" or "not_rigged" → stale state, safe to proceed
+    // "dead" or "not_openrig": the recorded PID is not a live OpenRig daemon, but another listener may still hold the
+    // launch port: a pending start's child (it never writes daemon.json) whose reservation was archived by hand, a
+    // daemon started outside this launcher, or a foreign process. Don't spawn a child onto it: its initialization
+    // would run before the bind fails.
+    if (await deps.isPortOccupied?.(probeHost, port)) throw new Error(occupiedPortGuidance(port));
   } else {
     let recoveredRunning = false;
     try {
