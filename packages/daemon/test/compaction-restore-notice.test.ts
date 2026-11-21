@@ -3,7 +3,7 @@ import * as humanSelection from "../src/domain/workflow-human-destination.js";
 import * as queueOwner from "../src/domain/queue-owner.js";
 import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 import { KERNEL_OPERATOR_SESSION } from "../src/domain/default-receiver.js";
-import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
+import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -165,6 +165,8 @@ interface RouteCase {
   wakeExpected?: boolean;
   resolvedParent?: string;
   unreadable?: boolean;
+  humanFailure?: "missing" | "registry-unavailable" | "unregistered" | "ambiguous";
+  createFailure?: boolean;
   expected: string;
   detail?: string;
 }
@@ -192,6 +194,18 @@ const routes: RouteCase[] = [
   { name: "registered person receiver alias stays on the human route", chosen: "alice@notice", kernelStatus: "running", expected: humanAddress },
   { name: "absent receiver rig is not consulted", chosen: "receiver@not-created", kernelStatus: "running", expected: humanAddress },
   { name: "no parent goes to the person, never an unrelated running seat", expected: humanAddress },
+  { name: "no registered person falls back to the kernel with a reason", humanFailure: "missing", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "unreadable person registry falls back to the kernel with a reason", humanFailure: "registry-unavailable", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "an unregistered person selection falls back to the kernel with a reason", humanFailure: "unregistered", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "ambiguous people fall back to the kernel with a reason", humanFailure: "ambiguous", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "person resolution failure uses the configured receiver before the kernel", humanFailure: "missing", chosen: "receiver@notice", receiverStatus: "exited", kernelStatus: "running", expected: "receiver@notice" },
+  { name: "fallback still excludes the failing seat's physical receiver alias", humanFailure: "missing", physicalWriter: "original@notice", reportAlias: true, chosen: "original@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "fallback still excludes a registered-person receiver alias", humanFailure: "unregistered", chosen: "alice@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "fallback still excludes an ineligible destination rig", humanFailure: "missing", chosen: "receiver@not-created", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION },
+  { name: "an eligible parent does not need person resolution", humanFailure: "missing", parent: true, expected: "owner@notice" },
+  { name: "no person or receiver preserves the unresolved case", humanFailure: "missing", expected: "unresolved" },
+  { name: "a self receiver without a kernel preserves the unresolved case", humanFailure: "missing", chosen: "writer@notice", expected: "unresolved" },
+  { name: "queue creation failure is not a person-resolution failure", createFailure: true, kernelStatus: "running", expected: humanAddress },
 ];
 
 describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind) => {
@@ -199,7 +213,7 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
     const db = createDb(); migrate(db, ALL_MIGRATIONS);
     const human = { entityId: "alice", class: "human", displayName: "Owner", address: humanAddress,
       connectorBindings: [], prefs: {}, subscriptions: [] } as unknown as HumanFragment;
-    vi.spyOn(humanSelection, "workflowHumanDestination").mockReturnValue(humanAddress);
+    const selected = vi.spyOn(humanSelection, "workflowHumanDestination").mockReturnValue(humanAddress);
     vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: route.chosen ?? null });
     try {
       const rigs = new RigRepository(db), sessions = new SessionRegistry(db), rig = rigs.createRig("notice");
@@ -229,7 +243,16 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
         }) as typeof db.prepare);
       }
       const send = vi.fn(async (_session: string, _text: string) => ({ ok: true, verified: true }));
-      const loadHumans = () => ({ ok: true as const, entities: [human] });
+      const loadHumans = (): LoadResult => route.humanFailure === "registry-unavailable"
+        ? { ok: false, error: "fixture person registry unreadable" }
+        : { ok: true, entities: route.humanFailure === "missing" ? [] : route.humanFailure === "ambiguous"
+          ? [human, { ...human, entityId: "bob", address: "bob@external" }] : [human] };
+      let personError: unknown;
+      if (route.humanFailure) selected.mockImplementation(() => {
+        try { return humanSelection.resolveWorkflowHumanDestination(
+          () => route.humanFailure === "unregistered" ? "not-registered@external" : null, loadHumans); }
+        catch (error) { personError = error; throw error; }
+      });
       const validateRig = makeTopologyDestinationCheck({
         findRigsByName: name => db.prepare("SELECT id FROM rigs WHERE name=? AND archived_at IS NULL").all(name),
         loadHumanRegistry: loadHumans, sharedChannels: () => [],
@@ -245,6 +268,20 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
       const report = (repository: QueueRepository, changed = false) => kind === "restore"
         ? reportRestoreDeliveryFailure(db, repository, changed ? { ...restore, lastDelivery: { ...restore.lastDelivery, reason: "typing_guard_enabled" } } : restore)
         : reportPreparationFailure(db, repository, changed ? { ...prep, attemptId: "next-attempt", endedAttempts: 4 } : prep);
+      if (route.createFailure) {
+        const error = new Error("fixture queue write failed");
+        vi.spyOn(queue, "create").mockRejectedValue(error);
+        await expect(report(queue)).rejects.toBe(error);
+        expect(selected).toHaveBeenCalledTimes(1);
+        expect(queueOwner.readReceivingAgentSetting).not.toHaveBeenCalled();
+        return;
+      }
+      if (route.expected === "unresolved") {
+        await expect(report(queue)).rejects.toMatchObject({ code: "workflow_human_destination_unavailable" });
+        expect(queue.list({ limit: 20 })).toEqual([]);
+        expect(send).not.toHaveBeenCalled();
+        return;
+      }
       await report(queue);
       const rows = queue.list({ limit: 20 }); expect(rows).toHaveLength(1);
       const id = rows[0]!.qitemId, row = queue.getById(id)!;
@@ -263,6 +300,12 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
 
       }
       if (route.detail) expect(row.body).toContain(route.detail);
+      if (route.humanFailure && !route.parent) {
+        expect(row.body).toContain("The registered person could not be resolved:");
+        expect(row.body).toContain((personError as Error).message);
+        expect(row.body).toContain("This is a receiver fallback, not the person's selection.");
+      }
+      if (route.parent) expect(selected).not.toHaveBeenCalled();
       // A new repository/changed configuration does not reroute or wake an existing notice.
       vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: "unrelated@notice" });
       const restarted = new QueueRepository(db, new EventBus(db), { validateRig,

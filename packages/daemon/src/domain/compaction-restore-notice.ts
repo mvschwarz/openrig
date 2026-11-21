@@ -3,13 +3,13 @@ import type Database from "better-sqlite3";
 import { type PreparationFailure, type RestoreDeliveryFailure } from "./claude-compaction-enforcer.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
-import { resolveDefaultReceiver } from "./default-receiver.js";
+import { describeDefaultReceiver, resolveDefaultReceiver } from "./default-receiver.js";
 import { workflowHumanDestination } from "./workflow-human-destination.js";
 import { physicalSessionName } from "./session-registry.js";
 import { resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 
-/** An eligible delegating parent owns recovery; otherwise notify the registered person. */
+/** An eligible parent owns recovery; otherwise notify the person, or the receiver if person resolution fails. */
 function recoveryRecipient(db: Database.Database, queue: QueueRepository, session: string): { session: string; kind: "agent" | "human"; note: string } {
   const unusable = (candidate: string): string | null => {
     if (candidate === session || physicalSessionName(db, candidate) === physicalSessionName(db, session))
@@ -30,7 +30,26 @@ function recoveryRecipient(db: Database.Database, queue: QueueRepository, sessio
     }
     reasons.push(reason);
   }
-  return { session: workflowHumanDestination(), kind: "human",
+  let person: string;
+  try { person = workflowHumanDestination(); }
+  catch (error) {
+    reasons.push(`The registered person could not be resolved: ${error instanceof Error ? error.message : String(error)}`);
+    let receiver = resolveDefaultReceiver(db);
+    if (receiver.session) {
+      const reason = unusable(receiver.session);
+      if (reason) {
+        reasons.push(reason);
+        receiver = resolveDefaultReceiver(db, () => ({ session: null, problem: reason }));
+      }
+    }
+    if (receiver.session) {
+      const reason = unusable(receiver.session);
+      if (!reason) return { session: receiver.session, kind: "agent",
+        note: `${reasons.join("; ")}. Recovery owner: ${describeDefaultReceiver(receiver)} This is a receiver fallback, not the person's selection. This records ownership, not delivery or pickup.` };
+    }
+    throw error;
+  }
+  return { session: person, kind: "human",
     note: `${reasons.length ? `${reasons.join("; ")}. ` : ""}No eligible independent delegating parent could be resolved, so this notice goes to the registered person.` };
 }
 
