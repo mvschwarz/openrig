@@ -98,7 +98,7 @@ export class RigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflightResult = await this.preflight.check(spec);
+    const preflightResult = await this.preflight.check(spec, false);
     if (!preflightResult.ready) {
       return { ok: false, code: "preflight_failed", errors: preflightResult.errors, warnings: preflightResult.warnings };
     }
@@ -205,7 +205,7 @@ export class RigInstantiator {
       return {
         ok: false,
         code: "instantiate_error",
-        message: "all node launches failed",
+        message: `all node launches failed — ${nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "failure reason unavailable"}`).join("; ")}`,
       };
     }
 
@@ -1521,7 +1521,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, includeModelWarnings: false, cwdOverride: opts?.cwdOverride, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -3411,4 +3411,3 @@ export class PodRigInstantiator {
     });
   }
 }
-
