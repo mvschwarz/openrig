@@ -46,7 +46,8 @@ function fixture() {
   const eventBus = new EventBus(db);
   const store = new AgentActivityStore({ db, eventBus, now: () => new Date(clock.now),
     resolveOccupantGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
-    isRegisteredOccupantGeneration: (id, gen) => sessions.isOccupantGenerationRegistered(id, gen) });
+    isRegisteredOccupantGeneration: (id, gen) => sessions.isOccupantGenerationRegistered(id, gen),
+    isOccupantContinuedByAdoption: (id, gen) => sessions.isOccupantContinuedByAdoption(id, gen) });
   /** The daemon's wiring: a new oracle (as after a restart) restores a held limit from the store. */
   const newOracle = (restore: "store" | "unreadable" = "store") => new SeatActivityService({
     tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3, now: () => new Date(clock.now),
