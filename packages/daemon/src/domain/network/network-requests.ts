@@ -161,7 +161,7 @@ function requestPayload(local: QueueItem, receipt: RequestRow): { body: string; 
 /** A hub item that was handed on there: handed off, or closed done by a handoff-and-complete. Its answer is its successor's. */
 const handedOn = (item: HubItem): boolean => item.state === "handed-off" || (item.state === "done" && item.closureReason === "handed_off_to");
 
-type CreateOutcome = { kind: "created"; item: HubItem } | { kind: "refused" | "unknown"; error: HubError };
+type CreateOutcome = { kind: "created"; item: HubItem } | { kind: "refused"; error: HubError } | { kind: "unknown"; error: HubError };
 
 /** Create the request on the hub under its derived id. A refusal with the hub's own code, or the hub holding a different
  *  request under that id, is definite; anything else (a timeout, a lost connection, an answer that can't be read) leaves
@@ -254,7 +254,7 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
   } catch (error) {
     if (!(error instanceof HubError)) throw error;
     // The credential refused is definite here too: nothing can be sent through this binding.
-    outcome = { kind: error.kind === "revoked" ? "refused" : "unknown", error };
+    outcome = error.kind === "revoked" ? { kind: "refused", error } : { kind: "unknown", error };
   }
   if (outcome.kind === "refused") {
     refuse(deps, receipt, outcome.error, now);
