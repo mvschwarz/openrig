@@ -55,7 +55,12 @@ export function resolveSessionNodeId(db: Database.Database, session: string): st
  *  (there is no orchestrator session to wake — never synthesize one). */
 export function defaultResolveOrchestrator(db: Database.Database, session: string): string | null {
   const nodeId = resolveSessionNodeId(db, session);
-  if (!nodeId) return null;
+  return nodeId ? orchestratorOfNode(db, nodeId) : null;
+}
+
+/** defaultResolveOrchestrator for a known node: the source of its delegates_to edge, at that parent's CURRENT canonical
+ *  session binding, or null. */
+export function orchestratorOfNode(db: Database.Database, nodeId: string): string | null {
   const row = db
     .prepare(
       `SELECT s.session_name AS parentSession FROM edges e

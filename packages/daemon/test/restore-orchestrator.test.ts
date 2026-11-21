@@ -3442,6 +3442,55 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.harnessNotStarted).toEqual(report);
   });
 
+  // A resume that finds no conversation rolls its blank session back: no agent runs in the seat, so it goes to the same
+  // notice, marked rolled back, and the rig isn't fully restored.
+  it("hands a seat whose resume was rolled back for a missing conversation to the notice, marked rolled back", async () => {
+    const token = "00000000-0000-4000-8000-0000000ba5e2";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    adapter.launchHarness.mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh", missingConversation: true as const } as never);
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-y", seats: ["dev-moved@r"] }], unrouted: [], warnings: [] };
+    const notice = vi.fn(async () => report);
+    const result = await createOrchestrator({ harnessNotStartedNotice: notice, listProcesses: nativeLineage("claude-code", token) })
+      .restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node0 = result.result.nodes[0]!;
+    expect(node0).toMatchObject({ status: "awaiting-decision", stage: "resume_rolled_back" });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: expect.stringMatching(/^restore attempt \d+$/),
+      seats: [{ nodeId: node0.nodeId, logicalId: "dev.moved", cause: node0.error, rolledBack: true }],
+    }));
+    expect(result.result.harnessNotStarted).toEqual(report);
+    expect(result.result.rigResult).toBe("partially_restored");
+  });
+
+  // The pod-aware twin of the legacy failed-resume rollback: the runtime reported fresh continuity for a resume, so its
+  // blank session is rolled back too, and that seat goes to the same notice.
+  it("hands a seat whose resume was rolled back for a fresh continuity outcome to the notice, marked rolled back", async () => {
+    const token = "00000000-0000-4000-8000-0000000f2e54";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+    const start = vi.spyOn(StartupOrchestrator.prototype, "startNode").mockResolvedValue({ ok: true, startupStatus: "ready", continuityOutcome: "fresh", warnings: [] });
+    const notice = vi.fn(async () => ({ notices: [], unrouted: [], warnings: [] }));
+    try {
+      const result = await createOrchestrator({ harnessNotStartedNotice: notice, listProcesses: nativeLineage("claude-code", token) })
+        .restore(snap.id, { adapters: { "claude-code": adapter } });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node0 = result.result.nodes[0]!;
+      expect(node0).toMatchObject({ status: "awaiting-decision", stage: "resume_rolled_back" });
+      expect(node0.error).toContain("the runtime reported fresh continuity");
+      expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+        seats: [{ nodeId: node0.nodeId, logicalId: "dev.moved", cause: node0.error, rolledBack: true }],
+      }));
+      expect(result.result.rigResult).toBe("partially_restored");
+    } finally { start.mockRestore(); }
+  });
+
   it("a full restore reports a recreated seat's current session to its owner", async () => {
     const { node: savedNode, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
     db.prepare("DELETE FROM nodes WHERE id = ?").run(savedNode.id);
@@ -3526,7 +3575,7 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
-    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (database is locked).");
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left with no agent running wasn't recorded (database is locked).");
     expect(notice).not.toHaveBeenCalled();
     expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
   });
@@ -3575,7 +3624,7 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
     expect(result.result.harnessNotStarted).toBeUndefined();
-    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (queue unavailable).");
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left with no agent running wasn't recorded (queue unavailable).");
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
