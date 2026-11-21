@@ -218,8 +218,11 @@ seat's shell. The daemon takes the recorded actor from transport identity only:
   `unattributed (no seat identity)`.
 
 Neither case takes an actor from the request body or from the target seat's name.
-`rig seat retire-held-message` still records the seat that retired a message, so
-run it from a seat's shell.
+`rig seat retire-held-message` works from an ordinary terminal the same way: from
+a managed seat's shell it records that seat, and with no seat identity it records
+the actor as `unattributed (no seat identity)`. Its `--reason` stays required.
+Retirement still only frees quota and preserves evidence; it delivers nothing and
+closes no work.
 
 ~~~sh
 rig seat set-typing-guard dev-impl@my-rig --mode draft-aware \

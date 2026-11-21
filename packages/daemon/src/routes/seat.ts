@@ -25,7 +25,7 @@ import { OPENRIG_HOME } from "../openrig-compat.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import type { SessionTransport } from "../domain/session-transport.js";
-import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
+import { DeliveryGuardError, UNATTRIBUTED_GUARD_ACTOR } from "../domain/seat-delivery-guard.js";
 import { PERMISSIONS_DENY } from "../domain/runner-permissions.js";
 
 export const seatRoutes = new Hono();
@@ -164,9 +164,11 @@ seatRoutes.get("/held-messages/:seatRef", c => {
 seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
   if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
-  const body = await c.req.json<Record<string, unknown>>();
-  const actor = transportSenderSession(c);
-  if (!actor || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Sender identity and reason required" }, 400);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Reason required" }, 400);
+  // #3587: as with set-typing-guard, a seat's transport identity is the recorded actor. An ordinary terminal has
+  // none; the retirement still applies and records an explicit unattributed actor. The body never names the actor.
+  const actor = transportSenderSession(c) ?? UNATTRIBUTED_GUARD_ACTOR;
   try {
     const target = guard.target(c.req.param("seatRef"));
     const outbox = new OutboxHandler(guard.db); const id = c.req.param("id");
