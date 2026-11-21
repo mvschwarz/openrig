@@ -290,6 +290,16 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "activity_stale_unknown",
 ]);
 
+/** A job's quiet decisions since this daemon started (#3643): how many, by reason, and the last one. Kept in memory
+ *  only, so `since` says when counting began. It counts evaluations, not loud outcomes, and on its own it says nothing
+ *  about the scheduler's cadence or health. */
+export interface WatchdogQuietCount {
+  since: string;
+  total: number;
+  byReason: Record<string, number>;
+  lastReason: string | null;
+}
+
 export interface EvaluationResult {
   job: WatchdogJob;
   outcome: PolicyEvaluation | { action: "skip"; reason: "active_wake_not_due" };
@@ -319,6 +329,9 @@ export class WatchdogPolicyEngine {
   /** Jobs whose delivered wake couldn't be recorded: consecutive failures, and when to try recording it again. In memory:
    *  a database that can't record the wake may not record this either, and a restart simply tries once more. */
   private readonly accountingBackoff = new Map<string, { failures: number; retryAtMs: number }>();
+  /** #3643: the quiet decisions per job since this engine started. They write no history row or event. */
+  private readonly quietCounts = new Map<string, { total: number; byReason: Record<string, number>; lastReason: string }>();
+  private readonly quietSince: string;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
@@ -334,6 +347,7 @@ export class WatchdogPolicyEngine {
     this.resolveDigestEntry = deps.resolveDigestEntry;
     this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
+    this.quietSince = this.now().toISOString();
     this.deliveryDeferred = deps.deliveryDeferred;
     this.accountingRetryIntervalSeconds = deps.accountingRetryIntervalSeconds ?? resolveWakeRetryIntervalSeconds;
     this.policies = new Map();
@@ -345,6 +359,25 @@ export class WatchdogPolicyEngine {
 
   resolvePolicy(name: string): Policy | undefined {
     return this.policies.get(name);
+  }
+
+  /** #3643: the job's quiet count since this engine started; a job with no quiet decision yet reads zero. */
+  quietCount(jobId: string): WatchdogQuietCount {
+    const count = this.quietCounts.get(jobId);
+    return {
+      since: this.quietSince,
+      total: count?.total ?? 0,
+      byReason: { ...count?.byReason },
+      lastReason: count?.lastReason ?? null,
+    };
+  }
+
+  private countQuiet(jobId: string, reason: string): void {
+    const count = this.quietCounts.get(jobId) ?? { total: 0, byReason: {}, lastReason: reason };
+    count.total += 1;
+    count.byReason[reason] = (count.byReason[reason] ?? 0) + 1;
+    count.lastReason = reason;
+    this.quietCounts.set(jobId, count);
   }
 
   private inactiveJobResult(jobId: string): EvaluationResult | null {
@@ -517,6 +550,7 @@ export class WatchdogPolicyEngine {
       this.jobsRepo.setActionable(job.jobId, false, evaluatedAt);
       const isQuiet = QUIET_SKIP_REASONS.has(outcome.reason);
       if (isQuiet) {
+        this.countQuiet(job.jobId, outcome.reason);
         return {
           job: this.jobsRepo.getByIdOrThrow(job.jobId),
           outcome,
@@ -593,6 +627,7 @@ export class WatchdogPolicyEngine {
         // last_actionable_at.
         this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
         this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
+        this.countQuiet(job.jobId, "active_wake_not_due");
         return {
           job: this.jobsRepo.getByIdOrThrow(job.jobId),
           outcome: { action: "skip", reason: "active_wake_not_due" },
