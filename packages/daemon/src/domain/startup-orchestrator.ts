@@ -14,7 +14,7 @@ import type {
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
-import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
+import { hasVerifiedStartupProof, issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -900,7 +900,7 @@ export class StartupOrchestrator {
       postLaunchFiles = []; // All resolved files were projected before the guest's initial input.
       for (const action of input.startupActions) if (action.type === "send_text") consumedActions.add(action);
     }
-    let challengeOnlyPrompt: string | null = null;
+    let standaloneChallenge: typeof challenge = null;
     if (continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = input.firstInputPassed && launchPrompt
         ? { ok: true as const, remainingFiles: launchPrompt.remainingFiles }
@@ -910,9 +910,9 @@ export class StartupOrchestrator {
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
-      if (challenge) await this.sendProofInstruction(deliveryInput);
+      if (challenge) await this.sendProofInstruction(deliveryInput, challenge.challengeId);
     } else if (challenge && !guestInputPassed) {
-      challengeOnlyPrompt = challenge.promptBlock;
+      standaloneChallenge = challenge;
     }
 
     // OPR.0.4.7.17 restore-order-correction. On a resumed
@@ -972,9 +972,9 @@ export class StartupOrchestrator {
 
     // Challenge-only delivery remains best-effort. Staging is reported without
     // turning a recoverable composer into a startup failure/occupant rollback.
-    if (challengeOnlyPrompt && input.binding.tmuxSession) {
-      const challengeFailure = await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt, "challenge");
-      if (!challengeFailure) await this.sendProofInstruction(deliveryInput);
+    if (standaloneChallenge && input.binding.tmuxSession) {
+      const challengeFailure = await this.sendInteractiveText(deliveryInput, standaloneChallenge.promptBlock, "challenge");
+      if (!challengeFailure) await this.sendProofInstruction(deliveryInput, standaloneChallenge.challengeId);
     }
 
     // 8. Execute after_files actions
@@ -1328,13 +1328,14 @@ export class StartupOrchestrator {
 
   /**
    * Claude only: the challenge reached the seat inside a paste, which Claude won't act on alone.
-   * One short line in the person's turn asks it to run the challenge's own command. Best-effort: a
+   * If this launch still needs proof, one short line asks it to run the challenge's own command. Best-effort: a
    * failed send is a submission warning, never a startup failure. It is sent only after the startup
    * prompt was observed submitted: staged, unverified or unobservable input stays in the composer
    * for the operator, and nothing is typed on top of it.
    */
-  private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
+  private async sendProofInstruction(input: StartupDeliveryInput, challengeId: string): Promise<void> {
     if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
+    if (hasVerifiedStartupProof(this.db, { nodeId: input.nodeId, sessionId: input.sessionId, challengeId })) return;
     if (!input.lastSubmissionConfirmed) {
       this.recordSubmissionWarning(input, startupProofHeldBackWarning(input.lastSubmissionUnconfirmedReason));
       return;

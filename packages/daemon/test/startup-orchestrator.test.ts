@@ -2262,6 +2262,39 @@ describe("StartupOrchestrator", () => {
       expect(deriveOriented(db, seed.nodeId)).toBe("missing");
     });
 
+    it.each(["bundled", "standalone"] as const)("skips the reminder when Claude submits the %s challenge before the reminder", async prompt => {
+      const seed = seedSession();
+      const store = new AgentActivityStore({ db, eventBus });
+      let staged = "";
+      const sendText = vi.fn(async (_session: string, text: string) => {
+        staged = text;
+        return { ok: true as const };
+      });
+      const sendKeys = vi.fn(async () => {
+        const [command, challengeId, answer] = staged.match(/rig startup-proof submit --challenge-id (\w+) --answer (\w+)/) ?? [];
+        if (command) {
+          expect(verifyStartupProof({ store, eventBus }, { nodeId: seed.nodeId, challengeId, answer }).ok).toBe(true);
+        }
+        return { ok: true as const };
+      });
+      const startupActions = prompt === "bundled" ? challengeAndIdentity() : challengeAndIdentity().slice(0, 1);
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText, sendKeys }) }).startNode(makeInput(seed, { startupActions }));
+
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(deriveOriented(db, seed.nodeId)).toBe("verified");
+      expect(sendText.mock.calls.map(([, text]) => text)).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("still sends a reminder when only a previous challenge was verified", async () => {
+      const { seed } = seedVerifiedProof();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+      expect(sendText.mock.calls.map(([, text]) => text)).toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
     it("sends no line to a Codex seat, which already acts on the pasted challenge", async () => {
       const seed = seedSession();
       const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
