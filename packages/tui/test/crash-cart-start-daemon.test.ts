@@ -109,4 +109,14 @@ describe("daemon start output", () => {
     const { error } = await run("setTimeout(() => {}, 60_000)", 200);
     expect(error).toMatchObject({ killed: true, signal: "SIGTERM" });
   });
+
+  it("returns at the timeout even when a grandchild still holds the output pipes", async () => {
+    const started = Date.now();
+    const { error } = await run(
+      `require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: "inherit" }); setTimeout(() => {}, 60_000)`,
+      200,
+    );
+    expect(error).toMatchObject({ killed: true, signal: "SIGTERM" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
 });

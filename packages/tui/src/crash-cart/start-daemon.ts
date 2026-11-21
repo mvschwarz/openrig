@@ -25,7 +25,11 @@ export function runDaemonStart(
     return all.length > DAEMON_START_OUTPUT_TAIL_CHARS ? all.slice(-DAEMON_START_OUTPUT_TAIL_CHARS) : all;
   };
   const child = spawn(file, args, { cwd: options.cwd });
-  const timer = options.timeout > 0 ? setTimeout(() => { killed = true; child.kill("SIGTERM"); }, options.timeout) : undefined;
+  // Like execFile, the timeout drops the pipes before the signal, so a grandchild that inherited them can't hold the
+  // result until it exits.
+  const timer = options.timeout > 0
+    ? setTimeout(() => { killed = true; child.stdout.destroy(); child.stderr.destroy(); child.kill("SIGTERM"); }, options.timeout)
+    : undefined;
   const finish = (error: DaemonStartError | null): void => {
     if (done) return;
     done = true;
