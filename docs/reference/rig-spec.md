@@ -898,7 +898,8 @@ rig provider account remove budget --provider claude
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
 and changes nothing of the rig's: no seat, account or assignment. A Codex seat that would change, or restart with its
 home, is checked with the restart preview (`rig seat restart <seat> --keep-conversation --plan`). Like that preview,
-the check can bring the seat's Codex home `config.toml` to OpenRig's managed hooks block when it differs. In this run, team-dev and team-qa are running on the default login, and team-review has its own
+the check can bring the seat's Codex home `config.toml` to OpenRig's managed hooks block when it differs (#3701). In
+this run, team-dev and team-qa are running on the default login, and team-review has its own
 token file. The paths and the host id are shortened; a digest belongs to its own plan, so yours will differ:
 
 ```text
