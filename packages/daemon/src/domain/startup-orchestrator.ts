@@ -481,7 +481,7 @@ export class StartupOrchestrator {
         }
         projectionPlan = { ...input.plan, entries };
         input = { ...input, plan: projectionPlan };
-      } else {
+      } else if (!current.missingRecipe || saved.length > 0) {
         const warning = "Today's Claude fragment selection couldn't be resolved.";
         if (current.missingRecipe && saved.length > 0) {
           warnings.push(`${warning} This seat has no launch recipe. Trying its saved Claude fragments.`);

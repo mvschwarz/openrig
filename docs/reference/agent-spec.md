@@ -402,6 +402,7 @@ with no restore opt-in. It applies the usual merge even when the user has change
 and records each write. The saved launch recipe supplies the spec location and profile.
 If the seat has no recipe, a fresh launch tries its saved fragments and warns about unreadable
 sources. If the current selection can't be resolved, OpenRig warns and continues the launch.
+A legacy seat without a recipe or relevant saved fragments starts without a fragment warning.
 
 During the opt-in refresh before resume, OpenRig leaves a target with local JSON edits intact
 and reports the skipped fragments.

@@ -45,6 +45,7 @@ import { decideManagedBlock, managedBlockRecords } from "./managed-block-records
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import type { ResolveClaudeFragments } from "./projection-planner.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -281,7 +282,7 @@ export interface RestoreOrchestratorDeps {
   /** A seat's skill selection as its spec says today (from its launch recipe), so skills that follow their source
    *  (`on_restore: follow_source`) come back with today's bytes and today's selection. Absent: saved selection only. */
   seatSkillSelection?: (rigId: string, nodeId: string) => Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }>;
-  resolveClaudeFragments?: import("./projection-planner.js").ResolveClaudeFragments;
+  resolveClaudeFragments?: ResolveClaudeFragments;
   /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
   routerLineSettings?: Pick<SettingsStore, "resolveOne">;
   /** Read-only current authored selection for Claude activity hooks (the
@@ -2133,7 +2134,8 @@ export class RestoreOrchestrator {
       ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
     if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
       if (this.resolveClaudeFragments && activityAdapter?.refreshRuntimeFragments && !activityAdapter.environment) {
-        const today = await this.resolveClaudeFragments(rigId, launchResult.session.nodeId).catch(() => ({ ok: false as const }));
+        const today: Awaited<ReturnType<ResolveClaudeFragments>> = await this.resolveClaudeFragments(rigId, launchResult.session.nodeId)
+          .catch(() => ({ ok: false as const, reason: "could not resolve today's selection" }));
         if (today.ok) {
           const following = today.entries.filter(entry => entry.onRestore === "follow_source");
           if (following.length) {
@@ -2144,7 +2146,8 @@ export class RestoreOrchestrator {
               warnings?.push(`Restore: Claude fragments ${following.map(entry => entry.effectiveId).join(", ")} could not be refreshed.`);
             }
           }
-        } else {
+        } else if (!today.missingRecipe || startupCtx?.projectionEntries.some(entry =>
+          entry.category === "runtime_resource" && entry.onRestore === "follow_source")) {
           warnings?.push("Restore: Today's Claude fragment selection couldn't be resolved. Check the seat's agent spec and launch recipe before the next restore.");
         }
       }

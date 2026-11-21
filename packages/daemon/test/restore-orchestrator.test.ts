@@ -164,8 +164,7 @@ describe("RestoreOrchestrator", () => {
     });
   }
 
-  it.each(["readable source", "unreadable source", "unresolved selection"] as const)(
-    "Claude restores the same conversation with %s", async mode => {
+  it.each(["readable source", "unreadable source", "unresolved selection", "no recipe or saved fragments"] as const)("Claude restores the same conversation with %s", async mode => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-claude-fragments-"));
     try {
       const target = path.join(cwd, ".mcp.json");
@@ -187,18 +186,27 @@ describe("RestoreOrchestrator", () => {
       });
       const result = await createOrchestrator({
         tmux, claude, listProcesses: nativeLineage("claude-code", "same-conversation"),
-        resolveClaudeFragments: async () => mode === "unresolved selection" ? { ok: false, reason: mode } : ({ ok: true, entries: [{
-          category: "runtime_resource", resourceType: "claude_mcp_fragment", onRestore: "follow_source",
-          effectiveId: "spec-mcp", sourceSpec: "fixture", sourcePath: cwd, resourcePath: "fragment.json", absolutePath: source,
-          classification: "safe_projection",
-        }] }),
+        resolveClaudeFragments: async () => {
+          if (mode === "unresolved selection") return { ok: false, reason: mode };
+          if (mode === "no recipe or saved fragments") return { ok: false, reason: mode, missingRecipe: true };
+          return { ok: true, entries: [{
+            category: "runtime_resource", resourceType: "claude_mcp_fragment", onRestore: "follow_source",
+            effectiveId: "spec-mcp", sourceSpec: "fixture", sourcePath: cwd, resourcePath: "fragment.json", absolutePath: source,
+            classification: "safe_projection",
+          }] };
+        },
       }).restore(snapshot.id, { adapters: { "claude-code": adapter } });
       expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "resumed" }] } });
       expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "same-conversation"]);
       if (mode !== "readable source") {
         expect(fs.readFileSync(target, "utf8")).toBe(previous);
         const reason = mode === "unreadable source" ? "a source was not a readable JSON object" : "Claude fragment selection couldn't be resolved";
-        expect(result.ok && result.result.warnings).toContainEqual(expect.stringContaining(reason));
+        const warnings = result.ok ? result.result.warnings : [];
+        if (mode === "no recipe or saved fragments") {
+          expect(warnings).not.toContainEqual(expect.stringContaining(reason));
+        } else {
+          expect(warnings).toContainEqual(expect.stringContaining(reason));
+        }
       } else {
         expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({
           owner_value: "kept", mcpServers: { "spec-mcp": { command: "fixture" } },

@@ -253,6 +253,14 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it("starts an older seat without a recipe or saved Claude fragments quietly", async () => {
+    const seat = seedSeat({ clean: true });
+    resolveClaudeFragments = async () => ({ ok: false, reason: "no launch recipe", missingRecipe: true });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start fresh" });
+    expect(result.ok).toBe(true);
+    expect(result.warnings ?? []).not.toContainEqual(expect.stringContaining("Claude fragment selection"));
+  });
+
   function useRealClaudeProjection(hashes = new Map<string, string>()): void {
     const real = new ClaudeCodeAdapter({ tmux, fsOps: {
       readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync,
