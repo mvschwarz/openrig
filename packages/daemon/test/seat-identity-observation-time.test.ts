@@ -84,7 +84,9 @@ describe("identity verdict time belongs to its evidence sample", () => {
       tmux: {
         listPanes: async () => {
           if (++paneReads === 2) {
-            f.store.upsert({ ...f.verified, verdict: "mismatch", reason: "process_identity_mismatch" });
+            f.registry.updateBinding(f.node.id, { tmuxSession: f.name, tmuxPane: "%2" });
+            f.store.upsert({ ...f.verified, verdict: "mismatch", reason: "process_identity_mismatch",
+              evidence: { ...f.verified.evidence, registeredPane: "%2" } });
             clock = 3_000;
           }
           return [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
@@ -96,8 +98,31 @@ describe("identity verdict time belongs to its evidence sample", () => {
         { pid: 43, ppid: 42, pgid: 43, tpgid: 43, executableName: "claude", command: "claude --resume saved-token", startedAt: "start" },
       ],
     });
-    expect(result.ok).toBe(true);
-    expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "mismatch", observedAt: time(2_000) });
+    expect(result).toMatchObject({ ok: false, reason: "identity_unverified" });
+    expect(f.registry.getBindingForNode(f.node.id)?.tmuxPane).toBe("%2");
+    expect(f.store.getForNode(f.node.id)).toMatchObject({
+      verdict: "mismatch", observedAt: time(2_000), evidence: { registeredPane: "%2" },
+    });
+  });
+
+  it.each([
+    { runtime: "claude-code", command: "sh", exact: false },
+    { runtime: "claude-code", command: "claude", exact: true },
+    { runtime: "codex", command: "node", exact: true },
+  ])("reports an unavailable process listing for $runtime in $command", async ({ runtime, command, exact }) => {
+    const f = fixture();
+    const result = await rebindAndVerifyPaneIdentity({
+      db, sessionRegistry: f.registry, nodeId: f.node.id, sessionName: f.name, runtime,
+      expectedResumeToken: "saved-token", requireExactResumeLineage: exact,
+      tmux: {
+        listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+        getPanePid: async () => 42,
+        getPaneCommand: async () => command,
+      },
+      listProcesses: async () => { throw new Error("fixture process listing failed"); },
+    });
+    expect(result).toMatchObject({ ok: false, reason: "tmux_unavailable", detail: expect.stringContaining("fixture process listing failed") });
+    expect(f.store.getForNode(f.node.id)).toMatchObject({ reason: "tmux_unavailable" });
   });
 
   it.each(["normal", "read failure", "session absent"].flatMap(mode => [false, true].map(sessionChanged => ({ mode, sessionChanged }))))("a sweep drops an old selection after $mode (sessionChanged=$sessionChanged)", async ({ mode, sessionChanged }) => {

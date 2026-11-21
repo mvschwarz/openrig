@@ -9,7 +9,7 @@ import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch, tmuxUnavailableIdentity } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
+import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses, listNativeProcessesOrThrow } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
@@ -233,6 +233,19 @@ export async function rebindAndVerifyPaneIdentity(input: {
     && input.requireExactResumeLineage !== true
     && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(normalizedCommand);
   const claudeProcessProof = claudeWrapper || claudeVersionLabel;
+  let processReadFailure: string | undefined;
+  const listProcesses = async () => {
+    try {
+      return await (input.listProcesses ?? (() => listNativeProcessesOrThrow(claudeProcessProof ? {
+        claudeLaunchPaths: input.launchedExecutable?.isScript === true,
+        frozenExecutable: input.launchedExecutable?.path,
+      } : undefined)))();
+    } catch (error) {
+      // The native verifiers fold read failures into null for other callers.
+      processReadFailure = `native process listing failed: ${error instanceof Error ? error.message : String(error)}`;
+      throw error;
+    }
+  };
   let nativePidUnreadable = false;
   const observationTmux = {
     getPanePid: async (target: string) => {
@@ -258,8 +271,9 @@ export async function rebindAndVerifyPaneIdentity(input: {
     // A shell/Node label describes the wrapper, not the native occupant.
     runtimeMatch = "match";
     const native = await verifyCodexPaneProcess({ target: pane.id, tmux: observationTmux,
-      listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
+      listProcesses, expectedToken: expectedResumeToken,
       requireResume: input.requireExactResumeLineage === true, requireArgv: true });
+    if (processReadFailure) return unavailable(processReadFailure);
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);
     if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
@@ -267,33 +281,30 @@ export async function rebindAndVerifyPaneIdentity(input: {
     // A known token always requires exact proof. Only non-strict, tokenless
     // wrappers and version labels may use runtime occupancy; this never proves resume continuity.
     runtimeMatch = "match";
-    const observation = { target: pane.id, tmux: observationTmux, listProcesses: input.listProcesses,
+    const observation = { target: pane.id, tmux: observationTmux, listProcesses,
       selectedExecutable: input.launchedExecutable?.path, scriptLaunch: input.launchedExecutable?.isScript };
     const native = expectedResumeToken !== null
       ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
         rotation: input.requireExactResumeLineage ? input.resumeRotation ?? null : storedRotation(input.db, input.nodeId, expectedResumeToken) })
       : !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
+    if (processReadFailure) return unavailable(processReadFailure);
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);
     if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
   } else if (runtimeMatch === "match" && strictNativeLineage) {
+    let rows: NativeProcessRow[];
     try {
-      lineageMatch = findExactNativeResumeProcess(
-        // Full rows (process group, OS executable): the strict finder's launcher rules need them.
-        await (input.listProcesses ?? listNativeProcesses)(),
-        pid,
-        input.runtime,
-        expectedResumeToken!,
-        input.resumeRotation,
-      );
-      observedAt = now();
-      if (lineageMatch) {
-        const current = await recheckPane();
-        if (!current.ok) return unavailable(current.error);
-        if (!current.sameProcess) lineageMatch = null;
-      }
-    } catch {
-      // Missing process evidence is ambiguity, never positive identity.
+      rows = await listProcesses();
+    } catch (error) {
+      return unavailable(processReadFailure ?? error);
+    }
+    // Full rows (process group, OS executable): the strict finder's launcher rules need them.
+    lineageMatch = findExactNativeResumeProcess(rows, pid, input.runtime, expectedResumeToken!, input.resumeRotation);
+    observedAt = now();
+    if (lineageMatch) {
+      const current = await recheckPane();
+      if (!current.ok) return unavailable(current.error);
+      if (!current.sameProcess) lineageMatch = null;
     }
   }
   const runtimeAmbiguous = input.runtime === "codex" || claudeProcessProof ? lineageMatch === null : runtimeMatch === "match" && (strictNativeLineage
@@ -326,15 +337,14 @@ export async function rebindAndVerifyPaneIdentity(input: {
     observedAt,
   };
 
-  // Persist the replacement pane before the verdict so both records describe
-  // the same current binding. A non-green verdict remains applicable and
-  // therefore keeps the public topology in attention_required.
   if (input.assertCurrent && !input.assertCurrent()) return { ok: false, reason: "identity_unverified", detail: "Selected seat changed during native proof" };
-  input.sessionRegistry.updateBinding(input.nodeId, {
-    tmuxSession: input.sessionName,
-    tmuxPane: pane.id,
-  });
-  identityStore.upsert(verdict);
+  // A rejected sample must leave the newer verdict and its binding together.
+  const published = input.db.transaction(() => {
+    if (!identityStore.upsert(verdict)) return false;
+    input.sessionRegistry.updateBinding(input.nodeId, { tmuxSession: input.sessionName, tmuxPane: pane.id });
+    return true;
+  })();
+  if (!published) return { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" };
 
   if (verdict.verdict === "mismatch") {
     if (runtimeAmbiguous) {
