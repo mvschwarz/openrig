@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenAllResult, TerminalDeps } from "../src/commands/terminal.js";
-import type { DaemonClient } from "../src/client.js";
-import { openAllTerminalWindows, type WindowDeps } from "../src/terminal-window.js";
+import { DaemonTimeoutError, type DaemonClient } from "../src/client.js";
+import { BULK_TERMINAL_OPEN_TIMEOUT_MS, BULK_TERMINAL_OPEN_UNCONFIRMED, openAllTerminalWindows, type WindowDeps } from "../src/terminal-window.js";
 import { createProgram } from "../src/index.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
@@ -533,6 +533,128 @@ describe("#3081 rig terminal open/close --all CLI", () => {
     const program2 = createProgram({ terminalDeps: badOpen.deps });
     await program2.parseAsync(["node", "rig", "terminal", "open", "--all"]);
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("#3473 bulk Herdr open deadline", () => {
+  let logs: string[];
+  let errs: string[];
+  beforeEach(() => {
+    logs = [];
+    errs = [];
+    process.exitCode = undefined;
+    vi.spyOn(console, "log").mockImplementation((...a) => logs.push(a.join(" ")));
+    vi.spyOn(console, "error").mockImplementation((...a) => errs.push(a.join(" ")));
+  });
+  afterEach(() => {
+    process.exitCode = undefined;
+    vi.restoreAllMocks();
+  });
+
+  const timeout = () => new DaemonTimeoutError("The OpenRig daemon at http://localhost:7433 did not respond in time: Request to http://localhost:7433/api/terminal/open-all timed out after 240000ms");
+  const expectUnconfirmed = (error: string | undefined) => {
+    expect(error).toContain(BULK_TERMINAL_OPEN_UNCONFIRMED);
+    expect(error).toMatch(/result is unconfirmed/);
+    expect(error).toMatch(/daemon may still be opening views/);
+    expect(error).toMatch(/Inspect the existing Herdr views before retrying/);
+    expect(error).toMatch(/can get another workspace/);
+  };
+
+  it("gives the bulk request a longer deadline than a single open", () => {
+    expect(BULK_TERMINAL_OPEN_TIMEOUT_MS).toBe(240_000);
+  });
+
+  it("--provider herdr posts open-all with the bulk deadline and reports an unconfirmed result on timeout, without retrying", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/open-all": { status: 200, data: { ok: true, provider: "herdr", rigs: [] } } } });
+    await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--provider", "herdr", "--json"]);
+    expect(calls.find(c => c.path === "/api/terminal/open-all")?.opts).toMatchObject({ timeoutMs: BULK_TERMINAL_OPEN_TIMEOUT_MS });
+
+    for (const flags of [["--json"], [] as string[]]) {
+      logs.length = 0;
+      errs.length = 0;
+      process.exitCode = undefined;
+      const post = vi.fn(async () => { throw timeout(); });
+      const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get: vi.fn(), post } as unknown as DaemonClient;
+      const cliDeps: TerminalDeps = { lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], clientFactory: () => client };
+      await createProgram({ terminalDeps: cliDeps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--provider", "herdr", "--session", "work", ...flags]);
+      expect(process.exitCode).toBe(1);
+      expect(post).toHaveBeenCalledOnce();
+      if (flags.length) {
+        const out = JSON.parse(logs[0]!) as OpenAllResult;
+        expect(out).toMatchObject({ ok: false, provider: "herdr", session: "work", rigs: [], code: "bulk_open_outcome_unknown" });
+        expectUnconfirmed(out.error);
+      } else {
+        // The human warning goes to stderr, so redirecting stdout does not hide it.
+        expect(logs).toEqual([]);
+        expectUnconfirmed(errs.join("\n"));
+      }
+    }
+  });
+
+  it("keeps the single-open deadline and timeout error for a provider name the daemon rejects", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/open-all": { status: 200, data: { ok: false, provider: "herd", rigs: [], code: "unknown_provider", error: "unknown provider 'herd' — expected herdr" } } } });
+    await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--provider", "herd", "--json"]);
+    expect(calls.find(c => c.path === "/api/terminal/open-all")?.opts).toMatchObject({ timeoutMs: 45_000 });
+
+    const post = vi.fn(async () => { throw timeout(); });
+    const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get: vi.fn(), post } as unknown as DaemonClient;
+    const cliDeps: TerminalDeps = { lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], clientFactory: () => client };
+    await expect(createProgram({ terminalDeps: cliDeps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--provider", "herd"]))
+      .rejects.toBeInstanceOf(DaemonTimeoutError);
+    expect([...logs, ...errs].join("\n")).not.toContain(BULK_TERMINAL_OPEN_UNCONFIRMED);
+  });
+
+  it.each([
+    { label: "desktop window", env: { TERM_PROGRAM: "ghostty", DISPLAY: ":0", HOME: "/tmp/h" }, socket: "/tmp/h/herdr.sock", windowPrefix: true },
+    { label: "current Herdr session", env: { HOME: "/tmp/h", HERDR_ENV: "1", HERDR_PANE_ID: "%1", HERDR_SOCKET_PATH: "/tmp/h/.config/herdr/herdr.sock" }, socket: "/tmp/h/.config/herdr/herdr.sock", windowPrefix: false },
+  ])("the $label path posts open-all with the bulk deadline and reports an unconfirmed result on timeout", async ({ env, socket, windowPrefix }) => {
+    const get = vi.fn(async () => ({ status: 200, data: { tmux: { mode: "inherit" }, providers: [{ liveness: { alive: true }, status: { launch: { socketPath: socket } } }] } }));
+    const post = vi.fn(async () => { throw timeout(); });
+    const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get, post } as unknown as DaemonClient;
+    const windowDeps: WindowDeps = {
+      platform: "linux", env, exists: f => f.endsWith("/herdr"),
+      exec: async (file: string, args: string[]) => (file === "/bin/sh" && args[1]?.includes("command -v herdr") ? "/usr/local/bin/herdr\n" : ""),
+      launch: async () => {}, sleep: async () => {}, id: () => "bulk-deadline", herdrConfig: () => "/tmp/herdr.cfg",
+    };
+    const result = await openAllTerminalWindows(client, "herdr", windowDeps);
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open-all", { provider: "herdr", reuseLive: true }, expect.objectContaining({ timeoutMs: BULK_TERMINAL_OPEN_TIMEOUT_MS }));
+    expect(result).toMatchObject({ ok: false, provider: "herdr", rigs: [] });
+    expectUnconfirmed(result.error);
+    expect(result.error).toBe(`${windowPrefix ? "A terminal window was requested. " : ""}${BULK_TERMINAL_OPEN_UNCONFIRMED}`);
+  });
+
+  it("rig terminal open --all --window sends the human unconfirmed warning to stderr and keeps JSON on stdout", async () => {
+    for (const flags of [[] as string[], ["--json"]]) {
+      logs.length = 0;
+      errs.length = 0;
+      process.exitCode = undefined;
+      const get = vi.fn(async () => ({ status: 200, data: { tmux: { mode: "inherit" }, providers: [{ liveness: { alive: true }, status: { launch: { socketPath: "/tmp/h/herdr.sock" } } }] } }));
+      const post = vi.fn(async () => { throw timeout(); });
+      const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get, post } as unknown as DaemonClient;
+      const windowDeps: WindowDeps = {
+        platform: "linux", env: { TERM_PROGRAM: "ghostty", DISPLAY: ":0", HOME: "/tmp/h" }, exists: f => f.endsWith("/herdr"),
+        exec: async (file: string, args: string[]) => (file === "/bin/sh" && args[1]?.includes("command -v herdr") ? "/usr/local/bin/herdr\n" : ""),
+        launch: async () => {}, sleep: async () => {}, id: () => "bulk-deadline", herdrConfig: () => "/tmp/herdr.cfg",
+      };
+      const cliDeps: TerminalDeps = { lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], clientFactory: () => client, windowDeps };
+      await createProgram({ terminalDeps: cliDeps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--window", ...flags]);
+      expect(process.exitCode).toBe(1);
+      expect(post).toHaveBeenCalledOnce();
+      if (flags.length) {
+        const out = JSON.parse(logs[0]!) as OpenAllResult;
+        expect(out).toMatchObject({ ok: false, provider: "herdr", rigs: [], code: "terminal_window_failed" });
+        expectUnconfirmed(out.error);
+      } else {
+        expect(logs).toEqual([]);
+        expect(errs.join("\n")).toContain(`A terminal window was requested. ${BULK_TERMINAL_OPEN_UNCONFIRMED}`);
+      }
+    }
+  });
+
+  it("leaves the single-open deadline at 45 seconds", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: { ok: true, provider: "herdr", opened: [], absent: [], degraded: [], pages: 1, remote: [] } } } });
+    await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "open", "alpha", "--provider", "herdr", "--json"]);
+    expect(calls.find(c => c.path === "/api/terminal/open")?.opts).toMatchObject({ timeoutMs: 45_000 });
   });
 });
 

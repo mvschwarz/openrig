@@ -6,13 +6,22 @@ import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
 import { encodeTmuxViewerProof, parseTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION, qualifiesTmuxViewer, tmuxViewerCloseArgs, TMUX_VIEWER_OPTION_SNAPSHOT, TMUX_VIEWER_KEPT } from "@openrig/daemon/terminal-viewer-guard";
-import { terminalAuthHeaders, type DaemonClient } from "./client.js";
+import { DaemonTimeoutError, terminalAuthHeaders, type DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
 import { findLiveHerdrWorkspace, fixedSizeWorkspaceNote, type HerdrTab, type LiveWorkspaceSearch } from "@openrig/daemon/herdr-live-workspace";
 import type { FollowControls, OpenAllResult, OpenAllRigResult, OpenViewResult } from "./commands/terminal.js";
+
+// The daemon opens every rig of a bulk Herdr open one after another and answers once, so the bulk
+// request gets a longer deadline than a single open. A longer wait neither speeds nor cancels it.
+export const BULK_TERMINAL_OPEN_TIMEOUT_MS = 240_000;
+
+export const BULK_TERMINAL_OPEN_UNCONFIRMED =
+  `The bulk Herdr open got no answer within ${BULK_TERMINAL_OPEN_TIMEOUT_MS / 1000} seconds, so its result is unconfirmed; `
+  + "the daemon may still be opening views. Inspect the existing Herdr views before retrying: "
+  + "a retry reuses only a view confirmed live, so a rig still opening, or one whose live check can't be confirmed, can get another workspace.";
 
 interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
 interface Preview {
@@ -850,7 +859,7 @@ async function openAllHerdrWindow(
     openAllRequested = true;
     const res = await client.post<OpenAllResult>("/api/terminal/open-all",
       { provider: "herdr", reuseLive: true, ...(session !== undefined ? { session } : {}) },
-      { timeoutMs: 45_000, headers: terminalAuthHeaders() });
+      { timeoutMs: BULK_TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
     const body = res.data && typeof res.data === "object" ? res.data : undefined;
     const bodyNotes = body && Array.isArray(body.notes) ? body.notes : [];
     if (res.status >= 400 || !body || !Array.isArray(body.rigs)) {
@@ -883,13 +892,16 @@ async function openAllHerdrWindow(
     if (openAllRequested && typeof launchWindow === "object") {
       windowNotes.push("The /api/terminal/open-all request had already been sent to the current Herdr session; inspect Herdr before retrying.");
     }
-    const error = window
+    let error = window
       ? `A terminal window was requested, but the bulk view outcome could not be confirmed. ${message}`
       : windowAttempted
         ? `Terminal window status is unknown. ${message}`
         : openAllRequested
           ? `The current Herdr bulk view outcome could not be confirmed. ${message}`
           : `No terminal window was opened. ${message}`;
+    if (openAllRequested && err instanceof DaemonTimeoutError) {
+      error = `${window ? "A terminal window was requested. " : ""}${BULK_TERMINAL_OPEN_UNCONFIRMED}`;
+    }
     return {
       ok: false,
       provider: "herdr",
