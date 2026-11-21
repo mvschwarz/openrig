@@ -278,6 +278,9 @@ export class SeatActivityService {
     if (!this.selfReportReader || !seat.inventory?.rungs.some((r) => r.rung === "self-report")) return;
     const evd = this.selfReportReader(paneId, seatNodeId);
     seat.selfReportUnread = evd ? 0 : (seat.selfReportUnread ?? 0) + 1;
+    // A report read from another file (the verified PID's own file after a name match, say) replaces the earlier file's:
+    // its timestamps don't continue that file's, so an older one must still be admitted. One file's own order still holds.
+    if (evd && seat.sources.get(CLAUDE_SELF_REPORT_SOURCE)?.latest.sourceFile !== evd.sourceFile) seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE);
     if (evd) this.reportEvidence(evd);
     else if (seat.selfReportUnread >= 2 && seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE)) this.arbitrate(seat);
   }

@@ -183,6 +183,51 @@ describe("S19 A5 — production wiring: the sweep auto-declares, consults self-r
     }
   });
 
+  // A first sweep without a verified PID takes a name-matched file; a later one with it takes the PID's own file, whose
+  // report can be older. That file's report decides from then on; one file's own older record is still dropped.
+  function selfReportFiles() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sessions-"));
+    const clock = { now: Date.parse("2026-11-20T08:00:00Z") };
+    const write = (file: string, record: Record<string, unknown>) => fs.writeFileSync(path.join(dir, file), JSON.stringify(record));
+    const read: ClaudeSelfReportRead = { listFiles: (d) => fs.readdirSync(d), readFile: (f) => fs.readFileSync(f, "utf8"), isAlive: () => true };
+    const verified = { pid: undefined as number | undefined };
+    const svc = new SeatActivityService({
+      tmux: { readPaneLastActivity: async () => clock.now / 1000 - 10 }, defaultWindowSeconds: 3, now: () => new Date(clock.now),
+      selfReportReader: (sessionName, seatNodeId) => readClaudeSelfReportEvidence({ sessionsDir: dir, sessionName, seatNodeId, read,
+        ...(verified.pid === undefined ? {} : { pid: verified.pid }) }),
+    });
+    const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: "claude-code", attachment_type: "tmux" }] }) } as unknown as Database.Database;
+    const sweep = async () => { await svc.pollAllRunningTmuxSeats(db); const s = svc.getSeatState(SEAT)!; return [s.activity, s.decidedBy]; };
+    return { dir, clock, write, verified, sweep };
+  }
+
+  it("#3605: the verified PID's own file decides once it's selected, though its report is older than the name match it replaces", async () => {
+    const { dir, clock, write, verified, sweep } = selfReportFiles();
+    try {
+      const t1 = clock.now - 120_000;
+      write("5000.json", { pid: 5000, name: NAME, status: "busy", statusUpdatedAt: clock.now }); // a name match, at T2
+      write("4242.json", { pid: 4242, name: "Some Title", status: "idle", statusUpdatedAt: t1 }); // the seat's own, at T1 < T2
+      expect(await sweep()).toEqual(["working", "self-report"]);
+      verified.pid = 4242; // the seat's PID is verified now
+      clock.now += 5_000;
+      expect(await sweep()).toEqual(["idle-at-prompt", "self-report"]);
+      clock.now += 60_000;
+      expect(await sweep()).toEqual(["idle-at-prompt", "self-report"]); // unchanged later sweeps stay idle
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("#3605: the same file's older record is still dropped", async () => {
+    const { dir, clock, write, verified, sweep } = selfReportFiles();
+    try {
+      verified.pid = 4242;
+      write("4242.json", { pid: 4242, name: NAME, status: "busy", statusUpdatedAt: clock.now });
+      expect(await sweep()).toEqual(["working", "self-report"]);
+      write("4242.json", { pid: 4242, name: NAME, status: "idle", statusUpdatedAt: clock.now - 1_000 }); // out of order
+      clock.now += 5_000;
+      expect(await sweep()).toEqual(["working", "self-report"]);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("#3605: a pane whose activity can't be read still retires an unread self-report on its second unread sweep", async () => {
     const clock = { now: 5_000_000 };
     let readable = true;

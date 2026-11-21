@@ -1577,13 +1577,13 @@ export function readClaudeSelfReportEvidence(input: {
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
   const read = input.read ?? defaultSelfReportRead;
   try {
-    let best: { status: string; statusUpdatedAt: number } | null = null;
+    let best: { status: string; statusUpdatedAt: number; file: string } | null = null;
     if (input.pid !== undefined && (read.isAlive ?? defaultSelfReportRead.isAlive!)(input.pid)) {
       try {
         const record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, `${input.pid}.json`))) as
           { pid?: unknown; status?: unknown; statusUpdatedAt?: unknown };
         if (record.pid === input.pid && typeof record.status === "string" && typeof record.statusUpdatedAt === "number") {
-          best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
+          best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt, file: `${input.pid}.json` };
         }
       } catch { /* no file for this process: the name match below, as before */ }
     }
@@ -1598,7 +1598,7 @@ export function readClaudeSelfReportEvidence(input: {
       if (record.name !== input.sessionName) continue;
       if (typeof record.status !== "string" || typeof record.statusUpdatedAt !== "number") continue;
       if (!best || record.statusUpdatedAt > best.statusUpdatedAt) {
-        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
+        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt, file };
       }
     }
     if (!best) return null;
@@ -1607,8 +1607,9 @@ export function readClaudeSelfReportEvidence(input: {
       sessionName: input.sessionName,
       rung: "self-report" as const,
       sourceId: "claude:pid-json",
-      seq: best.statusUpdatedAt, // self-dated monotonic
+      seq: best.statusUpdatedAt, // self-dated monotonic, within one file
       observedAt: new Date(best.statusUpdatedAt).toISOString(),
+      sourceFile: best.file,
     };
     switch (best.status) {
       case "busy":
