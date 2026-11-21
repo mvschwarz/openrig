@@ -2735,16 +2735,60 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
         };
       };
-      const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
+      // #3634: a name is armed while it has an unarchived row or a running seat (the seats diagnoseRig reads, so a rig
+      // archived with --force keeps its live seats watched). A name with neither has nothing the job can wake.
+      const runningSeatNames = (rigName?: string) => (db.prepare(
+        `SELECT DISTINCT r.name AS name FROM nodes n
+           JOIN rigs r ON r.id = n.rig_id
+           JOIN sessions s ON s.node_id = n.id
+            AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+          WHERE s.status = 'running' AND s.session_name IS NOT NULL${rigName === undefined ? "" : " AND r.name = ?"}`,
+      ).all(...(rigName === undefined ? [] : [rigName])) as Array<{ name: string }>).map((row) => row.name);
+      const isWatched = (rigName: string) =>
+        rigRepo.findUnarchivedRigsByName(rigName).length > 0 || runningSeatNames(rigName).length > 0;
+      // Archive and delete retire the job with one of these reasons; arming a name first puts that same job back
+      // (same id and history), so re-creation under the same name and a rolled-back replacement keep it. The ensure
+      // then refreshes it, or registers one when there was nothing to put back.
+      const RETIRED_REASONS = ["rig archived", "rig deleted"] as const;
+      const arm = (rigName: string, ensure: (job: ReturnType<typeof parkedOwnerJob>) => unknown) => {
+        watchdogJobsRepoInstance.reviveRetired(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), RETIRED_REASONS);
+        ensure(parkedOwnerJob(rigName));
+      };
+      const warn = (message: string) => console.warn(message);
       // #3437: one rig's bad watchdog rows warn and never stop the daemon from starting.
-      for (const r of rigRows) {
-        watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(parkedOwnerJob(r.name), (message) => console.warn(message));
+      for (const name of [...new Set([...rigRepo.listUnarchivedRigNames(), ...runningSeatNames()])].sort()) {
+        arm(name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       }
       // R2 repair — born-armed (advisor-ruled): a rig created after startup gets
       // its supervisor job in the same act that creates it, never at the next
       // daemon restart.
       rigRepo.onRigCreated = (rig) => {
-        watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(parkedOwnerJob(rig.name), (message) => console.warn(message));
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(job, warn));
+      };
+      // #3634: archive and delete retire the active job in the same act (hooks on RigRepository, so the routes, the
+      // instantiator, teardown and the lifecycle service all reach it), once the name has no unarchived row and no
+      // running seat. A stopped job stays stopped. Unarchive re-arms; a bad watchdog row warns and never blocks it.
+      const retireWhenUnwatched = (rigName: string, reason: (typeof RETIRED_REASONS)[number]) => {
+        if (isWatched(rigName)) return;
+        for (const job of watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), null)) {
+          if (job.state === "active") watchdogJobsRepoInstance.markTerminal(job.jobId, reason);
+        }
+      };
+      rigRepo.onRigArchived = (rig) => retireWhenUnwatched(rig.name, "rig archived");
+      rigRepo.onRigDeleted = (rig) => retireWhenUnwatched(rig.name, "rig deleted");
+      rigRepo.onRigUnarchived = (rig) => {
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
+      };
+      // A seat of a rig whose job archive or delete retired runs again (restore or launch without unarchive): the
+      // name is watched again, so that same job comes back. Nothing else changes here: a name with an active or
+      // stopped job, or with no retired one, is left as it is.
+      sessionRegistry.onSessionRunning = (nodeId) => {
+        const rig = db.prepare("SELECT r.name AS name FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
+          .get(nodeId) as { name: string } | undefined;
+        if (!rig) return;
+        if (watchdogJobsRepoInstance.reviveRetired(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rig.name), RETIRED_REASONS)) {
+          watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(parkedOwnerJob(rig.name), warn);
+        }
       };
     }
 
