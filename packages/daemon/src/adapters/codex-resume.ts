@@ -86,6 +86,9 @@ export class CodexResumeAdapter {
     codexPermissions?: CodexMemberPermissions,
     beforeNativeDispatch?: () => boolean,
     launchWrapper?: readonly string[],
+    // The seat's node, as the Claude and Pi resume paths pass it: the launch then checks that the session is that node's,
+    // and clears provider keys for a seat with its own account home. TRAILING; absent keeps the previous call.
+    nodeId?: string,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -164,7 +167,7 @@ export class CodexResumeAdapter {
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const staged = this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...((filesystem ? codexHome : seatCodexHome) ? { codexHome: filesystem ? codexHome : seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(nodeId ? { nodeId } : {}), ...((filesystem ? codexHome : seatCodexHome) ? { codexHome: filesystem ? codexHome : seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd;
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Codex resume preparation; no native command was sent." };
     const textResult = beforeNativeDispatch

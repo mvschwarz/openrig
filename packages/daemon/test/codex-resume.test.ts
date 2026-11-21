@@ -517,6 +517,21 @@ describe("CodexResumeAdapter launch_wrapper", () => {
     );
   });
 
+  // The seat's node, passed last as the Claude and Pi resume paths pass it, reaches the launch environment so the launch
+  // checks the session belongs to that node. The cell above, without it, keeps the previous target.
+  it("passes a trailing nodeId to the launch environment", async () => {
+    const targets: unknown[] = [];
+    const seatLaunchEnvironment = {
+      command: vi.fn(async (_session: string, cmd: string, target: unknown) => { targets.push(target); return cmd; }),
+    } as never;
+    const adapter = new CodexResumeAdapter(mockTmux({ sendText: vi.fn(async () => ({ ok: true as const })) }), { seatLaunchEnvironment });
+
+    const res = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", null, "floor", undefined, undefined,
+      false, false, false, "/seat/codex-home", undefined, undefined, undefined, "node-7");
+    expect(res.ok).toBe(true);
+    expect(targets).toEqual([{ codexCwd: "/repo", runtime: "codex", nodeId: "node-7", codexHome: "/seat/codex-home" }]);
+  });
+
   it("refuses selected launchWrapper when seatLaunchEnvironment is absent without falling back to env/bare codex", async () => {
     const sendText = vi.fn(async () => ({ ok: true as const }));
     const ensureManagedConfig = vi.fn(async () => {});

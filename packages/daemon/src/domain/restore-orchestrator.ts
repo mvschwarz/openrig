@@ -2263,7 +2263,8 @@ export class RestoreOrchestrator {
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
-          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable, opts?.claudeLaunch);
+          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable, opts?.claudeLaunch,
+          launchResult?.session.nodeId);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -2862,6 +2863,9 @@ export class RestoreOrchestrator {
     beforeNative?: () => boolean,
     claudeExecutable?: string,
     claudeLaunch?: ClaudeContinuationLaunch,
+    // The node the launcher registered the session on. A seat recreated after the snapshot runs under a new id, which the
+    // launch stamps as its OPENRIG_NODE_ID; the snapshot's id stays the key for the snapshot's own data.
+    liveNodeId?: string,
   ): Promise<
     | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
@@ -2943,7 +2947,8 @@ export class RestoreOrchestrator {
     if (this.codexResume.canResume(resumeType, resumeToken)) {
       // A seat with its own CODEX_HOME resumes the conversation that home holds, and a seat's envelope follows that home in
       // the tail; with neither the call is unchanged.
-      const seatHome = seatRuntimeHome(this.db, nodeId, "codex").home;
+      const launchNodeId = liveNodeId ?? nodeId;
+      const seatHome = seatRuntimeHome(this.db, launchNodeId, "codex").home;
       const codexTail: unknown[] = seatHome || codexPermissions !== undefined
         ? [...launchTail, ...Array(4 - launchTail.length).fill(undefined), seatHome, ...(codexPermissions !== undefined ? [codexPermissions] : [])]
         : launchTail;
@@ -2951,9 +2956,12 @@ export class RestoreOrchestrator {
       const wrappedCodexTail = launchWrapper?.length
         ? [...guardedCodexTail, ...Array(Math.max(0, 7 - guardedCodexTail.length)).fill(undefined), launchWrapper]
         : guardedCodexTail;
+      // The seat's registered node last, as the Claude call above passes a node: the launch checks the session's identity
+      // and applies the seat's account home with its provider-key clearing.
+      const nodeCodexTail = [...wrappedCodexTail, ...Array(Math.max(0, 8 - wrappedCodexTail.length)).fill(undefined), launchNodeId];
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model,
-        ...(wrappedCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean, launchWrapper?: readonly string[]]));
+        ...(nodeCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean, launchWrapper?: readonly string[], nodeId?: string]));
       if (result.ok) {
         const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: codexPermissions ? undefined : resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);

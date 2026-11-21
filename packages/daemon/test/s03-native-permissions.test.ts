@@ -172,7 +172,7 @@ describe("S03 future native permission selections (offline; no native effect cla
       claudeResume: { canResume: () => runtime === "claude-code", resume }, codexResume: { canResume: () => runtime === "codex", resume } };
     await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, "seat", runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
     expect(resume).toHaveBeenCalledWith(...(runtime === "codex"
-      ? ["seat", "codex_id", "original", "/inert", null, "full_bypass", "model"]
+      ? ["seat", "codex_id", "original", "/inert", null, "full_bypass", "model", ...Array(8).fill(undefined), f.node.id]
       : ["seat", "claude_id", "original", "/inert", "floor", "model", "auto", f.node.id, undefined, undefined, undefined, undefined, undefined, undefined, memberRules]));
   });
   it.each(["fresh", "resume", "fork"])("shared startup applies selected Claude auto on %s and keeps inherited posture separate", async path => {

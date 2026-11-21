@@ -1404,6 +1404,7 @@ describe("RestoreOrchestrator", () => {
       "floor",
       "medium",
     );
+    // The seat's node is the last argument (index 15), after the unset tail positions.
     expect(codexResume).toHaveBeenCalledWith(
       "codex-session",
       "codex_id",
@@ -1413,6 +1414,8 @@ describe("RestoreOrchestrator", () => {
       "floor",
       "o3",
       "medium",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      node.id,
     );
   });
 
@@ -1426,7 +1429,7 @@ describe("RestoreOrchestrator", () => {
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(node.id, "codex-session", "codex_id", "token-codex", "/work", null, "o3", "full_bypass", "medium");
     expect(codexResume).toHaveBeenCalledWith("codex-session", "codex_id", "token-codex", "/work", null, "full_bypass", "o3",
-      "medium", undefined, undefined, undefined, undefined, envelope);
+      "medium", undefined, undefined, undefined, undefined, envelope, undefined, undefined, node.id);
   });
 
   it("attemptResume forwards the resolved effort to the Pi resume adapter", async () => {
@@ -1999,6 +2002,24 @@ describe("RestoreOrchestrator", () => {
     expect(codex.resume).toHaveBeenCalled();
   });
 
+  // A seat recreated after the snapshot runs under a new node id, the one its launch stamps as OPENRIG_NODE_ID. Its legacy
+  // Codex resume names that registered node and reads that node's home; the snapshot's id would fail the identity check.
+  it("a recreated Codex seat's legacy resume names its registered node and that node's home", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }], edges: [],
+      resumeType: "codex_id", resumeToken: "uuid-123", restorePolicy: "resume_if_possible" });
+    const savedId = snap.data.nodes[0]!.id;
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(savedId);
+    const live = rigRepo.addNode(snap.rigId, "worker", { role: "worker", runtime: "codex" });
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/live" }), live.id);
+    const codex = mockCodexResume();
+    await createOrchestrator({ codex }).restore(snap.id);
+    const calls = vi.mocked(codex.resume).mock.calls as unknown[][];
+    expect(calls).toHaveLength(1);
+    expect(live.id).not.toBe(savedId);
+    expect(calls[0]![11]).toBe("/homes/live");
+    expect(calls[0]![15]).toBe(live.id);
+  });
+
   it("a Codex seat with its own CODEX_HOME resumes with that home appended; a seat without one gets the call as before", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }, { logicalId: "plain", role: "worker", runtime: "codex" }],
@@ -2011,9 +2032,10 @@ describe("RestoreOrchestrator", () => {
     expect(calls).toHaveLength(2);
     const withHome = calls.filter((c) => c.includes("/homes/worker"));
     expect(withHome).toHaveLength(1);
-    expect(withHome[0]).toHaveLength(12);
+    // Every call ends with the seat's node (index 15), so a seat without its own home differs only at index 11.
+    expect(withHome[0]).toHaveLength(16);
     expect(withHome[0]![11]).toBe("/homes/worker");
-    expect(calls.find((c) => !c.includes("/homes/worker"))!.length).toBeLessThan(12);
+    expect(calls.find((c) => !c.includes("/homes/worker"))![11]).toBeUndefined();
   });
 
   it("resume succeeds -> status 'resumed'", async () => {
@@ -7229,10 +7251,11 @@ describe("RestoreOrchestrator", () => {
       expect(piCall[6]).toBe("high");
       expect(piCall[7]).toEqual(["rtk", "--pi-wrap"]);
 
-      // Codex resume: 7 base args + 7 tail args (effort, nonInterruptive, kernelAuthority, teamPermissionDefault, seatCodexHome, codexPermissions, beforeNativeDispatch) + launchWrapper at index 14
+      // Codex resume: 7 base args + 7 tail args (effort, nonInterruptive, kernelAuthority, teamPermissionDefault, seatCodexHome, codexPermissions, beforeNativeDispatch) + launchWrapper at index 14 + the seat's node at 15
       const codexCall = (codexResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
       expect(codexCall).toBeDefined();
-      expect(codexCall).toHaveLength(15);
+      expect(codexCall).toHaveLength(16);
+      expect(codexCall[15]).toBe(codexNode.id);
       expect(codexCall[0]).toBe("r99-codex-worker");
       expect(codexCall[1]).toBe("codex_id");
       expect(codexCall[2]).toBe("codex-tok-123");
