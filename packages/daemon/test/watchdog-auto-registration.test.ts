@@ -967,4 +967,36 @@ describe("#3634 parked-owner-consumer jobs follow archive, unarchive, delete and
       warn.mockRestore();
     }
   }, 30_000);
+
+  it("a failed job lookup for a running seat warns and never fails the status write or the claim", async () => {
+    const { db, deps, eventLoopMonitor } = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+    });
+    const rig = deps.rigRepo.createRig("lookup-fails");
+    const node = deps.rigRepo.addNode(rig.id, "dev-qa", { role: "qa", runtime: "codex" });
+    const session = deps.sessionRegistry.registerSession(node.id, "dev-qa@lookup-fails");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listExactTuple = WatchdogJobsRepository.prototype.listExactTuple;
+    const lookup = vi.spyOn(WatchdogJobsRepository.prototype, "listExactTuple").mockImplementation(
+      function (this: WatchdogJobsRepository, ...args: Parameters<typeof listExactTuple>) {
+        if (args[0] === PARKED_OWNER_POLICY_NAME) throw new Error("disk I/O error");
+        return listExactTuple.apply(this, args);
+      },
+    );
+    try {
+      expect(() => deps.sessionRegistry.updateStatus(session.id, "running")).not.toThrow();
+      expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id) as { status: string }).status)
+        .toBe("running");
+      expect(() => deps.sessionRegistry.registerClaimedSession(node.id, "dev-qa@lookup-fails", "handover")).not.toThrow();
+      expect(lookup).toHaveBeenCalled();
+      expect(warn.mock.calls.some(([message]) => String(message).includes("for a running seat"))).toBe(true);
+    } finally {
+      lookup.mockRestore();
+      warn.mockRestore();
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
 });
