@@ -182,15 +182,22 @@ user.
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
 `~/.claude/skills` and `~/.agents/skills` when the daemon starts. For a new install, add it with the command for the
-agent doing the setup. Both use this release's tag:
+agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent pi
 ```
+
+**OMP:** this pin installs the shared skill only. The `v0.7.20` skill does not yet include OMP attachment guidance,
+and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
+`/reload-plugins` first.
 
 If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
 after `tree/` with it, including its `v` prefix. `rig --version` prints the version and a commit, for example
@@ -201,18 +208,18 @@ A Claude Code session that was already running doesn't see a skills folder creat
 project's `.claude/skills` that this command adds nor the `~/.claude/skills` the daemon fills on its first start. In
 that session, type `/reload-skills` (Claude Code 2.1.152 or later), or start a new one, before `/rigs`.
 
-These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
+The Claude Code and Codex lines are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 
 **One command, for the full setup.** It needs Node.js 22 or 24 with npm already installed. The preview prints what the
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.18/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.18/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -393,6 +400,12 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+Restore requests run one at a time by default. To keep up to two requests
+outstanding, for example, use `rig start --last --concurrency 2`. A request that
+times out can keep running in the daemon, so more than two restores can still be
+running; check `rig ps` before retrying. Each rig reports its own result, and
+interactive fresh-start decisions remain serialized.
 
 To deliberately start individual seats with fresh conversations during a multi-rig
 restore, name each logical ID and rig: `rig start --last --fresh '<logical-id>@<rig-name>'`.

@@ -736,7 +736,8 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
       `After a registered-host read confirms a target, record its note on the closed row so the sweep stops asking. ` +
       `The note starts with "custody-verified:"; its first word that names one of these targets exactly is what it verifies. ` +
       `Name several in one comma-list word (a,b), or write one note each.\n` +
-      `Do not rewrite historical custody from this local observation; the note is the separate record of the verification.`
+      `Do not rewrite historical custody from this local observation; the note is the separate record of the verification.\n` +
+      `This is a diagnostic about ${c.row.qitemId}, not a second assignment: the checks and notes above settle it, and closing this finding alone doesn't.`
     );
   }
   return (
@@ -746,7 +747,8 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
     `age: ${c.ageMinutes} min\n` +
     `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
     `why: ${c.why}\n` +
-    `Resolve the underlying row; the sweep closes this finding itself once the row is no longer stuck.`
+    `This is a diagnostic about ${c.row.qitemId}, not a second assignment. Read ${c.row.qitemId} and act on it: pick it up, resume, route or park it, as fits; ` +
+    `the sweep closes this finding itself once ${c.row.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${c.row.qitemId}.`
   );
 }
 

@@ -1866,6 +1866,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       await withClient(deps, async (local) => {
         const target = await queueHostTarget(deps, local, opts.host, true);
         if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        // Wake/refocus readers require the continuation prefix at the start of the park note.
+        const transitionNote = opts.continuation?.trim()
+          ? [`continuation: ${opts.continuation}`, opts.note].filter(Boolean).join("\n\n")
+          : (opts.note ?? `parked on ${opts.on}`);
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: "blocked",
           blockedOn: opts.on,
@@ -1873,7 +1877,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           evidenceRef: opts.evidenceRef,
           wakeWatchdogId: opts.wakeWatchdog,
           wakeAfterSeconds: opts.wakeAfter,
-          transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
+          transitionNote,
         }, target.options);
         await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
