@@ -142,6 +142,9 @@ export interface ActivityEvidence {
   needsInput?: NeedsInput;
   permissionRequest?: { id: string; hookAgentId?: string | null };
   permissionResolved?: boolean;
+  /** The file a self-report was read from. A report from another file starts the source again: its timestamps don't
+   *  continue the earlier file's, so that file's reports stop deciding the seat. */
+  sourceFile?: string;
   /** Which relay route posted hook evidence, when it said. One event can arrive by more than one route (a Codex seat's
    *  plugin hook and its managed hook), so promotion counts agreements per route. Absent for an untagged post. */
   route?: EvidenceRoute;

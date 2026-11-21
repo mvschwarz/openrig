@@ -6,6 +6,7 @@ import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
+import type { SeatIdentityVerdict } from "../domain/types.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
@@ -1527,22 +1528,37 @@ function stableJsonKey(value: unknown): string {
 
 // ── OPR.0.5.5.19 A5 — the Claude self-report rung (r3): sessions/<pid>.json ──
 // Claude Code's OWN status registry (since v2.1.139): one JSON file per live process
-// under <configDir>/sessions/, carrying {name: <canonical tmux session name>, status:
-// busy|idle|shell|waiting, statusUpdatedAt, ...}. Self-reported truth, SELF-DATED
-// (statusUpdatedAt) — the research doc's top rung, resolved here by the `name` field
-// (OpenRig's canonical session name; no pane-pid plumbing needed on this path).
+// under <configDir>/sessions/, carrying {name, status: busy|idle|shell|waiting,
+// statusUpdatedAt, ...} and, on the versions seen here, its own `pid`. Self-reported truth,
+// SELF-DATED (statusUpdatedAt) — the research doc's top rung. The seat's file is the one for
+// its verified native PID when the identity reconciler has one (verifiedSelfReportPid);
+// otherwise it's matched by `name`, the conversation title, which OpenRig's launch sets to the
+// seat's session name with `--name` and `/rename` changes.
 // UNDOCUMENTED INTERNAL: any read/parse/shape failure returns null — the ladder falls
 // to the next rung, NEVER errors (SPEC mini-req 2a).
 
 export interface ClaudeSelfReportRead {
   listFiles(dir: string): string[];
   readFile(path: string): string;
+  /** Whether a process with this PID is running. Default: signal 0 (a process we may not signal still exists). */
+  isAlive?(pid: number): boolean;
 }
 
 const defaultSelfReportRead: ClaudeSelfReportRead = {
   listFiles: (dir) => fs.readdirSync(dir),
   readFile: (p) => fs.readFileSync(p, "utf8"),
+  isAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } },
 };
+
+/** The seat's verified native Claude PID for the self-report read: only from a verified verdict for this same session.
+ *  It names the last verified process, until the next completed reconciliation. The reconciler polls every 5 s but runs
+ *  one pass at a time, so a slow pass leaves the stored verdict older than that. Until then the reader checks only that
+ *  some process holds the PID (signal 0) and that its `<pid>.json` records the same `pid`; nothing binds the file to the
+ *  process's start. So if the process ended and its number was reused, a surviving old file for that PID still reads as
+ *  the seat's. */
+export function verifiedSelfReportPid(verdict: SeatIdentityVerdict | null | undefined, sessionName: string): number | undefined {
+  return verdict?.verdict === "verified" && verdict.sessionName === sessionName ? verdict.evidence.observedPid ?? undefined : undefined;
+}
 
 /** Read the freshest self-report for `sessionName` as ladder evidence, or null.
  *  Mapping: busy→working; idle→idle-at-prompt; shell→idle-at-prompt (turn over, a
@@ -1554,12 +1570,24 @@ export function readClaudeSelfReportEvidence(input: {
   sessionsDir: string;
   sessionName: string;
   seatNodeId: string;
+  /** The seat's verified native Claude PID. Its own `<pid>.json` is the seat's, whatever its `name` (the conversation
+   *  title, which `/rename` changes) says, while a process holds that PID; verifiedSelfReportPid names the limit. */
+  pid?: number;
   read?: ClaudeSelfReportRead;
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
   const read = input.read ?? defaultSelfReportRead;
   try {
-    let best: { status: string; statusUpdatedAt: number } | null = null;
-    for (const file of read.listFiles(input.sessionsDir)) {
+    let best: { status: string; statusUpdatedAt: number; file: string } | null = null;
+    if (input.pid !== undefined && (read.isAlive ?? defaultSelfReportRead.isAlive!)(input.pid)) {
+      try {
+        const record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, `${input.pid}.json`))) as
+          { pid?: unknown; status?: unknown; statusUpdatedAt?: unknown };
+        if (record.pid === input.pid && typeof record.status === "string" && typeof record.statusUpdatedAt === "number") {
+          best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt, file: `${input.pid}.json` };
+        }
+      } catch { /* no file for this process: the name match below, as before */ }
+    }
+    for (const file of best ? [] : read.listFiles(input.sessionsDir)) {
       if (!file.endsWith(".json")) continue;
       let record: { name?: unknown; status?: unknown; statusUpdatedAt?: unknown };
       try {
@@ -1570,7 +1598,7 @@ export function readClaudeSelfReportEvidence(input: {
       if (record.name !== input.sessionName) continue;
       if (typeof record.status !== "string" || typeof record.statusUpdatedAt !== "number") continue;
       if (!best || record.statusUpdatedAt > best.statusUpdatedAt) {
-        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
+        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt, file };
       }
     }
     if (!best) return null;
@@ -1579,8 +1607,9 @@ export function readClaudeSelfReportEvidence(input: {
       sessionName: input.sessionName,
       rung: "self-report" as const,
       sourceId: "claude:pid-json",
-      seq: best.statusUpdatedAt, // self-dated monotonic
+      seq: best.statusUpdatedAt, // self-dated monotonic, within one file
       observedAt: new Date(best.statusUpdatedAt).toISOString(),
+      sourceFile: best.file,
     };
     switch (best.status) {
       case "busy":
