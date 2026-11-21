@@ -19,14 +19,15 @@ const questions = ["first", "second"].map(id => ({ id, question: id,
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); vi.useRealTimers(); });
 
-async function fixture(structured = false, extraQuestion = false) {
+async function fixture(structured = false, extraQuestion = false, sharedChannel?: string) {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-02-03T04:05:06Z"));
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   closes.push(() => db.close());
   const bus = new EventBus(db);
-  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry });
+  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry,
+    sharedChannels: () => sharedChannel ? [{ address: sharedChannel }] : [] });
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -182,4 +183,36 @@ it.each(["checkpoint", "audit"])("rolls back a relayed app answer when %s fails"
   if (phase === "audit") f.db.exec("DROP TRIGGER reject_audit");
   else return;
   await expect(result()).resolves.toMatchObject({ answer: { outcome: "recorded", unanswered: ["third"] } });
+});
+
+it("refuses a relay attributed to the shared channel the ask names, but not a person on it", async () => {
+  const channel = "front-desk@external";
+  const f = await fixture(false, false, channel);
+  const ask = await f.repo.create({ sourceSession: asker, destinationSession: channel, summary: "Channel ask", body: "Who is on tonight?",
+    evidenceRef: "/fixture/evidence", humanIntent: "decision", nudge: false });
+  const answer = (attributedTo: string) => f.post(`/api/queue/${ask.qitemId}/relayed-answer`, relaySeat,
+    { attributedTo, channel: "slack", text: "Tonight." });
+  expect(ask.destinationSession).toBe(channel);
+  expect((await answer(channel)).status).toBe(409);
+  expect(f.repo.getById(ask.qitemId)).toMatchObject({ state: "pending" });
+  expect(f.repo.getById(ask.qitemId)?.relayedAnswers).toBeUndefined();
+  // Who answered, not where: a person's answer through the same channel stays valid, attributed to them.
+  expect((await answer(person)).status).toBe(200);
+  expect(f.repo.getById(ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  expect(f.repo.answersForAsk(ask.qitemId)).toEqual([
+    expect.objectContaining({ kind: "relayed-answer", by: person, channel: "slack" })]);
+});
+
+it.each([
+  ["the human-gate tier", { tier: "human-gate" }],
+  ["a gate:human tag", { tags: ["gate:human"] }],
+])(
+"takes a relayed answer on an ordinary ask waiting on a person gate (%s)", async (_gate, fields) => {
+  const f = await fixture();
+  const gated = await f.repo.create({ sourceSession: asker, destinationSession: person, summary: "Approval", body: "Approve the plan?",
+    evidenceRef: "/fixture/evidence", humanIntent: "decision", nudge: false, ...fields });
+  expect((await f.post(`/api/queue/${gated.qitemId}/relayed-answer`, relaySeat,
+    { attributedTo: person, channel: "voice call", text: "Approved in chat." })).status).toBe(200);
+  expect(f.repo.getById(gated.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  expect(f.repo.getById(gated.qitemId)?.humanAnswers).toBeNull();
 });

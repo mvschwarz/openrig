@@ -1798,7 +1798,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
   cmd
     .command("relay-answer <qitemId>")
     .description("Record a person's verbatim answer given elsewhere and return it when the ask is fully answered")
-    .requiredOption("--attributed-to <person>", "The registered person who actually answered, e.g. reader@external")
+    .requiredOption("--attributed-to <person>", "The person who actually answered (a human seat or @external address), e.g. reader@external")
     .requiredOption("--channel <channel>", "Where the person gave the answer")
     .requiredOption("--text <text>", "The person's verbatim words")
     .option("--question-id <id>", "Exact question ID (required for a structured ask)")

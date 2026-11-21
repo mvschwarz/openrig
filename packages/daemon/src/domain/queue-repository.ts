@@ -2463,9 +2463,8 @@ export class QueueRepository {
       const refuse = (message: string): never => { throw new QueueRepositoryError("relayed_answer_refused", message); };
       if (!this.isPersonAddress(ask.destinationSession) || this.isPersonAddress(ask.sourceSession)
         || ask.humanIntent === "update" || ask.delegatedDecision || runnerPermissionOrigin(ask)
-        || isHostPairingAsk(ask) || ask.tags?.includes("runner-permission") || ask.tags?.includes(PROMPT_ALERT_TAG)
-        || effectiveGateRoles({ tags: ask.tags, tier: ask.tier }).includes("human")) {
-        refuse("Only ordinary asks to a person take relayed answers, not permission requests, host pairing or approval gates.");
+        || isHostPairingAsk(ask) || ask.tags?.includes("runner-permission") || ask.tags?.includes(PROMPT_ALERT_TAG)) {
+        refuse("Only ordinary asks to a person take relayed answers, not permission requests or host pairing.");
       }
       const questions = ask.humanQuestions ?? [];
       const submission = "relay" in input ? input.relay : input.direct;
@@ -2500,7 +2499,9 @@ export class QueueRepository {
         const questionId = named?.id ?? null;
         const prior = journal.relays.find(answer => answer.questionId === questionId);
         if (parseSessionName(input.actorSession).kind !== "canonical" || !this.answersAsk(ask, relay.attributedTo)
-          || !this.isPersonAddress(relay.attributedTo)) refuse("Record as an agent seat and attribute the answer to a registered person.");
+          || !this.isPersonAddress(relay.attributedTo) || this.isSharedChannel(relay.attributedTo)) {
+          refuse("Record as an agent seat and attribute the answer to a person's address (a human seat or @external person), never a shared channel.");
+        }
         if (prior) {
           if (prior.recordedBy === input.actorSession && prior.by === relay.attributedTo && prior.text === relay.text
             && prior.channel === relay.channel && prior.optionId === relay.optionId && prior.answeredAt === relay.answeredAt) return receipt();
