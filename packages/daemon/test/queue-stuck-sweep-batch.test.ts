@@ -257,13 +257,15 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
 
   it("still finds a closure's successor by handed_off_from, by chain_of_record and on a busy destination", async () => {
     const custody = (id: string, target: string) => row(id, { state: "done", created: recent(), updated: recent(), closureReason: "handed_off_to", closureTarget: target });
+    // Each successor is made after its source, as every writer stamps it; at `at` (weeks earlier) the seat arm's range
+    // would leave s-k2 and s-k3 out, and their sources would pay the live check a new finding gets.
     custody("qitem-k1", "seat-1@r");
-    row("s-k1", { handedOffFrom: "qitem-k1", destination: "seat-1@r" });
+    row("s-k1", { handedOffFrom: "qitem-k1", destination: "seat-1@r", created: recent() });
     custody("qitem-k2", "seat-2@r");
-    row("s-k2", { chain: JSON.stringify(["qitem-k2"]), destination: "seat-2@r" });
+    row("s-k2", { chain: JSON.stringify(["qitem-k2"]), destination: "seat-2@r", created: recent() });
     custody("qitem-k3", "desk@r");
-    for (let i = 0; i < 300; i++) row(`d-${i}`, { chain: JSON.stringify([`other-${i}`]), destination: "desk@r" });
-    row("s-k3", { chain: JSON.stringify(["x", "qitem-k3"]), destination: "desk@r" });
+    for (let i = 0; i < 300; i++) row(`d-${i}`, { chain: JSON.stringify([`other-${i}`]), destination: "desk@r", created: recent() });
+    row("s-k3", { chain: JSON.stringify(["x", "qitem-k3"]), destination: "desk@r", created: recent() });
     custody("qitem-k4", "seat-4@r");
     let result: Awaited<ReturnType<typeof runStuckSweep>> | undefined;
     // Only the one finding it creates re-checks its own source live (two point queries); the rest come from the index.

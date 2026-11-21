@@ -925,11 +925,13 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
         targetsOf.set(r.qitem_id, own);
       }
       const targets = JSON.stringify([...new Set([...targetsOf.values()].flatMap((own) => [...own]))]);
-      // `+` keeps the planner off the destination index, which holds each seat's whole history.
+      // INDEXED BY holds the seat arm to the creation-time range. Left to choose, the daemon's SQLite walked the whole
+      // table in primary-key order to feed the UNION's merge, and the destination index holds each seat's whole
+      // history; with the index named, a plan that can't use it fails to prepare instead of scanning.
       const seatArm = seatTargets.size === 0 ? "" : `
          UNION
-         SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
-          WHERE +s.destination_session IN (SELECT value FROM json_each(?)) AND s.ts_created >= ?
+         SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s INDEXED BY idx_queue_items_created, json_each(s.chain_of_record) j
+          WHERE s.destination_session IN (SELECT value FROM json_each(?)) AND s.ts_created >= ?
             AND s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
             AND j.value IN (SELECT value FROM json_each(?))`;
       const rows = db.prepare(

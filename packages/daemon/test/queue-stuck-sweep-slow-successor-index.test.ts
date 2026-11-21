@@ -107,6 +107,30 @@ describe("runStuckSweep: a successor index slower to build than the elapsed-time
     expect(counts.builds).toBe(1);
   });
 
+  it("confirms an open custody finding the index said no to, after the slow build switches the rest of the pass to per-row reads", async () => {
+    const created = new Date(Date.now() - 5 * 60_000).toISOString();
+    row("qitem-pre", { state: "done", updated: created, destination: "worker@r", closureReason: "handed_off_to", closureTarget: "seat-p@r" });
+    const first = await runStuckSweep({ db, queueRepo: repo, log: () => {} });
+    const finding = first.findings.find((f) => f.qitemId === "qitem-pre" && f.action === "created");
+    expect(finding).toBeDefined();
+    // A caller's own chainOfRecord can name an id before it exists: this successor, made two days before its source, is
+    // outside the index's read (it says no) and is found by the per-row query.
+    db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body,chain_of_record)
+      VALUES ('s-pre', ?, ?, 'sender@r', 'seat-p@r', 'pending', '[]', 'body', '["qitem-pre"]')`)
+      .run(new Date(Date.parse(created) - 2 * 86_400_000).toISOString(), created);
+    const counts = instrument(2 * STUCK_SWEEP_YIELD_AFTER_MS);
+    const second = await runStuckSweep({ db, queueRepo: repo, log: () => {} });
+    // The custody loop collected qitem-pre from the one build; a yield followed it, and the slow build switched the
+    // rest of the pass, retention included, to per-row reads (nothing rebuilt the index).
+    expect(counts.builds).toBe(1);
+    expect(counts.buildsPerStretch.indexOf(1)).toBeLessThan(counts.buildsPerStretch.length - 1);
+    // Retention still confirmed it live, so the finding closed instead of being refreshed.
+    expect(counts.perRow).toBeGreaterThanOrEqual(2);
+    expect(second.findings.filter((f) => f.qitemId === "qitem-pre" && f.action === "refreshed")).toEqual([]);
+    expect(second.findings.filter((f) => f.qitemId === "qitem-pre" && f.action === "closed")).toHaveLength(1);
+    expect(repo.getById(finding!.findingQitemId)?.state).toBe("done");
+  });
+
   it("keeps an index whose build is a small part of a stretch that yields by elapsed time (control)", async () => {
     const dangling = custodyRows();
     // 10 ms of build and 2 ms per row: each stretch covers about 20 rows, a fifth of it the build

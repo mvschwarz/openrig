@@ -1616,9 +1616,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     };
     /** The batch successor index reads a seat's chained rows only from its oldest seat-naming source's creation, so its
      *  "no successor" is a candidate, not a verdict: a custody finding it would keep open is confirmed on the row as it is
-     *  now, as a new one already is before it's created. True when the row no longer qualifies, so nothing is kept. */
+     *  now, as a new one already is before it's created. Every one is confirmed, whatever the mode is now: a yield can
+     *  switch the pass to per-row reads after the candidate came from the index. True when the row no longer qualifies,
+     *  so nothing is kept. */
     const keptOnBoundedRead = (c: Candidate): boolean =>
-      c.kind === "dangling-closure" && !successorsPerRow && freshCandidate(c.kind, c.row.qitemId) === null;
+      c.kind === "dangling-closure" && freshCandidate(c.kind, c.row.qitemId) === null;
     const unclaimedBacklog = new Map<string, Candidate[]>();
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       if (dueToYield()) await yieldLoop();
