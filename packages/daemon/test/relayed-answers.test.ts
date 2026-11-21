@@ -216,3 +216,20 @@ it.each([
   expect(f.repo.getById(gated.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
   expect(f.repo.getById(gated.qitemId)?.humanAnswers).toBeNull();
 });
+
+
+it("reuses the existing return when a reopened ask completes again", async () => {
+  const f = await fixture(true);
+  for (const question of questions) expect((await f.relay({ questionId: question.id, optionId: "no" }))).toMatchObject({ status: 200 });
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  const returnId = f.history()[0]?.qitemId;
+  expect(returnId).toBeTruthy();
+  expect((await f.post(`/api/queue/${f.ask.qitemId}/update`, relaySeat,
+    { state: "pending", reopen: true, transitionNote: "follow-up question" })).status).toBe(200);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "pending" });
+  expect((await f.correct({ questionId: "second", optionId: "yes" })).status).toBe(200);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  // The original return row survives; the second completion inserted no duplicate return.
+  expect(f.repo.getById(returnId ?? "")).not.toBeNull();
+  expect(f.history()).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "direct-correction" })]));
+});

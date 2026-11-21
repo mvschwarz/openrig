@@ -2665,7 +2665,10 @@ export class QueueRepository {
         }
       }
       const completed = !unplacedId && ask.state === "pending" && unanswered().length === 0;
-      if (completed) {
+      if (completed && !journal.returnId) {
+        // First completion only. After a deliberate reopen, the journal still names the
+        // original return row; re-inserting the same deterministic id would roll back the
+        // correction and its linked reply on a duplicate primary key, so reuse that row.
         const returnId = humanAnswerId(ask.qitemId, "relayed-answer");
         deliver(returnId, `Answers recorded with a RELAY: ${ask.summary ?? ask.qitemId}`,
           `${renderRelayedAnswers(journal, questions, direct)}\n\nIn reply to: ${ask.qitemId} (see its answer history).`, "relayed-answer");
