@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
-import { reconcileToken } from "../src/domain/gateway/slack/message.js";
+import { reconcileToken, SLACK_SECTION_CAP, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
@@ -31,8 +31,10 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
   const stores = () => ({ delivered: new SeenStore(join(home, "delivered")), attempted: new SeenStore(join(home, "attempted")), outboundSeen: new SeenStore(join(home, "seen")) });
   const opts = () => ({ ...stores(), botToken: "synthetic", channel: "C-TEST", sourceLabel: "fixture" });
 
-  it("delivers a four-question decision with private PNG evidence as a link", async () => {
-    const evidenceRef = "https://host.example/shot.png";
+  it.each([false, true])("delivers a four-question decision with private PNG evidence as a link (needs compact format=%s)", async compact => {
+    const base = "https://host.example/";
+    const path = compact ? "a".repeat(SLACK_SECTION_CAP - base.length - ".png".length) + ".png" : "shot.png";
+    const evidenceRef = base + path;
     const humanQuestions = Array.from({ length: 4 }, (_, index) => ({
       id: `question-${index + 1}`,
       question: `Decision ${index + 1}?`,
@@ -42,7 +44,7 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
       ...decision,
       payload: { ...request, qitemId: "q-rejected", evidenceRef, humanQuestions },
     };
-    const posts: { text: string; blocks: { type: string; elements?: unknown[] }[] }[] = [];
+    const posts: { text: string; blocks: { type: string; elements?: { type: string; text?: string }[] }[] }[] = [];
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
       const post = JSON.parse(String(init?.body));
       posts.push(post);
@@ -55,8 +57,10 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(ask)).toEqual({ ok: true });
     expect(posts).toHaveLength(1);
     expect(posts[0]!.text).toContain(evidenceRef);
+    expect(posts[0]!.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
     const blocks = posts[0]!.blocks;
-    expect(JSON.stringify(blocks.filter((block) => block.type === "context"))).toContain(evidenceRef);
+    const evidence = blocks.filter((block) => block.type === "context").flatMap(block => block.elements ?? []);
+    expect(evidence).toContainEqual({ type: "mrkdwn", text: compact ? evidenceRef : `Evidence: <${evidenceRef}|evidence>` });
     expect(blocks.filter((block) => block.type === "actions").map((block) => block.elements?.length)).toEqual([2, 2, 2, 2]);
     expect(onTransportFailed).not.toHaveBeenCalled();
   });
