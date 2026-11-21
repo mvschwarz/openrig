@@ -198,6 +198,8 @@ export interface SliceIndexerOpts {
   slicesRoot: string;
   /** Additional compatible roots to scan after the primary root. */
   additionalSliceRoots?: string[];
+  /** Catalogued projects' missions roots (#3553). Carried for terminal mission/slice view index contexts only; the indexer's own listing keeps using `slicesRoot` + `additionalSliceRoots`. */
+  catalogMissionsRoots?: readonly string[];
   /** Root directory containing dogfood-evidence directories. */
   dogfoodEvidenceRoot: string | null;
   /** SQLite handle for read-only joins to queue_items + transitions + actions. */
@@ -374,6 +376,8 @@ export class SliceIndexer {
   readonly missionId?: string;
   readonly slicesRoot: string;
   readonly additionalSliceRoots: string[];
+  /** Catalogued projects' missions roots, carried for terminal-view index contexts (#3553). Not part of the indexer's own listing roots. */
+  readonly catalogMissionsRoots: readonly string[];
   readonly dogfoodEvidenceRoot: string | null;
   /** Workflows in Spec Library v0: exposed read-only so the slices
    *  route's `boundToWorkflow` lens filter can call
@@ -404,6 +408,7 @@ export class SliceIndexer {
     this.missionId = opts.missionId;
     this.slicesRoot = opts.slicesRoot;
     this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
+    this.catalogMissionsRoots = opts.catalogMissionsRoots ?? [];
     this.dogfoodEvidenceRoot = opts.dogfoodEvidenceRoot;
     this.db = opts.db;
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;

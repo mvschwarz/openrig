@@ -316,3 +316,81 @@ it("keeps directly tagged shared work in both missions despite a colliding child
       members: [{ seat: "b", obligations: [{ qitemId: "shared" }] }] } });
   }
 });
+
+
+describe("catalogued project missions roots (#3553)", () => {
+  function catalogFixture() {
+    const root = mkdtempSync(path.join(tmpdir(), "scope-terminals-catalog-"));
+    const db = new Database(":memory:");
+    cleanup.push(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+    db.exec("CREATE TABLE queue_items(qitem_id TEXT PRIMARY KEY,destination_session TEXT,state TEXT,tags TEXT,chain_of_record TEXT); CREATE INDEX idx_queue_items_state ON queue_items(state)");
+    // The configured slices root is empty, as in the report: every mission lives under a catalogued project's missions root.
+    const emptyRoot = path.join(root, "empty-missions");
+    mkdirSync(emptyRoot, { recursive: true });
+    const projectMissions = (id: string) => path.join(root, id, "missions");
+    const projA = projectMissions("proj-a"), projB = projectMissions("proj-b");
+    const index = { slicesRoot: emptyRoot, additionalSliceRoots: [] as string[], catalogMissionsRoots: [projA, projB] };
+    const seats = new Map<string, TaskSeat>(["a", "b"].map(name => [name,
+      { hostId: "local", nodeId: name, seat: name, tmuxSession: name, attachmentType: "tmux" as const, stopped: false }]));
+    const add = (id: string, owner = "a", state = "pending", tags: unknown = ["slice:OPR.A1"], chain: string[] = []) =>
+      db.prepare("INSERT INTO queue_items VALUES(?,?,?,?,?)").run(id, owner, state, JSON.stringify(tags), JSON.stringify(chain));
+    const addCatalogSlice = (missionsRoot: string, mission: string, name: string, id = name, title = name) => {
+      const dir = path.join(missionsRoot, mission, "slices", name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "SPEC.md"), `---\nid: ${id}\ntitle: ${title}\n---\n# ${title}\n`);
+      return dir;
+    };
+    addCatalogSlice(projA, "alpha", "01-first", "OPR.A1", "First slice");
+    addCatalogSlice(projB, "beta", "02-second", "OPR.B2", "Second slice");
+    const read = (selector: string) => readScopedTaskTerminalView(db, selector, index, address => seats.get(address) ?? null);
+    return { root, db, index, seats, add, addCatalogSlice, read, projA, projB };
+  }
+
+  it("resolves mission and slice views through catalogued projects with an empty slices root", () => {
+    const f = catalogFixture();
+    f.add("direct", "b", "pending", ["mission:alpha"]);
+    f.add("slice-work", "a", "pending", ["slice:OPR.A1"]);
+    f.add("other-project", "b", "pending", ["slice:OPR.B2"]);
+    expect(f.read("mission:alpha")).toMatchObject({ task: { kind: "mission", id: "alpha", complete: true,
+      members: [{ seat: "a", obligations: [{ qitemId: "slice-work" }] }, { seat: "b", obligations: [{ qitemId: "direct" }] }] } });
+    expect(f.read("slice:OPR.A1")).toMatchObject({ task: { kind: "slice", id: "OPR.A1", complete: true, members: [{ seat: "a" }] } });
+    expect(f.read("mission:beta")).toMatchObject({ task: { kind: "mission", id: "beta", complete: true, members: [{ seat: "b" }] } });
+    expect(f.read("slice:OPR.B2")).toMatchObject({ task: { kind: "slice", id: "OPR.B2", complete: true, members: [{ seat: "b" }] } });
+  });
+
+  it("keeps a slice name shared by two catalogued projects ambiguous, while unique ids still resolve", () => {
+    const f = catalogFixture();
+    f.addCatalogSlice(f.projB, "beta", "01-first", "OPR.B1", "Same name, other project");
+    f.add("ours", "a", "pending", ["mission:alpha", "slice:01-first"]);
+    f.add("theirs", "b", "pending", ["mission:beta", "slice:01-first"]);
+    expect(f.read("slice:01-first")).toMatchObject({ code: "scope_ambiguous" });
+    expect(f.read("slice:OPR.A1")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+    expect(f.read("slice:OPR.B1")).toMatchObject({ task: { complete: true, members: [{ seat: "b" }] } });
+    expect(f.read("mission:alpha")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+  });
+
+  it("finds a mission declared by mission.yaml under a catalogued project root", () => {
+    const f = catalogFixture();
+    const dir = path.join(f.projA, "planning");
+    mkdirSync(path.join(dir, "slices"), { recursive: true });
+    writeFileSync(path.join(dir, "mission.yaml"), "kind: mission\n");
+    f.add("planned", "b", "pending", ["mission:planning"]);
+    expect(f.read("mission:planning")).toMatchObject({ task: { kind: "mission", id: "planning", complete: true, members: [{ seat: "b" }] } });
+  });
+
+  it("rereads identities when a catalogued root sits outside the watched primary root", () => {
+    const f = catalogFixture();
+    let observed = true;
+    const create = (scopeReader as unknown as { createScopedTaskResolver?: (db: Database.Database, index: typeof f.index,
+      resolveSeat: (address: string) => TaskSeat | null, observed: () => boolean) => { resolve: (view: string) => ReturnType<typeof f.read>; invalidate(): void } }).createScopedTaskResolver;
+    const resolver = create ? create(f.db, f.index, address => f.seats.get(address) ?? null, () => observed)
+      : { resolve: (view: string) => f.read(view), invalidate() {} };
+    expect(resolver.resolve("slice:OPR.A1")).toMatchObject({ task: { id: "OPR.A1", members: [] } });
+    f.add("fresh-owner", "b");
+    expect(resolver.resolve("slice:OPR.A1")).toMatchObject({ task: { id: "OPR.A1", members: [{ seat: "b" }] } });
+    observed = false;
+    const dir = path.join(f.projA, "alpha", "slices", "01-first", "SPEC.md");
+    writeFileSync(dir, `---\nid: CHANGED\n---\n`);
+    expect(resolver.resolve("slice:OPR.A1")).toMatchObject({ code: "scope_not_found" });
+  });
+});

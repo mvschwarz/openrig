@@ -8,7 +8,7 @@ import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
 import { projectTaskOwners, type TaskSeat, type TaskTerminalView } from "./task-terminal-view.js";
 
 export interface ScopeViewError { code: "scope_unsupported" | "scope_not_found" | "scope_ambiguous" | "scope_unavailable"; error: string }
-type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds">>;
+type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds" | "catalogMissionsRoots">>;
 interface Scope { name: string; id?: string; title: string; source: string; mission?: string; missionSource?: string }
 interface Mission { name: string; source: string; manifest?: string }
 interface ScopeIndex { slices: Scope[]; missions: Mission[]; claims: Map<string, Set<string>>; missionIssues: string[] }
@@ -68,7 +68,8 @@ function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
     scopeBySource.set(source, scope); scopes.push(scope);
   };
   try {
-    for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots].entries()) {
+    // Catalogued projects' missions roots (#3553) are walked after the configured roots, so a mission or slice that lives under a catalogued project's root resolves even when `workspace.slices_root` is empty. Missing catalog roots are skipped like any other optional root.
+    for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots, ...(index.catalogMissionsRoots ?? [])].entries()) {
       let real: string;
       try { real = fs.realpathSync(root); }
       catch (error) {
@@ -244,7 +245,9 @@ export function createScopedTaskResolver(db: Database.Database, index: IndexCont
       let reusable = false;
       try {
         const primary = fs.realpathSync(index.slicesRoot);
-        reusable = observed() && index.additionalSliceRoots.every(root => {
+        // A catalog root outside the primary root's namespace is unwatched like any other optional root: reuse no cached generation across it.
+        const extraRoots = [...index.additionalSliceRoots, ...(index.catalogMissionsRoots ?? [])];
+        reusable = observed() && extraRoots.every(root => {
           try { const real = fs.realpathSync(root); return real === primary || real.startsWith(primary + path.sep); }
           catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
         });
