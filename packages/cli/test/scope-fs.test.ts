@@ -195,7 +195,9 @@ describe("frontmatter parser", () => {
 
   it.each(["\u2028", "\u2029", "\r"])("keeps dashes after %j inside frontmatter", (separator) => {
     const original = `---\ntitle: before${separator}---\nstatus: active\n---\nbody\n`;
-    expect(editFrontmatter(original, { status: "closed" }, "README.md")).toBe(original.replace("status: active", "status: closed"));
+    const updated = editFrontmatter(original, { status: "closed" }, "README.md");
+    expect(updated).toBe(original.replace("status: active", "status: closed"));
+    expect(splitFrontmatter(updated)).toMatchObject({ frontmatter: { status: "closed" }, body: "body\n" });
   });
 
   describe.each(["\n", "\r\n"])("empty frontmatter (%j)", (newline) => {

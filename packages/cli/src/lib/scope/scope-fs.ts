@@ -38,7 +38,7 @@ export function splitFrontmatter(content: string): {
   const opening = /^---[ \t]*\r?\n/.exec(content);
   if (!opening) return { frontmatter: {}, body: content };
   const rest = content.slice(opening[0].length);
-  const closing = /^---[ \t]*(?:\r?\n|(?![\s\S]))/m.exec(rest);
+  const closing = /(?<=^|\n)---[ \t]*(?:\r?\n|(?![\s\S]))/.exec(rest);
   if (!closing) return { frontmatter: {}, body: content };
   return {
     frontmatter: parseYamlSafely(rest.slice(0, closing.index)),
