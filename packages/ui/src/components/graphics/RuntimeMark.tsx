@@ -356,6 +356,16 @@ function UnknownGlyph({ className, title, decorative }: { className?: string; ti
   );
 }
 
+/** A plain chip for a runtime that is named but not built in: no brand, and no question mark. */
+function GenericRuntimeGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2" y="2" width="12" height="12" fill="#e7e5e4" stroke="#78716c" strokeWidth="1" />
+      <rect x="5" y="5" width="6" height="6" fill="none" stroke="#57534e" strokeWidth="1.1" />
+    </svg>
+  );
+}
+
 export function RuntimeMark({ runtime, size = "sm", className, title, decorative }: RuntimeMarkProps) {
   const id = normalizeRuntimeBrandId(runtime);
   const label = title ?? runtimeBrand(runtime).label;
@@ -365,6 +375,7 @@ export function RuntimeMark({ runtime, size = "sm", className, title, decorative
   if (id === "pi") return <PiGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "omp") return <OmpGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
+  if (runtime?.trim()) return <GenericRuntimeGlyph className={cls} title={label} decorative={decorative} />;
   return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }
 
