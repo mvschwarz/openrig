@@ -305,6 +305,45 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   return null;
 }
 
+// Claude's confirm-style select, such as its usage-limit menu ("What do you want to do?", seen 2026-08-10) or the folder-trust
+// dialog: the footer is the last drawn row, and a numbered option with the cursor sits in the block adjoining it. The
+// usage-limit menu's second option spends money ("Switch to usage credits"), so it refuses even in the dialogue-only read,
+// whose fresh hook (StopFailure rate_limit reads unknown) can't tell a menu is open.
+const CLAUDE_CONFIRM_FOOTER = "Enter to confirm · Esc to cancel";
+function findCurrentClaudeConfirmMenu(paneContent: string): string | null {
+  const lines = paneContent.split("\n").map(line => line.trim());
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]) end--;
+  if (lines[end - 1] !== CLAUDE_CONFIRM_FOOTER) return null;
+  // Walk up from the footer past option rows and the unnumbered rows a menu draws among them (a wrapped option, a
+  // description, a balance or spend row), to the cursor's option. The menu ends at its question line, its top rule or
+  // two blank rows, so history above it is never read.
+  let blanks = 0;
+  for (let i = end - 2; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line) { if (++blanks >= 2) break; continue; }
+    blanks = 0;
+    if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
+    if (/^[▔─━═]{3,}$/.test(line) || (/\?$/.test(line) && !/^\d+\./.test(line))) break;
+  }
+  return null;
+}
+
+// The option labels of Claude Code's usage-limit menus, read from the 2.1.282 bundle: the rate-limit options dialog and
+// its sibling spend-limit dialog (same title; unnumbered rows), with or without the cursor and number.
+const CLAUDE_LIMIT_MENU_OPTION = /^(?:❯\s*)?(?:\d+\.\s+)?(?:Stop and wait for limit to reset|Switch to usage(?: credits)?\b|Add funds to continue with\b|Upgrade your plan\b|Ask your admin for more usage|Wait here, then continue automatically\b|Don.t continue automatically\b|Adjust monthly spend limit:|Wait for limit to reset\b|Upgrade to Max(?: 20x)? for higher session limits every month)/;
+/** A usage-limit menu option in the screen's bottom block: up to 40 non-blank rows, ending at one of Claude's output or
+ *  timer rows (⏺, ●, ✻), so a reply that came after a dismissed menu isn't read as the menu. */
+function findClaudeLimitMenuInBottomBlock(paneContent: string): string | null {
+  const lines = paneContent.split("\n").map(line => line.trim()).filter(line => line.length > 0).slice(-40);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (CLAUDE_LIMIT_MENU_OPTION.test(line)) return truncateEvidence(line);
+    if (/^[⏺●✻] /.test(line)) break;
+  }
+  return null;
+}
+
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 const CLAUDE_STATUS_WARNINGS = [
@@ -872,7 +911,17 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   // The program's own /model picker: its highlighted row can sit above the scan window, and Enter there confirms it.
   const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
     : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
-  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  const confirmMenu = options.runtime === undefined || options.runtime === "claude-code" ? findCurrentClaudeConfirmMenu(paneContent) : null;
+  // Claude's usage-limit menu replaces the input box, and some of its options spend money. In the dialogue-only read, its
+  // own option text in the bottom block with no Claude input box drawn refuses, whatever the menu's layout. Any input box
+  // counts (framed, unframed above the mode bar, or an input line, closing rule and footer, multiline drafts included), so
+  // a quoted menu above one, or a draft inside one, doesn't. A version whose labels differ is covered after a usage-limit
+  // hook by the full read below.
+  const claudeInputBox = claudeComposer !== null
+    || (currentComposer !== null && currentComposer.markerLine !== null && currentComposer.closingRuleLine !== null);
+  const limitMenu = options.currentClaudeDialogueOnly && options.runtime === "claude-code" && !claudeInputBox
+    ? findClaudeLimitMenuInBottomBlock(paneContent) : null;
+  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ?? limitMenu ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {
@@ -4525,6 +4574,9 @@ export class SessionTransport {
     ) {
       return hookActivity;
     }
+    // A fresh usage-limit hook: a limit menu may be open, and some of its options spend money (a hard line).
+    const freshUsageLimit = !input.readinessFromPaneOnly && hookActivity?.evidenceSource === "runtime_hook"
+      && hookActivity.stale !== true && hookActivity.reason === "usage_limit" && this.hookFreshForSend(hookActivity, now);
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
@@ -4539,7 +4591,10 @@ export class SessionTransport {
       // Fresh hook (within the 15s send window): authoritative for any state, except a current Claude
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
-      if (this.hookFreshForSend(hookActivity, now)) {
+      // A fresh usage-limit hook is the exception: a limit menu may be open, and some of its options spend money. It
+      // takes the full pane read below, whose numbered-row scan refuses any current menu whatever its layout; an
+      // ordinary input box at a limit wall still delivers.
+      if (this.hookFreshForSend(hookActivity, now) && !freshUsageLimit) {
         // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
         // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
         // the pane probe below don't read the declaration.
@@ -4633,6 +4688,17 @@ export class SessionTransport {
     const probe = input.readinessFromPaneOnly && input.runtime === "claude-code"
       ? (await this.readAtReadableSize(input.sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readPane)).value
       : await readPane();
+    // After a fresh usage-limit hook the full read is a veto only. Unless the pane reads idle or a running turn (the
+    // heuristic for an input box), it refuses before any write as the choice prompt it may be: an unreadable capture,
+    // or a menu drawn outside the scan. This is the one deliberate stop here; every other path keeps failing open.
+    // Otherwise the fresh hook's own verdict stands, as it did before this read.
+    if (freshUsageLimit && hookActivity) {
+      if (probe.state !== "idle" && probe.state !== "running") {
+        return { ...probe, state: "needs_input", reason: "selection_prompt",
+          evidence: probe.evidence ?? "usage-limit hook; the pane didn't read as an input box" };
+      }
+      return hookActivity;
+    }
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
     // running/needs_input hook such as UserPromptSubmit: keep it until it ages out. An `unknown`
