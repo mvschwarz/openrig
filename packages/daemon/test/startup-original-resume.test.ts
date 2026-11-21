@@ -237,15 +237,20 @@ describe("opt-in original conversation resume", () => {
       const r = await request(f.path + `?snapshotId=${f.refs.snapshotId}&historySessionId=${f.refs.historySessionId}`);
       return { status: r.status, body: await r.json() as Record<string, any> };
     };
-    // Another conversation launched in the seat since the snapshot: its newer session row names it, the saved row is unchanged.
-    const launchedSince = (f: ReturnType<typeof fixture>, conversation: string | null) => {
+    // Another session launched in the seat since the snapshot, with its conversation (or none) and status; the saved row is unchanged.
+    const launchedSince = (f: ReturnType<typeof fixture>, conversation: string | null, status?: string) => {
       const later = setup.sessionRegistry.registerSession(f.node.id, f.source.sessionName);
       if (conversation) db.prepare("UPDATE sessions SET resume_type='claude_name',resume_token=? WHERE id=?").run(conversation, later.id);
+      if (status) db.prepare("UPDATE sessions SET status=? WHERE id=?").run(status, later.id);
     };
-    // The seat runs an agent now: a live terminal whose foreground is Claude.
-    const running = () => { setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "present" as const })); };
+    // An agent is present: a live terminal whose foreground is Claude, showing `screen` (nothing drawn by default).
+    const present = (screen = "") => {
+      setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "present" as const }));
+      setup.tmuxAdapter.capturePaneContent = vi.fn(async () => screen);
+      if (setup.tmuxAdapter.capturePaneScreen) setup.tmuxAdapter.capturePaneScreen = vi.fn(async () => screen);
+    };
 
-    it("answers selection_changed when a newer session row names another conversation", async () => {
+    it("answers selection_changed when the seat's current session names another conversation", async () => {
       const f = fixture(); launchedSince(f, "post-clear-other-conversation");
       const { status, body } = await preview(f);
       expect(status).toBe(409);
@@ -254,20 +259,30 @@ describe("opt-in original conversation resume", () => {
       expect(JSON.stringify(body)).not.toContain(token); expect(JSON.stringify(body)).not.toContain("post-clear-other-conversation");
     });
 
-    it("answers current_conversation_unknown when a newer session row records no conversation", async () => {
+    it("previews the saved one, reporting it unknown, when the seat's current session records no conversation", async () => {
       const f = fixture(); launchedSince(f, null);
       const { status, body } = await preview(f);
-      expect(status).toBe(409);
-      expect(body).toMatchObject({ ok: false, code: "current_conversation_unknown" });
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ ok: true, revision: expect.any(String), currentConversation: { state: "unknown" } });
+      expect(body.forecast).toBeDefined();
     });
 
-    it("still previews the saved one when a newer session row resumed that same conversation", async () => {
+    it("skips the row a rolled-back restore left (superseded, no conversation): the saved one previews as the same", async () => {
+      const f = fixture(); launchedSince(f, null, "superseded");
+      const { status, body } = await preview(f);
+      expect(status).toBe(200);
+      expect(body.currentConversation).toEqual({ state: "same", basis: "record" });
+    });
+
+    it("previews the saved one as the same when a newer session resumed that same conversation", async () => {
       const f = fixture(); launchedSince(f, token);
-      expect((await preview(f)).status).toBe(200);
+      const { status, body } = await preview(f);
+      expect(status).toBe(200);
+      expect(body.currentConversation).toEqual({ state: "same", basis: "record" });
     });
 
     it("answers selection_changed when a /clear moved the running agent's identity while the saved history row is unchanged", async () => {
-      const f = fixture(); running();
+      const f = fixture(); present();
       live.code = "expected_identity_mismatch"; live.reason = "The current native conversation differs from the expected original.";
       const { status, body } = await preview(f);
       expect(status).toBe(409);
@@ -276,18 +291,45 @@ describe("opt-in original conversation resume", () => {
       expect(JSON.stringify(body)).not.toContain(token);
     });
 
-    it("answers current_conversation_unknown, never a 200 naming the saved one, when the running agent's identity can't be established", async () => {
-      const f = fixture(); running();
+    it("compares a present agent behind a prompt too: another identity behind a login screen answers selection_changed", async () => {
+      const f = fixture(); present("● Not logged in · Please run /login");
+      live.code = "expected_identity_mismatch"; live.reason = "The current native conversation differs from the expected original.";
       const { status, body } = await preview(f);
       expect(status).toBe(409);
-      expect(body).toMatchObject({ ok: false, code: "current_conversation_unknown",
-        identityEvidence: { code: "expected_identity_unavailable", detail: "The exact current native identity is unavailable" } });
-      expect(body).not.toHaveProperty("forecast");
+      expect(body).toMatchObject({ ok: false, code: "selection_changed", identityEvidence: { code: "expected_identity_mismatch" } });
     });
 
-    it("previews the saved one while the running agent is proved to be that conversation", async () => {
-      const f = fixture(); running(); live.original = true;
-      expect((await preview(f)).status).toBe(200);
+    it("reports unknown, still previewing the saved one, when the terminal can't be read", async () => {
+      const f = fixture();
+      setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "transport_unavailable" as const }));
+      const { status, body } = await preview(f);
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ revision: expect.any(String), currentConversation: { state: "unknown",
+        identityEvidence: { code: "expected_identity_unavailable", detail: "The exact current native identity is unavailable" } } });
+    });
+
+    it("reports unknown, never claiming the saved one, when a present agent's identity can't be established", async () => {
+      const f = fixture(); present();
+      const { status, body } = await preview(f);
+      expect(status).toBe(200);
+      expect(body.currentConversation).toMatchObject({ state: "unknown", identityEvidence: { code: "expected_identity_unavailable" } });
+    });
+
+    it("keeps the evidence free of native ids, the saved one's and any other the resolver names", async () => {
+      const f = fixture(); present();
+      const other = "6f1c2a7e-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+      live.reason = `multiple claude session ids under verified pane %1: ${other}, ${token}`;
+      const { status, body } = await preview(f);
+      expect(status).toBe(200);
+      expect(body.currentConversation.identityEvidence.detail).toBe("multiple claude session ids under verified pane %1: [redacted], [redacted]");
+      expect(JSON.stringify(body)).not.toContain(other); expect(JSON.stringify(body)).not.toContain(token);
+    });
+
+    it("previews the saved one as the same while the present agent is proved to be that conversation", async () => {
+      const f = fixture(); present(); live.original = true;
+      const { status, body } = await preview(f);
+      expect(status).toBe(200);
+      expect(body.currentConversation).toEqual({ state: "same", basis: "running_agent" });
     });
   });
 

@@ -24,7 +24,7 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import { currentRestoreSnapshot } from "../domain/current-restore-snapshot.js";
-import { latestRuntimeHomeRecord, observeRuntimeHome, readRuntimeHomeState, selectedHomePlan, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
+import { currentOriginal, latestRuntimeHomeRecord, observeRuntimeHome, readRuntimeHomeState, selectedHomePlan, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import { HISTORY_REF_RE, listSharedHistories } from "../domain/shared-history-selection.js";
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
@@ -225,7 +225,9 @@ async function observeSeat(c: Context, rig: RigWithRelations, node: Node) {
       return { state: "attention_required", sessionName: name,
         detail: `The pane shows a shell that is not a proven idle shell; a launch script may still be starting ${node.runtime === "claude-code" ? "Claude" : "Codex"}.` };
     }
-    return { state: probe.status === "resumed" ? "running" : "attention_required", detail: probe.detail, sessionName: name };
+    // A shell that got here was proved idle above: no agent is present.
+    return { state: probe.status === "resumed" ? "running" : "attention_required", detail: probe.detail, sessionName: name,
+      ...(probe.code === "returned_to_shell" ? { idleShell: true as const } : {}) };
   } catch (error) {
     return { state: "unverified", detail: error instanceof Error ? error.message : String(error), sessionName: name };
   }
@@ -343,36 +345,43 @@ function redactDiagnostic(value: string | null | undefined, tokens: readonly str
   return tokens.reduce((text, token) => text.replaceAll(token, "[redacted]"), value);
 }
 
-type CurrentOriginal = { kind: "same" }
-  | { kind: "changed" | "unknown"; message: string; identityEvidence?: { code: string; detail: string } };
+/** What the original-only preview reports about the seat's current conversation beside the banked one. */
+type CurrentConversation = { state: "same"; basis: "record" | "running_agent" }
+  | { state: "changed"; message: string; identityEvidence?: { code: string; detail: string } }
+  | { state: "unknown"; reason: string; identityEvidence?: { code: string; detail: string } };
+
+// Native conversation ids are UUIDs, and the reused resolver's reasons can name ids other than the banked one.
+const NATIVE_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const idFree = (text: string, banked: string) => (redactDiagnostic(text, [banked]) ?? text).replace(NATIVE_ID_RE, "[redacted]");
 
 /** For the original-only preview: whether the seat's current conversation is still the banked one. The selected history
- *  row can keep its token while the seat has moved on, so it isn't enough by itself. A newer session row (a launch since
- *  the snapshot) is what the seat's record names now, and a running agent's proved native identity is what it runs now.
- *  Another conversation is `changed`; one that can't be established is `unknown`, never read as the banked one. */
-async function currentOriginal(c: Context, rigName: string, node: Node, refs: HistoryRefs, snapshot: Snapshot,
-  observed: { state: string; sessionName: string }): Promise<CurrentOriginal> {
+ *  row can keep its token while the seat has moved on, so it isn't enough by itself. The seat's record is read as its
+ *  runtime home's original is (the live occupant's row, or a stopped seat's newest row that a rolled-back launch didn't
+ *  leave), and a present agent, behind a gate or not, is compared by its proved native identity. Only another
+ *  conversation is `changed`; one that can't be established is `unknown`, reported, and never read as the banked one. */
+async function currentConversation(c: Context, rigName: string, node: Node, refs: HistoryRefs, snapshot: Snapshot,
+  observed: { state: string; sessionName: string; idleShell?: true }): Promise<CurrentConversation> {
   const banked = snapshot.data.sessions.find(row => row.nodeId === node.id && row.id === refs.historySessionId)?.resumeToken ?? null;
-  const newest = repo(c).db.prepare("SELECT id, resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as
-    { id: string; resume_token: string | null } | undefined;
-  if (newest && newest.id !== refs.historySessionId) {
-    if (!newest.resume_token) return { kind: "unknown", message: `This seat was launched again since it was saved, and that launch hasn't recorded which conversation it runs, so this preview can't tell whether it's still the saved one. Check the seat with rig seat status ${observed.sessionName}; to save its current conversation, run rig snapshot ${rigName}.` };
-    if (newest.resume_token !== banked) return { kind: "changed", message: recordChanged(rigName) };
-  }
-  // Only a running agent has a current conversation to compare; a stopped seat or an idle shell is the record's to say.
-  if (observed.state !== "running" || (node.runtime !== "claude-code" && node.runtime !== "codex")) return { kind: "same" };
-  const unknownRunning = `This seat is running, and its current conversation couldn't be established, so this preview can't say whether it's still the saved one. identityEvidence says why; check the seat with rig seat status ${observed.sessionName}.`;
-  if (!banked) return { kind: "unknown", message: unknownRunning };
+  const recorded = currentOriginal(repo(c).db, node.id);
+  if (recorded.original && recorded.original !== banked) return { state: "changed", message: recordChanged(rigName) };
+  // No agent is present in a stopped seat or a proved-idle shell: the record decides there.
+  if (observed.state === "stopped" || observed.idleShell) return recorded.original && recorded.original === banked
+    ? { state: "same", basis: "record" }
+    : { state: "unknown", reason: recorded.candidates
+      ? "This seat's record names more than one current session, so which conversation it holds isn't established."
+      : "This seat's record doesn't name a current conversation, so whether it's still the saved one isn't established." };
+  const unknownPresent = "An agent may be running in this seat, and its current conversation couldn't be established, so whether it's still the saved one isn't known.";
+  if ((node.runtime !== "claude-code" && node.runtime !== "codex") || !banked) return { state: "unknown", reason: unknownPresent };
   try {
     await resolveExpectedConversation({ nodeId: node.id, sessionName: observed.sessionName, runtime: node.runtime, nativeId: banked },
       sessions(c), tmux(c), dep<ContextUsageStore | undefined>(c, "contextUsageStore"));
-    return { kind: "same" };
+    return { state: "same", basis: "running_agent" };
   } catch (error) {
     const code = (error as { code?: string }).code ?? "expected_identity_unavailable";
-    const identityEvidence = { code, detail: redactDiagnostic(error instanceof Error ? error.message : String(error), [banked]) ?? "Current native identity could not be read." };
+    const identityEvidence = { code, detail: idFree(error instanceof Error ? error.message : String(error), banked) };
     return code === "expected_identity_mismatch"
-      ? { kind: "changed", identityEvidence, message: `This seat is running a different conversation from the saved one, or its occupant changed while it was read, so the saved conversation can't be resumed from here. Refresh the review; to save the current conversation, run rig snapshot ${rigName}.` }
-      : { kind: "unknown", identityEvidence, message: unknownRunning };
+      ? { state: "changed", identityEvidence, message: `This seat is running a different conversation from the saved one, or its occupant changed while it was read, so the saved conversation can't be resumed from here. Refresh the review; to save the current conversation, run rig snapshot ${rigName}.` }
+      : { state: "unknown", identityEvidence, reason: unknownPresent };
   }
 }
 
@@ -402,11 +411,10 @@ async function reviewSelectedHistory(c: Context, retained = false) {
     collectPreviewSessionRows(repo(c).db, { ...facts.rig, nodes: [facts.node] }, facts.snapshot), undefined, Date.now(), {},
     { nodeId, historySessionId: refs.historySessionId }).nodes[0]!;
   const observed = await observeSeat(c, facts.rig, facts.node);
-  if (retained) {
-    const current = await currentOriginal(c, facts.rig.rig.name, facts.node, refs, facts.snapshot, observed);
-    if (current.kind !== "same") return c.json({ ok: false, code: current.kind === "changed" ? "selection_changed" : "current_conversation_unknown",
-      message: current.message, ...(current.identityEvidence ? { identityEvidence: current.identityEvidence } : {}) }, 409);
-  }
+  // Only positive evidence of another conversation refuses; an unknown one is reported beside the saved forecast.
+  const current = retained ? await currentConversation(c, facts.rig.rig.name, facts.node, refs, facts.snapshot, observed) : undefined;
+  if (current?.state === "changed") return c.json({ ok: false, code: "selection_changed", message: current.message,
+    ...(current.identityEvidence ? { identityEvidence: current.identityEvidence } : {}) }, 409);
   const checked = selectedState(c, rigId, nodeId, refs, facts.snapshot);
   if (checked && "permissionUnavailable" in checked) return c.json({ ok: false, code: "permission_unavailable",
     message: "The selected seat's saved permission choice needs repair before launch." }, 409);
@@ -434,6 +442,7 @@ async function reviewSelectedHistory(c: Context, retained = false) {
       permission,
       codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" },
       ...(runtimeHome ? { runtimeHome } : {}) },
+    ...(current ? { currentConversation: current } : {}),
     revision: state.review, mutated: false });
  }
 startupRoutes.get("/:rigId/nodes/:nodeId", c => reviewSelectedHistory(c));
