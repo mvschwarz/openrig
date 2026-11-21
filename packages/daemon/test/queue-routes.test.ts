@@ -950,7 +950,7 @@ describe("queue routes", () => {
     it("a lookup that fails still answers the read, and says the successor couldn't be looked up", async () => {
       const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
       await queueRepo.handoff({ qitemId: source.qitemId, fromSession: "b@r", toSession: "next@r", nudge: false });
-      const list = vi.spyOn(queueRepo, "list").mockImplementation(() => { throw Object.assign(new Error("busy"), { code: "SQLITE_BUSY" }); });
+      const list = vi.spyOn(queueRepo, "handoffSuccessorReads").mockImplementation(() => { throw Object.assign(new Error("busy"), { code: "SQLITE_BUSY" }); });
       try {
         const res = await app.request(`/api/queue/${source.qitemId}`);
         expect(res.status).toBe(200);
@@ -1009,6 +1009,74 @@ describe("queue routes", () => {
       queueRepo.update({ qitemId: created.qitemId, actorSession: "next@r", state: "done", closureReason: "no-follow-on" });
       const closed = await (await app.request("/api/queue/list?destinationSession=next@r&compact=1")).json();
       expect(closed[0]).not.toHaveProperty("successors");
+    });
+
+    it("reads a page's successors in the same number of statements, however many handed-off rows it holds (#3645)", async () => {
+      const handedOff = async (destination: string, rows: number) => {
+        for (let i = 0; i < rows; i++) {
+          const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: destination, body: "x", nudge: false });
+          await queueRepo.handoff({ qitemId: source.qitemId, fromSession: destination, toSession: "next@r", nudge: false });
+        }
+      };
+      // Statements prepared, and statement runs (a reused statement run once per row would grow too).
+      const statements = async (destination: string) => {
+        const statement = Object.getPrototypeOf(db.prepare("SELECT 1")) as Record<"all" | "get" | "run" | "iterate", (...args: unknown[]) => unknown>;
+        const runs = (["all", "get", "run", "iterate"] as const).map((method) => vi.spyOn(statement, method));
+        const prepare = vi.spyOn(db, "prepare");
+        try {
+          const res = await app.request(`/api/queue/list?destinationSession=${destination}&compact=1`);
+          expect(res.status).toBe(200);
+          const rows = await res.json() as Array<{ successors?: unknown[] }>;
+          expect(rows.map((row) => row.successors?.length)).toEqual(rows.map(() => 1));
+          return { prepared: prepare.mock.calls.length, run: runs.reduce((n, spy) => n + spy.mock.calls.length, 0) };
+        } finally {
+          prepare.mockRestore();
+          for (const spy of runs) spy.mockRestore();
+        }
+      };
+      await handedOff("two@r", 2);
+      await handedOff("six@r", 6);
+      await statements("two@r"); // a first read may prepare what later reads reuse
+      expect(await statements("six@r")).toEqual(await statements("two@r"));
+    });
+
+    it("names the same successors on list and show for a page of mixed rows: the cut, the 21st closure-target entry, no duplicate (#3645)", async () => {
+      const insert = db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, handed_off_from)
+        VALUES (?, ?, ?, 'b@r', 'next@r', 'pending', 'routine', 'x', ?)`);
+      const close = db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = ?, handed_off_to = 'next@r' WHERE qitem_id = ?");
+      const id = (source: string, n: number) => `qitem-${source}-${String(n).padStart(2, "0")}`;
+      const sources: Record<string, string> = {};
+      for (const name of ["cut", "named", "remote", "none"]) {
+        sources[name] = (await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: name, nudge: false })).qitemId;
+      }
+      for (let n = 1; n <= 21; n++) {
+        const ts = `2026-11-10T00:00:${String(n).padStart(2, "0")}.000Z`;
+        insert.run(id("cut", n), ts, ts, sources.cut);
+        if (n <= 3) insert.run(id("named", n), ts, ts, sources.named);
+      }
+      close.run(id("cut", 1), sources.cut); // the oldest successor, cut from the newest 20: named once more, by its closure target
+      close.run(id("named", 2), sources.named); // a successor already named: not repeated
+      close.run("qitem-elsewhere@far-host", sources.remote);
+      close.run("next@r", sources.none);
+      const face = (row: Record<string, unknown>) => ({ successors: row.successors, successorsTruncated: row.successorsTruncated, successorNote: row.successorNote });
+      const expected = {
+        [sources.cut]: { successors: [
+          ...Array.from({ length: 20 }, (_, i) => ({ qitemId: id("cut", i + 2), destinationSession: "next@r", state: "pending", via: "handedOffFrom" })),
+          { qitemId: id("cut", 1), destinationSession: "next@r", state: "pending", via: "closureTarget" },
+        ], successorsTruncated: true, successorNote: undefined },
+        [sources.named]: { successors: [1, 2, 3].map((n) => ({ qitemId: id("named", n), destinationSession: "next@r", state: "pending", via: "handedOffFrom" })),
+          successorsTruncated: undefined, successorNote: undefined },
+        [sources.remote]: { successors: [], successorsTruncated: undefined,
+          successorNote: "It was handed to another host; its successor there is qitem-elsewhere@far-host. This daemon has no copy." },
+        [sources.none]: { successors: [], successorsTruncated: undefined, successorNote: "No row on this daemon was made by this handoff." },
+      };
+      for (const compact of ["0", "1"]) {
+        const listed = await (await app.request(`/api/queue/list?destinationSession=b@r&compact=${compact}`)).json() as Array<Record<string, unknown>>;
+        expect(Object.fromEntries(listed.map((row) => [row.qitemId, face(row)]))).toEqual(expected);
+      }
+      for (const [qitemId, want] of Object.entries(expected)) {
+        expect(face(await (await app.request(`/api/queue/${qitemId}`)).json())).toEqual(want);
+      }
     });
 
     it("keeps show's remote-successor note on a compact list face", async () => {
@@ -1073,10 +1141,10 @@ describe("queue routes", () => {
 
     it("keeps a successful close when the optional successor lookup is unavailable", async () => {
       const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "old", nudge: false });
-      const list = queueRepo.list.bind(queueRepo);
-      const lookup = vi.spyOn(queueRepo, "list").mockImplementation((opts) => {
-        if (opts?.handedOffFrom === source.qitemId) throw new Error("lookup unavailable");
-        return list(opts);
+      const reads = queueRepo.handoffSuccessorReads.bind(queueRepo);
+      const lookup = vi.spyOn(queueRepo, "handoffSuccessorReads").mockImplementation((sources, targets, perSource) => {
+        if (sources.includes(source.qitemId)) throw new Error("lookup unavailable");
+        return reads(sources, targets, perSource);
       });
       try {
         expect((await supersede(source.qitemId, "qitem-replacement@far-host")).status).toBe(200);
