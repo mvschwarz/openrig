@@ -928,8 +928,8 @@ Codex seats have two extra cases:
 - **In place, on Linux only.** A Codex seat switches in place by changing its Codex home's active login, so every seat
   on that home moves with it. The plan lists each home's seats: this rig's "would restart", and a seat in another rig
   shows the `rig seat restart` it would need. Elsewhere the row reads "unsupported in place".
-- **To a prepared home.** `--account-home <dir>` moves the seats to that home instead, as fresh successors with a
-  handover. Nothing falls back to this by itself. A successor uses the login active in that home, which isn't checked
+- **To a prepared home.** `--account-home <dir>` moves the seats that aren't on the account yet to that home instead,
+  as fresh successors with a handover. A seat already on the account's own saved login stays where it is. Nothing falls back to this by itself. A successor uses the login active in that home, which isn't checked
   against the account: the plan, the result and status say so.
 
 **Applying it.** `--apply --plan <digest>` computes the plan again, and refuses without changing anything unless it's
@@ -946,7 +946,9 @@ time. Seats move one at a time, and each gets one result:
 | `unknown` | Something may have changed. The result names the command that recovers or checks it. |
 
 - **A failure doesn't stop the others.** Nothing is rolled back or retried.
-- **After an unknown on a Codex home,** that home's remaining seats are skipped.
+- **After an unknown on a Codex home,** that home's remaining seats are skipped: when the switch of the home itself
+  ends unknown, its login isn't known. A seat whose restart on a switched home doesn't confirm is unknown on its own,
+  and the home's other seats still restart, because the home's login is known.
 - **Seats in another rig** on a switched home are listed with their restart command, never restarted.
 - **Each result is stored as it lands,** with what the seat was doing when it was reached. Status `--json` shows it as
   `applied.activity`.

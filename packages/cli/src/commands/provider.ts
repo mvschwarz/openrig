@@ -1115,7 +1115,7 @@ that machine. Only the command and its output cross the connection.`);
     .option("--provider <p>", "claude or codex: a mixed rig gets one assignment per provider")
     .option("--account <label>", "The account's label (rig provider account list)")
     .option("--include-overrides", "Also move seats with their own choice of account; by default they're kept and shown")
-    .option("--account-home <dir>", "Codex: move the seats to this prepared home as fresh successors with a handover, instead of in place")
+    .option("--account-home <dir>", "Codex: move the seats not on the account yet to this prepared home as fresh successors with a handover, instead of in place")
     .option("--apply", "Carry out the plan, one seat at a time; needs --plan with the digest the plan showed")
     .option("--plan <digest>", "The digest of the plan you reviewed: apply acts only while the plan is still the same")
     .option("--host <id>", "Plan or apply on that registered machine instead, over its SSH entry; the rig and account are that daemon's")
@@ -1134,8 +1134,8 @@ A configured account is what a seat's next launch uses, not proof of the login a
 --apply --plan <digest> computes the plan again and refuses, changing nothing, unless it's the one you reviewed. It then
 moves each seat through the existing switch, one at a time, reporting each result as unchanged, switched,
 pending-successor, unsupported, failed-before-effect or unknown. A failure doesn't stop the other seats; nothing is
-rolled back or retried, and an unknown result names its recovery command. After an unknown on a Codex home, that home's
-other seats are skipped. Seats in other rigs on a switched home are listed, never restarted.
+rolled back or retried, and an unknown result names its recovery command. When a Codex home's own switch ends unknown,
+that home's other seats are skipped. Seats in other rigs on a switched home are listed, never restarted.
 The rig's assignment is stored with the first seat that's on the account or may be, so an apply where every seat was
 refused leaves the earlier one. Afterwards the plan shows the assignment and each seat's last result, and rig provider
 status shows each seat against it. It exits 1 when any seat failed or is unknown.`)

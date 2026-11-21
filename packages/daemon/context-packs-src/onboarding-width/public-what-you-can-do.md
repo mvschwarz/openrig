@@ -1686,7 +1686,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   home on launch, restart, resume and restore, and needs a readable `auth.json` there, or the launch stops; remove
   the declaration to keep the managed seat login. A seat that has its own Pi login as well stops at launch even with
   an `auth.json` there, and the error says why (for example, that the existing login isn't a managed account link).
-- **`rig provider account add <label>`**, then **`rig provider assign <rig> --provider <p> --account <label>`**
+- **`rig provider account add <label> --provider claude --token-file <path>`** (or `--api-key-file <path>`), or
+  **`rig provider account add <label> --provider codex --codex-home <dir> --login <name>`**, then
+  **`rig provider assign <rig> --provider <p> --account <label>`**
   — move a whole rig's Claude or Codex seats to one account. The daemon keeps your label and a reference (a token or
   API-key file, or a Codex home and saved login), never the secret. The plan changes nothing; `--apply --plan
   <digest>` applies exactly that plan, seat by seat, with each result reported and nothing retried. Seats with their
