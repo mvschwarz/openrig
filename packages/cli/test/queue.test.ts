@@ -29,6 +29,7 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 interface StubResponse {
   status: number;
   data: unknown;
+  headers?: Headers;
 }
 
 const STUB_SENDER = "stub@rig";
@@ -1825,6 +1826,39 @@ describe("rig queue CLI", () => {
     expect(process.exitCode).toBe(1);
     expect(logs.join("\n")).toContain("filter_unsupported");
     expect(logs.join("\n")).not.toContain("qitem-unfiltered");
+  });
+
+  it("list says on stderr when the daemon cut the page, and leaves stdout as it was (#3572)", async () => {
+    const rows = [{ qitemId: "qitem-newest" }, { qitemId: "qitem-next" }];
+    // The notice names the limit the daemon says it applied, not the one asked for.
+    const page = (truncated: string) => new Headers({ "X-OpenRig-Limit": "7", "X-OpenRig-Truncated": truncated });
+    const { deps } = makeDeps({
+      routes: {
+        "GET /api/queue/list?limit=2": [
+          { status: 200, data: rows, headers: page("1") },
+          { status: 200, data: rows, headers: page("1") },
+          { status: 200, data: rows, headers: page("0") },
+          { status: 200, data: rows },
+        ],
+      },
+    });
+    const run = async (...extra: string[]) => {
+      logs.length = 0; errors.length = 0;
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "--full", "--all", "--all-rigs", "--limit", "2", ...extra]);
+      return { stdout: [...logs], stderr: [...errors] };
+    };
+    const notice = "this page stops at --limit 7 and more rows match; pass a larger --limit to see the rest";
+
+    // Cut, in JSON and in the default output: the rows unchanged on stdout, one line on stderr naming the limit.
+    expect(await run("--json")).toEqual({ stdout: [JSON.stringify(rows)], stderr: [notice] });
+    expect(await run()).toEqual({ stdout: [JSON.stringify(rows, null, 2)], stderr: [notice] });
+    // Exactly the limit matched: nothing on stderr.
+    expect(await run("--json")).toEqual({ stdout: [JSON.stringify(rows)], stderr: [] });
+    // A daemon that doesn't send the marker: nothing on stderr either.
+    expect(await run("--json")).toEqual({ stdout: [JSON.stringify(rows)], stderr: [] });
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("list -a includes history (no activeOnly param)", async () => {

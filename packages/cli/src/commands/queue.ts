@@ -350,6 +350,15 @@ async function withClient<T>(
   }
 }
 
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
+}
+
 function printResult(json: boolean, body: unknown, status: number): void {
   if (isIndeterminateRemoteWrite(status, body)) {
     console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
@@ -2456,6 +2465,9 @@ Examples:
           }
         }
         printResult(useJson, res.data, res.status);
+        // The rows stay on stdout as they were; only a page the daemon says it cut adds a line on stderr.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        if (page?.truncated) console.error(`this page stops at --limit ${page.limit} and more rows match; pass a larger --limit to see the rest`);
       }, remote !== undefined, remote);
     });
 
