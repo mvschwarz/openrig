@@ -713,7 +713,8 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     const attemptWake = async (id: string, target: string, occurrence?: string): Promise<string> => {
       const row = deps.queueRepo.getById(id);
       if ((row && deliveryHeld(deps.queueRepo, row)) || deps.queueRepo.deliveryDrains.holds(target)) return "deferred:rig_delivery_drain";
-      return sendWake(id, target, occurrence);
+      // A wake with no occurrence is called exactly as before.
+      return occurrence === undefined ? sendWake(id, target) : sendWake(id, target, occurrence);
     };
 
     const actions: WakeLadderAction[] = [];
@@ -1839,7 +1840,12 @@ async function advancePromptRefusals(
     if (!view.orchRung) {
       if (!toOperator) {
         const recoveryOwner = row.destinationSession;
-        const outcome = await attemptWake(row.qitemId, recoveryOwner);
+        // The rung's wake names the prompts the alert carries, each by its own start. Resent after its marker was lost (a
+        // restart between the send and the marker), it's the same delivery with the same prompts and a new one once a new
+        // prompt has joined, so that prompt isn't absorbed into the first delivery's receipt. An alert whose prompts have
+        // no start passes no occurrence, as before.
+        const prompts = (row.tags ?? []).filter(t => t.startsWith(permissionPrefix) && t.includes("|prompt:")).sort();
+        const outcome = await attemptWake(row.qitemId, recoveryOwner, prompts.length ? `Permission prompts on this alert: ${prompts.join(" ")}.` : undefined);
         if (outcome === "deferred:rig_delivery_drain") continue;
         appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${reason}`, true);
         actions.push({ qitemId: row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });

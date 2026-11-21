@@ -936,3 +936,27 @@ it("after a drain defers the first rung, a new prompt on the pending alert gets 
   await tick();
   expect(attempts).toEqual([lead]);
 });
+
+// The rung's wake was delivered on native input, then a restart lost its markers before they were written. A prompt that
+// joins after that is in the rung's resend, which is a new delivery, not the first one's receipt.
+it("a rung delivered on native input whose markers were lost: once a new prompt joins, the rung's resend is new input", async () => {
+  const { f, repo, lead, leadNode, read, later, alerts } = promptEpisodeFixture();
+  new SessionRegistry(f.db).updateBinding(leadNode.id, { tmuxSession: lead });
+  const inputs = new Set<string>();
+  repo.attachTransport({ send: async (_session, _text, opts) => {
+    inputs.add(opts!.deliveryId!); // a known delivery ID returns its receipt and offers nothing new, as native input does
+    return { ok: true, verified: true };
+  } });
+  const tick = () => runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+    resolveOrchestrator: () => lead, readPermissionPrompts: read, retryIntervalSeconds: 1 });
+  await later(0, "Notification", "permission_prompt");
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  expect(inputs.size).toBe(1);
+  f.db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND (transition_note LIKE 'escalation-rung:%' OR transition_note LIKE 'ladder-exhausted:%')").run(id);
+  await later(14_000, "Notification", "permission_prompt");
+  await tick();
+  expect(inputs.size).toBe(2);
+  await tick();
+  expect(inputs.size).toBe(2);
+});
