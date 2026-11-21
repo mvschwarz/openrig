@@ -79,6 +79,9 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid" | { task
   const files = { writeFile: async (_p: string, content: string) => { writes.push(content); }, unlink: async () => {},
     tmpName: () => `/tmp/synthetic-seat-env-${++n}`, bufferName: () => "unused" };
   const adapter = new TmuxAdapter(exec, files, argvExec);
+  // #3253: the calls pinned here are a daemon's that has already checked its server's bus once (on Linux, a daemon's
+  // first launch runs startServer first; tmux-server-systemd-scope.test.ts covers that).
+  (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
   adapter.resolveExecutable = (name) => (opts.missing?.includes(name) ? null : `/usr/bin/${name}`);
   adapter.dirExists = () => opts.runDir === true;
   // By default a capped start is seen at once: its marker emptied (its command ran in the scope) and the pane's process

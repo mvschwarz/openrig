@@ -4,6 +4,7 @@ import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} 
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { rigIdForHandle } from "../rig-handle.js";
+import { snapshotRigIds } from "../snapshot-rig-handle.js";
 
 export function snapshotCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("snapshot").description("Manage rig snapshots");
@@ -53,26 +54,44 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
-      const target = await rigIdForHandle(client, rigId);
-      if (!target.ok) { console.error(target.message); process.exitCode = 1; return; }
-
-      const res = await client.get<Array<{ id: string; kind: string; status: string; createdAt: string }>>(`/api/rigs/${encodeURIComponent(target.id)}/snapshots`);
-      if (res.status >= 400) {
-        console.error(`Failed to list snapshots: ${(res.data as { error?: string }).error ?? "unknown error"}`);
+      const target = await snapshotRigIds(client, rigId);
+      if (target.unreadable) {
+        console.error(`Snapshot history is unresolved: ${target.unreadable}. Nothing was listed — the name match could be another rig's history; retry once the read answers.`);
         process.exitCode = 1;
         return;
       }
-
-      const snapshots = res.data;
+      let snapshots: Array<{ id: string; kind: string; status: string; createdAt: string }> = [];
+      let incomplete = false;
+      for (const id of target.ids) {
+        try {
+          const res = await client.get<typeof snapshots>(`/api/rigs/${encodeURIComponent(id)}/snapshots`);
+          if (res.status >= 400) {
+            console.error(`Failed to list snapshots for identity "${id}": ${(res.data as { error?: string }).error ?? `HTTP ${res.status}`}`);
+            incomplete = true;
+            continue;
+          }
+          snapshots = snapshots.concat(res.data);
+        } catch (err) {
+          console.error(`Failed to list snapshots for identity "${id}": ${err instanceof Error ? err.message : String(err)}`);
+          incomplete = true;
+        }
+      }
+      if (incomplete) {
+        console.error("Snapshot list INCOMPLETE: showing only successfully read history; retry the failed identities.");
+        process.exitCode = 1;
+      }
+      if (target.ids.length > 1) {
+        snapshots.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+      }
       // The daemon lists snapshots by exact rig id and answers [] for an id it has none for, so an unknown
       // handle would read as a rig with no snapshots. Snapshots kept under a removed rig's id still list.
-      if (snapshots.length === 0 && !target.known) {
+      if (snapshots.length === 0 && !target.known && !incomplete) {
         console.error(`Rig '${rigId}' not found: no rig has that name or id. List rigs with: rig ps`);
         process.exitCode = 1;
         return;
       }
       if (snapshots.length === 0) {
-        console.log("No snapshots");
+        if (!incomplete) console.log("No snapshots");
         return;
       }
 
