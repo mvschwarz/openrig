@@ -326,7 +326,10 @@ export class HerdrFollowView {
         delete state.viewerFailures?.[join.key];
         state.tiles.push({ key: join.key, seat: join.seat, target, member: { hostId: member.key.hostId, nodeId: member.key.nodeId }, viewer: verified.viewer });
         notice(`${join.seat}: ${join.reason}`); save();
-        if (verified.created) opened.push({ tile: state.tiles.at(-1)!, script: verified.script, ...(verified.agent ? { agent: verified.agent } : {}) });
+        // A tile reports its restart command when it first enters the canvas, whether this call created its viewer or an
+        // earlier, interrupted follow did (resumed from the journal, or confirmed by the lookup above). Retained tiles never
+        // pass through here, so they aren't reported again.
+        opened.push({ tile: state.tiles.at(-1)!, script: verified.script, ...(verified.agent ? { agent: verified.agent } : {}) });
       }
       for (const line of await this.reportResume(opened)) notice(line);
       if (opened.some(o => o.tile.resume)) save();

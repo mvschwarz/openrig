@@ -522,6 +522,46 @@ describe("after a Herdr restart", () => {
     expect(f.reports).toHaveLength(count);
   });
 
+  const tileIn = (f: ReturnType<typeof fixture>, seat: string) => [...f.panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!;
+  const held = (f: ReturnType<typeof fixture>, seat: string) => ({ method: "pane.report_agent", params: { pane_id: tileIn(f, seat).pane_id,
+    source: "openrig-tile", agent: "openrig-tile", state: "idle", seq: expect.any(Number), resume_argv: ["sh", path.join(tileIn(f, seat).cwd, "attach.sh")] } });
+  const savedResume = (f: ReturnType<typeof fixture>) => (JSON.parse(readFileSync(path.join(f.root, readdirSync(f.root)[0]!, "canvas.json"), "utf8")) as
+    { tiles: Array<{ seat: string; resume?: boolean }> }).tiles.map(tile => [tile.seat, tile.resume ?? false]);
+
+  it("a join an interrupted follow left half-open reports its restart command once when it's resumed, so a Herdr restart re-binds it", async () => {
+    const f = fixture(); await f.follow(); let reads = 0;
+    // d's viewer pane is created and saved, then the follow stops before its attach is dispatched.
+    expect((await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 4)).opened).toEqual(["a", "b", "c"]);
+    const count = f.reports.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    // Only d is reported (a, b and c were reported when they opened), and its viewer was still created and run once.
+    expect(f.reports.slice(count)).toEqual([held(f, "d")]);
+    expect(savedResume(f)).toEqual([["a", true], ["b", true], ["c", true], ["d", true]]);
+    expect(f.calls.filter(c => c[1] === "split")).toHaveLength(4);
+    expect(f.calls.filter(c => c[1] === "run" && !c[3]?.includes("/usr/bin/tail"))).toHaveLength(4);
+    // Herdr restarts and restores every tile from its restart command: the workspace is re-bound, not replaced.
+    for (const restored of f.panes.values()) {
+      restored.terminal_id = `restarted-${restored.pane_id}`;
+      if (restored.argv[0] === "/usr/bin/tail") restored.argv = ["/bin/bash"];
+    }
+    const recovered = await f.follow(["a", "b", "c", "d"]);
+    expect(recovered).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"], workspaceId: "w1" });
+    expect(recovered.following!.events).toContain("Herdr restarted; this workspace and its tiles were found again and re-attached.");
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+  });
+
+  it("a join confirmed by its lookup after a failed first inspection reports its restart command once", async () => {
+    const f = fixture(); f.failProcessRead();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    expect(f.reports).toEqual([held(f, "a"), held(f, "b")]);
+    expect(savedResume(f)).toEqual([["a", true], ["b", true]]);
+    expect(f.calls.filter(c => c[1] === "split")).toHaveLength(2);
+    expect(f.calls.filter(c => c[1] === "run" && !c[3]?.includes("/usr/bin/tail"))).toHaveLength(2);
+    const count = f.reports.length;
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true });
+    expect(f.reports).toHaveLength(count);
+  });
+
   it("a workspace Herdr restores with every tile resumed is re-bound: one workspace, its strip restarted, and a later member joins it", async () => {
     const f = fixture();
     expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
