@@ -4,6 +4,9 @@ import { CLAUDE_ACTIVITY_RUNG_INVENTORY, deriveDisplayActivity } from "../src/do
 import { evidenceFromHookActivity } from "../src/routes/activity.js";
 import { readClaudeSelfReportEvidence } from "../src/adapters/claude-code-adapter.js";
 import type { AgentActivity } from "../src/domain/types.js";
+import { diagnoseRigParked } from "../src/domain/parked-query.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "../src/domain/policies/parked-owner-consumer.js";
+import type { PolicyJob } from "../src/domain/policies/types.js";
 
 // A Claude seat at its usage-limit notice must read a typed usage limit or unknown, never working (the honest-state
 // rule). These replay the real sequences through the real hook mapping and the real self-report reader:
@@ -110,5 +113,28 @@ describe("a Claude seat at its usage-limit notice", () => {
     claudeStatus("idle", T0 + 5_000);
     expect(seat().display).toBe("idle");
     expect(seat().usageLimit).toBeNull();
+  });
+
+  it("is parked with its open work, so the parked-owner reminder goes to it rather than skipping it as unknown, until a newer turn", async () => {
+    promptSubmitted(T0);
+    usageLimit(T0 + 1_000);
+    idlePrompt(T0 + 61_000);
+    clock.now = T0 + 3_600_000; // well past the waiting grace, still before the stated reset
+    const rows = [{ qitemId: "qitem-limited-work", state: "in-progress", summary: null }];
+    const diagnose = () => diagnoseRigParked({ getSeatState: (id) => svc.getSeatState(id), listOpenObligations: (_dest, limit) => ({ rows, limit }) },
+      [{ seatNodeId: SEAT, sessionName: SESSION }]);
+    const policy = makeParkedOwnerConsumerPolicy({ diagnoseRig: () => diagnose() as never, now: () => clock.now,
+      history: { listForJob: () => [], countForJob: () => 0 },
+      rows: { listTransitions: () => [], appendNote: () => ({ ok: true }), recordNudgeResult: () => {}, listOpenIds: () => rows.map((r) => r.qitemId) } });
+    const job = { jobId: "job-limited", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("hq") }, intervalSeconds: 120,
+      activeWakeIntervalSeconds: null, scanIntervalSeconds: null, context: {}, lastEvaluationAt: null, lastFireAt: null,
+      registeredAt: new Date(T0).toISOString() } as PolicyJob;
+
+    expect(seat().display).toBe("unknown");
+    expect(diagnose().seats[0]).toMatchObject({ parked: true, reason: expect.stringContaining(`at its usage limit (resets ${RESET})`) });
+    expect(await policy.evaluate(job)).toMatchObject({ action: "send", target: { session: SESSION } });
+    // A newer turn ends the hold, and a working seat isn't parked.
+    promptSubmitted(T0 + 3_600_000);
+    expect(diagnose().seats[0]?.parked).toBe(false);
   });
 });
