@@ -1025,6 +1025,43 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  it("launchHarness keeps polling past a foreground Claude, so the missing conversation it then reports is marked", async () => {
+    const tmux = mockTmux();
+    const command = tmux.getPaneCommand as ReturnType<typeof vi.fn>;
+    const capture = tmux.capturePaneContent as ReturnType<typeof vi.fn>;
+    // A resume of a conversation that doesn't exist: Claude is the foreground process with nothing drawn, then prints
+    // "No conversation found" and the pane is back at its shell. The foreground reads alone aren't a resumed seat.
+    for (let read = 0; read < 3; read++) { command.mockResolvedValueOnce("claude"); capture.mockResolvedValueOnce(""); }
+    command.mockResolvedValue("zsh");
+    capture.mockResolvedValue("No conversation found with session ID: abc-123\nuser@example.test %");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(capture).toHaveBeenCalledTimes(4);
+    expect(result).toEqual({
+      ok: false,
+      probe: probeEvidence,
+      error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh",
+      missingConversation: true,
+    });
+  });
+
+  it("launchHarness still accepts a foreground Claude with nothing drawn when the wait ends (control)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+    const capture = tmux.capturePaneContent as ReturnType<typeof vi.fn>;
+    capture.mockResolvedValue("");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    // The 16 reads of the wait, then the final read accepts it as before.
+    expect(capture).toHaveBeenCalledTimes(17);
+    expect(result).toMatchObject({ ok: true });
+  });
+
   it("launchHarness marks a missing conversation that first shows on the read after the wait", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");

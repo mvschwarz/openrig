@@ -803,7 +803,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
+      // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen or its
+      // "No conversation found" through the window, and accept it at the final read if that's still all there is.
+      if (probe.status === "resumed" && !probe.foregroundOnly) {
         return { ok: true };
       }
 
