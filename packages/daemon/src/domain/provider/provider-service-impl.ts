@@ -270,7 +270,10 @@ export class ProviderServiceImpl implements ProviderService {
     try {
       const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
       const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
-      assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
+      // The rig's assignment is stored once a seat has an effect: an apply where every seat was refused or failed before
+      // effect leaves the rig's earlier assignment as it was, so it doesn't hold the label against removal.
+      let stored = false;
+      const tookEffect = (kind: string) => kind === "switched" || kind === "pending_successor" || kind === "unknown";
       const report = await applyAssignment(plan, account, {
         switchSeat: (seat) => this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat),
         restartPeer: async (seat, reason) => {
@@ -283,9 +286,15 @@ export class ProviderServiceImpl implements ProviderService {
         },
         ...(tools.successor ? { successor: tools.successor } : {}),
         activityOf: (seat) => this.activityOf(nodeOf.get(seat)?.nodeId ?? "", seat, nodeOf.get(seat)?.runtime ?? ""),
-        save: (result, applied) => assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
+        save: (result, applied) => {
+          if (!stored && tookEffect(result.kind)) {
+            assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
+            stored = true;
+          }
+          assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
           label: input.label, kind: result.kind, detail: result.detail, recovery: result.recovery ?? null, activity: result.activity, at: result.at,
-          ...(applied ? { applied } : {}) }),
+          ...(applied ? { applied } : {}) });
+        },
         now,
       });
       return { ok: true, report };

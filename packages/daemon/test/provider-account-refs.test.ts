@@ -153,7 +153,7 @@ describe("provider account references", () => {
     const used = new ProviderAccountRefsRepository(db, { uses: (p, l) => (p === "claude" && l === "max-1" ? ["rig fleet (claude)"] : []) });
     expect(used.add({ provider: "claude", label: "max-1", tokenFile: file("token", 0o600) }).ok).toBe(true);
     expect(used.remove("claude", "max-1")).toEqual({ ok: false, code: "in_use", usedBy: ["rig fleet (claude)"],
-      message: "max-1 is assigned to rig fleet (claude); change those assignments first. Nothing changed." });
+      message: "max-1 is assigned to rig fleet (claude); assign it another account first (rig provider assign <rig> --provider claude --account <label>). Nothing changed." });
     expect(used.list()).toHaveLength(1);
     expect(used.remove("codex", "max-1")).toMatchObject({ ok: false, code: "not_found" });
   });

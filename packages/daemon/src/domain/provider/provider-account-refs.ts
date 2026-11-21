@@ -176,7 +176,7 @@ export class ProviderAccountRefsRepository {
     if (!account) return { ok: false, code: "not_found", message: `There's no ${provider} account labelled ${label}.` };
     const usedBy = this.opts.uses?.(provider, label) ?? [];
     if (usedBy.length) {
-      return { ok: false, code: "in_use", usedBy, message: `${label} is assigned to ${usedBy.join(", ")}; change those assignments first. Nothing changed.` };
+      return { ok: false, code: "in_use", usedBy, message: `${label} is assigned to ${usedBy.join(", ")}; assign ${usedBy.length === 1 ? "it" : "each"} another account first (rig provider assign <rig> --provider ${provider} --account <label>). Nothing changed.` };
     }
     this.db.prepare("DELETE FROM provider_account_refs WHERE provider = ? AND label = ?").run(provider, label);
     return { ok: true, account };

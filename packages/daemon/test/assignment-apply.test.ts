@@ -93,14 +93,42 @@ describe("applying an assignment", () => {
     expect(report.otherRigPeers.map((p) => p.seat)).toEqual(["p@other"]);
   });
 
-  it("a seat whose own switch failed before effect restarts once another seat switches its home", async () => {
-    const { d } = deps({ "c1@fleet": { outcome: "failed_safely", reasons: ["seat_home_changed"], message: "home changed" } });
-    const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" })],
-      { codexHomes: [{ home: "/homes/a", seats: [{ seat: "c1@fleet", rig: "fleet", effect: "would restart" }, { seat: "c2@fleet", rig: "fleet", effect: "would restart" }] }] }), CODEX, d);
+  const homeA = (...seats: string[]) => ({ codexHomes: [{ home: "/homes/a", seats: seats.map((seat) => ({ seat, rig: "fleet", effect: "would restart" })) }] });
+
+  it.each([
+    ["before", ["bad@fleet", "c1@fleet"]],
+    ["after", ["c1@fleet", "bad@fleet"]],
+  ])("a seat whose precheck was unsafe is never restarted on its home, %s the seat that switched it", async (_where, order) => {
+    for (const reason of ["target_not_in_seat_home", "conversation_not_resumable"]) {
+      const { d } = deps({});
+      const rows = order.map((seat) => change(seat, { runtime: "codex", ...(seat === "bad@fleet" ? { precheck: { safe: false, reasons: [reason], message: "m" } } : {}) }));
+      const report = await applyAssignment(plan(CODEX, rows, homeA(...order)), CODEX, d);
+      expect(d.switchSeat.mock.calls.map(([s]) => s)).toEqual(["c1@fleet"]);
+      expect(d.restartPeer).not.toHaveBeenCalled();
+      const bad = report.results.find((r) => r.seat === "bad@fleet")!;
+      expect(bad).toMatchObject({ kind: "unknown", recovery: "rig seat restart bad@fleet --keep-conversation" });
+      expect(bad.detail).toBe(`/homes/a now uses "team" (switched by c1@fleet), and this seat wasn't restarted: its precheck was unsafe (${reason}): m`);
+    }
+  });
+
+  it("a seat whose own switch failed before effect isn't restarted as a peer: once its home changed, it's unknown, keeping its own reason", async () => {
+    const { d, saved } = deps({ "c1@fleet": { outcome: "failed_safely", reasons: ["seat_home_changed"], message: "home changed" } });
+    const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" })], homeA("c1@fleet", "c2@fleet")), CODEX, d);
     expect(d.switchSeat.mock.calls.map(([s]) => s)).toEqual(["c1@fleet", "c2@fleet"]);
-    expect(d.restartPeer.mock.calls.map(([s]) => s)).toEqual(["c1@fleet"]);
-    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c2@fleet", "switched"], ["c1@fleet", "switched"]]);
-    expect(report.otherRigPeers).toEqual([]);
+    expect(d.restartPeer).not.toHaveBeenCalled();
+    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c2@fleet", "switched"], ["c1@fleet", "unknown"]]);
+    expect(report.results[1]!.detail).toBe('/homes/a now uses "team" (switched by c2@fleet), and this seat wasn\'t restarted: its own switch failed before effect (seat_home_changed: home changed)');
+    expect(report.results[1]!.recovery).toBe("rig seat restart c1@fleet --keep-conversation");
+    // Its first result was saved as it landed, then the home's change under it.
+    expect(saved.map((s) => [s.seat, s.kind])).toEqual([["c1@fleet", "failed_before_effect"], ["c2@fleet", "switched"], ["c1@fleet", "unknown"]]);
+  });
+
+  it("a seat whose own switch failed before effect keeps that result when no seat switched its home", async () => {
+    const failed = { outcome: "failed_safely" as const, reasons: ["login_not_activated"], message: "not activated" };
+    const { d } = deps({ "c1@fleet": failed, "c2@fleet": failed });
+    const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" })], homeA("c1@fleet", "c2@fleet")), CODEX, d);
+    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "failed_before_effect"], ["c2@fleet", "failed_before_effect"]]);
+    expect(d.restartPeer).not.toHaveBeenCalled();
   });
 
   it("an unsupported seat isn't attempted; a move to a prepared home goes through the successor", async () => {

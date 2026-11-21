@@ -1088,8 +1088,11 @@ The plan shows the rig's assignment and each seat's last result afterwards. It e
         printPlan(res.data.plan!, again);
         return;
       }
-      // The plan is read first only to size the wait: the daemon checks the digest itself.
-      const changing = res.data.plan?.rows.filter((r) => r.effect === "change").length ?? 1;
+      // The plan is read first only to size the wait: the daemon checks the digest itself. Each seat that changes takes a
+      // switch, and so does each other seat of this rig on a Codex home that switches, since it restarts on it.
+      const shown = res.data.plan;
+      const changing = shown ? new Set([...shown.rows.filter((r) => r.effect === "change").map((r) => r.seat),
+        ...shown.codexHomes.flatMap((h) => h.seats.filter((s) => s.rig === shown.rig).map((s) => s.seat))]).size : 1;
       type ApplyResponse = { status: number; data: { ok: boolean; report?: ApplyReport; code?: string; message?: string; digest?: string } };
       let applied: ApplyResponse;
       try {
@@ -1098,6 +1101,8 @@ The plan shows the rig's assignment and each seat's last result afterwards. It e
         { timeoutMs: SWITCH_TIMEOUT_MS * Math.max(1, changing) + 30_000 });
       } catch (err) {
         if (!(err instanceof DaemonTimeoutError)) throw err;
+        if (opts.json) console.log(JSON.stringify({ ok: false, code: "apply_outcome_unknown", digest: opts.plan, check: again,
+          message: "The CLI timed out waiting for the daemon; the apply may still be running. Don't run it again: each seat's result shows in the plan as it lands." }));
         console.error(`The CLI timed out waiting for the daemon. The apply may still be running, seat by seat, so don't run it again: `
           + `a second apply to the rig is refused while one runs. Each seat's result shows in the plan as it lands: ${again}`);
         process.exitCode = 1;

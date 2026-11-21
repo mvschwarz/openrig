@@ -62,8 +62,8 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     : { file: null, fileKind: null, codexHome: account.codexHome, codexLogin: account.login };
   const record = (row: PlanRow, kind: AssignmentResultKind, detail: string, recovery?: string, activity = row.activity as string) => {
     const result: ApplySeatResult = { seat: row.seat, kind, detail, ...(recovery ? { recovery } : {}), activity, at: deps.now() };
-    // A seat whose own switch failed before effect is reached again once another seat switches its home: the later
-    // result replaces the earlier one.
+    // A seat whose own switch failed before effect is recorded again, as unknown, once another seat changes its home:
+    // the later result, which names the earlier failure, replaces it in the report.
     const earlier = results.findIndex((r) => r.seat === row.seat);
     if (earlier >= 0) results.splice(earlier, 1);
     results.push(result);
@@ -108,14 +108,25 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     record(row, kind, detail, recovery, activity);
   }
 
-  /** One switch per home: the first seat that can switches it; the others restart on it, or are skipped after an unknown. */
+  /** One switch per home: the first seat that can switches it, and this rig's other seats on it restart on its new login.
+   *  A seat that isn't safe to restart, or whose own switch was just refused, is never restarted: once its home changed
+   *  under it, it's unknown, with its restart command. After an unknown on the home, its other seats are skipped. */
   async function applyHome(home: string, rows: PlanRow[]): Promise<void> {
     let state: "untouched" | "switched" | "unknown" = "untouched";
     let switcher = "";
+    /** Seats whose own switch failed before effect, with why: kept as they are, whatever the home does next. */
+    const refused = new Map<string, string>();
     const waiting: PlanRow[] = [];
+    const skipped = (row: PlanRow) => record(row, "unknown", `skipped: home outcome unknown (${switcher} left ${home} in an unknown state)`, restartCommand(row.seat));
+    const notRestarted = (row: PlanRow, why: string) => record(row, "unknown",
+      `${home} now uses "${plan.account.label}" (switched by ${switcher}), and this seat wasn't restarted: ${why}`, restartCommand(row.seat));
+    const onSwitchedHome = async (row: PlanRow) => {
+      if (unsafe(row)) notRestarted(row, notAttempted(row).replace(/^not attempted: /, ""));
+      else await restartOnHome(row, home, switcher);
+    };
     for (const row of rows) {
-      if (state === "unknown") { record(row, "unknown", `skipped: home outcome unknown (${switcher} left ${home} in an unknown state)`, restartCommand(row.seat)); continue; }
-      if (state === "switched") { await restartOnHome(row, home, switcher); continue; }
+      if (state === "unknown") { skipped(row); continue; }
+      if (state === "switched") { await onSwitchedHome(row); continue; }
       // The home is untouched: a seat that would change and is safe switches it; any other waits until it's known.
       if (row.effect !== "change" || unsafe(row)) { waiting.push(row); continue; }
       const activity = deps.activityOf(row.seat);
@@ -124,23 +135,21 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       record(row, kind, detail, recovery, activity);
       if (kind === "switched") { state = "switched"; switcher = row.seat; }
       else if (kind === "unknown") { state = "unknown"; switcher = row.seat; }
-      // Failed before effect: the home is as it was, and the next seat that can switches it. This one waits for the outcome.
-      else waiting.push({ ...row, notes: ["failed_before_effect"] });
+      // Failed before effect: the home is as it was, and the next seat that can switches it. This seat isn't tried again.
+      else refused.set(row.seat, detail);
     }
     for (const row of waiting) {
-      const failedEarlier = row.notes?.includes("failed_before_effect") === true;
-      if (state === "unknown") {
-        record(row, "unknown", `skipped: home outcome unknown (${switcher} left ${home} in an unknown state)`, restartCommand(row.seat));
-      } else if (state === "switched") {
-        if (unsafe(row)) {
-          record(row, "unknown", `${home} now uses "${plan.account.label}", switched by ${switcher}, but this seat wasn't restarted: ${notAttempted(row).replace(/^not attempted: /, "")}`,
-            restartCommand(row.seat));
-        } else await restartOnHome(row, home, switcher);
-      } else if (!failedEarlier) {
-        if (row.effect === "unchanged") record(row, "unchanged", `already on ${plan.account.label}; its home wasn't switched`);
-        else if (row.effect === "kept_override") record(row, "unchanged", `kept (seat override): ${row.override}`);
-        else record(row, "failed_before_effect", unsafe(row) ? notAttempted(row) : `not attempted: ${home} wasn't switched`);
-      }
+      if (state === "unknown") skipped(row);
+      else if (state === "switched") await onSwitchedHome(row);
+      else if (row.effect === "unchanged") record(row, "unchanged", `already on ${plan.account.label}; its home wasn't switched`);
+      else if (row.effect === "kept_override") record(row, "unchanged", `kept (seat override): ${row.override}`);
+      else record(row, "failed_before_effect", unsafe(row) ? notAttempted(row) : `not attempted: ${home} wasn't switched`);
+    }
+    // A seat whose own switch was refused keeps that result unless its home's login then changed under it.
+    for (const [seat, why] of refused) {
+      const row = rows.find((r) => r.seat === seat)!;
+      if (state === "switched") notRestarted(row, `its own switch failed before effect (${why})`);
+      else if (state === "unknown") record(row, "unknown", `its own switch failed before effect (${why}), then ${switcher} left ${home} in an unknown state`, restartCommand(seat));
     }
   }
 

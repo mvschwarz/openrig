@@ -19,6 +19,8 @@ const CONTENT = "synthetic-content-never-echoed";
 let dir: string;
 let db: Database.Database;
 let svc: ProviderServiceImpl;
+/** When set, a credential in the daemon's environment outranks any token file: every Claude precheck is unsafe. */
+let outranked = false;
 
 function seat(id: string, status = "stopped", rig = "fleet") {
   db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, ?)").run(`rig-${rig}`, rig);
@@ -34,9 +36,11 @@ function token(name: string): string {
 }
 
 /** Claude's relaunch for stopped seats: the token reference is read and written for real; nothing is relaunched. */
-function stoppedClaude(gate: Promise<void> = Promise.resolve()): ClaudeSeatRelaunch & { relaunchInPane: ReturnType<typeof vi.fn> } {
+function stoppedClaude(gate: Promise<void> = Promise.resolve()): ClaudeSeatRelaunch & { relaunchInPane: ReturnType<typeof vi.fn>; entered: () => boolean } {
   const repo = new RigRepository(db);
+  let entered = false;
   return {
+    entered: () => entered,
     seat: (s) => {
       const row = db.prepare(`SELECT n.id, n.rig_id, r.name, n.logical_id FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
         WHERE s.session_name = ? AND n.runtime = 'claude-code'`).get(s) as { id: string; rig_id: string; name: string; logical_id: string } | undefined;
@@ -46,7 +50,7 @@ function stoppedClaude(gate: Promise<void> = Promise.resolve()): ClaudeSeatRelau
     setTokenRef: (nodeId, ref) => repo.setNodeClaudeTokenRef(nodeId, ref),
     snapshot: () => { throw new Error("a stopped seat takes no snapshot"); },
     nextLaunch: () => ({ snapshotId: "snap-1", resumes: true, automatic: false, conversation: "conv-1" }),
-    exclusive: async (_nodeId, fn) => { await gate; return fn(); },
+    exclusive: async (_nodeId, fn) => { entered = true; await gate; return fn(); },
     relaunchInPane: vi.fn(async () => { throw new Error("a stopped seat isn't relaunched"); }),
   };
 }
@@ -70,7 +74,9 @@ beforeEach(() => {
   db = createFullTestDb();
   svc = new ProviderServiceImpl({ db, listRigs: () => db.prepare("SELECT id FROM rigs ORDER BY id").all() as Array<{ id: string }>,
     env: { HOME: dir }, platform: "linux", now: () => "2026-11-21T07:00:00.000Z",
-    claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    claudePrecedence: async () => ({ conflicts: outranked ? [{ name: "ANTHROPIC_API_KEY", source: "the daemon's environment", remedy: "remove it" }] : [],
+      checked: ["the pane environment"], notChecked: [] }) });
+  outranked = false;
   const refs = new ProviderAccountRefsRepository(db);
   for (const label of ["max-1", "max-2", "max-3"]) refs.add({ provider: "claude", label, tokenFile: token(label) });
 });
@@ -124,13 +130,36 @@ describe("applying an assignment on the daemon", () => {
     expect(everything()).toBe(before);
   });
 
+  it("an apply where no seat took effect stores no assignment, keeps the rig's earlier one, and doesn't hold the label", async () => {
+    seat("a");
+    const claude = stoppedClaude();
+    const uses = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
+    // An API key outranks the token: the precheck is unsafe, so the seat isn't attempted.
+    outranked = true;
+    const refused = await svc.applyAssignment(request("max-3", await digestOf("max-3", claude)), { claudeSeat: claude });
+    expect(refused.ok && refused.report.results.map((r) => r.kind)).toEqual(["failed_before_effect"]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM provider_account_assignments").get()).toEqual({ n: 0 });
+    expect(uses.remove("claude", "max-3")).toMatchObject({ ok: true });
+
+    // With an earlier assignment in place, a refused apply leaves it as it was.
+    outranked = false;
+    expect((await svc.applyAssignment(request("max-2", await digestOf("max-2", claude)), { claudeSeat: claude })).ok).toBe(true);
+    outranked = true;
+    const again = await svc.applyAssignment(request("max-1", await digestOf("max-1", claude)), { claudeSeat: claude });
+    expect(again.ok && again.report.results.map((r) => r.kind)).toEqual(["failed_before_effect"]);
+    outranked = false;
+    const planned = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+    expect(planned.ok && planned.plan.intent?.label).toBe("max-2");
+    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: true });
+  });
+
   it("a second apply to the same rig while one runs is refused, with nothing changed", async () => {
     seat("a");
     let release!: () => void;
     const claude = stoppedClaude(new Promise<void>((r) => { release = r; }));
     const digest = await digestOf("max-2", claude);
     const first = svc.applyAssignment(request("max-2", digest), { claudeSeat: claude });
-    await vi.waitFor(() => expect(db.prepare("SELECT COUNT(*) AS n FROM provider_account_assignments").get()).toEqual({ n: 1 }));
+    await vi.waitFor(() => expect(claude.entered()).toBe(true));
     const before = everything();
     expect(await svc.applyAssignment(request("max-2", digest), { claudeSeat: claude })).toMatchObject({ ok: false, code: "apply_in_progress" });
     expect(everything()).toBe(before);

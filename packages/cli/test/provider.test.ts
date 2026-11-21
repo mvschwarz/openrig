@@ -664,17 +664,26 @@ describe("rig provider assign (#3625 slices 2 and 3: the plan, and applying it)"
     expect(seen.length).toBe(before);
   });
 
-  it("waits 120 s for each seat that changes; a timeout says the apply may still be running, and how to see its results", async () => {
+  it("waits 120 s for each seat that changes or restarts on a switching home; a timeout says the apply may still be running, and how to see its results", async () => {
     let waited: number | undefined;
+    // c1 changes; c3 is already on the account but shares c1's home, so it restarts too. p@other isn't restarted.
+    const shown = { ...PLAN, codexHomes: [{ home: "/homes/a", seats: [...PLAN.codexHomes[0]!.seats, { seat: "c3@fleet", rig: "fleet", effect: "would restart" }] }] };
     const deps = { ...runningDeps(1), clientFactory: () => ({
-      get: async () => ({ status: 200, data: { ok: true, plan: PLAN } }),
+      get: async () => ({ status: 200, data: { ok: true, plan: shown } }),
       post: async (_p: string, _b: unknown, o?: { timeoutMs?: number }) => { waited = o?.timeoutMs; throw new DaemonTimeoutError("timed out"); },
     }) as never };
     const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], deps);
-    // PLAN has one seat that changes.
-    expect(waited).toBe(150_000);
+    expect(waited).toBe(2 * 120_000 + 30_000);
     expect(result.exitCode).toBe(1);
     expect(result.logs.join("\n")).toContain("The apply may still be running, seat by seat, so don't run it again");
     expect(result.logs.join("\n")).toContain("rig provider assign fleet --provider codex --account team");
+    // With --json, stdout carries the outcome too.
+    const stdout: string[] = [];
+    const origLog = console.log, origErr = console.error;
+    console.log = (...a: unknown[]) => stdout.push(a.join(" "));
+    console.error = () => {};
+    try { await providerCommand(deps).parseAsync(["node", "rig", "assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab", "--json"]); }
+    finally { console.log = origLog; console.error = origErr; process.exitCode = undefined; }
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ ok: false, code: "apply_outcome_unknown", digest: "0123456789ab", check: "rig provider assign fleet --provider codex --account team" });
   });
 });
