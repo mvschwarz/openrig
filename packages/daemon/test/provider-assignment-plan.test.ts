@@ -14,6 +14,9 @@ import { ProviderServiceImpl } from "../src/domain/provider/provider-service-imp
 import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
 import type { SeatRestart } from "../src/domain/provider/provider-service.js";
 
+// The account-home dry run computes paths under OPENRIG_HOME: a scratch path, never the real one. Set before any import.
+const scratchHome = vi.hoisted(() => (process.env.OPENRIG_HOME = `${process.env.TMPDIR ?? "/tmp"}/assignment-plan-openrig-${process.pid}`));
+
 // #3625 slice 2: the daemon gathers each seat's facts for the plan, refuses an unknown label or rig and a reference that
 // no longer checks out, and changes nothing.
 
@@ -22,11 +25,18 @@ let dir: string;
 let codexHome: string;
 let db: Database.Database;
 
-function seat(rig: string, id: string, runtime: string, session: string, status = "running") {
+function seat(rig: string, id: string, runtime: string, session: string, status = "running", bound = false) {
   db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, ?)").run(`rig-${rig}`, rig);
   db.prepare("INSERT OR IGNORE INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run(`pod-${rig}`, `rig-${rig}`, "dev", "Dev");
   db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, `rig-${rig}`, `dev.${id}`, runtime, "/w", `pod-${rig}`);
-  db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, ?, ?)").run(`sess-${id}`, id, session, status, "ready");
+  if (!bound) {
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, ?, ?)").run(`sess-${id}`, id, session, status, "ready");
+    return;
+  }
+  // A seat that could switch: one running session, bound to the single pane %0 the tmux stand-in reports.
+  const registry = new SessionRegistry(db);
+  registry.updateStatus(registry.registerSession(id, session).id, "running");
+  registry.updateBinding(id, { tmuxSession: session, tmuxPane: "%0" });
 }
 
 function privateFile(name: string): string {
@@ -133,15 +143,18 @@ describe("GET /api/provider/assignment-plan", () => {
   // A stand-in tmux that records each call and does nothing: the real restart plan and dry run run, never a live server.
   let tmuxCalls: string[] = [];
   const fakeTmux = () => new Proxy({}, { get: (_t, key) => key === "then" || key === "deliveryGuard" ? undefined
-    : (..._args: unknown[]) => { tmuxCalls.push(String(key)); return Promise.resolve([]); } });
+    : (..._args: unknown[]) => { tmuxCalls.push(String(key));
+      return Promise.resolve(key === "listPanes" ? [{ id: "%0" }] : key === "listWindows" ? [{ id: "@0" }] : []); } });
 
-  function app(): Hono {
+  function app(opts: { codexAdapter?: boolean } = {}): Hono {
     const a = new Hono();
     a.use("*", async (c, next) => {
       c.set("rigRepo" as never, new RigRepository(db));
       c.set("sessionRegistry" as never, new SessionRegistry(db));
       c.set("eventBus" as never, new EventBus(db));
       c.set("discoveryRepo" as never, new DiscoveryRepository(db));
+      // Only the dry run gets a Codex adapter: it checks one exists, and starts nothing in a dry run.
+      if (opts.codexAdapter) c.set("runtimeAdapters" as never, { codex: { runtime: "codex" } });
       c.set("tmuxAdapter" as never, fakeTmux());
       c.set("providerService" as never, service());
       await next();
@@ -156,7 +169,7 @@ describe("GET /api/provider/assignment-plan", () => {
     new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: token });
     seat("fleet", "a", "claude-code", "a@fleet");
     seat("fleet", "b", "claude-code", "b@fleet");
-    seat("fleet", "x", "codex", "x@fleet");
+    seat("fleet", "x", "codex", "x@fleet", "running", true);
     seat("fleet", "s", "claude-code", "s@fleet", "stopped");
     new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
     db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = 'b'").run(JSON.stringify({ label: "max-1", tokenFile: other }));
@@ -183,14 +196,15 @@ describe("GET /api/provider/assignment-plan", () => {
     // The real restart plan answers (this daemon has no Codex adapter); the plan shows its verdict.
     expect((await codex.json()).plan.rows.find((r: { seat: string }) => r.seat === "x@fleet")).toMatchObject({ effect: "change",
       precheck: { safe: false, reasons: ["seat_restart_refused"] } });
-    const prepared = await app().request(`/api/provider/assignment-plan?rig=fleet&provider=codex&account=team&accountHome=${encodeURIComponent(dir)}`);
+    const prepared = await app({ codexAdapter: true }).request(`/api/provider/assignment-plan?rig=fleet&provider=codex&account=team&accountHome=${encodeURIComponent(dir)}`);
     expect(prepared.status).toBe(200);
-    // The real account-home dry run answers, not the in-place precheck: this seat has no bound pane.
+    // The real account-home dry run answers, through every gate to its dry-run return, and the plan shows it safe.
     expect((await prepared.json()).plan.rows.find((r: { seat: string }) => r.seat === "x@fleet")).toMatchObject({
-      precheck: { safe: false, reasons: ["runtime_switch_unsupported"] }, continuity: `fresh successor with handover, on ${dir}` });
+      precheck: { safe: true, reasons: [] }, continuity: `fresh successor with handover, on ${dir}` });
     expect(everything()).toBe(before);
     expect(fs.statSync(path.join(codexHome, "auth-profiles", "team.json")).mtimeMs).toBe(saved.mtimeMs);
     expect(fs.readdirSync(codexHome).sort()).toEqual(["auth-profiles"]);
+    expect(fs.existsSync(scratchHome)).toBe(false);
     // Whatever the checks asked of tmux, it was only reading.
     expect(tmuxCalls.filter((k) => !/^(list|has|get|show|capture|display)/i.test(k))).toEqual([]);
     expect(fs.statSync(token).mtimeMs).toBe(stat.mtimeMs);
