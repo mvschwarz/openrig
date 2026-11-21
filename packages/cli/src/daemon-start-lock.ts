@@ -50,7 +50,8 @@ export interface StaleLockCheck {
  * a reservation that `rig daemon stop` retained after a shutdown it couldn't verify (`markReservationRetained`):
  * that state is unknown, not gone. The start notes in the archive that it archived it.
  * Every route that removes another launch's reservation (both of these, and `rig daemon stop`'s release) first takes
- * one claim on its inode (`claimAndArchive`), so two of them that both find it removable can't both remove it. The
+ * one claim on its inode (`claimAndArchive`), so two of them that both find it removable can't both remove it; the stop's
+ * retention mark takes the same claim, so it lands before a removal's content check or not at all. The
  * owning launcher's own release needs no claim: while it runs, nothing else finds its reservation removable. */
 export function acquireDaemonStartLock(home: string, stale?: StaleLockCheck): DaemonStartLock {
   fs.mkdirSync(home, { recursive: true });
@@ -194,7 +195,8 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
 /** #3637 — moves the reservation at `file`, still the `inspected` inode, to `target` and removes `file`, only after
  * taking the one claim on that inode that every remover takes: a hard link named after the inode, made with link(2),
  * which never replaces an existing name. Whoever gets EEXIST, a missing file, another inode under the claim, or
- * content other than the `text` it decided on (a stop may have appended a retention since) keeps the reservation
+ * content other than the `text` it decided on (a stop may have appended a retention since; the stop takes this same
+ * claim to append it, so none lands between this check and the move) keeps the reservation
  * where it is. While the claim exists no other remover can remove `file`, so the winner never removes another
  * launch's lock, whichever archive name each would use. The claim goes once the move is done. A remover that dies
  * holding the claim leaves it, and later removals of that inode refuse until it's cleared by hand. */
@@ -223,6 +225,8 @@ function claimAndArchive(file: string, inspected: fs.Stats, text: string, target
  *  listener isn't confirmed closed, no matching receipt, or an incomplete one), and marks it before its signal
  *  ("stopping") so no start archives it while the shutdown is being verified. It records that here, only while the
  *  file still holds exactly `expected`, so a later start doesn't take that unknown state for an abandoned launch.
+ *  It holds the removers' claim on the inode (`claimAndArchive`) across that check and the write, so no remover moves
+ *  the reservation between them: while a remover holds the claim, nothing is written and the stop refuses.
  *  Returns the reservation's new text, or undefined when nothing was written. */
 export function markReservationRetained(file: string, expected: string, reason: string): string | undefined {
   let fd: number;
@@ -231,7 +235,14 @@ export function markReservationRetained(file: string, expected: string, reason: 
   } catch {
     return undefined;
   }
+  let claim: string | undefined;
   try {
+    const opened = fs.fstatSync(fd);
+    const name = `${file}.claim-${opened.ino}`;
+    fs.linkSync(file, name);
+    claim = name;
+    const claimed = fs.statSync(claim);
+    if (claimed.dev !== opened.dev || claimed.ino !== opened.ino) return undefined;
     const text = fs.readFileSync(fd, "utf8");
     if (text !== expected) return undefined;
     const record = JSON.stringify({ retainedBy: "stop", reason, at: new Date().toISOString() }) + "\n";
@@ -240,6 +251,7 @@ export function markReservationRetained(file: string, expected: string, reason: 
   } catch {
     return undefined;
   } finally {
+    if (claim) { try { fs.unlinkSync(claim); } catch { /* already gone */ } }
     fs.closeSync(fd);
   }
 }

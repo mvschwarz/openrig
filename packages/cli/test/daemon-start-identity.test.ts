@@ -584,6 +584,27 @@ describe("local startup reservation", () => {
       expect(fs.readdirSync(home)).toEqual(["daemon-start.lock"]);
       expect(fs.readFileSync(file, "utf8")).toBe(marked);
     }));
+    it("writes no stop mark between this start's content check on its claim and its move", () => withHome((home) => {
+      // The stop tries to mark it after the start's claim passed the content check: the claim keeps the mark out, so
+      // the stop gets nothing written (and refuses before its signal) instead of a mark on a reservation that moves.
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file);
+      const text = fs.readFileSync(file, "utf8");
+      const link = fs.linkSync;
+      let marked: string | undefined = "not tried";
+      const spy = vi.spyOn(fs, "linkSync").mockImplementation((from, to) => {
+        if (String(to) === archive) marked = markReservationRetained(file, text, "stopping");
+        return link(from, to);
+      });
+      try {
+        const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS });
+        expect(lock.archived).toBe(archive);
+        expect(marked).toBeUndefined();
+        expect(fs.readFileSync(archive, "utf8")).not.toContain('"retainedBy"');
+        lock.release();
+      } finally {
+        spy.mockRestore();
+      }
+    }));
     it("has one winner when two starts read an older CLI's reservation as different boots", () => withHome((home) => {
       // No boot ID: the route rests on each start's boot time. B (a later boot time) archives it as from an earlier
       // boot and takes the lock between A's inspection and A's claim; A, reading it as from this boot, refuses.
