@@ -526,6 +526,13 @@ export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
   state?: QueueState;
+  /**
+   * The caller's compare-and-set condition: the state it last read for the row. Checked inside the
+   * update's own transaction, before anything else: when the row is in another state, the update
+   * writes nothing (no state, note, transition, event or wake) and fails with `qitem_state_changed`,
+   * naming the current state. Absent (or null), the update behaves as it always has.
+   */
+  expectState?: QueueState | null;
   /** The actor accepts this revised closure deadline without replacing the claim. */
   closureRequiredAt?: string;
   /** Explicit acknowledgment for a deliberate terminal → active repair. */
@@ -3747,6 +3754,23 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
+    if (input.expectState != null) {
+      if (!isQueueState(input.expectState)) {
+        throw new QueueRepositoryError(
+          "invalid_state",
+          `expectState=${String(input.expectState)} not valid; valid: ${QUEUE_STATES.join(", ")}; nothing was written`,
+        );
+      }
+      // The condition is read in the same transaction as the write below, so no other write
+      // (a claim, a close) can land between this check and this update's own write.
+      if (qitem.state !== input.expectState) {
+        throw new QueueRepositoryError(
+          "qitem_state_changed",
+          `qitem ${input.qitemId} is ${qitem.state}, not the expected ${input.expectState}; nothing was written`,
+          { expectedState: input.expectState, currentState: qitem.state },
+        );
+      }
+    }
     const hasReestimate = input.closureRequiredAt !== undefined;
     let closureRequiredAt: string | undefined;
     if (hasReestimate) {
@@ -4186,6 +4210,15 @@ export class QueueRepository {
         nextResolution,
         input.qitemId
       );
+    // A row that enters in-progress here (resolve, or an update to in-progress from blocked, pending or a reopened
+    // terminal state) carries the claimant generation the way claim() stamps it: the destination's current occupant,
+    // not the actor's, since another seat or a person can resolve it. A seat swap releases or transfers in-progress
+    // rows by this stamp (migration 063).
+    if (this.hasClaimedGenColumn && input.state === "in-progress" && fromState !== "in-progress") {
+      this.db
+        .prepare("UPDATE queue_items SET claimed_by_generation_uuid = ? WHERE qitem_id = ?")
+        .run(this.resolveOccupantGeneration?.(qitem.destinationSession) ?? null, input.qitemId);
+    }
 
     // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
     // merely validated-then-dropped) — visible to the attention query, to
