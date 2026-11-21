@@ -872,4 +872,78 @@ describe("#3634 parked-owner-consumer jobs follow archive, unarchive, delete and
       db.close();
     }
   }, 30_000);
+
+  it("a seat of an archived name with no job gets exactly one active job when it runs, with no restart or unarchive", async () => {
+    const dbPath = fileDb("parked-seat-unarmed-");
+    const seed = createDb(dbPath);
+    migrate(seed, ALL_MIGRATIONS);
+    const rigs = new RigRepository(seed);
+    const jobs = new WatchdogJobsRepository(seed);
+    const unarmed = rigs.createRig("never-armed");
+    const unarmedNode = rigs.addNode(unarmed.id, "dev-qa", { role: "qa", runtime: "codex" });
+    rigs.archiveRig(unarmed.id);
+    const held = rigs.createRig("held");
+    const heldNode = rigs.addNode(held.id, "dev-qa", { role: "qa", runtime: "codex" });
+    rigs.archiveRig(held.id);
+    jobs.stop(jobs.register(parkedJob("held")).jobId);
+    const heldId = ids(seed, "held");
+    seed.close();
+
+    const { db, deps, eventLoopMonitor } = await boot(dbPath);
+    try {
+      // The start skips both: archived, with no running seat.
+      expect(states(db, "never-armed")).toEqual([]);
+      expect(states(db, "held")).toEqual(["stopped"]);
+      for (const [nodeId, name] of [[unarmedNode.id, "dev-qa@never-armed"], [heldNode.id, "dev-qa@held"]] as const) {
+        deps.sessionRegistry.updateStatus(deps.sessionRegistry.registerSession(nodeId, name).id, "running");
+      }
+      expect(states(db, "never-armed")).toEqual(["active"]);
+      expect(deps.rigRepo.findUnarchivedRigsByName("never-armed")).toEqual([]);
+      // Control: the same transition leaves an operator-stopped job stopped.
+      expect(states(db, "held")).toEqual(["stopped"]);
+      expect(ids(db, "held")).toEqual(heldId);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a failed put-back warns and never stops a daemon start, an unarchive or a running seat", async () => {
+    const dbPath = fileDb("parked-revive-fails-");
+    const seed = createDb(dbPath);
+    migrate(seed, ALL_MIGRATIONS);
+    const rigs = new RigRepository(seed);
+    rigs.createRig("steady");
+    const back = rigs.createRig("back");
+    rigs.archiveRig(back.id);
+    const seat = rigs.createRig("seat");
+    const seatNode = rigs.addNode(seat.id, "dev-qa", { role: "qa", runtime: "codex" });
+    rigs.archiveRig(seat.id);
+    seed.close();
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const revive = vi.spyOn(WatchdogJobsRepository.prototype, "reviveRetired").mockImplementation(() => {
+      throw new Error("disk I/O error");
+    });
+    try {
+      const { app, db, deps, eventLoopMonitor } = await boot(dbPath);
+      try {
+        expect(states(db, "steady")).toEqual(["active"]);
+        expect((await app.request(`/api/rigs/${back.id}/unarchive`, { method: "POST" })).status).toBe(200);
+        expect(deps.rigRepo.findUnarchivedRigsByName("back").map((row) => row.id)).toEqual([back.id]);
+        expect(states(db, "back")).toContain("active");
+        const session = deps.sessionRegistry.registerSession(seatNode.id, "dev-qa@seat");
+        expect(() => deps.sessionRegistry.updateStatus(session.id, "running")).not.toThrow();
+        expect(states(db, "seat")).toContain("active");
+        expect(revive).toHaveBeenCalled();
+        expect(warn.mock.calls.some(([message]) => String(message).includes("could not put back"))).toBe(true);
+      } finally {
+        eventLoopMonitor.stop();
+        db.close();
+      }
+    } finally {
+      revive.mockRestore();
+      warn.mockRestore();
+    }
+  }, 30_000);
 });

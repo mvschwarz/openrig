@@ -2750,11 +2750,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // (same id and history), so re-creation under the same name and a rolled-back replacement keep it. The ensure
       // then refreshes it, or registers one when there was nothing to put back.
       const RETIRED_REASONS = ["rig archived", "rig deleted"] as const;
-      const arm = (rigName: string, ensure: (job: ReturnType<typeof parkedOwnerJob>) => unknown) => {
-        watchdogJobsRepoInstance.reviveRetired(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), RETIRED_REASONS);
+      const warn = (message: string) => console.warn(message);
+      // Startup, unarchive and a running seat are nonfatal, as their ensure is: a failed put-back warns and the
+      // ensure still runs. Creation stays strict and lets the error through.
+      const arm = (
+        rigName: string,
+        ensure: (job: ReturnType<typeof parkedOwnerJob>) => unknown,
+        strict = false,
+      ) => {
+        try {
+          watchdogJobsRepoInstance.reviveRetired(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), RETIRED_REASONS);
+        } catch (error) {
+          if (strict) throw error;
+          warn(
+            `[watchdog] could not put back ${PARKED_OWNER_POLICY_NAME}/${makeRigAnchor(rigName)} and continued: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
         ensure(parkedOwnerJob(rigName));
       };
-      const warn = (message: string) => console.warn(message);
       // #3437: one rig's bad watchdog rows warn and never stop the daemon from starting.
       for (const name of [...new Set([...rigRepo.listUnarchivedRigNames(), ...runningSeatNames()])].sort()) {
         arm(name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
@@ -2763,7 +2777,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // its supervisor job in the same act that creates it, never at the next
       // daemon restart.
       rigRepo.onRigCreated = (rig) => {
-        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(job, warn));
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(job, warn), true);
       };
       // #3634: archive and delete retire the active job in the same act (hooks on RigRepository, so the routes, the
       // instantiator, teardown and the lifecycle service all reach it), once the name has no unarchived row and no
@@ -2779,16 +2793,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       rigRepo.onRigUnarchived = (rig) => {
         arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       };
-      // A seat of a rig whose job archive or delete retired runs again (restore or launch without unarchive): the
-      // name is watched again, so that same job comes back. Nothing else changes here: a name with an active or
-      // stopped job, or with no retired one, is left as it is.
+      // A seat of an archived name runs again (restore, launch or claim without unarchive): the name is watched again,
+      // so it is armed as at startup. A job archive or delete retired comes back (same id); a name with none gets one;
+      // an active or stopped job stays as it is. A name with an unarchived row is armed by creation, unarchive and
+      // start, and archive never retires it, so its seats change nothing here.
       sessionRegistry.onSessionRunning = (nodeId) => {
         const rig = db.prepare("SELECT r.name AS name FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
           .get(nodeId) as { name: string } | undefined;
-        if (!rig) return;
-        if (watchdogJobsRepoInstance.reviveRetired(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rig.name), RETIRED_REASONS)) {
-          watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(parkedOwnerJob(rig.name), warn);
-        }
+        if (!rig || rigRepo.findUnarchivedRigsByName(rig.name).length > 0) return;
+        arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       };
     }
 
