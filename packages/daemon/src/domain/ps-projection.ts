@@ -3,6 +3,7 @@ import type { NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "
 import { identityVerdictConfirmsExecutorStopped } from "./types.js";
 import {
   countAssignedWorkForEntry,
+  isUnlaunchedHeldWithoutWork,
   seatNeedsAttention,
   arbitratedNeedsInputSignal,
   hookOrPaneActivity,
@@ -108,10 +109,15 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
 /** Shared display rollup for ps and the rig summaries consumed by the TUI.
  * Intentionally stopped seats remain in process counts and node diagnostics. */
 export function deriveRigLifecycleFromInventory(
-  inventory: readonly Pick<NodeInventoryEntry, "lifecycleState" | "intentionallyStopped">[],
+  inventory: readonly NodeInventoryEntry[],
+  assignedWorkCount: (entry: NodeInventoryEntry) => number,
 ): RigLifecycleState {
   return deriveRigLifecycleState(
-    inventory.filter((entry) => !entry.intentionallyStopped).map((entry) => entry.lifecycleState),
+    inventory.filter((entry) => {
+      if (entry.intentionallyStopped) return false;
+      const work = assignedWorkCount(entry);
+      return !(isUnlaunchedHeldWithoutWork(entry, work) && !seatNeedsAttention(entry, null, null, work));
+    }).map((entry) => entry.lifecycleState),
   );
 }
 
@@ -245,7 +251,7 @@ export class PsProjectionService {
         : effectiveRunningCount > 0 ? "partial"
         : "stopped";
 
-      const lifecycleState = deriveRigLifecycleFromInventory(inventory);
+      const lifecycleState = deriveRigLifecycleFromInventory(inventory, (node) => countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount);
 
       // Slice 15 — `terminal-active` count. Subset of running tmux-bound
       // seats whose latest SeatActivity observation says
@@ -300,7 +306,7 @@ export class PsProjectionService {
         const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
         const activity = identityVerdictConfirmsExecutorStopped(node.identityVerdict) ? null
           : hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
-        if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated))) attentionCount++;
+        if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated), countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount)) attentionCount++;
       }
 
       return {

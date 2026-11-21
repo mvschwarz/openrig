@@ -664,7 +664,7 @@ export class QueueTransitionLog {
   postedHumanAskIds(): string[] {
     if (!this.hasOwnerNotificationColumns) return [];
     return (this.db.prepare(`SELECT DISTINCT qitem_id FROM ${this.historySource}
-      WHERE transition_note LIKE 'slack-owner-notification-posted %'
+      WHERE (transition_note LIKE 'slack-owner-notification-posted %' OR transition_note LIKE 'slack-owner-notification-marked %')
         AND qitem_id IN (SELECT qitem_id FROM queue_items)
         AND instr(' ' || transition_note || ' ', ' kind=human-required ') > 0`).all() as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
   }
@@ -698,7 +698,7 @@ export class QueueTransitionLog {
       `EXISTS (
          SELECT 1 FROM ${this.historySource} r
          WHERE r.qitem_id = ${qitemIdExpr}
-           AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
+           AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'slack-owner-notification-marked %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
            AND instr(' ' || r.transition_note || ' ', ' notification_key=' || ${qitemIdExpr} || ':' || ${transitionIdExpr} || ' ') > 0
        )`;
     const postedFilter = includePosted ? "" : `AND NOT ${receipt("latest.qitem_id", "latest.transition_id")}`;
@@ -740,7 +740,7 @@ export class QueueTransitionLog {
     const rows = this.db
       .prepare(
         `SELECT transition_note FROM ${this.historySource}
-          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'
+          WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %' OR transition_note LIKE 'slack-owner-notification-marked %')
           ORDER BY transition_id DESC`,
       )
       .all(qitemId) as Array<{ transition_note: string }>;

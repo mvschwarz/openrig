@@ -306,6 +306,27 @@ function isSubmitKey(key: string): boolean {
   return key === "Enter" || key === "C-m";
 }
 
+/**
+ * A key argument escaped so tmux treats it as one argument, not as a command boundary.
+ *
+ * tmux ends its command at an argument ending in `;` unless the character immediately before that `;`
+ * is a backslash, in which case it drops the `;` and turns that one backslash into a `;`
+ * (`cmd_parse_from_arguments` in tmux's `cmd-parse.y`; see `commandsOf` in tmux-control.ts, pinned
+ * against real tmux in test/tmux-control-native.test.ts). It checks one character, not a run of them:
+ * there is no parity rule and no notion of an already escaped argument.
+ *
+ * So every trailing `;` gets exactly one backslash in front of it, unconditionally, and each key then
+ * arrives byte for byte: `x;` is sent as `x\;` and arrives as `x;`, and `x\;` is sent as `x\\;` and
+ * arrives as `x\;`. Quoting protects the SHELL, not tmux: `send-keys -t X 'x;'` still reaches tmux as
+ * two commands.
+ *
+ * This narrows nothing: a caller may still send any key argument it sent before, and the argument
+ * arrives at the pane as the same bytes. Both transports receive the escaped form, so the spawned
+ * client and the control client read the same argv.
+ */
+export function escapeTmuxCommandSeparator(key: string): string {
+  return key.endsWith(";") ? `${key.slice(0, -1)}\\;` : key;
+}
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -1377,9 +1398,15 @@ export class TmuxAdapter {
   /** #3315: told what each classified probe of this adapter's server showed (reachable, or the no-server/socket
    *  diagnostic). The daemon records only changes (terminal-server-reachability.ts); an observer error never changes
    *  the probe's own result. */
-  serverObserver?: (observation: TerminalServerObservation) => void;
-  private noteServer(observation: TerminalServerObservation): void {
-    try { this.serverObserver?.(observation); } catch { /* reporting only */ }
+  serverObserver?: (observation: TerminalServerObservation, startedIn?: number) => void;
+  /** #3315: the epoch of this adapter's server record, read when a classified probe starts and handed back with its
+   *  observation, so a probe that finishes after a newer loss or return can't overwrite it. */
+  serverEpoch?: () => number;
+  private readServerEpoch(): number | undefined {
+    try { return this.serverEpoch?.(); } catch { return undefined; }
+  }
+  private noteServer(observation: TerminalServerObservation, startedIn?: number): void {
+    try { this.serverObserver?.(observation, startedIn); } catch { /* reporting only */ }
   }
 
   private inputGuard?: SeatDeliveryGuard;
@@ -1712,17 +1739,18 @@ export class TmuxAdapter {
   }
 
   async listSessions(): Promise<TmuxSession[]> {
+    const startedIn = this.readServerEpoch();
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
-      this.noteServer({ reachable: true });
+      this.noteServer({ reachable: true }, startedIn);
       return parseLines(output, parseSessionLine);
     } catch (err) {
       // Classified from what tmux reported (its stderr when the exec kept it), as probeSession does: the wrapper's
       // "Command failed:" line and stdout never decide it. Unknown and permission errors still throw the original.
       const error = tmuxReportedError(err);
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
-        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) }, startedIn);
         return [];
       }
       throw err;
@@ -1782,6 +1810,7 @@ export class TmuxAdapter {
    *   fail closed rather than treating a probe failure as an answer.
    */
   async probeSession(name: string): Promise<SessionProbe> {
+    const startedIn = this.readServerEpoch();
     try {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
@@ -1789,16 +1818,16 @@ export class TmuxAdapter {
       const target = `=${name}`; // canonical session name, never a prefix lookup
       await this.run(["tmux", "has-session", "-t", target],
         `tmux has-session -t ${shellQuote(target)}`);
-      this.noteServer({ reachable: true });
+      this.noteServer({ reachable: true }, startedIn);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
       if (isSessionAbsenceError(error)) {
-        this.noteServer({ reachable: true }); // the server answered: the session is what is missing
+        this.noteServer({ reachable: true }, startedIn); // the server answered: the session is what is missing
         return { state: "absent" };
       }
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
-        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) }, startedIn);
         return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;
@@ -2226,9 +2255,12 @@ export class TmuxAdapter {
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
+    // Escaped here, at the one place a key argument becomes a tmux argument, so both transports read
+    // the same argv and neither can be the one that splits a key into two commands.
+    const sent = keys.map(escapeTmuxCommandSeparator);
     try {
-      await this.run(["tmux", "send-keys", "-t", target, ...keys],
-        `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
+      await this.run(["tmux", "send-keys", "-t", target, ...sent],
+        `tmux send-keys -t ${shellQuote(target)} ${sent.map(shellQuote).join(" ")}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
