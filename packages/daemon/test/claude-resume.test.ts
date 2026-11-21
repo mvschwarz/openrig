@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
@@ -36,26 +39,33 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
-  it("refuses oversized composed settings before restoring a Claude seat", async () => {
+  it("delivers oversized composed settings by file when restoring a Claude seat", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+    const adapter = new ClaudeResumeAdapter(tmux, { openrigHome, maxWaitMs: 1, sleep: async () => {} });
     const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
     args[14] = { deny: Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`) };
     const result = await adapter.resume(...args);
-    expect(result).toMatchObject({ ok: false, message: expect.stringMatching(/--settings.*bytes/) });
-    expect(tmux.sendText).not.toHaveBeenCalled();
-    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    try {
+      const file = /--settings'? '([^']+\.json)'/.exec(vi.mocked(tmux.sendText).mock.calls[0]?.[1] ?? "")?.[1];
+      expect(file, JSON.stringify(result)).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(file!, "utf8")).permissions.deny).toEqual(args[14]!.deny);
+    } finally { fs.rmSync(openrigHome, { recursive: true, force: true }); }
   });
 
   it("checks the captured settings actually sent by a provider restore", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+    const adapter = new ClaudeResumeAdapter(tmux, { openrigHome, maxWaitMs: 1, sleep: async () => {} });
     const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
     args[16] = "/native/claude";
     args[19] = { args: ["--settings", JSON.stringify({ custom: "x".repeat(131072) })], warnings: [] };
     const result = await adapter.resume(...args);
-    expect(result).toMatchObject({ ok: false, message: expect.stringMatching(/--settings.*bytes/) });
-    expect(tmux.sendText).not.toHaveBeenCalled();
+    try {
+      const file = /--settings' '([^']+\.json)'/.exec(vi.mocked(tmux.sendText).mock.calls[0]?.[1] ?? "")?.[1];
+      expect(file, JSON.stringify(result)).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(file!, "utf8"))).toEqual({ custom: "x".repeat(131072) });
+    } finally { fs.rmSync(openrigHome, { recursive: true, force: true }); }
   });
 
   it("warning-only capture on a classic resume still dispatches the ordinary command", async () => {

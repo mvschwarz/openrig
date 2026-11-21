@@ -255,10 +255,13 @@ also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings
 arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
 not establish support by every Claude version.
 
-Launch and resume also check the final composed `--settings` argument against OpenRig's
-inline transport bound before sending input. An oversized argument is refused with its UTF-8
-byte count and the bound; reduce the inline rules/settings before retrying. Rules are never
-truncated or dropped to fit. This check does not expand or rewrite a captured settings filename.
+After composition, launches and resumes keep settings of at most 64 KiB inline, byte-identical.
+Larger JSON values go through Claude's native `--settings` file form: a content-addressed 0600
+file under OpenRig's seat-specific `state/claude-settings/` storage. Each write prunes older generated
+files while keeping the current files and files named by captured live arguments. Continuations
+can rewrite OpenRig's own unchanged files to apply the selected auto-mode block; foreign files stay
+opaque. A failed write falls back inline with a warning naming the size and failure, never a size
+refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.
 
 The initial spec records the rules on the stable seat. For an existing seat, put the
 complete replacement in a JSON file and use the existing audited permission command:

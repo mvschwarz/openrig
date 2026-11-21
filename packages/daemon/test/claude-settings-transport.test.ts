@@ -1,44 +1,98 @@
-import { describe, expect, it } from "vitest";
-import { claudeSettingsTransportProblem, operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { transportClaudeSettings, ownClaudeSettings } from "../src/adapters/claude-settings-transport.js";
+import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
+import { resumedClaudeArguments, sentClaudeAutoMode } from "../src/domain/claude-continuation-launch.js";
 
-describe("Claude inline settings transport", () => {
-  it("accepts an argument below the byte bound and rejects the boundary including its NUL", () => {
-    expect(claudeSettingsTransportProblem(["--settings", "x".repeat(131071)])).toBeUndefined();
-    expect(claudeSettingsTransportProblem(["--settings", "x".repeat(131072)])).toMatch(/131072.*bytes/);
+const roots: string[] = [];
+const seat = () => {
+  const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+  roots.push(openrigHome);
+  return { openrigHome, session: "builder@fixture" };
+};
+afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+
+describe("Claude settings file transport", () => {
+  it("keeps the exact 64 KiB margin inline and stages the next byte", () => {
+    const context = seat(), value = JSON.stringify({ x: "x".repeat(65528) });
+    expect(Buffer.byteLength(value)).toBe(65536);
+    expect(transportClaudeSettings(["--settings", value], context, [])).toEqual(["--settings", value]);
+    const larger = JSON.stringify({ x: "x".repeat(65529) });
+    expect(fs.readFileSync(transportClaudeSettings(["--settings", larger], context, [])[1]!, "utf8")).toBe(larger);
   });
 
-  it("counts UTF-8 bytes rather than JavaScript characters", () => {
-    const value = JSON.stringify({ text: "🙂".repeat(40000) });
-    expect(value.length).toBeLessThan(131072);
-    expect(claudeSettingsTransportProblem(["--settings", value])).toMatch(/UTF-8 bytes/);
-  });
-
-  it("includes --settings= in the captured inline argument's size", () => {
-    expect(claudeSettingsTransportProblem([`--settings=${"x".repeat(131061)}`])).toMatch(/131072.*bytes/);
-  });
-
-  it("does not change composed permissions, hooks, compaction, status line or auto mode", () => {
+  it("keeps small composed permissions, hooks, status line and auto mode byte-identical", () => {
+    const context = seat();
     const args = operationalLaunchArgs("claude-code", { teamPermissionDefault: true, managedCompaction: true,
       hookBridge: true, claudePermissions: { deny: ["Read(/example/private/**)"] },
       statusLine: { type: "command", command: "echo fixture" }, claudeAutoMode: { environment: ["$defaults", "fixture"] } });
-    const before = [...args];
-    expect(claudeSettingsTransportProblem(args)).toBeUndefined();
-    expect(args).toEqual(before);
-    const value = JSON.parse(args[args.indexOf("--settings") + 1]!);
-    expect(value).toMatchObject({ permissions: { deny: ["Read(/example/private/**)"] }, idleCompaction: false,
-      statusLine: { command: "echo fixture" }, autoMode: { environment: ["$defaults", "fixture"] } });
-    expect(value.hooks).toBeDefined();
+    expect(transportClaudeSettings(args, context, [])).toEqual(args);
+    expect(fs.readdirSync(context.openrigHome)).toEqual([]);
   });
 
-  it("keeps ordinary settings filenames and arguments without settings unchanged", () => {
-    expect(claudeSettingsTransportProblem(["--settings", "/example/session settings.json", "--resume", "same"])).toBeUndefined();
-    expect(claudeSettingsTransportProblem(["--resume", "same"])).toBeUndefined();
+  it("stages exact UTF-8 bytes above the margin in a reusable 0600 content-addressed file", () => {
+    const context = seat(), warnings: string[] = [];
+    const value = JSON.stringify({ text: "🙂".repeat(20000) });
+    expect(value.length).toBeLessThan(65536);
+    const args = ["--settings", value];
+    const staged = transportClaudeSettings(args, context, warnings);
+    const file = staged[1]!;
+    expect(path.basename(file)).toBe(`${createHash("sha256").update(value).digest("hex")}.json`);
+    expect(fs.readFileSync(file, "utf8")).toBe(value);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(transportClaudeSettings(args, context, warnings)).toEqual(staged);
+    expect(warnings).toEqual([]);
+    expect(ownClaudeSettings(file, { ...context, session: "someone-else@fixture" })).toBeUndefined();
   });
 
-  it("reports size without echoing the settings", () => {
-    const value = JSON.stringify({ permissions: { deny: ["sensitive-fixture-marker" + "x".repeat(131072)] } });
-    const problem = claudeSettingsTransportProblem(["--settings", value]);
-    expect(problem).toContain("No Claude launch command was sent");
-    expect(problem).not.toContain("sensitive-fixture-marker");
+  it("keeps the current and captured live file, pruning only older generated files for this seat", () => {
+    const context = seat();
+    const args = (n: number) => ["--settings", JSON.stringify({ text: String(n).repeat(70000) })];
+    const live = transportClaudeSettings(args(1), context, []);
+    const stale = transportClaudeSettings(args(2), context, [], live);
+    const foreign = path.join(path.dirname(live[1]!), "operator.json");
+    fs.writeFileSync(foreign, "untouched");
+    const current = transportClaudeSettings(args(3), context, [], live);
+    expect(fs.existsSync(live[1]!)).toBe(true);
+    expect(fs.existsSync(current[1]!)).toBe(true);
+    expect(fs.existsSync(stale[1]!)).toBe(false);
+    expect(fs.readFileSync(foreign, "utf8")).toBe("untouched");
+  });
+
+  it("falls back inline with size and failed-write warnings, without including settings content", () => {
+    const context = seat(), warnings: string[] = [];
+    fs.writeFileSync(path.join(context.openrigHome, "state"), "not a directory");
+    const args = ["--settings", JSON.stringify({ privateMarker: "sensitive-fixture-marker" + "x".repeat(70000) })];
+    expect(transportClaudeSettings(args, context, warnings)).toEqual(args);
+    expect(warnings.join(" ")).toMatch(/\d+ UTF-8 bytes.*file write failed.*inline/);
+    expect(warnings.join(" ")).not.toContain("sensitive-fixture-marker");
+  });
+
+  it.each([false, true])("rewrites own captured settings for auto mode and stages the result (equals form %s)", inline => {
+    const context = seat();
+    const value = JSON.stringify({ custom: "x".repeat(70000), autoMode: { environment: ["old"] } });
+    const live = transportClaudeSettings(inline ? [`--settings=${value}`] : ["--settings", value], context, []);
+    const block = { environment: ["new"] };
+    const composed = resumedClaudeArguments({ args: live, warnings: [] }, [], "same", undefined, undefined, block, context);
+    const current = transportClaudeSettings(composed, context, [], live);
+    expect(sentClaudeAutoMode(current, context)).toEqual(block);
+    const file = inline ? current[0]!.slice(11) : current[1]!;
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ custom: "x".repeat(70000), autoMode: block });
+    expect(ownClaudeSettings(inline ? live[0]!.slice(11) : live[1]!, context)).toBe(value);
+  });
+
+  it("keeps foreign and modified files opaque rather than changing their auto mode", () => {
+    const context = seat();
+    const foreign = path.join(context.openrigHome, "operator.json");
+    fs.writeFileSync(foreign, JSON.stringify({ autoMode: { environment: ["foreign"] } }));
+    const args = ["--settings", foreign];
+    expect(transportClaudeSettings(args, context, [])).toEqual(args);
+    expect(sentClaudeAutoMode(args, context)).toBeUndefined();
+    const owned = transportClaudeSettings(["--settings", JSON.stringify({ x: "x".repeat(70000) })], context, [])[1]!;
+    fs.writeFileSync(owned, "{}");
+    expect(ownClaudeSettings(owned, context)).toBeUndefined();
   });
 });

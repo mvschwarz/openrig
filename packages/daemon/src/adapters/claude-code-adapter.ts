@@ -1,6 +1,7 @@
 import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
-import { claudeSettingsTransportProblem, operationalLaunchArgs } from "./kernel-authority.js";
+import { operationalLaunchArgs } from "./kernel-authority.js";
+import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
@@ -432,6 +433,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const appliedLaunch = appliedWith(autoMode.block ?? null);
     const hookBridge = (await this.hookBridgeLaunch?.(binding.nodeId, binding.claudeExecutable ?? undefined)) === true;
     const statusLine = await this.throttledStatusLine(binding.nodeId, binding.cwd, opts.name, tokenWarnings);
+    const settingsSeat = { openrigHome: this.stateDir, session: opts.name };
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge, ...(statusLine ? { statusLine } : {}) }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
@@ -474,9 +476,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
       const forkSessionId = this.sessionIdFactory();
-      const launchArgs = permissionArgs(forkSessionId);
-      const settingsProblem = claudeSettingsTransportProblem(launchArgs);
-      if (settingsProblem) return { ok: false, error: settingsProblem };
+      const launchArgs = transportClaudeSettings(permissionArgs(forkSessionId), settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
       const permissionMode = permissionArg(launchArgs);
       const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
@@ -499,12 +499,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
+    let launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
+    let nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat);
+    const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
+    if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
+    else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
     const permissionMode = permissionArg(launchArgs);
-    const nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null);
-    const settingsProblem = claudeSettingsTransportProblem(managed || (opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable) ? nativeArgs : launchArgs);
-    if (settingsProblem) return { ok: false, error: settingsProblem };
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
@@ -515,8 +516,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (!managed && binding.claudeLaunch?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(binding.claudeLaunch, posture, model));
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
-    const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
-    const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
+    const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs, settingsSeat) : autoMode.block ?? null;
     if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
     const launchApplied = appliedWith(sentAutoMode === undefined ? { unknown: "settings_file" } : sentAutoMode);
 

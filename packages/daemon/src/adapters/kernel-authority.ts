@@ -129,22 +129,3 @@ function claudeOperationalArgs(choice: LaunchChoice): string[] {
 export function operationalLaunchArg(runtime: string, choice: LaunchChoice): string {
   return operationalLaunchArgs(runtime, choice).map(arg => ` ${shellQuote(arg)}`).join("");
 }
-
-// A conservative ceiling for this individual argument, not for total argv/env: Linux with 4 KiB
-// pages rejects an individual argv string at 128 KiB, including its trailing NUL.
-// This is a transport bound, not a limit on Claude's documented settings files.
-const INLINE_CLAUDE_SETTINGS_BYTES = 128 * 1024;
-
-/** Check the final arguments, after restore/continuation composition. Never report settings content. */
-export function claudeSettingsTransportProblem(args: readonly string[]): string | undefined {
-  for (let at = 0; at < args.length; at++) {
-    const arg = args[at]!;
-    const value = arg === "--settings" ? args[++at] : arg.startsWith("--settings=") ? arg : undefined;
-    if (value === undefined) continue;
-    const bytes = Buffer.byteLength(value, "utf8");
-    if (bytes >= INLINE_CLAUDE_SETTINGS_BYTES) {
-      return `Claude --settings argument is ${bytes} UTF-8 bytes; OpenRig requires it to be below ${INLINE_CLAUDE_SETTINGS_BYTES} bytes for inline launch transport. Reduce the inline settings before retrying. No Claude launch command was sent.`;
-    }
-  }
-  return undefined;
-}
