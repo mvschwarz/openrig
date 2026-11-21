@@ -140,7 +140,7 @@ describe("applying an assignment", () => {
     const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex", continuity: "fresh successor with handover, on /prepared" })],
       { accountHome: "/prepared" }), CODEX, { ...d, successor });
     expect(successor).toHaveBeenCalledWith("c1@fleet", "/prepared");
-    expect(report.results[0]).toMatchObject({ kind: "pending_successor", detail: 'a fresh successor took the seat with a handover: "picking up the review"' });
+    expect(report.results[0]).toMatchObject({ kind: "pending_successor", detail: `a fresh successor took the seat with a handover: "picking up the review"; not checked: whether /prepared is signed in as team` });
     expect(saved[0]!.applied).toEqual({ file: null, fileKind: null, codexHome: "/prepared", codexLogin: null });
     const mac = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex", continuity: "unsupported in place: a Codex seat switches in place only on Linux" })]), CODEX, d);
     expect(mac.results[0]).toMatchObject({ kind: "unsupported", detail: "unsupported in place: a Codex seat switches in place only on Linux" });

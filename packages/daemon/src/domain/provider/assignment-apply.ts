@@ -103,7 +103,10 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       if (!deps.successor) { record(row, "failed_before_effect", "not attempted: the move to a prepared home isn't available here", undefined, activity); continue; }
       const moved = await deps.successor(row.seat, plan.accountHome);
       const [kind, detail, recovery] = successorKind(row.seat, moved);
-      record(row, kind, detail, recovery, activity);
+      // The successor uses whatever login is active in the prepared home: the result names the account the person chose, not
+      // a login it checked.
+      record(row, kind, kind === "pending_successor" || kind === "unchanged"
+        ? `${detail}; not checked: whether ${plan.accountHome} is signed in as ${plan.account.label}` : detail, recovery, activity);
       continue;
     }
     const switched = await deps.switchSeat(row.seat);

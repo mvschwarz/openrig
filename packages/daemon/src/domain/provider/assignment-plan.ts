@@ -168,10 +168,11 @@ function appliedThis(seat: PlanSeatFacts, label: string): boolean {
   return !!seat.followsAssignment && seat.appliedLabel === label;
 }
 
-/** A seat whose configuration names no login of its own: a Codex seat on its home's active login (not a home an account
- *  switch moved it to). That it's on an account rests only on the apply that switched its home. */
+/** A seat whose configuration names no login of its own: a Codex seat on its home's active login, whether an apply
+ *  switched that home in place or moved the seat to a prepared home. That it's on an account rests only on that apply:
+ *  the login active in the home isn't read, and a prepared home's login was never checked against the label. */
 function homeOnly(seat: PlanSeatFacts): boolean {
-  return seat.runtime === "codex" && seat.configured?.source === "default_login" && seat.configured.homeFrom !== "account-switch";
+  return seat.runtime === "codex" && seat.configured?.source === "default_login";
 }
 
 /** How a seat that's unchanged only as an apply left its home is worded, in the plan, the apply and status. */

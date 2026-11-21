@@ -93,6 +93,22 @@ describe("the daemon's assignment plan", () => {
     expect(await effectAfter(elsewhere)).toBe("kept_override");
   });
 
+  it("a Codex seat an apply moved to a prepared home is on the account only as that apply left it: its home's login wasn't checked", async () => {
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
+    seat("fleet", "c1", "codex", "c1@fleet");
+    const prepared = path.join(dir, "prepared");
+    fs.mkdirSync(prepared);
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'c1'").run(prepared);
+    const assignments = new ProviderAccountAssignmentsRepository(db);
+    assignments.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "r", requestedBy: null, at: "t" });
+    assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "pending_successor", detail: "d",
+      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: prepared, codexLogin: null } });
+    const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" });
+    expect(planned.ok && planned.plan.rows.map((r) => [r.effect, r.asApplied])).toEqual([["unchanged", true]]);
+    const model = await service().getReadModel();
+    expect(model.bindings.find((b) => b.seatSession === "c1@fleet")!.assignment).toMatchObject({ state: "follows", asApplied: true });
+  });
+
   it("a Codex seat with no saved login of its own, whose home an apply switched to this login, is unchanged: a re-apply restarts nothing", async () => {
     new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
     seat("fleet", "c1", "codex", "c1@fleet");

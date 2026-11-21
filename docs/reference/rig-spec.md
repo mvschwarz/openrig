@@ -929,7 +929,8 @@ Codex seats have two extra cases:
   on that home moves with it. The plan lists each home's seats: this rig's "would restart", and a seat in another rig
   shows the `rig seat restart` it would need. Elsewhere the row reads "unsupported in place".
 - **To a prepared home.** `--account-home <dir>` moves the seats to that home instead, as fresh successors with a
-  handover. Nothing falls back to this by itself.
+  handover. Nothing falls back to this by itself. A successor uses the login active in that home, which isn't checked
+  against the account: the plan, the result and status say so.
 
 **Applying it.** `--apply --plan <digest>` computes the plan again, and refuses without changing anything unless it's
 still the plan you reviewed. A seat's activity changing doesn't count as a change. Only one apply runs for a rig at a
