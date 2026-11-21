@@ -344,6 +344,24 @@ describe("first-user return route", () => {
       expect(await give({ destinationSession: lead, body: "x", returnRoute: named })).toMatchObject({ returnRoute: named, returnRouteBasis: "named" });
       expect(await give({ destinationSession: route, body: "a question for the person" })).not.toHaveProperty("returnRoute");
     });
+
+    it("keeps a route that names another host, even when its address matches the local destination's", async () => {
+      setSelfHostId("host-b");
+      const foreign = `${route}@host-a`;
+      await goalAt(operator, foreign);
+      expect(await give({ destinationSession: route, body: "work for this host's conversation of the same name" }))
+        .toMatchObject({ returnRoute: foreign, returnRouteBasis: "inherited" });
+    });
+
+    it("one route held on several rows is still one, and an inherited basis survives a cross-host carry", async () => {
+      setSelfHostId("host-b");
+      await goalAt(operator, route);
+      await goalAt(operator, route);
+      expect(await give({ destinationSession: lead, body: "one goal, two rows" })).toMatchObject({ returnRoute: route, returnRouteBasis: "inherited" });
+      const carried = `${route}@host-a`;
+      expect(await give({ destinationSession: lead, body: "carried here", returnRoute: carried, returnRouteBasis: "inherited" }))
+        .toMatchObject({ returnRoute: carried, returnRouteBasis: "inherited" });
+    });
   });
 
   describe("the resolver reads only the work's own rows", () => {

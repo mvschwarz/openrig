@@ -101,7 +101,8 @@ export type RouteResolution =
 /** The route for work a seat creates without naming one: the route of the one routed row it holds (open, addressed to it),
  *  so a goal's work keeps reaching the person's conversation when the seat gives it out as a new row rather than handing the
  *  goal on. Two distinct routes are a conflict and give none, as the resolver below treats them. A row addressed to the
- *  route itself (a question to that conversation) gets none, so its own escalation can't relay back to it. */
+ *  route itself (a question to that conversation, on this host) gets none, so its own escalation can't relay back to it; a
+ *  route naming another host is kept as stored, even when its address matches a local one. */
 export function inheritedReturnRoute(db: Database.Database, holder: string, destination: string): string | null {
   try {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('queue_items') WHERE name = 'return_route'").get()) return null;
@@ -109,7 +110,8 @@ export function inheritedReturnRoute(db: Database.Database, holder: string, dest
         AND state IN ('pending','in-progress','blocked') AND return_route IS NOT NULL`).all(holder) as Array<{ return_route: string }>;
     if (routes.length !== 1) return null;
     const route = routes[0]!.return_route;
-    return splitRoute(route).address === splitRoute(destination).address ? null : route;
+    const local = routeOnThisHost(route);
+    return local !== null && local === (routeOnThisHost(destination) ?? destination) ? null : route;
   } catch { return null; }
 }
 
