@@ -2221,10 +2221,18 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
       if (deps.queueRepo.deliveryDrains.holds(group.destination) || liveRows.length === 0) continue;
       const tag = unroutableNoticeTag(group.source, group.destination);
+      const surviving = refreshYielded ? recountQualifyingUnroutable(liveRows, group.source, group.destination) : liveRows;
+      if (surviving.length === 0) continue;
+      const openNotice = findUnroutableNotice(deps.db, group.source, group.destination);
+      if (openNotice) {
+        liveUnroutableTags.add(tag);
+        findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openNotice.qitemId, action: "refreshed" });
+        continue;
+      }
+      const dismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
+      if (dismissed && !surviving.some((c) => evidenceIsNewer(c.evidenceAt, dismissed.tsUpdated))) continue;
       const target = unreachableNoticeTarget(group.destination, group.source);
       if (!target) {
-        const surviving = refreshYielded ? recountQualifyingUnroutable(liveRows, group.source, group.destination) : liveRows;
-        if (surviving.length === 0) continue;
         liveUnroutableTags.add(tag);
         for (const c of surviving) {
           log(`[stuck-sweep] unreported #514 unreachable row ${c.row.qitemId} at ${group.destination}: no reachable source, operator agent or operator seat`);
@@ -2232,16 +2240,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         }
         continue;
       }
-      const openNotice = findUnroutableNotice(deps.db, group.source, group.destination);
-      if (openNotice) {
-        if (refreshYielded && recountQualifyingUnroutable(liveRows, group.source, group.destination).length === 0) continue;
-        liveUnroutableTags.add(tag);
-        findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openNotice.qitemId, action: "refreshed" });
-        continue;
-      }
-      const dismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
-      if (dismissed && !liveRows.some((c) => evidenceIsNewer(c.evidenceAt, dismissed.tsUpdated))) continue;
-      const text = unroutableNoticeText(group.source, group.destination, liveRows.length);
+      const text = unroutableNoticeText(group.source, group.destination, surviving.length);
       const createInput = {
         sourceSession: group.destination,
         destinationSession: target,
@@ -2257,13 +2256,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           const existing = findUnroutableNotice(deps.db, group.source, group.destination);
           if (existing) throw new DuplicateOpenUnroutableNoticeError(existing.qitemId);
           othersMayHaveRun();
-          const recounted = recountQualifyingUnroutable(liveRows, group.source, group.destination);
+          const recounted = recountQualifyingUnroutable(surviving, group.source, group.destination);
           if (recounted.length === 0) throw new UnroutableNoticeSkippedError();
           const latestDismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
           if (latestDismissed && !recounted.some((c) => evidenceIsNewer(c.evidenceAt, latestDismissed.tsUpdated))) {
             throw new UnroutableNoticeSkippedError();
           }
-          if (recounted.length !== liveRows.length) {
+          if (recounted.length !== surviving.length) {
             const refreshedText = unroutableNoticeText(group.source, group.destination, recounted.length);
             createInput.body = refreshedText.body;
             createInput.summary = refreshedText.summary;

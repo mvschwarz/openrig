@@ -23,6 +23,7 @@ import {
   STUCK_SWEEP_YIELD_EVERY_ROWS,
   unclaimedBacklogTag,
   UNROUTABLE_NOTICE_PREFIX,
+  UNROUTABLE_NOTICE_SEPARATOR,
   unroutableNoticeTag,
 } from "../src/domain/queue-stuck-sweep.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -222,7 +223,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     db.prepare("DELETE FROM sessions WHERE node_id = ?").run(worker.nodeId);
     await ageRow(verified.qitemId, 90, now);
 
-    // --no-nudge rows to parked, unbound (running=true, bound=false), mistyped, and non-polled hosted destinations.
+    // --no-nudge rows to parked, exited unbound (running="exited", bound=false), mistyped, and non-polled hosted destinations.
     await createNoNudge("lead@ops", "parked@ops", "Parked task", 90, now);
     await createNoNudge("lead@ops", "offline@ops", "Unbound task", 90, now);
     await createNoNudge("lead@ops", "typo@ops", "Typo task", 90, now);
@@ -255,20 +256,30 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(opFindings.some((f) => f.body.includes(claimedStopped.qitemId))).toBe(true);
     expect(opFindings.some((f) => f.body.includes(unclaimedMissingWithOp.qitemId))).toBe(true);
 
-    // Live re-check before emit: a row claimed during yield produces zero notices.
+    // Live re-check before emit: a row claimed after initial candidate selection produces zero notices.
     const parkedLate = await createNoNudge("lead@ops", "parked2@ops", "Late claim", 90, now);
-    const filler = seedSeat("ops", "work.filler", "filler@ops", { running: true, bound: true });
-    expect(filler.session).toBe("filler@ops");
+    let parkedLateReads = 0;
     let triggered = false;
     const origGet = queue.getById.bind(queue);
     queue.getById = ((id: string, opts?: { waiting?: boolean }) => {
-      if (id === parkedLate.qitemId && !triggered && queue.list({ limit: 500 }).some((x) => (x.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")))) {
-        triggered = true;
-        queue.claim({ qitemId: parkedLate.qitemId, destinationSession: "parked2@ops" });
+      if (id === parkedLate.qitemId) {
+        parkedLateReads++;
+        // First read happens in unclaimedCandidate so parkedLate enters unroutableGroups;
+        // second read happens in the live re-check right before notice emission.
+        if (parkedLateReads === 2 && !triggered) {
+          triggered = true;
+          queue.claim({ qitemId: parkedLate.qitemId, destinationSession: "parked2@ops" });
+        }
       }
       return origGet(id, opts);
     }) as typeof queue.getById;
-    await sweep({ now });
+    try {
+      await sweep({ now });
+    } finally {
+      queue.getById = origGet;
+    }
+    expect(parkedLateReads).toBeGreaterThanOrEqual(2);
+    expect(triggered).toBe(true);
     expect(allFindings().some((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked2@ops")))).toBe(false);
   });
 
@@ -370,10 +381,11 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
 
     await createNoNudge("alpha@ops", "parked2@ops", "Race check");
     const origCreate = queue.create.bind(queue);
+    let injectedNoticeId: string | null = null;
     queue.create = (async (input, verifyBeforeCreate) => {
       if ((input.tags ?? []).includes(unroutableNoticeTag("alpha@ops", "parked2@ops"))) {
         // Insert an open tag-matched notice right before create's transaction checks verifyBeforeCreate.
-        await origCreate({
+        const injected = await origCreate({
           sourceSession: input.sourceSession,
           destinationSession: input.destinationSession,
           body: input.body,
@@ -382,13 +394,27 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
           tags: input.tags,
           nudge: false,
         });
+        injectedNoticeId = injected.qitemId;
       }
       return origCreate(input, verifyBeforeCreate);
     }) as typeof queue.create;
-    const raceRes = await sweep();
+    let raceRes: Awaited<ReturnType<typeof sweep>>;
+    try {
+      raceRes = await sweep();
+    } finally {
+      queue.create = origCreate;
+    }
+    expect(injectedNoticeId).not.toBeNull();
     expect(raceRes.outcome).toBe("findings");
+    expect(raceRes.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: `alpha@ops${UNROUTABLE_NOTICE_SEPARATOR}parked2@ops`,
+      findingQitemId: injectedNoticeId,
+      action: "refreshed",
+    });
     const parked2Open = unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("alpha@ops", "parked2@ops")));
     expect(parked2Open).toHaveLength(1);
+    expect(parked2Open[0]!.qitemId).toBe(injectedNoticeId);
   });
 
   it("R5 / C5: minimal notice body names count, source, destination, and list command only (no item IDs or summaries)", async () => {
@@ -1580,5 +1606,130 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(res.outcome).toBe("clean");
     expect(res.error).toBeUndefined();
     expect(nudgesSent).toHaveLength(0);
+  });
+
+  it("refreshes an open #514 notice instead of reporting unreported when all fallback targets become unreachable", async () => {
+    const lead = seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.helper", "helper@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    await createNoNudge("lead@ops", "parked@ops", "Still pending 1", 90, now);
+    await createNoNudge("lead@ops", "parked@ops", "Still pending 2", 90, now);
+
+    // Pass 1 creates the open #514 notice to lead@ops; lead@ops hands it off to helper@ops, then stops.
+    await sweep({ now });
+    const [original] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(original).toBeDefined();
+    const { created: child } = await queue.handoff({
+      qitemId: original!.qitemId,
+      fromSession: "lead@ops",
+      toSession: "helper@ops",
+      body: "Helper handling unreachable parked@ops notice",
+      nudge: false,
+    });
+
+    // Make source, operatorAgent, and operatorSeat all unreachable.
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(lead.nodeId);
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(lead.nodeId);
+
+    const logs: string[] = [];
+    nudgesSent = [];
+    const res = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+
+    expect(res.outcome).toBe("findings");
+    expect(res.findings).toEqual([{
+      kind: "unroutable-notice",
+      qitemId: `lead@ops${UNROUTABLE_NOTICE_SEPARATOR}parked@ops`,
+      findingQitemId: child.qitemId,
+      action: "refreshed",
+    }]);
+    expect(logs.some((line) => line.includes("unreported #514"))).toBe(false);
+    expect(queue.getByIdOrThrow(child.qitemId).state).toBe("pending");
+    expect(nudgesSent).toHaveLength(0);
+  });
+
+  it("keeps an explicitly dismissed #514 notice suppressed when all fallback targets become unreachable until newer evidence arrives", async () => {
+    const lead = seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+    seedSeat("ops", "work.parked2", "parked2@ops", { running: false, bound: false });
+
+    const t0 = new Date("2026-11-21T02:00:00.000Z");
+    const existingRow = await createNoNudge("lead@ops", "parked@ops", "Dismissed via cancel", 90, t0);
+    await createNoNudge("lead@ops", "parked2@ops", "Dismissed via non-sweep done", 90, t0);
+
+    // Pass 1 creates both #514 notices; lead@ops cancels one and marks the other done, then stops.
+    await sweep({ now: t0 });
+    const [canceledNotice] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    const [doneNotice] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked2@ops")));
+    expect(canceledNotice).toBeDefined();
+    expect(doneNotice).toBeDefined();
+    queue.update({ qitemId: canceledNotice!.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "recipient dismissed" });
+    queue.update({ qitemId: doneNotice!.qitemId, actorSession: "lead@ops", state: "done", closureReason: "no-follow-on", transitionNote: "recipient acknowledged" });
+    const dismissedAt = new Date("2026-11-21T02:05:00.000Z").toISOString();
+    db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id IN (?, ?)").run(dismissedAt, canceledNotice!.qitemId, doneNotice!.qitemId);
+
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(lead.nodeId);
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(lead.nodeId);
+
+    // Pass 2 (no newer evidence, all fallback targets unreachable): stays silent, zero unreported actions/logs.
+    const t1 = new Date("2026-11-21T02:10:00.000Z");
+    const silentLogs: string[] = [];
+    const silentRes = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now: t1,
+      log: (line) => silentLogs.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(silentRes.outcome).toBe("clean");
+    expect(silentRes.findings).toEqual([]);
+    expect(silentLogs.some((line) => line.includes("unreported #514"))).toBe(false);
+
+    // Pass 3 (newer unclaimed row arrives after dismissal while all fallback targets remain unreachable): now reports unreported.
+    const t2 = new Date("2026-11-21T04:00:00.000Z");
+    const newerRow = await createNoNudge("lead@ops", "parked@ops", "Newer task after dismissal", 90, t2);
+    const newerLogs: string[] = [];
+    const newerRes = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now: t2,
+      log: (line) => newerLogs.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(newerRes.outcome).toBe("findings");
+    expect(newerRes.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: existingRow.qitemId,
+      findingQitemId: "",
+      action: "unreported",
+      destination: "parked@ops",
+    });
+    expect(newerRes.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: newerRow.qitemId,
+      findingQitemId: "",
+      action: "unreported",
+      destination: "parked@ops",
+    });
+    expect(newerLogs.some((line) => line.includes("unreported #514"))).toBe(true);
   });
 });
