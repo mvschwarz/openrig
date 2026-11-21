@@ -915,7 +915,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-statusline-throttle" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-startup-text" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-statusline-throttle" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -939,12 +939,16 @@ identity remains unverified; a version number alone cannot clear it.
     } catch (err) {
       // A record's answer can be lost in more ways than a timeout: a connection lost after the request was sent, or a
       // response that couldn't be read. Each may follow a recorded home, so each keeps the operation id.
-      const recordAnswerLost = path === "record-runtime-home" && (err instanceof DaemonConnectionError || err instanceof DaemonResponseError);
-      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd"
+      const recordAnswerLost = (path === "record-runtime-home" || path === "set-startup-text") && (err instanceof DaemonConnectionError || err instanceof DaemonResponseError);
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd" && path !== "set-startup-text"
         && path !== "record-runtime-home") || !(err instanceof DaemonTimeoutError || recordAnswerLost)) throw err;
       const lost = err instanceof DaemonTimeoutError ? "The CLI timed out waiting for the daemon"
         : err instanceof DaemonResponseError ? "The daemon's answer couldn't be read" : "The connection to the daemon was lost";
-      const error = path === "record-runtime-home" ? {
+      const error = path === "set-startup-text" ? {
+        ok: false as const, code: "startup_text_outcome_unknown", status: "unknown",
+        message: body["expectedRevision"] === undefined ? `${lost}; no change was requested.` : `${lost}; saved startup text may or may not have changed.`,
+        guidance: `Inspect the saved revision and text before retrying: rig seat set-startup-text ${seat} --inspect`,
+      } : path === "record-runtime-home" ? {
         ok: false as const,
         code: "record_runtime_home_outcome_unknown",
         status: "unknown",
@@ -1385,6 +1389,53 @@ Example:
         console.log(`Runtime home for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])} (revision ${String(data["revision"])}, ${data["replayed"] ? "already recorded by this operation" : data["changed"] === false ? "same home, recorded" : "recorded"}; next launch).`);
         console.log(`  Home ${observation?.home ?? "unknown"}; original conversation ${observation?.original ?? "unknown"} there. The running process isn't checked.`);
         console.log(`  Operation id: ${operationId}`);
+      });
+    });
+
+  cmd
+    .command("set-startup-text")
+    .argument("<seat>", "Seat reference")
+    .option("--inspect", "List selectable actions and the saved revision")
+    .option("--clear-override", "Preview or remove a seat-only source override")
+    .option("--override-index <index>", "Override index from inspection, including stale overrides")
+    .option("--layer <layer>", "Action layer: rig, pod, member, or context")
+    .option("--recipe-index <index>", "Zero-based action index in the recipe layer")
+    .option("--context-index <index>", "Zero-based action index in the saved startup context")
+    .option("--text-file <path>", "UTF-8 file containing replacement text")
+    .option("--expected-revision <revision>", "Apply only against this preview revision; omit to preview")
+    .option("--json", "JSON output")
+    .description("Preview or replace one seat's saved application startup text")
+    .action(async (seat: string, opts: { inspect?: boolean; clearOverride?: boolean; overrideIndex?: string; layer?: string; recipeIndex?: string; contextIndex?: string; textFile?: string; expectedRevision?: string; json?: boolean }) => {
+      if (opts.inspect) {
+        await runLifecycleVerb("set-startup-text", seat, { inspect: true }, opts, data => console.log(JSON.stringify(data, null, 2)));
+        return;
+      }
+      if (opts.clearOverride) {
+        const contextIndex = opts.contextIndex && /^[0-9]+$/.test(opts.contextIndex) ? Number(opts.contextIndex) : -1;
+        const overrideIndex = opts.overrideIndex === undefined ? undefined : /^[0-9]+$/.test(opts.overrideIndex) ? Number(opts.overrideIndex) : -1;
+        await runLifecycleVerb("set-startup-text", seat, { clearOverride: true, contextIndex, overrideIndex, expectedRevision: opts.expectedRevision }, opts, data => {
+          console.log(`${data["preview"] ? "Preview clear" : "Override cleared"}; revision: ${String(data["revision"])}.`);
+          console.log("Saved startup context is unchanged; a recipe-resolved fresh launch uses its current source.");
+        });
+        return;
+      }
+      if (!opts.layer || !opts.recipeIndex || !opts.contextIndex || !opts.textFile) {
+        console.error("Supply --layer, --recipe-index, --context-index and --text-file, or use --inspect."); process.exitCode = 1; return;
+      }
+      let value: string;
+      try { value = readFileSync(opts.textFile, "utf8"); }
+      catch { console.error(`Cannot read replacement text from ${opts.textFile}.`); process.exitCode = 1; return; }
+      const recipeIndex = /^[0-9]+$/.test(opts.recipeIndex) ? Number(opts.recipeIndex) : -1;
+      const contextIndex = /^[0-9]+$/.test(opts.contextIndex) ? Number(opts.contextIndex) : -1;
+      await runLifecycleVerb("set-startup-text", seat, { layer: opts.layer, recipeIndex, contextIndex, value, expectedRevision: opts.expectedRevision }, opts, data => {
+        console.log(data["preview"] ? "Preview (no changes):" : data["changed"] === false ? "Already saved; no changes:" : "Saved and read back:");
+        console.log(`Revision: ${String(data["revision"])}`);
+        console.log(`Old: ${JSON.stringify(data["from"])}\nNew: ${JSON.stringify(data["to"])}`);
+        if (data["recipeText"] !== undefined) console.log(`Recipe readback: ${JSON.stringify(data["recipeText"])}`);
+        console.log(`Applies on: ${JSON.stringify(data["appliesOn"])}; eligible for restore replay: ${String(data["restoreEligible"])}.`);
+        if (data["overlap"]) console.log("Warning: this replacement overlaps another action; an ambiguous override will be skipped at start.");
+        if (opts.layer === "context") console.log("If a saved override no longer matches uniquely, startup uses the current source and warns.");
+        console.log("Existing snapshots keep their captured text. The current conversation is unchanged; no launch was started.");
       });
     });
 

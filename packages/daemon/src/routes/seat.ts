@@ -483,6 +483,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     nodeLauncher: c.get("nodeLauncher" as never) as import("../domain/node-launcher.js").NodeLauncher,
     startupOrchestrator: (c.get("startupOrchestrator" as never) as import("../domain/startup-orchestrator.js").StartupOrchestrator | undefined) ?? undefined,
+    inspectStartupActions: (rigId, nodeId) => (c.get("podInstantiator" as never) as import("../domain/rigspec-instantiator.js").PodRigInstantiator).inspectStartupActions(rigId, nodeId),
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
@@ -575,6 +576,14 @@ const setModelHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-model/:seatRef", setModelHandler);
 seatRoutes.post("/set-model/node/:nodeId", setModelHandler);
+
+seatRoutes.post("/set-startup-text/:seatRef", async c => {
+  const value: unknown = await c.req.json().catch(() => null);
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const result = await seatLifecycleService(c).setStartupText({ seatRef: c.req.param("seatRef"), inspect: body.inspect === true, clearOverride: body.clearOverride === true, overrideIndex: body.overrideIndex, layer: body.layer,
+    recipeIndex: body.recipeIndex, contextIndex: body.contextIndex, value: body.value, expectedRevision: body.expectedRevision });
+  return c.json(result, result.ok ? 200 : result.code === "invalid_startup_text" ? 400 : result.code === "seat_not_found" ? 404 : 409);
+});
 
 seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   const value: unknown = await c.req.json().catch(() => null);

@@ -1,0 +1,15 @@
+name: startup-worker
+version: "1.0.0"
+resources:
+  skills: []
+startup:
+  actions:
+    - type: send_text
+      value: "shared source instruction"
+      phase: after_ready
+      applies_on: [fresh_start, restore]
+      idempotent: true
+profiles:
+  default:
+    uses:
+      skills: []

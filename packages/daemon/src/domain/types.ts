@@ -1538,6 +1538,10 @@ export interface NodeLaunchRecipe {
   version: 1;
   rigRoot: string;
   rigSpec: RigSpec;
+  /** Seat-only substitutions for saved actions supplied by a shared source. */
+  startupTextOverrides?: Array<{ before: StartupAction; value: string }>;
+  /** Seat-specific edits to otherwise shared recipe layers, which a rig export cannot represent. */
+  startupTextPrivateLayers?: Array<"rig" | "pod">;
 }
 
 export interface RigServicesWaitTarget {

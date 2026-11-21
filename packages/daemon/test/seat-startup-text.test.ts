@@ -1,0 +1,115 @@
+import Database from "better-sqlite3";
+import { describe, expect, it } from "vitest";
+import { applyStartupTextOverrides, clearStartupTextOverride, editSavedStartupText, inspectSavedStartupText } from "../src/domain/seat-startup-text.js";
+
+describe("saved startup text", () => {
+  it("allows an overlapping edit, warns and keeps ambiguous source actions at start", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE rigs (id TEXT PRIMARY KEY, startup_layers_json TEXT); INSERT INTO rigs VALUES ('rig', NULL); CREATE TABLE nodes (id TEXT PRIMARY KEY, rig_id TEXT, launch_recipe_json TEXT); CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, startup_actions_json TEXT)");
+    const action = { type: "send_text" as const, value: "a", phase: "after_ready" as const, appliesOn: ["fresh_start" as const], idempotent: true };
+    const other = { ...action, value: "b" };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "rig", pods: [{ id: "dev", label: "Dev", members: [{ id: "build", agentRef: "local:agent", profile: "default", runtime: "stub", cwd: "." }] }] } };
+    db.prepare("INSERT INTO nodes VALUES ('a', 'rig', ?)").run(JSON.stringify(recipe));
+    db.prepare("INSERT INTO node_startup_context VALUES ('a', ?)").run(JSON.stringify([action, other]));
+    const request = { nodeId: "a", logicalId: "dev.build", layer: "context" as const, recipeIndex: 0, contextIndex: 0, value: "b" };
+    const preview = editSavedStartupText(db, request);
+    expect(preview).toMatchObject({ ok: true, preview: true, overlap: true });
+    if (!preview.ok) throw new Error(preview.message);
+    expect(editSavedStartupText(db, { ...request, expectedRevision: preview.revision })).toMatchObject({ ok: true, changed: true });
+    const warnings: string[] = [];
+    expect(applyStartupTextOverrides(db, "a", [action, other], warnings)).toEqual([action, other]);
+    expect(warnings.join(" ")).toContain("stale");
+    expect(inspectSavedStartupText(db, "a", "dev.build", [action, other])).toMatchObject({ overrides: [{ status: "stale", overlap: true }] });
+    const inspection = inspectSavedStartupText(db, "a", "dev.build");
+    if (!inspection.ok) throw new Error(inspection.message);
+    const clear = clearStartupTextOverride(db, { nodeId: "a", logicalId: "dev.build", contextIndex: -1, overrideIndex: 0, expectedRevision: inspection.revision });
+    expect(clear).toMatchObject({ ok: true, clearOverride: true, from: "b" });
+    db.close();
+  });
+  it("marks a private rig-layer edit as not representable by a shared export", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE rigs (id TEXT PRIMARY KEY, startup_layers_json TEXT); INSERT INTO rigs VALUES ('rig', NULL); CREATE TABLE nodes (id TEXT PRIMARY KEY, rig_id TEXT, launch_recipe_json TEXT); CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT)");
+    const action = { type: "send_text", value: "old", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "rig", startup: { files: [], actions: [action] }, pods: [{ id: "dev", label: "Dev", members: [{ id: "build", agentRef: "local:agent", profile: "default", runtime: "stub", cwd: "." }] }] } };
+    db.prepare("INSERT INTO nodes VALUES ('a', 'rig', ?)").run(JSON.stringify(recipe));
+    db.prepare("INSERT INTO node_startup_context VALUES ('a', '[]', '[]', ?, 'stub')").run(JSON.stringify([action]));
+    const request = { nodeId: "a", logicalId: "dev.build", layer: "rig" as const, recipeIndex: 0, contextIndex: 0, value: "new" };
+    const preview = editSavedStartupText(db, request);
+    if (!preview.ok) throw new Error(preview.message);
+    expect(editSavedStartupText(db, { ...request, expectedRevision: preview.revision }).ok).toBe(true);
+    const saved = JSON.parse((db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = 'a'").get() as { launch_recipe_json: string }).launch_recipe_json);
+    expect(saved.startupTextPrivateLayers).toEqual(["rig"]);
+    db.close();
+  });
+
+  it("keeps a seat-only override for an action resolved from a shared source", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE rigs (id TEXT PRIMARY KEY, startup_layers_json TEXT); INSERT INTO rigs VALUES ('rig', NULL); CREATE TABLE nodes (id TEXT PRIMARY KEY, rig_id TEXT, launch_recipe_json TEXT); CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT)");
+    const old = { type: "send_text" as const, value: "shared old", phase: "after_ready" as const, appliesOn: ["fresh_start" as const], idempotent: true };
+    const recipe = JSON.stringify({ version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "rig", pods: [{ id: "dev", label: "Dev", members: [{ id: "build", agentRef: "local:agent", profile: "default", runtime: "stub", cwd: "." }] }] } });
+    db.prepare("INSERT INTO nodes VALUES (?, 'rig', ?)").run("a", recipe);
+    db.prepare("INSERT INTO node_startup_context VALUES (?, '[]', '[]', ?, 'stub')").run("a", JSON.stringify([old]));
+    const input = { nodeId: "a", logicalId: "dev.build", layer: "context" as const, recipeIndex: 0, contextIndex: 0, value: "seat new" };
+    expect(inspectSavedStartupText(db, "a", "dev.build")).toMatchObject({ candidates: [{ layer: "context", contextIndex: 0, value: "shared old" }] });
+    const preview = editSavedStartupText(db, input);
+    if (!preview.ok) throw new Error(preview.message);
+    db.prepare("UPDATE rigs SET startup_layers_json = ? WHERE id = 'rig'").run('{"changed":true}');
+    expect(editSavedStartupText(db, { ...input, expectedRevision: preview.revision })).toMatchObject({ ok: false, code: "stale_revision" });
+    const refreshed = editSavedStartupText(db, input);
+    if (!refreshed.ok) throw new Error(refreshed.message);
+    expect(editSavedStartupText(db, { ...input, expectedRevision: refreshed.revision })).toMatchObject({ ok: true, recipeText: "seat new" });
+    expect(applyStartupTextOverrides(db, "a", [old])).toEqual([{ ...old, value: "seat new" }]);
+    expect(old.value).toBe("shared old");
+    const warnings: string[] = [];
+    expect(applyStartupTextOverrides(db, "a", [{ ...old, value: "changed at source" }], warnings)).toEqual([{ ...old, value: "changed at source" }]);
+    expect(warnings.join(" ")).toContain("stale");
+    expect(inspectSavedStartupText(db, "a", "dev.build", [{ ...old, value: "changed at source" }])).toMatchObject({ overrides: [{ status: "stale", value: "seat new" }] });
+    const next = editSavedStartupText(db, { ...input, value: "seat newer" });
+    if (!next.ok) throw new Error(next.message);
+    editSavedStartupText(db, { ...input, value: "seat newer", expectedRevision: next.revision });
+    expect(applyStartupTextOverrides(db, "a", [old])).toEqual([{ ...old, value: "seat newer" }]);
+    const clear = clearStartupTextOverride(db, { nodeId: "a", logicalId: "dev.build", contextIndex: 0 });
+    if (!clear.ok) throw new Error(clear.message);
+    expect(clearStartupTextOverride(db, { nodeId: "a", logicalId: "dev.build", contextIndex: 0, expectedRevision: clear.revision })).toMatchObject({ ok: true, clearOverride: true, preview: false });
+    expect(applyStartupTextOverrides(db, "a", [{ ...old, value: "changed at source" }])).toEqual([{ ...old, value: "changed at source" }]);
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = 'a'").run(JSON.stringify([old, old]));
+    expect(inspectSavedStartupText(db, "a", "dev.build")).toMatchObject({ candidates: [], ambiguousContext: [{ contextIndex: 0 }, { contextIndex: 1 }] });
+    expect(editSavedStartupText(db, input)).toMatchObject({ ok: false, code: "selection_ambiguous" });
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = 'a'").run("{malformed");
+    expect(applyStartupTextOverrides(db, "a", [old])).toEqual([old]);
+    db.close();
+  });
+
+  it("previews, rejects a stale revision, and updates only the chosen seat", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE rigs (id TEXT PRIMARY KEY, startup_layers_json TEXT); INSERT INTO rigs VALUES ('rig', NULL); CREATE TABLE nodes (id TEXT PRIMARY KEY, rig_id TEXT, launch_recipe_json TEXT); CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT)");
+    const action = { type: "send_text", value: "old", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true };
+    const identity = { ...action, value: "OpenRig session identity: protected" };
+    const recipe = JSON.stringify({ version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "rig", pods: [{ id: "dev", label: "Dev", members: [{ id: "build", agentRef: "local:agent", profile: "default", runtime: "stub", cwd: ".", startup: { files: [], actions: [action] } }] }] } });
+    const actions = JSON.stringify([action, identity]);
+    for (const id of ["a", "b"]) {
+      db.prepare("INSERT INTO nodes VALUES (?, 'rig', ?)").run(id, recipe);
+      db.prepare("INSERT INTO node_startup_context VALUES (?, '[]', '[]', ?, 'codex')").run(id, actions);
+    }
+    const input = { nodeId: "a", logicalId: "dev.build", layer: "member" as const, recipeIndex: 0, contextIndex: 0, value: "new" };
+    expect(inspectSavedStartupText(db, "a", "dev.build")).toMatchObject({ ok: true, candidates: [{ layer: "member", recipeIndex: 0, contextIndex: 0, value: "old" }] });
+    expect(editSavedStartupText(db, { ...input, value: "OpenRig session identity: forged" })).toMatchObject({ ok: false, code: "invalid_startup_text" });
+    expect(editSavedStartupText(db, { ...input, contextIndex: 1 })).toMatchObject({ ok: false, code: "selection_mismatch" });
+    const preview = editSavedStartupText(db, input);
+    expect(preview).toMatchObject({ ok: true, preview: true, from: "old", to: "new" });
+    if (!preview.ok) throw new Error(preview.message);
+    expect(editSavedStartupText(db, { ...input, value: "old", expectedRevision: preview.revision })).toMatchObject({ ok: true, changed: false, revision: preview.revision });
+    db.prepare("UPDATE node_startup_context SET resolved_files_json = ? WHERE node_id = ?").run('["concurrent"]', "a");
+    expect(editSavedStartupText(db, { ...input, expectedRevision: preview.revision })).toMatchObject({ ok: false, code: "stale_revision" });
+    expect((db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id = 'a'").get() as { startup_actions_json: string }).startup_actions_json).toBe(actions);
+    const current = editSavedStartupText(db, input);
+    if (!current.ok) throw new Error(current.message);
+    expect(editSavedStartupText(db, { ...input, expectedRevision: current.revision })).toMatchObject({ ok: true, preview: false, to: "new" });
+    const saved = JSON.parse((db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id = 'a'").get() as { startup_actions_json: string }).startup_actions_json);
+    expect(saved.map((a: { value: string }) => a.value)).toEqual(["new", identity.value]);
+    const savedRecipe = JSON.parse((db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = 'a'").get() as { launch_recipe_json: string }).launch_recipe_json);
+    expect(savedRecipe.rigSpec.pods[0].members[0].startup.actions[0].value).toBe("new");
+    expect((db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = 'b'").get() as { launch_recipe_json: string }).launch_recipe_json).toBe(recipe);
+    db.close();
+  });
+});

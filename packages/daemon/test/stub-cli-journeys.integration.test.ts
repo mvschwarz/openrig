@@ -53,6 +53,65 @@ describe("stub CLI journeys", () => {
     }
   }, 60_000);
 
+  it("updates one seat's startup text with stale-revision protection and uses it at the next start", async () => {
+    const cwd = join(scaffold!.root, "startup-text");
+    mkdirSync(cwd);
+    const up = await runRig(["up", join(library, "rig-startup-text-stub.yaml"), "--cwd", cwd, "--json", "--yes"], daemon!.readEnv, rigBin, 120_000);
+    expect(up.code, JSON.stringify(up)).toBe(0);
+    launchedRigs.push("rig-startup-text");
+    const seat = "work-worker@rig-startup-text";
+    const node = (await cli(["ps", "--nodes", "--rig", "rig-startup-text", "--json", "--full"]))[0];
+    const qitemId = `startup-${randomUUID()}`;
+    await cli(["queue", "create", "--destination", seat, "--id", qitemId, "--body", "Keep this work", "--summary", "Startup text fixture", "--no-nudge", "--json"]);
+    const db = new Database(join(scaffold!.stateDir, "scenario.db"), { readonly: true });
+    try {
+    const queue = () => db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(qitemId);
+    const sessions = () => db.prepare("SELECT id, session_name, status FROM sessions WHERE node_id = ? ORDER BY id").all(node.nodeId);
+    const originalQueue = queue();
+    const originalSessions = sessions();
+    expect(JSON.stringify(await cli(["capture", seat, "--json"]))).toContain("old startup instruction");
+    const replacement = join(cwd, "replacement.txt");
+    writeFileSync(replacement, "new startup instruction");
+    const options = ["seat", "set-startup-text", seat, "--layer", "member", "--recipe-index", "0", "--context-index", "0", "--text-file", replacement, "--json"];
+    const inspected = await cli(["seat", "set-startup-text", seat, "--inspect", "--json"]);
+    const candidate = inspected.candidates.find((entry: { value: string }) => entry.value === "old startup instruction");
+    expect(candidate).toMatchObject({ layer: "member", recipeIndex: 0 });
+    options[options.indexOf("--context-index") + 1] = String(candidate.contextIndex);
+    const preview = await cli(options);
+    expect(preview).toMatchObject({ preview: true, from: "old startup instruction", to: "new startup instruction" });
+    writeFileSync(replacement, "concurrent startup instruction");
+    await cli([...options, "--expected-revision", preview.revision]);
+    writeFileSync(replacement, "new startup instruction");
+    const stale = await runRig([...options, "--expected-revision", preview.revision], { ...daemon!.readEnv, OPENRIG_SESSION_NAME: sender }, rigBin);
+    expect(stale.code).not.toBe(0);
+    expect(JSON.parse(stale.stdout)).toMatchObject({ code: "stale_revision" });
+    const second = await cli(options);
+    expect(second.from).toBe("concurrent startup instruction");
+    await cli([...options, "--expected-revision", second.revision]);
+    const sourceCandidate = (await cli(["seat", "set-startup-text", seat, "--inspect", "--json"])).candidates.find((entry: { value: string }) => entry.value === "shared source instruction");
+    expect(sourceCandidate).toMatchObject({ layer: "context" });
+    writeFileSync(replacement, "seat-specific source instruction");
+    const sourceOptions = ["seat", "set-startup-text", seat, "--layer", "context", "--recipe-index", "0", "--context-index", String(sourceCandidate.contextIndex), "--text-file", replacement, "--json"];
+    const sourcePreview = await cli(sourceOptions);
+    await cli([...sourceOptions, "--expected-revision", sourcePreview.revision]);
+    expect(queue()).toEqual(originalQueue);
+    expect(sessions()).toEqual(originalSessions);
+    expect(JSON.stringify(await cli(["capture", seat, "--json"]))).not.toContain("new startup instruction");
+    await cli(["seat", "launch", seat, "--fresh", "--stop", "--reason", "startup text fixture", "--json"]);
+    const captured = await cli(["capture", seat, "--json"]);
+    expect(JSON.stringify(captured)).toContain("new startup instruction");
+    expect(JSON.stringify(captured)).toContain("seat-specific source instruction");
+    expect(queue()).toEqual(originalQueue);
+    const afterStart = await cli(["seat", "set-startup-text", seat, "--inspect", "--json"]);
+    const override = afterStart.candidates.find((entry: { value: string }) => entry.value === "seat-specific source instruction");
+    const clearOptions = ["seat", "set-startup-text", seat, "--clear-override", "--context-index", String(override.contextIndex), "--json"];
+    const clear = await cli(clearOptions);
+    expect(clear).toMatchObject({ preview: true, clearOverride: true });
+    expect(await cli([...clearOptions, "--expected-revision", clear.revision])).toMatchObject({ preview: false, clearOverride: true });
+    expect(queue()).toEqual(originalQueue);
+    } finally { db.close(); }
+  }, 120_000);
+
   it.each(["normal", "narrow soft-wrap"])("verified send renders in the addressed pane and not its sibling: %s", async (mode) => {
     if (mode === "narrow soft-wrap") {
       execFileSync("tmux", ["-S", scaffold!.tmuxSocketPath, "resize-window", "-t", `=${recipient}:`, "-x", "42", "-y", "40"], { env: scaffold!.env });

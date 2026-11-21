@@ -511,6 +511,24 @@ Per harness: Claude Code's and Codex's permission choices are in the setup refer
 
 ---
 
+### Replace saved application startup text
+
+Prefer a startup file for guidance that changes regularly: adapters read its current contents when the file is eligible for delivery. An existing seat can also have application-authored `send_text` embedded in its saved startup context and its launch recipe. To replace one such action without starting the seat, first inspect its selectable positions:
+
+```bash
+rig seat set-startup-text dev-impl@my-rig --inspect
+rig seat set-startup-text dev-impl@my-rig --layer member --recipe-index 0 --context-index 2 --text-file ./replacement.txt
+rig seat set-startup-text dev-impl@my-rig --layer member --recipe-index 0 --context-index 2 --text-file ./replacement.txt --expected-revision <revision-from-preview>
+```
+
+The second command previews the old and replacement text. The last applies only if the saved context, recipe and shared rig layer still match the preview revision, then reads back the saved text. It changes only the selected seat's saved context and recipe; it does not relaunch, send to its current conversation, or change identity and queue work. An action's `applies_on` and idempotence still govern delivery. Snapshots already captured retain their own startup text; a later snapshot captures the updated context.
+
+`--inspect` lists application actions from the seat's saved context and the rig, pod and member layers of its own recipe. It omits generated identity and other platform actions. A unique action supplied by an agent/profile source or inherited shared rig layer appears as layer `context` with recipe index `0`. Its replacement is recorded for this seat; the shared source remains unchanged. At a future fresh start OpenRig matches the original action against the resolved source. If it no longer matches uniquely, OpenRig keeps the replacement, uses the current source and warns. Inspection reports an override as stale when the current source cannot be matched, or as source-unverified when source resolution is unavailable. An overlapping edit is allowed and reported in preview; ambiguous overrides are skipped at start. Identical duplicate saved actions cannot be selected this way. For recipe layers, the two indexes must identify the same action. A stale revision requires a fresh preview. Inspect the saved text before retrying if the outcome of an apply is unknown.
+
+To remove a seat-only source override after its source changes, inspect its `overrideIndex`, preview `rig seat set-startup-text <seat> --clear-override --override-index <index>`, then repeat with `--expected-revision` from that preview. The earlier `--context-index` selector remains available when the saved action still identifies the override. Clearing leaves the saved context unchanged; a fresh launch resolved from the recipe uses the current source.
+
+Rig export cannot express seat-specific substitutions to shared rig, pod or source actions. Export names the affected seats as not carried; inspect those actions before importing the exported spec.
+
 ## Deterministic Configuration
 
 The AgentSpec and RigSpec allow declaring deterministic environment configuration:
