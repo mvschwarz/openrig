@@ -4,14 +4,15 @@ import { describe, it, expect } from "vitest";
 import { deriveRelayEvents } from "../src/domain/claude-activity-hooks.js";
 
 describe("restore-check Claude activity-hook contract", () => {
-  it("derives all delivery events, including the optional diagnostic, from the shipped manifest", () => {
+  it("derives all delivery events, including the optional diagnostic and elicitation pair, from the shipped manifest", () => {
     const manifestPath = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json");
     const events = deriveRelayEvents({
       exists: existsSync,
       readFile: (file) => readFileSync(file, "utf-8"),
     }, manifestPath).map(({ event }) => event);
 
-    expect(events).toEqual(["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolBatch", "Stop", "StopFailure", "Notification"]);
+    expect(events).toEqual(["SessionStart", "UserPromptSubmit", "PermissionRequest", "Elicitation", "ElicitationResult", "PostToolBatch", "Stop",
+      "StopFailure", "Notification"]);
   });
 
   it("does not claim hook readiness when the canonical manifest is unavailable", () => {
