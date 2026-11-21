@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
-import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter, mockNativeRuntime } from "./helpers/test-app.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import type { RigSpec } from "../src/domain/types.js";
@@ -66,6 +66,7 @@ describe("persisted pod-aware launch recipes", () => {
     const launchHarness = vi.fn(async () => ({ ok: true as const }));
     const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
     const setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       adapters: {
         codex: {
           runtime: "codex",
@@ -248,6 +249,7 @@ describe("persisted pod-aware launch recipes", () => {
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
@@ -380,7 +382,7 @@ describe("persisted pod-aware launch recipes", () => {
     // The provisional shell's start couldn't be told; the replacement's is known not applied: the node reports the
     // replacement's.
     const provisional = { state: "unknown" as const, kind: "unverified" as const, reason: "the start was not seen", retryable: true };
-    const tmux = mockTmuxAdapter();
+    const { tmux, listProcesses } = mockNativeRuntime(() => "codex");
     let recoveries = 0;
     const createSession = vi.fn(async (_name: string, _cwd?: string, _env?: Record<string, string>,
       launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => launchOpts?.processLimitsMode === "recovery"
@@ -389,6 +391,7 @@ describe("persisted pod-aware launch recipes", () => {
     (tmux as unknown as Record<string, unknown>).createSession = createSession;
     setup = createTestApp(db, {
       tmux,
+      listProcesses,
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
@@ -458,6 +461,7 @@ describe("persisted pod-aware launch recipes", () => {
       [`${rigRoot}/agents/shared/agent.yaml`]: `name: shared\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    compaction_strategy: harness_native\nresources:\n  skills: []\nprofiles: {}\n`,
     };
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
@@ -644,6 +648,7 @@ describe("a restore reports the stored pool block of a model seat", () => {
     const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
