@@ -114,6 +114,26 @@ describe("OPR.0.4.3.33 — computeCodexHookTrust (key + hash derivation)", () =>
   });
 });
 
+it("preserves the actual status message in markerless activity-hook trust", () => {
+  const statusMessage = "OpenRig: record permission request";
+  const own = computeCodexHookTrust("PermissionRequest", { keySource: CONFIG, command: COMMAND, timeoutSec: 5, groupIndex: 1, statusMessage });
+  const stale = computeCodexHookTrust("PermissionRequest", { keySource: CONFIG, command: COMMAND, timeoutSec: 5, groupIndex: 1 });
+  // Independent pin (CodeRabbit on #3451): Codex 0.170.0 `hooks/list` reports this currentHash for this exact
+  // handler (command, timeout 5, this statusMessage, no matcher), so the test fails if the shared recipe
+  // stops hashing statusMessage, even when own and stale would then compute the same value.
+  expect(own.hash).toBe("sha256:ed94749d59ee1fe17a7123881b817fb04ee04756239dd4466018774f366dd3f4");
+  expect(stale.hash).not.toBe(own.hash);
+  const other = `${CONFIG}:permission_request:0:0`;
+  const input = `[features]\nhooks = true\n\n[[hooks.PermissionRequest]]\nhooks = [{ type = "command", command = "other", timeout = 10 }]\n\n[[hooks.PermissionRequest]]\n[[hooks.PermissionRequest.hooks]]\ntype = "command"\ncommand = '${COMMAND}'\ntimeout = 5\nstatusMessage = '${statusMessage}'\n\n[hooks.state."${other}"]\nenabled = false\ntrusted_hash = "sha256:other"\n\n[hooks.state."${own.key}"]\nenabled = true\ntrusted_hash = "${stale.hash}"\n`;
+  const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: input });
+  const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs, activityRelayPath: RELAY });
+  adapter.ensureCodexActivityHooks();
+  const output = fs._store[CONFIG]!;
+  expect(output).toBe(input.replace(stale.hash, own.hash));
+  adapter.ensureCodexActivityHooks();
+  expect(fs._store[CONFIG]).toBe(output);
+});
+
 describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, section-scoped)", () => {
   const KEY = PROVISIONAL_FIXTURE.SessionStart.key;
   const HASH = PROVISIONAL_FIXTURE.SessionStart.hash;
