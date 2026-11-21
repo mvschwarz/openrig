@@ -1353,6 +1353,21 @@ export class RestoreOrchestrator {
           ...notStarted };
       }
     }
+    const carried = opts?.resumePeriodicCarry && !selectedHistory && !freshRequested
+      && occupantResolution.kind === "none" && liveNode?.id === nodeId
+      ? data.periodicResumeSourcesByNode?.[nodeId] : undefined;
+    if (carried && carried.nodeId !== nodeId) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: "The periodic resume source belongs to another agent. No session was started." };
+    }
+    if (carried) {
+      // The launch lifecycle lease is held here, before any stale-state cleanup
+      // or destination registration. Capture-time eligibility can have expired
+      // without another tick; never resume a conversation a fresh launch retired.
+      if (!periodicCarryIsCurrent(this.db, this.sessionRegistry.getSessionsForRig(rigId), rigId, nodeId, carried, liveNode?.runtime, node.runtime)) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
+      }
+    }
     // R2b/C (#2829 review): the same protection for a snapshot that has no occupant for
     // the seat. Two ways a cold start would silently replace a conversation the seat had:
     //   R2b — the seat started after the snapshot was taken, so a live session is newer
@@ -1360,8 +1375,11 @@ export class RestoreOrchestrator {
     //   C — the snapshot explicitly recorded the occupant absent but retained the seat's
     //   conversation history under resume_if_possible with no token, which the
     //   resume-history guard skips. Both park for a decision instead of fresh-launching;
-    //   explicit history selection and --fresh deliberately override.
-    if (opts?.requireCurrentOccupant && occupantResolution.kind === "none" && !selectedHistory && !freshRequested) {
+    //   explicit history selection and --fresh deliberately override. An eligible selected
+    //   carry is validated above and resumes below, so both parks give way to it
+    //   (round 4: C must not park a valid periodic carry).
+    if (opts?.requireCurrentOccupant && occupantResolution.kind === "none" && !selectedHistory
+      && !freshRequested && !carried) {
       const seatSessions = data.sessions.filter(row => row.nodeId === nodeId);
       const latestLive = this.sessionRegistry.getSessionsForRig(rigId)
         .filter(row => row.nodeId === nodeId)
@@ -1377,21 +1395,6 @@ export class RestoreOrchestrator {
         return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
           error: `${why} No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
           ...notStarted };
-      }
-    }
-    const carried = opts?.resumePeriodicCarry && !selectedHistory && !freshRequested
-      && occupantResolution.kind === "none" && liveNode?.id === nodeId
-      ? data.periodicResumeSourcesByNode?.[nodeId] : undefined;
-    if (carried && carried.nodeId !== nodeId) {
-      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: "The periodic resume source belongs to another agent. No session was started." };
-    }
-    if (carried) {
-      // The launch lifecycle lease is held here, before any stale-state cleanup
-      // or destination registration. Capture-time eligibility can have expired
-      // without another tick; never resume a conversation a fresh launch retired.
-      if (!periodicCarryIsCurrent(this.db, this.sessionRegistry.getSessionsForRig(rigId), rigId, nodeId, carried, liveNode?.runtime, node.runtime)) {
-        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
-          error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
       }
     }
     const resumeSession = occupantResolution.kind === "resolved" ? occupantResolution.session : carried ?? null;

@@ -277,4 +277,25 @@ it("parks an explicitly-absent snapshot occupant that retains resume history wit
   expect(pi.resume).not.toHaveBeenCalled();
   expect(createSession).not.toHaveBeenCalled();
 });
+
+// #3173 review round 4 — the control for the C park: with periodic snapshots on, a seat
+// that crashed before the periodic tick is recorded absent-occupant-with-history by the
+// auto-periodic capture while KEEPING its token as the periodic resume source. That valid
+// carry must not be parked by the C guard; the cold start resumes the exact conversation.
+it("resumes a valid periodic carry instead of parking it", async () => {
+  sessionRegistry.updateResumeToken(implSessionId(), "pi_session_file", SESSION_FILE);
+  db.prepare("UPDATE sessions SET restore_policy = 'resume_if_possible' WHERE id = ?").run(implSessionId());
+  snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+  sessionRegistry.updateStatus(implSessionId(), "exited"); // crashed before the periodic tick
+  snapshotCapture.captureSnapshot(rigId, "auto-periodic"); // occupant absent, token carried
+  const resume = vi.fn(async () => ({ ok: true as const }));
+  const pi = { canResume: vi.fn(() => true), resume } as unknown as PiResumeAdapter;
+  const starter = starterFor(orchestratorWith(pi));
+
+  starter.notify(SEAT_SESSION);
+  await vi.waitFor(() => expect(ledger()).toBe("resumed"));
+
+  expect(resume).toHaveBeenCalledTimes(1);
+  expect(resume.mock.calls[0]!.slice(1, 4)).toEqual(["pi_session_file", SESSION_FILE, "./"]);
+});
 });
