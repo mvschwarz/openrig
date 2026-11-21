@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { TmuxAdapter, defaultTmuxFileOps, escapeTmuxCommandSeparator } from "../src/adapters/tmux.js";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { TmuxAdapter, defaultTmuxFileOps, escapeTmuxCommandSeparator, isStagedSendScriptPath, tmuxStagingDir } from "../src/adapters/tmux.js";
 import type { ExecFn, TmuxResult, TmuxFileOps, ArgvExecFn } from "../src/adapters/tmux.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
@@ -1821,5 +1824,30 @@ describe("TmuxAdapter pane-local options (in-place restart)", () => {
       "tmux set-option -p -u -t %1 remain-on-exit",
       "tmux set-option -p -t %1 remain-on-exit on",
     ]);
+  });
+});
+
+describe("staged files", () => {
+  // Every file the adapter stages (launch scripts, environment files, the scope marker, private configs, paste buffers)
+  // takes its name from tmpName.
+  it("are staged in the OpenRig home's runtime folder, created owner-only, and keep their mode and cleanup", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tmux-staging-home-"));
+    vi.stubEnv("OPENRIG_HOME", home);
+    try {
+      const files = defaultTmuxFileOps();
+      const file = files.tmpName();
+      expect(dirname(file)).toBe(join(home, "run", "tmux-staging"));
+      expect(tmuxStagingDir()).toBe(dirname(file));
+      expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+      expect(isStagedSendScriptPath(file)).toBe(true);
+      await files.writeFile(file, "exec true\n", { mode: 0o600, flag: "wx" });
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      await files.unlink(file);
+      expect(existsSync(file)).toBe(false);
+      expect(files.tmpName()).not.toBe(file);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

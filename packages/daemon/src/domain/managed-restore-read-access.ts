@@ -21,6 +21,13 @@ export function postCompactExtraSetting(value: string | null | undefined): strin
   return value?.trim() || null;
 }
 
+/** Where Claude's PreCompact hook writes restore packets: the OpenRig home's runtime folder, created owner-only. The hook
+ *  and `restore-from-jsonl.mjs` resolve the same folder from the seat's OPENRIG_HOME, and OPENRIG_COMPACTION_OUT_ROOT
+ *  overrides all three. The read grant and the enforcer's restore request name it through this. */
+export function compactionPacketRoot(openrigHome: string): string {
+  return process.env.OPENRIG_COMPACTION_OUT_ROOT || path.join(openrigHome, "run", "compaction-restore");
+}
+
 // These are permission patterns, not shell arguments. Keep literal path components
 // literal; only the attempt/timestamp segment below is a wildcard.
 function literalPath(value: string): string {
@@ -71,7 +78,7 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
   // Fresh/fork launches know their own UUID. Never grant the fork parent's or
   // another seat's packet directory; a legacy name is not a packet identity.
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(context.nativeSessionId)) {
-    for (const packets of spellings(process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore")) {
+    for (const packets of spellings(compactionPacketRoot(context.openrigHome))) {
       for (const file of ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]) {
         files.push(`${packets}/${context.nativeSessionId}-*/${file}`);
       }

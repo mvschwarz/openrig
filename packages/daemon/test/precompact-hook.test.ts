@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -76,7 +76,7 @@ function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.Pr
 
 function runBridge(openrigHome: string, input: Record<string, unknown> = {
   hook_event_name: "UserPromptSubmit",
-}): { stdout: string; stderr: string; status: number | null } {
+}, extraEnv: NodeJS.ProcessEnv = {}): { stdout: string; stderr: string; status: number | null } {
   const result = spawnSync(process.execPath, [BRIDGE_SCRIPT], {
     input: JSON.stringify({ transcript_path: join(dirname(openrigHome), "transcript.jsonl"), ...input }),
     encoding: "utf8",
@@ -85,6 +85,7 @@ function runBridge(openrigHome: string, input: Record<string, unknown> = {
       OPENRIG_HOME: openrigHome,
       OPENRIG_SESSION_NAME: "test-seat@kernel",
       RIGGED_HOME: undefined,
+      ...extraEnv,
     } as NodeJS.ProcessEnv,
   });
   return {
@@ -134,6 +135,13 @@ function writePartialPolicyConfig(home: string, policy: Record<string, unknown>)
   );
 }
 
+/** The fixture seat's pending marker, found by listing its folder (the sentinel beside it ends in .expected.json). */
+function pendingMarker(openrigHome: string): string {
+  const dir = join(openrigHome, "compaction", "restore-pending");
+  const [name] = readdirSync(dir).filter(n => n.endsWith(".json") && !n.endsWith(".expected.json"));
+  return join(dir, name!);
+}
+
 describe("precompact-hook.mjs (slice 27 custom message append)", () => {
   let tmpDir: string;
   let openrigHome: string;
@@ -152,6 +160,50 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(JSON.parse(stdout).systemMessage).toContain("Pre-compaction restore seed packet prepared");
     const marker = JSON.parse(readFileSync(join(openrigHome, "compaction/restore-pending/test-seat@kernel.json"), "utf8"));
     expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
+  });
+
+  it("with no packet root set, writes the packet in the OpenRig home's runtime folder, owner-only, and names it", () => {
+    const { stdout, status } = runHook(openrigHome, true, { OPENRIG_COMPACTION_OUT_ROOT: undefined });
+    expect(status).toBe(0);
+    const packets = join(openrigHome, "run", "compaction-restore");
+    const markerPath = pendingMarker(openrigHome);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(dirname(marker.outputDir)).toBe(packets);
+    expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
+    expect(statSync(packets).mode & 0o777).toBe(0o700);
+    expect(statSync(marker.outputDir).mode & 0o777).toBe(0o700);
+    const message = JSON.parse(stdout).systemMessage as string;
+    expect(message).toContain(`it writes under ${packets}`);
+    expect(message).not.toContain("/tmp/claude-compaction-restore");
+
+    // A marker that doesn't name its packet: the bridge points at the same folder.
+    delete marker.outputDir;
+    writeFileSync(markerPath, JSON.stringify(marker));
+    const bridge = runBridge(openrigHome, { hook_event_name: "UserPromptSubmit" }, { OPENRIG_COMPACTION_OUT_ROOT: undefined });
+    expect(bridge.status).toBe(0);
+    expect(JSON.parse(bridge.stdout.trim()).hookSpecificOutput.additionalContext).toContain(`Restore packet: ${packets}`);
+  });
+
+  it("a new packet removes packets older than a week, and only folders named as packets", () => {
+    const packets = join(tmpDir, "packets");
+    const folder = (name: string, ageDays: number) => {
+      const dir = join(packets, name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "restore-instructions.md"), "old");
+      const at = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000);
+      utimesSync(dir, at, at);
+      return dir;
+    };
+    const old = folder("11111111-1111-4111-8111-111111111111-2026-11-01T00-00-00-000Z", 8);
+    const recent = folder("22222222-2222-4222-8222-222222222222-2026-11-20T00-00-00-000Z", 6);
+    const unrelated = folder("notes-from-someone", 30);
+    const { status } = runHook(openrigHome);
+    expect(status).toBe(0);
+    const marker = JSON.parse(readFileSync(pendingMarker(openrigHome), "utf8"));
+    expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(recent)).toBe(true);
+    expect(existsSync(unrelated)).toBe(true);
   });
 
   it("HG-6: inline message is appended to systemMessage", () => {

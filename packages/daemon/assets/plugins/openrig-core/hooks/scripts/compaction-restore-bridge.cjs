@@ -129,7 +129,8 @@ function writeMarker(marker) {
 }
 
 function buildRestoreContext(marker) {
-  const outputDir = firstString(marker.data.outputDir) || "/tmp/claude-compaction-restore";
+  const outputDir = firstString(marker.data.outputDir)
+    || firstString(process.env.OPENRIG_COMPACTION_OUT_ROOT) || path.join(openrigHome(), "run", "compaction-restore");
   const ack = firstString(marker.data.expectedAck) || "restored from packet at <path>; resumed at step <X>";
   const postInstruction = firstString(marker.data.postCompactInstruction);
   const restoreMapPath = firstString(marker.data.restoreMapPath);
