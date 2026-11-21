@@ -38,6 +38,7 @@ import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js"
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
 import { startSeatPollers } from "./domain/seat-activity-service.js";
+import { startIdentityReconciler } from "./domain/seat-identity-reconciler.js";
 import {
   ensureOpenRigInstance,
   formatInstanceInitializationConflicts,
@@ -424,7 +425,9 @@ export async function startServer(port?: number) {
         // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
         // Persists the per-seat pane PID/command verdict so node-inventory
         // gates the running/active projection on verified process identity.
-        deps.seatIdentityReconciler?.start();
+        // daemon.identity_poll_interval_ms (OPENRIG_IDENTITY_POLL_INTERVAL_MS) slows it down (default 5 s,
+        // unchanged); startup-only: read once here.
+        startIdentityReconciler(deps.seatIdentityReconciler);
         startPeriodicSnapshotScheduler(deps);
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).

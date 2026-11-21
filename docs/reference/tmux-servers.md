@@ -254,3 +254,20 @@ runs over skips the next tick, the Codex working-frame proof expires, and a work
 can briefly read idle. At 2000 ms the remaining 1 s margin is also what a lagging event loop
 uses up. The two settings compose: `OPENRIG_TMUX_CONTROL=1` makes each tmux command cheaper,
 and this one makes there be fewer of them.
+
+The seat identity reconciler is a third poller: every 5 s it reads each running seat's pane
+process from tmux, and for some seats the host's process table, to record whether the pane still
+runs the seat's agent. The setting `daemon.identity_poll_interval_ms` slows it down, from the
+5000 ms default up to 30000 ms. Set it with `rig config set daemon.identity_poll_interval_ms 15000`
+or with `OPENRIG_IDENTITY_POLL_INTERVAL_MS`, which overrides the saved value. Like the seat poll
+interval, it is startup-only (a change takes a daemon restart), `rig config set` refuses a value
+outside 5000..30000, and an environment value outside it is dropped with a warning.
+The cost is staleness. A longer interval can delay the sweep noticing a stopped seat or a changed
+pane process, updating the seat's identity verdict, and revoking the activity grants that go with
+it. The verdict feeds the running and active views, and sends and reads that name an expected
+identity (and resume of the original conversation) need a verified one: a seat that `rig up` has
+just launched answers those with `expected_identity_unavailable` until its first sweep. The delay
+is one interval plus the time the sweep takes; a sweep that runs past the next tick makes that
+tick skip, so it can approach two intervals, and after a daemon start the first sweep runs one
+interval in. Keep the default unless the reconciler's reads are a measured share of the daemon's
+load.
