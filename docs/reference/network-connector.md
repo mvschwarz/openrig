@@ -144,7 +144,8 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
 
 - **`--id` is your own id for this request,** unique to it. It becomes the local item's id. To retry a request whose
   outcome you don't know, send it again with the same id: the hub item is looked up by its id first, and created under
-  that id only if the hub has none. The same id with a different request is refused
+  that id only if the hub answers that it has none. If the hub can't answer, the outcome stays unknown and a later try
+  asks again. The same id with a different request is refused
   (`request_id_reused`), and so is an id that already names another local item.
 - **The request is recorded here first,** as a local queue item from the seat to OpenRig, parked on the hub item
   (`external:network-request/<hub item>`). It's addressed to OpenRig rather than the seat, so the seat owes nothing on it

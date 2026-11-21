@@ -195,8 +195,9 @@ function beforeCreate(deps: NetworkRequestDeps, bindingId: string, receipt: Requ
 type Reached = CreateOutcome | { kind: "found"; item: HubItem } | { kind: "stopped"; stop: CreateStop };
 
 /** The request's hub item, read before any create. With `showFirst` (a request the hub may already hold), it's shown by
- *  its id first, and only a confirmed qitem_not_found, for a request the hub never confirmed, goes on to the create under
- *  that id; any other answer to the show (unavailable, out of scope, unreadable) leaves the outcome unknown. The command's
+ *  its id first, and only a refusal with qitem_not_found, for a request the hub never confirmed, goes on to the create
+ *  under that id; any other answer to the show (unavailable whatever its code, out of scope, unreadable) leaves the
+ *  outcome unknown. The command's
  *  retry and the connector's pass both go through here. A revoked credential is thrown. */
 async function reachOnHub(deps: NetworkRequestDeps, hub: HubSession, bindingId: string, receipt: RequestRow, showFirst: boolean,
   live: () => boolean = () => true): Promise<Reached> {
@@ -205,7 +206,7 @@ async function reachOnHub(deps: NetworkRequestDeps, hub: HubSession, bindingId: 
       return { kind: "found", item: await hub.show(receipt.hub_qitem_id) };
     } catch (error) {
       if (!(error instanceof HubError) || error.kind === "revoked") throw error;
-      if (receipt.hub_created_at || error.code !== "qitem_not_found") return { kind: "unknown", error };
+      if (receipt.hub_created_at || error.kind !== "refused" || error.code !== "qitem_not_found") return { kind: "unknown", error };
     }
   }
   const ready = beforeCreate(deps, bindingId, receipt, live);

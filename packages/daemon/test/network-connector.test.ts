@@ -910,6 +910,20 @@ describe("network connector", () => {
       expect(outcome("req-15")).toEqual({ outcome: null });
     });
 
+    it("a show answering unavailable with a not-found code creates nothing, and the request stays unknown", async () => {
+      const b = bind();
+      hub.down = true;
+      expect((await send(b.id, "req-17")).state).toBe("unknown");
+      hub.down = false;
+      const hubId = networkHubRequestId(b, "req-17");
+      hub.duringShow = (id) => { if (id === hubId) throw new HubError("unavailable", "The hub couldn't tell.", "qitem_not_found"); };
+      expect((await send(b.id, "req-17")).state).toBe("unknown");
+      await pass(b.id);
+      expect(hub.creates).toBe(0);
+      expect(repo.getById("req-17")!.state).toBe("blocked");
+      expect(outcome("req-17")).toEqual({ outcome: null });
+    });
+
     it("a hub holding a different request under the derived id refuses it rather than confirming it", async () => {
       const b = bind();
       const hubId = networkHubRequestId(b, "req-16");
