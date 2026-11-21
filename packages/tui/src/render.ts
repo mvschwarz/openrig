@@ -424,6 +424,9 @@ function agentDetailLines(
           // effort report is this host's read — a remote seat has none here.
           ...(localSeat ? wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth) : []),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
+          ...(localSeat && (agent.canRun ?? !agent.live)
+            ? [fieldLine({ label: "action", value: "run ▸", link: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: agent.name } })]
+            : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
           ...(localSeat
             ? [fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } })]
@@ -1495,6 +1498,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 export interface RenderOptions {
   /** Independent endpoint chosen for a standalone TUI after a collision. */
   controlSocketPath?: string;
+  /** No control socket could be bound this session; the status bar says so. */
+  controlSocketUnavailable?: boolean;
   /** First visit: preserve the prior frame with its original label and no effect targets. */
   previousPage?: { state: ViewState; snapshot: FleetSnapshot };
   startup?: StartupState;
@@ -1914,6 +1919,13 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     screen.lines[row] = pad(`${label} ${socketPath} · ${screen.lines[row]!.trimEnd()}`, cols);
     // The status stays compact; its copy target retains the actual bound path.
     screen.hitMap.unshift({ y: row + 1, x1: 1, x2: Math.min(cols, label.length), action: { type: "print-for-copy", label: "Control socket", value: options.controlSocketPath } });
+    if (screen.segRows) delete screen.segRows[row + 1];
+  } else if (options.controlSocketUnavailable && screen.lines.length) {
+    // Said here rather than only in a notice: a notice is replaced as soon as work is chosen, and this
+    // is a fact about the session that stays true. Short on purpose, so it fits a narrow status bar.
+    const row = screen.lines.length - 1;
+    const cols = options.cols ?? 120;
+    screen.lines[row] = pad(`socket: unavailable · ${screen.lines[row]!.trimEnd()}`, cols);
     if (screen.segRows) delete screen.segRows[row + 1];
   }
   const commandReady = !state.palette && !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");

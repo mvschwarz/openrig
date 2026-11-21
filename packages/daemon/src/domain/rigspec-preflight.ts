@@ -21,6 +21,10 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "omp": "omp --version",
 };
 
+export function unverifiedModelWarning(seat: string, model: string): string {
+  return `${seat}: configured model '${model}' is unverified. Launch checks do not establish model availability or account entitlement; no model call is made to verify it.`;
+}
+
 interface RigSpecPreflightDeps {
   rigRepo: RigRepository;
   tmuxAdapter: TmuxAdapter;
@@ -44,7 +48,7 @@ export class RigSpecPreflight {
     this.cmuxExec = deps.cmuxExec;
   }
 
-  async check(spec: RigSpec): Promise<PreflightResult> {
+  async check(spec: RigSpec, includeModelWarnings = true): Promise<PreflightResult> {
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -107,6 +111,7 @@ export class RigSpecPreflight {
     // Runtime availability
     const checkedRuntimes = new Set<string>();
     for (const node of spec.nodes) {
+      if (includeModelWarnings && node.model) warnings.push(unverifiedModelWarning(node.id, node.model));
       if (checkedRuntimes.has(node.runtime)) continue;
       checkedRuntimes.add(node.runtime);
 
@@ -147,7 +152,7 @@ export class RigSpecPreflight {
 // -- Rebooted rig preflight (AgentSpec reboot) --
 
 import { RigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema } from "./rigspec-schema.js";
+import { RigSpecSchema, poolAdvisories } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
@@ -175,6 +180,7 @@ const DEFAULT_ACTIVITY_RELAY_PATH = nodePath.resolve(import.meta.dirname, "../..
 const DEFAULT_CLAUDE_HOOKS_MANIFEST_PATH = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/claude.json");
 
 export interface RigPreflightInput {
+  includeModelWarnings?: boolean;
   /** One-off launch environment, merged after the rig and member declarations. */
   envOverride?: SeatEnv;
   rigSpecYaml: string;
@@ -197,6 +203,7 @@ export interface RigPreflightInput {
  * already-parsed+validated spec. (YAML is only the input adapter at the front.)
  */
 export interface PreflightSpecContext {
+  includeModelWarnings?: boolean;
   envOverride?: SeatEnv;
   rigRoot: string;
   cwdOverride?: string;
@@ -309,8 +316,9 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
   // callers holding an already-parsed+validated spec (expand / add_member)
   // preflight it WITHOUT a YAML round-trip. Mirrors the materialize-core split.
   let rigSpec: PodRigSpec;
+  let raw: unknown;
   try {
-    const raw = RigSpecCodec.parse(input.rigSpecYaml);
+    raw = RigSpecCodec.parse(input.rigSpecYaml);
     const validation = RigSpecSchema.validate(raw, { externalQualifiedIds: input.externalQualifiedIds });
     if (!validation.valid) {
       return { ready: false, errors: validation.errors, warnings: [] };
@@ -320,7 +328,10 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     return { ready: false, errors: [`Parse error: ${(err as Error).message}`], warnings: [] };
   }
 
-  return preflightValidatedSpec(rigSpec, {
+  // #3395: the pool advisories join the load warnings here, once; the structured core below and the
+  // instantiator's own preflight do not add them, so import and bootstrap plan/apply report each one once.
+  const result = await preflightValidatedSpec(rigSpec, {
+    includeModelWarnings: input.includeModelWarnings,
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
     envOverride: input.envOverride,
@@ -332,6 +343,8 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     exec: input.exec,
     claudeActivityAssets: input.claudeActivityAssets,
   });
+  const pool = poolAdvisories(raw);
+  return pool.length > 0 ? { ...result, warnings: [...result.warnings, ...pool] } : result;
 }
 
 /**
@@ -379,6 +392,7 @@ async function preflightMembers(
   // 3. For each pod member: resolve agent_ref + profile, check runtime, check cwd
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
+      if (preflightCtx.includeModelWarnings !== false && member.model) warnings.push(unverifiedModelWarning(`${pod.id}.${member.id}`, member.model));
       // Terminal members: skip agent resolution and profile resolution
       if (member.agentRef === "builtin:terminal") {
         // Only validate runtime and cwd for terminal members
