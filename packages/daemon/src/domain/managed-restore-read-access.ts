@@ -25,7 +25,7 @@ export function postCompactExtraSetting(value: string | null | undefined): strin
  *  and `restore-from-jsonl.mjs` resolve the same folder from the seat's OPENRIG_HOME, and OPENRIG_COMPACTION_OUT_ROOT
  *  overrides all three. The read grant and the enforcer's restore request name it through this. */
 export function compactionPacketRoot(openrigHome: string): string {
-  return process.env.OPENRIG_COMPACTION_OUT_ROOT || path.join(openrigHome, "run", "compaction-restore");
+  return path.resolve(process.env.OPENRIG_COMPACTION_OUT_ROOT || path.join(openrigHome, "run", "compaction-restore"));
 }
 
 // These are permission patterns, not shell arguments. Keep literal path components

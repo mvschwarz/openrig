@@ -1,8 +1,8 @@
 import type { InputReadDiagnostic } from "../domain/input-read-diagnostic.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
-import { writeFile as fsWriteFile, unlink as fsUnlink, readFile as fsReadFile } from "node:fs/promises";
-import { accessSync, mkdirSync, statSync, constants as fsConstants } from "node:fs";
-import { join as pathJoin, isAbsolute as pathIsAbsolute } from "node:path";
+import { writeFile as fsWriteFile, unlink as fsUnlink, readFile as fsReadFile, mkdir as fsMkdir } from "node:fs/promises";
+import { accessSync, statSync, constants as fsConstants } from "node:fs";
+import { join as pathJoin, isAbsolute as pathIsAbsolute, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
@@ -76,20 +76,21 @@ export function isStagedSendScriptPath(path: string): boolean {
 
 /** Where the files tmux and a pane's shell later read or run (launch scripts, environment files, buffers) are staged:
  *  the OpenRig home's runtime folder, created owner-only, so nothing else that can write the shared temp folder can
- *  replace one between the write and its use. */
+ *  replace one between the write and its use. Resolved against the daemon's cwd, as `run/seat-bin` is, because tmux and
+ *  the pane's shell read the path from their own cwd. */
 export function tmuxStagingDir(): string {
-  return getDefaultOpenRigPath(pathJoin("run", "tmux-staging"));
+  return pathResolve(getDefaultOpenRigPath(pathJoin("run", "tmux-staging")));
 }
 
 export function defaultTmuxFileOps(): TmuxFileOps {
   return {
-    writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
-    unlink: (p) => fsUnlink(p),
-    tmpName: () => {
-      const dir = tmuxStagingDir();
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      return pathJoin(dir, `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`);
+    // The folder is made where the file is written, inside each caller's error handling.
+    writeFile: async (p, content, options) => {
+      await fsMkdir(pathDirname(p), { recursive: true, mode: 0o700 });
+      await fsWriteFile(p, content, { encoding: "utf8", ...options });
     },
+    unlink: (p) => fsUnlink(p),
+    tmpName: () => pathJoin(tmuxStagingDir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
     bufferName: () => `openrig_${process.pid}_${randomUUID().replace(/-/g, "")}`,
   };
 }

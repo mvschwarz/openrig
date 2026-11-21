@@ -204,6 +204,7 @@ it("with no packet root set, the restore request and the grant both name the Ope
   const home = path.join(root, "home"), packets = path.join(home, "run", "compaction-restore");
   const seat = deriveCanonicalSessionName("dev", "owner", "rig");
   expect(compactionPacketRoot(home)).toBe(packets);
+  expect(compactionPacketRoot(path.relative(process.cwd(), home))).toBe(packets);
   for (const sessionId of [CHILD, null]) {
     const prompt = buildPostCompactRestorePrompt({ sessionName: seat, openrigHome: home, sessionId });
     expect(prompt).toContain(`inspect the newest matching packet under ${packets}/ for `);
