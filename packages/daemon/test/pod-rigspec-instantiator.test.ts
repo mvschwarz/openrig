@@ -945,6 +945,34 @@ profiles:
     } finally { db.close(); }
   });
 
+  it("launches an edited rig-layer action from the seat's recipe", async () => {
+    const { editSavedStartupText } = await import("../src/domain/seat-startup-text.js");
+    const { db, rigRepo, sessionRegistry, inst, tmux } = setup({ [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl") });
+    try {
+      const spec = makeRigSpec();
+      spec.startup = { files: [], actions: [{ type: "send_text", value: "rig original", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true }] };
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      const rigId = result.result.rigId;
+      const node = rigRepo.getRig(rigId)!.nodes[0]!;
+      const actions = JSON.parse((db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id = ?").get(node.id) as { startup_actions_json: string }).startup_actions_json);
+      const contextIndex = actions.findIndex((action: { value: string }) => action.value === "rig original");
+      const input = { nodeId: node.id, logicalId: node.logicalId, layer: "rig" as const, recipeIndex: 0, contextIndex, value: "rig replacement" };
+      const preview = editSavedStartupText(db, input);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+      expect(editSavedStartupText(db, { ...input, expectedRevision: preview.revision }).ok).toBe(true);
+      for (const session of sessionRegistry.getSessionsForRig(rigId)) { sessionRegistry.markDetached(session.id); sessionRegistry.clearBinding(session.nodeId); }
+      tmux.startServer = vi.fn(async () => {});
+      tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+      vi.mocked(tmux.sendText).mockClear();
+      const launched = await inst.launchPersistedFresh(rigId, node.id);
+      expect(launched.status, JSON.stringify(launched)).toBe("launched");
+      expect(vi.mocked(tmux.sendText).mock.calls.map(call => call[1])).toContain("rig replacement");
+    } finally { db.close(); }
+  });
+
   it("keeps a seat-only replacement when a fresh launch resolves the shared agent source again", async () => {
     const { editSavedStartupText } = await import("../src/domain/seat-startup-text.js");
     const agent = `${agentYaml("impl")}\nstartup:\n  actions:\n    - type: send_text\n      value: shared original\n      phase: after_ready\n      applies_on: [fresh_start, restore]\n      idempotent: true\n`;
@@ -982,10 +1010,13 @@ profiles:
       files[agentPath] = agent.replace("shared original", "changed source");
       (tmux.sendText as ReturnType<typeof vi.fn>).mockClear();
       const sessionCount = sessionRegistry.getSessionsForRig(rigId).length;
+      const { inspectSavedStartupText } = await import("../src/domain/seat-startup-text.js");
+      const currentSource = await inst.inspectStartupActions(rigId, node.id);
+      expect(inspectSavedStartupText(db, node.id, node.logicalId, currentSource)).toMatchObject({ overrides: [{ status: "stale", value: "seat replacement" }] });
       const changedSource = await inst.launchPersistedFresh(rigId, node.id);
-      expect(changedSource).toMatchObject({ status: "failed", error: expect.stringContaining("no longer matches") });
-      expect(sessionRegistry.getSessionsForRig(rigId)).toHaveLength(sessionCount);
-      expect((tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.some(([, text]) => typeof text === "string" && text.includes("changed source"))).toBe(false);
+      expect(changedSource).toMatchObject({ status: "launched", warnings: expect.arrayContaining([expect.stringContaining("stale")]) });
+      expect(sessionRegistry.getSessionsForRig(rigId)).toHaveLength(sessionCount + 1);
+      expect((tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.some(([, text]) => typeof text === "string" && text.includes("changed source"))).toBe(true);
     } finally { db.close(); }
   });
 

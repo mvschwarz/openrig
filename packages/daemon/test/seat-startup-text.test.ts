@@ -3,6 +3,29 @@ import { describe, expect, it } from "vitest";
 import { applyStartupTextOverrides, clearStartupTextOverride, editSavedStartupText, inspectSavedStartupText } from "../src/domain/seat-startup-text.js";
 
 describe("saved startup text", () => {
+  it("allows an overlapping edit, warns and keeps ambiguous source actions at start", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE rigs (id TEXT PRIMARY KEY, startup_layers_json TEXT); INSERT INTO rigs VALUES ('rig', NULL); CREATE TABLE nodes (id TEXT PRIMARY KEY, rig_id TEXT, launch_recipe_json TEXT); CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, startup_actions_json TEXT)");
+    const action = { type: "send_text" as const, value: "a", phase: "after_ready" as const, appliesOn: ["fresh_start" as const], idempotent: true };
+    const other = { ...action, value: "b" };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "rig", pods: [{ id: "dev", label: "Dev", members: [{ id: "build", agentRef: "local:agent", profile: "default", runtime: "stub", cwd: "." }] }] } };
+    db.prepare("INSERT INTO nodes VALUES ('a', 'rig', ?)").run(JSON.stringify(recipe));
+    db.prepare("INSERT INTO node_startup_context VALUES ('a', ?)").run(JSON.stringify([action, other]));
+    const request = { nodeId: "a", logicalId: "dev.build", layer: "context" as const, recipeIndex: 0, contextIndex: 0, value: "b" };
+    const preview = editSavedStartupText(db, request);
+    expect(preview).toMatchObject({ ok: true, preview: true, overlap: true });
+    if (!preview.ok) throw new Error(preview.message);
+    expect(editSavedStartupText(db, { ...request, expectedRevision: preview.revision })).toMatchObject({ ok: true, changed: true });
+    const warnings: string[] = [];
+    expect(applyStartupTextOverrides(db, "a", [action, other], warnings)).toEqual([action, other]);
+    expect(warnings.join(" ")).toContain("stale");
+    expect(inspectSavedStartupText(db, "a", "dev.build", [action, other])).toMatchObject({ overrides: [{ status: "stale", overlap: true }] });
+    const inspection = inspectSavedStartupText(db, "a", "dev.build");
+    if (!inspection.ok) throw new Error(inspection.message);
+    const clear = clearStartupTextOverride(db, { nodeId: "a", logicalId: "dev.build", contextIndex: -1, overrideIndex: 0, expectedRevision: inspection.revision });
+    expect(clear).toMatchObject({ ok: true, clearOverride: true, from: "b" });
+    db.close();
+  });
   it("marks a private rig-layer edit as not representable by a shared export", () => {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE rigs (id TEXT PRIMARY KEY, startup_layers_json TEXT); INSERT INTO rigs VALUES ('rig', NULL); CREATE TABLE nodes (id TEXT PRIMARY KEY, rig_id TEXT, launch_recipe_json TEXT); CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT)");
@@ -37,7 +60,10 @@ describe("saved startup text", () => {
     expect(editSavedStartupText(db, { ...input, expectedRevision: refreshed.revision })).toMatchObject({ ok: true, recipeText: "seat new" });
     expect(applyStartupTextOverrides(db, "a", [old])).toEqual([{ ...old, value: "seat new" }]);
     expect(old.value).toBe("shared old");
-    expect(() => applyStartupTextOverrides(db, "a", [{ ...old, value: "changed at source" }])).toThrow(/no longer matches/);
+    const warnings: string[] = [];
+    expect(applyStartupTextOverrides(db, "a", [{ ...old, value: "changed at source" }], warnings)).toEqual([{ ...old, value: "changed at source" }]);
+    expect(warnings.join(" ")).toContain("stale");
+    expect(inspectSavedStartupText(db, "a", "dev.build", [{ ...old, value: "changed at source" }])).toMatchObject({ overrides: [{ status: "stale", value: "seat new" }] });
     const next = editSavedStartupText(db, { ...input, value: "seat newer" });
     if (!next.ok) throw new Error(next.message);
     editSavedStartupText(db, { ...input, value: "seat newer", expectedRevision: next.revision });

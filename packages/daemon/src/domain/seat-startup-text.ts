@@ -43,20 +43,23 @@ function sameShape(a: StartupAction, b: StartupAction): boolean {
 }
 
 /** Apply seat-owned replacements to freshly resolved actions, without editing shared sources. */
-export function applyStartupTextOverrides(db: Database.Database, nodeId: string, actions: StartupAction[]): StartupAction[] {
+export function applyStartupTextOverrides(db: Database.Database, nodeId: string, actions: StartupAction[], warnings: string[] = []): StartupAction[] {
   const recipe = new RigRepository(db).getNodeLaunchRecipe(nodeId);
-  if (!recipe) return actions;
-  let updated = actions;
-  for (const override of recipe.startupTextOverrides ?? []) {
-    const matches = updated.flatMap((action, index) => isEditableStartupText(action) && sameShape(action, override.before)
-      && (action.value === override.before.value || action.value === override.value) ? [index] : []);
-    if (matches.length !== 1) throw new Error("Saved startup text no longer matches exactly one resolved action; inspect the seat's source before starting it.");
-    updated = updated.map((action, index) => index === matches[0] ? { ...action, value: override.value } : action);
-  }
-  return updated;
+  if (!recipe || actions.length === 0) return actions;
+  const overrides = recipe.startupTextOverrides ?? [];
+  const matchesByOverride = overrides.map(override => actions.flatMap((action, index) => isEditableStartupText(action) && sameShape(action, override.before)
+      && (action.value === override.before.value || action.value === override.value) ? [index] : []));
+  const replacements = new Map<number, string>();
+  overrides.forEach((override, i) => {
+    const matches = matchesByOverride[i]!;
+    if (matches.length !== 1 || matchesByOverride.some((other, j) => j !== i && other.includes(matches[0]!))) {
+      warnings.push(`Saved startup text override ${i} is stale or overlaps another action; using current source text. Inspect or clear the saved override.`);
+    } else replacements.set(matches[0]!, override.value);
+  });
+  return actions.map((action, index) => replacements.has(index) ? { ...action, value: replacements.get(index)! } : action);
 }
 
-export function inspectSavedStartupText(db: Database.Database, nodeId: string, logicalId: string) {
+export function inspectSavedStartupText(db: Database.Database, nodeId: string, logicalId: string, sourceActions?: StartupAction[] | null) {
   const context = db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?").get(nodeId) as { startup_actions_json: string } | undefined;
   const node = savedNodeInputs(db, nodeId);
   if (!context || !node?.launch_recipe_json) return { ok: false as const, code: "saved_input_missing", message: "Saved startup context and launch recipe are both required." };
@@ -83,11 +86,23 @@ export function inspectSavedStartupText(db: Database.Database, nodeId: string, l
     && actions.filter(action => isEditableStartupText(action) && sameAction(action, actions[entry.contextIndex]!)).length === 1)
     .map(entry => ({ ...entry, layer: "context" as const, recipeIndex: 0 }));
   const ambiguousContext = unmatchedContext.filter(entry => !contextCandidates.some(candidate => candidate.contextIndex === entry.contextIndex));
-  return { ok: true as const, inspect: true, revision: startupTextRevision(nodeId, [logicalId, context, node.startup_layers_json], node.launch_recipe_json), candidates: [...uniqueCandidates, ...contextCandidates], ambiguousContext };
+  const overrides = (recipe.startupTextOverrides ?? []).map((entry, overrideIndex) => {
+    const matches = actions.flatMap((action, index) => isEditableStartupText(action) && sameShape(action, entry.before) && action.value === entry.value ? [index] : []);
+    const source = sourceActions ?? actions;
+    const overlap = source.filter(action => isEditableStartupText(action) && sameShape(action, entry.before)
+      && (action.value === entry.before.value || action.value === entry.value)).length > 1;
+    const sourceMatches = source.filter(action => isEditableStartupText(action) && sameShape(action, entry.before)
+      && (action.value === entry.before.value || action.value === entry.value));
+    const contested = sourceMatches.length === 1 && (recipe.startupTextOverrides ?? []).some((other, index) => index !== overrideIndex
+      && sameShape(sourceMatches[0]!, other.before) && (sourceMatches[0]!.value === other.before.value || sourceMatches[0]!.value === other.value));
+    return { overrideIndex, value: entry.value, before: entry.before.value, contextIndex: matches.length === 1 ? matches[0] : null,
+      status: sourceActions ? (sourceMatches.length === 1 && !contested ? "current" : "stale") : "source_unverified", overlap: overlap || contested };
+  });
+  return { ok: true as const, inspect: true, revision: startupTextRevision(nodeId, [logicalId, context, node.startup_layers_json], node.launch_recipe_json), candidates: [...uniqueCandidates, ...contextCandidates], ambiguousContext, overrides };
 }
 
 /** Remove a seat-only override after its shared source changes; the saved context remains intact. */
-export function clearStartupTextOverride(db: Database.Database, input: { nodeId: string; logicalId: string; contextIndex: number; expectedRevision?: string }) {
+export function clearStartupTextOverride(db: Database.Database, input: { nodeId: string; logicalId: string; contextIndex: number; overrideIndex?: number; expectedRevision?: string }) {
   return db.transaction(() => {
     const context = db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?").get(input.nodeId) as { startup_actions_json: string } | undefined;
     const node = savedNodeInputs(db, input.nodeId);
@@ -98,15 +113,17 @@ export function clearStartupTextOverride(db: Database.Database, input: { nodeId:
     const recipe = JSON.parse(node.launch_recipe_json) as RecipeWithOverrides;
     const action = (JSON.parse(context.startup_actions_json) as StartupAction[])[input.contextIndex];
     const overrides = recipe.startupTextOverrides ?? [];
-    const matches = overrides.flatMap((entry, index) => isEditableStartupText(action) && entry.value === action.value && sameShape(entry.before, action) ? [index] : []);
+    const matches = input.overrideIndex === undefined ? overrides.flatMap((entry, index) => isEditableStartupText(action) && entry.value === action.value && sameShape(entry.before, action) ? [index] : [])
+      : overrides[input.overrideIndex] ? [input.overrideIndex] : [];
     if (matches.length !== 1) return { ok: false as const, code: "override_not_found", message: "The selected saved action does not identify exactly one seat-only override." };
-    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, clearOverride: true, revision, from: action!.value };
+    const from = overrides[matches[0]!]!.value;
+    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, clearOverride: true, revision, from };
     overrides.splice(matches[0]!, 1);
     if (overrides.length) recipe.startupTextOverrides = overrides; else delete recipe.startupTextOverrides;
     const recipeJson = JSON.stringify(recipe);
     db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(recipeJson, input.nodeId);
     const savedRecipe = db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = ?").get(input.nodeId) as { launch_recipe_json: string };
-    return { ok: true as const, preview: false, clearOverride: true, revision: startupTextRevision(input.nodeId, [input.logicalId, context, node.startup_layers_json], savedRecipe.launch_recipe_json), from: action!.value };
+    return { ok: true as const, preview: false, clearOverride: true, revision: startupTextRevision(input.nodeId, [input.logicalId, context, node.startup_layers_json], savedRecipe.launch_recipe_json), from };
   })();
 }
 
@@ -132,9 +149,10 @@ export function editSavedStartupText(db: Database.Database, input: {
       return { ok: false as const, code: "selection_mismatch", message: "Selected recipe and saved context positions must identify the same application-authored text." };
     if (actions.filter(action => isEditableStartupText(action) && sameAction(action, saved)).length !== 1)
       return { ok: false as const, code: "selection_ambiguous", message: "This saved action is duplicated; select a uniquely identifiable action." };
-    if (input.layer === "context" && actions.some((action, index) => index !== input.contextIndex && isEditableStartupText(action)
-      && sameShape(action, saved) && action.value === input.value))
-      return { ok: false as const, code: "selection_ambiguous", message: "The replacement would be indistinguishable from another saved action." };
+    const overlap = actions.some((action, index) => index !== input.contextIndex && isEditableStartupText(action)
+      && sameShape(action, saved) && action.value === input.value)
+      || (recipe.startupTextOverrides ?? []).some(entry => sameShape(entry.before, saved) && entry.value !== saved.value
+        && [entry.before.value, entry.value].some(value => value === saved.value || value === input.value));
     let recipeMatches = 0;
     for (const layer of ["rig", "pod", "member"] as const) {
       for (let index = 0; ; index++) {
@@ -145,16 +163,11 @@ export function editSavedStartupText(db: Database.Database, input: {
     }
     if ((input.layer === "context" && recipeMatches !== 0) || (input.layer !== "context" && recipeMatches !== 1))
       return { ok: false as const, code: "selection_ambiguous", message: "The selected saved action cannot be attributed uniquely to this recipe layer." };
-    if (input.layer === "context") {
-      const collisions = (recipe.startupTextOverrides ?? []).filter(entry => sameShape(entry.before, saved)
-        && !(entry.value === saved.value) && [entry.before.value, entry.value].some(value => value === saved.value || value === input.value));
-      if (collisions.length) return { ok: false as const, code: "selection_ambiguous", message: "The replacement overlaps another seat-only override." };
-    }
     const from = saved.value;
     const appliesOn = saved.appliesOn;
     const restoreEligible = appliesOn.includes("restore") && saved.idempotent;
     const sourceMatchRequired = input.layer === "context";
-    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, revision, from, to: input.value, appliesOn, restoreEligible, sourceMatchRequired };
+    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, revision, from, to: input.value, appliesOn, restoreEligible, sourceMatchRequired, overlap };
     if (input.value === from) return { ok: true as const, preview: false, changed: false, revision, from, to: from, appliesOn, restoreEligible, sourceMatchRequired };
     if (input.layer === "context") {
       const overrides = recipe.startupTextOverrides ?? [];

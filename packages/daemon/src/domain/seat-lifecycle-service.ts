@@ -126,6 +126,7 @@ export interface SeatLifecycleDeps {
   readProcessCensus?: () => Promise<ProcessTableCensus>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
+  inspectStartupActions?: (rigId: string, nodeId: string) => Promise<import("./types.js").StartupAction[] | null>;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   occupantInvalidator?: OccupantInvalidator;
   activityOracle?: { declareOccupantSwap(nodeId: string, generation: string): void; getSeatState?(nodeId: string): ArbitratedSeatState | null };
@@ -379,6 +380,7 @@ export interface ParsedStartupContext {
 
 export class SeatLifecycleService {
   private readonly db: Database.Database;
+  private readonly inspectStartupActions: SeatLifecycleDeps["inspectStartupActions"];
   private readonly rigRepo: RigRepository;
   private readonly sessionRegistry: SessionRegistry;
   private readonly eventBus: EventBus;
@@ -403,6 +405,7 @@ export class SeatLifecycleService {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("SeatLifecycleService: sessionRegistry must share the same db handle");
     if (deps.db !== deps.eventBus.db) throw new Error("SeatLifecycleService: eventBus must share the same db handle");
     this.db = deps.db;
+    this.inspectStartupActions = deps.inspectStartupActions;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.eventBus = deps.eventBus;
@@ -2581,10 +2584,10 @@ export class SeatLifecycleService {
       seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType)) === "external");
   }
 
-  async setStartupText(input: { seatRef: string; inspect?: boolean; clearOverride?: boolean; layer: unknown; recipeIndex: unknown; contextIndex: unknown; value: unknown; expectedRevision?: unknown }): Promise<ReturnType<typeof editSavedStartupText> | ReturnType<typeof inspectSavedStartupText> | ReturnType<typeof clearStartupTextOverride> | SeatRefusal | { ok: false; code: string; message: string }> {
+  async setStartupText(input: { seatRef: string; inspect?: boolean; clearOverride?: boolean; overrideIndex?: unknown; layer: unknown; recipeIndex: unknown; contextIndex: unknown; value: unknown; expectedRevision?: unknown }): Promise<ReturnType<typeof editSavedStartupText> | ReturnType<typeof inspectSavedStartupText> | ReturnType<typeof clearStartupTextOverride> | SeatRefusal | { ok: false; code: string; message: string }> {
     if (!input.inspect && ((!input.clearOverride && (!(["rig", "pod", "member", "context"] as unknown[]).includes(input.layer)
       || !Number.isInteger(input.recipeIndex) || (input.recipeIndex as number) < 0 || typeof input.value !== "string" || !input.value))
-      || !Number.isInteger(input.contextIndex) || (input.contextIndex as number) < 0
+      || (input.clearOverride && input.overrideIndex !== undefined ? !Number.isInteger(input.overrideIndex) || (input.overrideIndex as number) < 0 : !Number.isInteger(input.contextIndex) || (input.contextIndex as number) < 0)
       || (input.expectedRevision !== undefined && (typeof input.expectedRevision !== "string" || !input.expectedRevision)))) {
       return { ok: false as const, code: "invalid_startup_text", message: "Supply a layer, two nonnegative action indexes, nonempty text, and an expected revision when applying." };
     }
@@ -2592,13 +2595,10 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && !guard.ownsLifecycle(resolved.nodeId)) return guard.lifecycle([resolved.nodeId], () => this.setStartupText(input));
-    if (input.inspect) return inspectSavedStartupText(this.db, resolved.nodeId, resolved.entry.logicalId);
-    const session = this.latestSession(resolved.nodeId);
-    if (input.expectedRevision !== undefined && session && this.startupOrchestrator?.pendingStartupContext(resolved.nodeId, session.id)) {
-      return { ok: false as const, code: "startup_delivery_pending", message: "Finish the pending startup delivery before changing its saved inputs." };
-    }
+    if (input.inspect) return inspectSavedStartupText(this.db, resolved.nodeId, resolved.entry.logicalId,
+      await this.inspectStartupActions?.(resolved.entry.rigId, resolved.nodeId));
     if (input.clearOverride) return clearStartupTextOverride(this.db, { nodeId: resolved.nodeId, logicalId: resolved.entry.logicalId,
-      contextIndex: input.contextIndex as number, ...(typeof input.expectedRevision === "string" ? { expectedRevision: input.expectedRevision } : {}) });
+      contextIndex: input.contextIndex as number, ...(typeof input.overrideIndex === "number" ? { overrideIndex: input.overrideIndex } : {}), ...(typeof input.expectedRevision === "string" ? { expectedRevision: input.expectedRevision } : {}) });
     return editSavedStartupText(this.db, { nodeId: resolved.nodeId, logicalId: resolved.entry.logicalId,
       layer: input.layer as StartupTextLayer, recipeIndex: input.recipeIndex as number, contextIndex: input.contextIndex as number,
       value: input.value as string, ...(typeof input.expectedRevision === "string" ? { expectedRevision: input.expectedRevision } : {}) });

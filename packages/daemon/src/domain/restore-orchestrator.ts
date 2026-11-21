@@ -2562,6 +2562,7 @@ export class RestoreOrchestrator {
               plan,
               resolvedStartupFiles: filteredFiles,
               startupActions: sourceActions,
+              snapshotStartupActions: true,
               isRestore: replayAsRestore,
               ...(replaySkip ? { replaySkip } : {}),
               preserveStartupContext: replayContained,

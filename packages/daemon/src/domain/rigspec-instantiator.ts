@@ -1,5 +1,4 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
-import { applyStartupTextOverrides } from "./seat-startup-text.js";
 import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import { effectiveProcessLimits } from "./process-limits.js";
 import { memberPoolBlock, storedPoolAdvisories } from "./seat-pool-spec.js";
@@ -2378,6 +2377,25 @@ export class PodRigInstantiator {
     } };
   }
 
+  /** Resolve today's recipe source for inspection without starting or changing the seat. */
+  async inspectStartupActions(rigId: string, nodeId: string): Promise<StartupAction[] | null> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find(candidate => candidate.id === nodeId);
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!node || !recipe) return null;
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return null;
+    const member = this.persistedMember(node, context.member);
+    const layers = this.rigStartupLayers(recipe.rigSpec, recipe.rigRoot, rigId);
+    if (member.agentRef === "builtin:terminal") return resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
+      rigCultureFile: layers.cultureFile, rigStartup: layers.startup, podStartup: context.pod.startup, memberStartup: member.startup, operatorStartup: undefined }).actions;
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return null;
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod,
+      rig: this.withRigStartupLayers(recipe.rigSpec, layers), skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    return config.ok ? config.config.startup.actions : null;
+  }
+
   /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */
   canLaunchPersistedFresh(rigId: string, nodeId: string): boolean {
     const rig = this.deps.rigRepo.getRig(rigId);
@@ -2569,9 +2587,6 @@ export class PodRigInstantiator {
     if (!configResult.ok) {
       return { status: "failed", error: configResult.errors.join("; ") };
     }
-
-    try { applyStartupTextOverrides(this.db, input.nodeId, configResult.config.startup.actions); }
-    catch (error) { return { status: "failed", error: (error as Error).message }; }
 
     this.updateNodeResolvedConfig(input.nodeId, configResult.config);
 
@@ -3052,8 +3067,6 @@ export class PodRigInstantiator {
     const startup = resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
       rigCultureFile: terminalRigLayers.cultureFile, rigStartup: terminalRigLayers.startup,
       podStartup: input.pod.startup, memberStartup: input.member.startup, operatorStartup: undefined });
-    try { applyStartupTextOverrides(this.db, input.nodeId, startup.actions); }
-    catch (error) { return { status: "failed", error: (error as Error).message }; }
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);

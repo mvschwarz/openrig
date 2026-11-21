@@ -169,6 +169,8 @@ export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path"
 }
 
 export interface StartupInput {
+  /** Actions came from a snapshot and must not be changed by today's live recipe. */
+  snapshotStartupActions?: boolean;
   /** Explicit history startup checks its exact source after awaited preparation. */
   beforeNativeLaunch?: () => boolean;
   /** Internal attempt state: a launch input may already have reached the harness, so it cannot be replayed. */
@@ -351,13 +353,9 @@ export class StartupOrchestrator {
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.startNodeWithWarnings(input, warnings));
     }
-    if (!input.isRestore && !input.continueFreshStartup && !input.skipHarnessLaunch) {
-      try {
-        const actions = applyStartupTextOverrides(this.db, input.nodeId, input.startupActions);
-        input = { ...input, startupActions: actions };
-      } catch (error) {
-        return this.fail(input, "failed", [(error as Error).message]);
-      }
+    if (!input.isRestore && !input.continueFreshStartup && !input.skipHarnessLaunch && !input.snapshotStartupActions && input.startupActions.length) {
+      const actions = applyStartupTextOverrides(this.db, input.nodeId, input.startupActions, warnings);
+      input = { ...input, startupActions: actions };
     }
     // A contained runtime reconciles saved execution before the ordinary startup prelude writes state or files.
     if (input.adapter.environment) {
