@@ -2947,6 +2947,8 @@ describe("queue routes", () => {
       }
       fs.mkdirSync(path.join(alpha, "work-items", "notes"), { recursive: true });
       fs.writeFileSync(path.join(alpha, "project.yaml"), "id: alpha\nmissions:\n  root: work-items\n");
+      // A healthy catalog project has its own source file (SPEC.md or README.md); without one its missions root reads as unavailable.
+      fs.writeFileSync(path.join(alpha, "SPEC.md"), "---\nid: alpha\n---\n# Alpha\n");
       app = buildApp({
         eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
         settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog

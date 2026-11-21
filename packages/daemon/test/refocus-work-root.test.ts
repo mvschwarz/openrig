@@ -163,10 +163,17 @@ describe("refocus trace with no typed baton (#3320)", () => {
       "--work-root", w.projectB, "--work-project", w.projectB]);
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain("Missions in the selected project (project-b): m1");
-    expect(result.stdout).toContain(`--work-start ${join(w.projectB, "missions")}/<mission>`);
+    expect(result.stdout).toContain(`--work-root ${w.projectB} --work-start ${join(w.projectB, "missions")}/<mission>`);
     expect(result.stdout).not.toContain("Missions on this host");
     expect(result.stdout).not.toContain(`--work-start ${join(w.workspace, "missions")}/`);
     expect(result.stdout).toContain("## ORIENTATION — the selected project's chain, not your work");
+    // The printed next step is the agent's own call: run it in a fresh process, with no extra root in its environment.
+    const next = result.stdout.split("\n").find((line) => line.includes("--work-start"))!.trim().replace("<mission>", "m1");
+    const followed = spawnSync("/bin/sh", ["-c", next], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: root!, OPENRIG_WORKSPACE_ROOT: w.workspace } });
+    expect(followed.status, followed.stdout + followed.stderr).toBe(0);
+    expect(followed.stdout).toContain("intent: mission one");
+    expect(followed.stdout).toContain("intent: ship project b");
+    expect(followed.stdout).not.toContain("TRACE GAP");
   });
 
   it("keeps workspace.root's listing when no project is selected, the daemon names none, or its root isn't the project's", () => {

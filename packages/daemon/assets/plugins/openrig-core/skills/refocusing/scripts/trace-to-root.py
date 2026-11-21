@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -611,6 +612,7 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
     names = evidence.get("missionsOnHost") or []
     names_cut = evidence.get("missionsOnHostTruncated")
     listing = "Missions on this host"
+    start_root, extra_root = missions_root, ""
     # Orienting from the selected project, name its missions under its own root, not workspace.root's. A daemon that
     # predates the field, or an entry whose root isn't inside this project, keeps workspace.root's listing.
     selected = (selected_project_missions(evidence.get("projectMissions"), project)
@@ -618,6 +620,9 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
     if selected:
         missions_root, names, names_cut = selected["missionsRoot"], selected["names"], selected["truncated"]
         listing = f"Missions in the selected project ({selected['project']})"
+        # The next call is the agent's own, with none of this run's --work-root: name the project root so it can ascend.
+        start_root = shlex.quote(missions_root)
+        extra_root = f" --work-root {shlex.quote(str(Path(project).expanduser().resolve()))}"
     output = ["## WORK — name it"]
     if not candidates and not unknown:
         output.append("No in-progress queue row names your work. If you are working from messages, "
@@ -637,7 +642,7 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
     if not candidates and names:
         output.append(f"{listing}: " + ", ".join(names) + (", …" if names_cut else ""))
     output.append("Then read that mission's current intent as text:")
-    output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet --work-start {missions_root}/<mission>")
+    output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {start_root}/<mission>")
     # Nothing in progress: orient from the seat's selected project, which may live outside
     # workspace.root (#3320), or say why none was selected. Held and next work stay evidence only.
     orient_root = root
