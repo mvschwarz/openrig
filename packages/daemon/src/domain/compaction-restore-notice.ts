@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { type PreparationFailure, type RestoreDeliveryFailure } from "./claude-compaction-enforcer.js";
+import { type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import { describeDefaultReceiver, resolveDefaultReceiver } from "./default-receiver.js";
@@ -102,6 +102,27 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
     body: recipient.kind === "human"
       ? `${summary}. ${recipient.note} OpenRig still owes this stage after repeated delivery failures, and its existing poll keeps retrying. This does not prove the compaction finished. On the OpenRig host, rig compact ${seat} --state shows the stage, why it waits and, when this compaction has one, its restore map. rig seat status ${seat} shows the seat. Do not issue another /compact. ${possibleWriteHold}To restore the seat yourself instead: read rig compact ${seat} --state first, then run rig compact ${seat} --cancel so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land). Then send the seat a restore request naming the restore map --state showed. If it showed none, because this compaction skipped its map, ask the seat to restore from its restore-pending marker, or from its own transcript if the marker is missing.`
       : `${summary}. ${recipient.note} OpenRig still owes this stage after repeated delivery failures. Please inspect the seat and decide whether intervention is needed. This does not prove native compaction finished. The existing poll retries with its delivery checks. Inspect rig compact ${shellQuote(sessionName)} --state --json and rig seat status ${shellQuote(sessionName)} before acting. Do not issue another /compact. Restore map: ${failure.mapPath}. The latest reason is in this item's summary and transition notes. Restore input follows ordinary delivery defaults: a draft can receive and submit the restore text unless the operator enabled draft protection. The seat's draft-aware mode and transport.draft_delivery=refuse keep their existing protections. A lost /compact result is not replayed. ${possibleWriteHold}To restore the seat yourself instead: first run rig compact ${shellQuote(sessionName)} --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land), then send the seat a restore request naming the restore map${failure.markerPath ? `, its restore-pending marker ${failure.markerPath}` : ""} and the packet the marker names.`,
+  });
+}
+
+/** One notice per attempt, also across restarts: its restore was delivered, but the seat's RESTORED note never appeared. */
+export async function reportRestoreUptakeUnknown(db: Database.Database, queue: QueueRepository, unknown: RestoreUptakeUnknown): Promise<void> {
+  const { sessionName, attemptId, mapPath, doneAt, waitedMinutes } = unknown;
+  const qitemId = `qitem-compaction-uptake-${attemptId}`;
+  if (queue.getById(qitemId)) return;
+  const recipient = recoveryRecipient(db, queue, sessionName);
+  const seat = shellQuote(sessionName);
+  const summary = `Managed restore for ${sessionName}: uptake unknown (no restore note ${waitedMinutes} minutes after the audit was sent)`;
+  const what = `OpenRig delivered this compaction's restore request and post-restore audit, the last at ${doneAt}. The audit asks the seat to write a RESTORED note beside its restore map, and none appeared within ${waitedMinutes} minutes. So whether the seat took up the restore is unknown: it may still be at the post-compaction boundary, or it may have restored without writing the note. Nothing failed that OpenRig can see, and OpenRig resends nothing.`;
+  await queue.create({
+    qitemId, sourceSession: sessionName,
+    destinationSession: recipient.session,
+    summary, wakeTrigger: "openrig",
+    tags: ["compaction", "restore-delivery", "restore-uptake", `attempt:${attemptId}`],
+    evidenceRef: recipient.kind === "agent" ? mapPath : null,
+    body: recipient.kind === "human"
+      ? `${summary}. ${recipient.note} ${what} Check the seat with rig seat status ${seat} and rig capture ${seat} on the OpenRig host. If it's still at the boundary, ask it to restore from its newest restore map.`
+      : `${summary}. ${recipient.note} ${what} Check the seat with rig seat status ${seat} and rig capture ${seat}. If it's still at the boundary, send it a restore request naming this map: ${mapPath}.`,
   });
 }
 
