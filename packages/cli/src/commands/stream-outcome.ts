@@ -58,7 +58,9 @@ async function intake(client: Get, streamItemId: string) {
   if (record === null) return { stage: "awaiting_intake", summary: "No routing decision is recorded yet." };
   if (object(record) && typeof record.qitemId === "string") {
     const where = record.how === "folded" ? `it was added to intake row ${record.qitemId}` : `it opened intake row ${record.qitemId}`;
-    return { stage: "in_intake", summary: `It reached intake: ${where}, which is ${record.state}. No routing decision is recorded yet.`,
+    const decision = OPEN.includes(record.state) ? `, which is ${record.state}. No routing decision is recorded yet.`
+      : `, and intake closed that row (${record.state}) without a recorded decision for this item.`;
+    return { stage: "in_intake", summary: `It reached intake: ${where}${decision}`,
       intake: { qitemId: record.qitemId, how: record.how, state: record.state } };
   }
   const why = res.status === 404 ? "this daemon doesn't serve intake records" : `the intake read failed (${res.status || "no response"})`;

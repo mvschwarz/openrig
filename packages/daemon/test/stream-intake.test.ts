@@ -7,6 +7,7 @@ import { formatIntakeNote, streamIntakeQitemId, streamIntakeRecord, StreamIntake
 import type { StreamItem } from "../src/domain/stream-store.js";
 import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
+import { runQueueRetentionSweep } from "../src/domain/queue-retention.js";
 import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { RUNNER_PERMIT_TAG } from "../src/domain/runner-permissions.js";
 import { migrate } from "../src/db/migrate.js";
@@ -1183,6 +1184,26 @@ describe("streamIntakeRecord: where intake recorded an item (rig stream show)", 
     }
     const later = streamStore.emit({ sourceSession: source, body: "after intake stopped" });
     expect(streamIntakeRecord(db, later)).toBeNull();
+  });
+
+  it("still finds the note once retention has archived a closed intake row's transitions", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    const coordinator = new StreamIntakeCoordinator({ db, eventBus: bus, streamStore, queueRepo, destination: "queue.worker" });
+    coordinator.start();
+    try {
+      const first = streamStore.emit({ sourceSession: source, body: "one" });
+      await new Promise((r) => setTimeout(r, 50));
+      const second = streamStore.emit({ sourceSession: source, body: "two" });
+      await new Promise((r) => setTimeout(r, 50));
+      const row = streamIntakeQitemId(first.streamSortKey);
+      queueRepo.update({ qitemId: row, actorSession: deriveCanonicalSessionName("orch", "lead", "rig"), state: "done", closureReason: "no-follow-on" });
+      const swept = await runQueueRetentionSweep(db, { nowIso: new Date(Date.now() + 40 * 86_400_000).toISOString(), transitionsRetentionDays: 30 });
+      expect(swept.archivedQitems).toBeGreaterThan(0);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ?").get(row)).toEqual({ n: 0 });
+      expect(streamIntakeRecord(db, second)).toEqual({ qitemId: row, how: "folded", state: "done" });
+    } finally {
+      coordinator.stop();
+    }
   });
 
   it("counts only intake's own note for exactly this item", () => {

@@ -38,6 +38,10 @@ describe("what became of a stream observation", () => {
     expect(folded).toMatchObject({ stage: "in_intake", intake: { qitemId: "qitem-stream-intake-abc", how: "folded", state: "pending" } });
     expect(folded.summary).toBe("It reached intake: it was added to intake row qitem-stream-intake-abc, which is pending. No routing decision is recorded yet.");
     expect((await streamOutcome(client({ [INTAKE]: record("opened") }), "S1")).summary).toContain("it opened intake row qitem-stream-intake-abc");
+    // A row intake closed with no decision for this item isn't "yet".
+    const closed = await streamOutcome(client({ [INTAKE]: { status: 200, data: { streamItemId: "S1",
+      intake: { qitemId: "qitem-stream-intake-abc", how: "folded", state: "done" } } } }), "S1");
+    expect(closed.summary).toBe("It reached intake: it was added to intake row qitem-stream-intake-abc, and intake closed that row (done) without a recorded decision for this item.");
     // A daemon without the read, or a read that fails, can't say either way.
     for (const reply of [{ status: 404, data: "404 Not Found" }, { status: 500, data: { error: "boom" } }]) {
       const unknown = await streamOutcome(client({ [INTAKE]: reply }), "S1");

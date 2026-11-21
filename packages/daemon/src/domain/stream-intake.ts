@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import type { PersistedEvent } from "./types.js";
 import type { StreamItem, StreamStore } from "./stream-store.js";
-import type { QueueRepository } from "./queue-repository.js";
+import { detectTable, type QueueRepository } from "./queue-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { RUNNER_PERMIT_TAG } from "./runner-permissions.js";
 import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
@@ -25,13 +25,18 @@ export function streamIntakeRecord(db: Database.Database, item: Pick<StreamItem,
   const opened = db.prepare("SELECT qitem_id AS qitemId, state FROM queue_items WHERE qitem_id = ?")
     .get(streamIntakeQitemId(item.streamSortKey)) as { qitemId: string; state: string } | undefined;
   if (opened) return { ...opened, how: "opened" };
-  // Only intake rows' own transitions are read: their ids share the prefix, so the range uses the transitions' row index.
-  // The note is intake's own (the daemon's actor), not a person's quoting it.
+  // Only intake rows' own transitions are read: their ids share the prefix, so the range uses each table's row index. Retention
+  // moves a closed row's transitions to the archive, keeping their ids, so both are read. The note is intake's own (the
+  // daemon's actor), not a person's quoting it. Exact for ids up to 120 characters: the note cuts a longer one (`boundText`).
   const prefix = `Stream observation added: ${boundText(item.streamItemId, 120)} (`;
-  const folded = db.prepare(`SELECT t.qitem_id AS qitemId, q.state FROM queue_transitions t JOIN queue_items q ON q.qitem_id = t.qitem_id
-    WHERE t.qitem_id >= 'qitem-stream-intake-' AND t.qitem_id < 'qitem-stream-intake.' AND +t.actor_session = ?
-      AND substr(t.transition_note, 1, ?) = ? ORDER BY t.transition_id LIMIT 1`)
-    .get(OPENRIG_SENDER, prefix.length, prefix) as { qitemId: string; state: string } | undefined;
+  const match = (table: string) => `SELECT t.transition_id AS id, t.qitem_id AS qitemId, q.state FROM ${table} t
+    JOIN queue_items q ON q.qitem_id = t.qitem_id WHERE t.qitem_id >= 'qitem-stream-intake-' AND t.qitem_id < 'qitem-stream-intake.'
+      AND +t.actor_session = ? AND substr(t.transition_note, 1, ?) = ?`;
+  const archived = detectTable(db, "queue_transitions_archive");
+  const folded = db.prepare(`SELECT qitemId, state FROM (${match("queue_transitions")}${archived ? ` UNION ALL ${match("queue_transitions_archive")}` : ""})
+    ORDER BY id LIMIT 1`)
+    .get(...[OPENRIG_SENDER, prefix.length, prefix], ...(archived ? [OPENRIG_SENDER, prefix.length, prefix] : [])) as
+    { qitemId: string; state: string } | undefined;
   return folded ? { ...folded, how: "folded" } : null;
 }
 
