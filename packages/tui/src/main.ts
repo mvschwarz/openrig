@@ -31,7 +31,7 @@ import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.
 import { driveRestoreLifecycle, buildRestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
 import { restoreKeyAction, type RestoreInputEvent } from "./crash-cart/restore-input.js";
 import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-click-gate.js";
-import { daemonStartArgs, daemonStartTimeoutMs } from "./crash-cart/start-daemon.js";
+import { daemonStartArgs, daemonStartTimeoutMs, runDaemonStart } from "./crash-cart/start-daemon.js";
 import { readLocal } from "./local-reading.js";
 import { replyAct, opensOnDefaultFeed, actingAs, answerRequest } from "./attention/attention-model.js";
 import { decidePairRequest } from "./config/pairing.js";
@@ -264,7 +264,7 @@ async function run(): Promise<void> {
   if (client) startup = new StartupController({
     client, home: process.env["OPENRIG_HOME"] ?? "default local instance", probe: runCrashCartVerb,
     startDaemon: () => startTimeoutMs().then((timeout) => new Promise<void>((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout }, (error, stdout, stderr) => {
+      runDaemonStart(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout }, (error, stdout, stderr) => {
         if (error) reject(new Error(`Daemon start did not confirm completion: ${stderr.trim() || stdout.trim() || error.message}`));
         else resolve();
       });
@@ -357,7 +357,7 @@ async function run(): Promise<void> {
     restoreCancelRequested = false;
     restoreScrollOffset = 0;
     startTimeoutMs(true).then((timeout) => new Promise<void>((resolve, reject) =>
-      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout }, (err) => (err ? reject(err) : resolve())),
+      runDaemonStart("rig", ["daemon", "start"], { cwd: helperCwd(), timeout }, (err) => (err ? reject(err) : resolve())),
     ))
       .then(() => pollRestore(daemonClient))
       .catch((e: unknown) => {
@@ -394,7 +394,7 @@ async function run(): Promise<void> {
       startingDaemon = true;
       crashCartOpts = { ...crashCartOpts, starting: client!.baseUrl };
       draw();
-      void startTimeoutMs().then((timeout) => execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout }, (error, stdout, stderr) => {
+      void startTimeoutMs().then((timeout) => runDaemonStart(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout }, (error, stdout, stderr) => {
         startingDaemon = false;
         if (error) {
           crashCartOpts = { unavailable: `Daemon start did not confirm completion. Retry reads actual state before another attempt. ${stderr.trim() || stdout.trim() || error.message}` };

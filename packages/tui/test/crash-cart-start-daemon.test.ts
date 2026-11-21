@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import * as lifecycleBudget from "../../daemon/src/daemon-shutdown.js";
 import { describe, it, expect } from "vitest";
-import { daemonStartArgs, daemonStartTimeoutMs } from "../src/crash-cart/start-daemon.js";
+import { DAEMON_START_OUTPUT_TAIL_CHARS, daemonStartArgs, daemonStartTimeoutMs, runDaemonStart, type DaemonStartError } from "../src/crash-cart/start-daemon.js";
 import { resolveCrashCartKey } from "../src/crash-cart/keys.js";
 
 describe("local startup target", () => {
@@ -67,9 +67,46 @@ describe("daemon start caller budget", () => {
     const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     expect(source.match(/startTimeoutMs\((?:true)?\)\.then\(\(timeout\) =>/g)).toHaveLength(3);
     // The restore start runs the bare `rig`, so it reads the wait from the bare `rig` too.
-    expect(source).toMatch(/startTimeoutMs\(true\)\.then\(\(timeout\) => new Promise<void>\(\(resolve, reject\) =>\s+execFile\("rig", \["daemon", "start"\]/);
-    expect(source.match(/\{ cwd: helperCwd\(\), timeout \}/g)).toHaveLength(3);
+    expect(source).toMatch(/startTimeoutMs\(true\)\.then\(\(timeout\) => new Promise<void>\(\(resolve, reject\) =>\s+runDaemonStart\("rig", \["daemon", "start"\]/);
+    // All three read the CLI's output as it arrives (runDaemonStart), never through execFile's maxBuffer.
+    expect(source.match(/runDaemonStart\([^\n]*\{ cwd: helperCwd\(\), timeout \}/g)).toHaveLength(3);
+    expect(source).not.toMatch(/execFile\([^\n]*\{ cwd: helperCwd\(\), timeout \}/);
     expect(source).not.toMatch(/DAEMON_START_COMMAND_TIMEOUT_MS/);
     expect(source).not.toMatch(/execFileSync/);
+  });
+});
+
+// #3637: a long wait prints a progress line about every 20 s; execFile's default 1 MiB maxBuffer would stop the CLI
+// after about 50 h of them. A finite fake child prints more than 1 MiB before it's ready instead of waiting days.
+describe("daemon start output", () => {
+  const LINES = 20_000;
+  const LINE = "Still waiting for the daemon to answer its readiness probe (progress line padding)....\n";
+  const run = (script: string, timeout = 60_000) => new Promise<{ error: DaemonStartError | null; stdout: string; stderr: string }>((resolve) => {
+    runDaemonStart(process.execPath, ["-e", script], { cwd: process.cwd(), timeout }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+  });
+
+  it("reads the output as it arrives, so more than 1 MiB before ready doesn't end the start", async () => {
+    expect(LINES * LINE.length).toBeGreaterThan(1024 * 1024);
+    const { error, stdout } = await run(`process.stdout.write(${JSON.stringify(LINE)}.repeat(${LINES}) + "daemon ready\\n")`);
+    expect(error).toBeNull();
+    expect(stdout.length).toBeLessThanOrEqual(DAEMON_START_OUTPUT_TAIL_CHARS);
+    expect(stdout.endsWith("daemon ready\n")).toBe(true);
+  });
+
+  it("keeps only a bounded tail of a failed start's output for the error message", async () => {
+    const { error, stdout, stderr } = await run(
+      `process.stdout.write(${JSON.stringify(LINE)}.repeat(${LINES})); process.stderr.write(${JSON.stringify(LINE)}.repeat(${LINES}) + "port 7433 is held\\n"); process.exitCode = 3`,
+    );
+    expect(error?.code).toBe(3);
+    expect(stdout.length).toBeLessThanOrEqual(DAEMON_START_OUTPUT_TAIL_CHARS);
+    expect(stderr.length).toBeLessThanOrEqual(DAEMON_START_OUTPUT_TAIL_CHARS);
+    expect(stderr.endsWith("port 7433 is held\n")).toBe(true);
+    expect(error?.message.length).toBeLessThan(DAEMON_START_OUTPUT_TAIL_CHARS + 1_000);
+    expect(error?.message).toContain("port 7433 is held");
+  });
+
+  it("ends a start that outlives its timeout with SIGTERM", async () => {
+    const { error } = await run("setTimeout(() => {}, 60_000)", 200);
+    expect(error).toMatchObject({ killed: true, signal: "SIGTERM" });
   });
 });

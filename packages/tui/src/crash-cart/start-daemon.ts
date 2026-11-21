@@ -1,4 +1,48 @@
+import { spawn } from "node:child_process";
 import { DAEMON_START_READINESS_WAIT_MAX_SECONDS, daemonStartCommandTimeoutMs } from "@openrig/daemon/daemon-shutdown";
+
+/** #3637: how much of each stream a start keeps for its error message: the end, where the failure is. */
+export const DAEMON_START_OUTPUT_TAIL_CHARS = 16 * 1024;
+
+export type DaemonStartError = Error & { code?: number | string | null; signal?: NodeJS.Signals | null; killed?: boolean };
+
+/** #3637: runs a TUI `rig daemon start` like `execFile`, but reads its output as it arrives and keeps only the last
+ * DAEMON_START_OUTPUT_TAIL_CHARS of stdout and of stderr. `execFile` collects it under the default 1 MiB `maxBuffer`,
+ * so the progress line the CLI prints about every 20 s would stop the CLI after about 50 h of a wait the setting
+ * allows to last about 25 days. Past `timeout` ms the command gets SIGTERM, as with `execFile`. */
+export function runDaemonStart(
+  file: string,
+  args: readonly string[],
+  options: { cwd: string | undefined; timeout: number },
+  callback: (error: DaemonStartError | null, stdout: string, stderr: string) => void,
+): void {
+  let stdout = "";
+  let stderr = "";
+  let killed = false;
+  let done = false;
+  const keepTail = (tail: string, chunk: string): string => {
+    const all = tail + chunk;
+    return all.length > DAEMON_START_OUTPUT_TAIL_CHARS ? all.slice(-DAEMON_START_OUTPUT_TAIL_CHARS) : all;
+  };
+  const child = spawn(file, args, { cwd: options.cwd });
+  const timer = options.timeout > 0 ? setTimeout(() => { killed = true; child.kill("SIGTERM"); }, options.timeout) : undefined;
+  const finish = (error: DaemonStartError | null): void => {
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    callback(error, stdout, stderr);
+  };
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout = keepTail(stdout, chunk); });
+  child.stderr.on("data", (chunk: string) => { stderr = keepTail(stderr, chunk); });
+  child.on("error", (error: DaemonStartError) => finish(error));
+  child.on("close", (code, signal) => {
+    if (code === 0 && !killed) return finish(null);
+    const error: DaemonStartError = new Error(`Command failed: ${[file, ...args].join(" ")}\n${stderr}`);
+    finish(Object.assign(error, { code, signal, killed }));
+  });
+}
 
 /** #3637: the TUI's budget for a `rig daemon start` whose readiness wait is the resolved
  * daemon.start_readiness_wait_seconds (`rig config get … --json`'s value). A value that can't be read falls back to the
