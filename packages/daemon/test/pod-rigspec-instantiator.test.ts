@@ -141,6 +141,54 @@ describe("PodRigInstantiator", () => {
     expect(done.edges.outgoing).toMatchObject([{ kind: "delegates_to", to: { logicalId: "dev.qa" } }]);
   });
 
+  it("notifies started agents only after the complete roster is visible", async () => {
+    const files = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"), [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa") };
+    let observed: unknown;
+    const notice = vi.fn(async (rigId: string, sessions: string[]) => {
+      const first = rigRepo.getRig(rigId)!.nodes.find(node => node.logicalId === "dev.impl")!;
+      observed = whoami.resolve({ nodeId: first.id });
+      expect(sessions).toHaveLength(2);
+      return [];
+    });
+    const { db, rigRepo, sessionRegistry, inst } = setup(files, undefined, undefined, undefined, undefined, { rosterReadyNotice: notice });
+    const whoami = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore: new TranscriptStore({ transcriptsRoot: "/tmp/transcripts", enabled: true }) });
+    const spec = makeRigSpec({ pods: [{ id: "dev", label: "Dev", members: [
+      { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." },
+      { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "claude-code", cwd: "." },
+    ], edges: [{ from: "impl", to: "qa", kind: "delegates_to" }] }] });
+    try {
+      const outcome = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+      expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+      expect(notice).toHaveBeenCalledOnce();
+      expect(observed).not.toHaveProperty("rosterState");
+      expect(observed).toMatchObject({ edges: { outgoing: [{ kind: "delegates_to", to: { logicalId: "dev.qa" } }] } });
+    } finally { db.close(); }
+  });
+
+  it("does not report a complete roster when an edge could not be recorded", async () => {
+    const notice = vi.fn(async () => []);
+    const files = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"), [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa") };
+    const { db, rigRepo, inst } = setup(files, undefined, undefined, undefined, undefined, { rosterReadyNotice: notice });
+    vi.spyOn(rigRepo, "addEdge").mockImplementation(() => { throw new Error("write failed"); });
+    const spec = makeRigSpec();
+    spec.pods[0]!.members.push({ id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "claude-code", cwd: "." });
+    spec.pods[0]!.edges = [{ from: "impl", to: "qa", kind: "delegates_to" }];
+    try {
+      const outcome = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+      expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+      expect(notice).not.toHaveBeenCalled();
+    } finally { db.close(); }
+  });
+
+  it("does not send roster notices for a failed build", async () => {
+    const notice = vi.fn(async () => []);
+    const { db, inst } = setup({}, undefined, undefined, undefined, undefined, { rosterReadyNotice: notice });
+    try {
+      expect((await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT)).ok).toBe(false);
+      expect(notice).not.toHaveBeenCalled();
+    } finally { db.close(); }
+  });
+
   it.each(["pi", "omp", "claude-code", "codex", "stub"])("limits Core-observed pane forwarding to grant-owning runtimes: %s", async runtime => {
     const adapter = mockAdapter(runtime);
     const { db, inst, tmux, sessionRegistry } = setup(undefined, { [runtime]: adapter });

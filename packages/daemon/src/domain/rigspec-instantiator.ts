@@ -422,6 +422,7 @@ interface PodInstantiatorDeps {
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
   continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
+  rosterReadyNotice?: (rigId: string, sessions: string[]) => Promise<string[]>;
 }
 
 export interface MaterializeResult {
@@ -1485,18 +1486,28 @@ export class PodRigInstantiator {
    *  has been written (#2871), so a seat that asks who's on its team in between is told the team isn't complete yet. */
   private async instantiateBuilding(rigSpecYaml: string, rigRoot: string, opts?: Parameters<PodRigInstantiator["instantiate"]>[2]) {
     const marked: string[] = [];
+    let rosterComplete = false;
     const recordCreated: RecordCreated = (rigId, nodeId) => {
       if (nodeId === undefined) { markRigBuilding(this.db, rigId); marked.push(rigId); }
       opts?.recordCreated?.(rigId, nodeId);
     };
+    let outcome: InstantiateOutcome;
     try {
-      return await this.instantiateOnce(rigSpecYaml, rigRoot, { ...opts, recordCreated });
+      outcome = await this.instantiateOnce(rigSpecYaml, rigRoot, { ...opts, recordCreated, recordRosterComplete: () => { rosterComplete = true; } });
     } finally {
       for (const rigId of marked) unmarkRigBuilding(this.db, rigId);
     }
+    if (outcome.ok && rosterComplete && this.deps.rosterReadyNotice) {
+      const nodes = this.deps.rigRepo.getRig(outcome.result.rigId)!.nodes;
+      const agents = new Set(nodes.filter(node => node.runtime !== "terminal").map(node => node.logicalId));
+      const sessions = outcome.result.nodes.flatMap(node => node.status === "launched" && node.sessionName && agents.has(node.logicalId) ? [node.sessionName] : []);
+      const warnings = await this.deps.rosterReadyNotice(outcome.result.rigId, sessions);
+      if (warnings.length) outcome.result.warnings = [...(outcome.result.warnings ?? []), ...warnings];
+    }
+    return outcome;
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; recordRosterComplete?: () => void; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1837,6 +1848,7 @@ export class PodRigInstantiator {
       }
     });
 
+    let edgesRecorded = true;
     // Create pod-local edges (after all members created)
     for (const pod of rigSpec.pods) {
       for (const edge of pod.edges) {
@@ -1845,8 +1857,8 @@ export class PodRigInstantiator {
         if (fromId && toId) {
           try {
             this.deps.rigRepo.addEdge(rigId, fromId, toId, edge.kind);
-          } catch { /* best-effort */ }
-        }
+          } catch { edgesRecorded = false; }
+        } else edgesRecorded = false;
       }
     }
 
@@ -1857,8 +1869,12 @@ export class PodRigInstantiator {
       if (fromId && toId) {
         try {
           this.deps.rigRepo.addEdge(rigId, fromId, toId, edge.kind);
-        } catch { /* best-effort */ }
-      }
+        } catch { edgesRecorded = false; }
+      } else edgesRecorded = false;
+    }
+
+    if (edgesRecorded && Object.keys(nodeIdMap).length === rigSpec.pods.reduce((count, pod) => count + pod.members.length, 0)) {
+      opts?.recordRosterComplete?.();
     }
 
     // OPR.0.3.2.CT (conveyor-trust-minimal-fix):
