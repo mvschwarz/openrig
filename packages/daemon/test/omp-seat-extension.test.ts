@@ -311,7 +311,7 @@ describe("OMP seat extension: wired into OMP", () => {
     const ctx = { ...ompContext(), ui: {
       onTerminalInput: (fn: typeof handler) => { handler = fn; return () => { handler = undefined; }; },
       getEditorText: () => editor,
-      setEditorText: (text: string) => { editor = text.replaceAll("\r\n", "\n").replaceAll("\t", "    "); },
+      setEditorText: (text: string) => { editor = text.replace(/\r\n?/g, "\n").replaceAll("\t", "   ").replace(/[\x00-\x09\x0b-\x1f]/g, ""); },
     } };
     const handlers = load({ OPENRIG_SESSION_NAME: "test", OPENRIG_OMP_SEAT_STATE: statePath, OPENRIG_OMP_LAUNCH_ID: "launch",
       OPENRIG_HOME: root, OPENRIG_URL: "not a URL", OPENRIG_ACTIVITY_HOOK_TOKEN: "test" });
@@ -341,7 +341,21 @@ describe("OMP seat extension: wired into OMP", () => {
       expect(editor).toBe(text);
       expect(state().inputReceipt).toMatchObject({ requestId: "one", sha256: createHash("sha256").update(text).digest("hex") });
 
-      for (const [id, payload] of [["tabs", "a\tb"], ["crlf", "a\r\nb"], ["write-failure", "exact"]]) {
+      expect(state().inputReceipt).not.toHaveProperty("stagedSha256");
+      const original = "first\r\n\tsecond\rthird";
+      const staged = "first\n   second\nthird";
+      editor = "";
+      arm("normalized", original);
+      dispatch(`\x1b[200~${original}\x1b[201~`);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(editor).toBe(staged);
+      expect(state().inputReceipt).toMatchObject({
+        requestId: "normalized",
+        sha256: createHash("sha256").update(original).digest("hex"),
+        stagedSha256: createHash("sha256").update(staged).digest("hex"),
+      });
+
+      for (const [id, payload] of [["unsupported-control", "a\x01b"], ["write-failure", "a\r\nb"]]) {
         editor = "";
         arm(id, payload);
         const tempState = statePath + "." + process.pid + ".tmp";
@@ -350,10 +364,10 @@ describe("OMP seat extension: wired into OMP", () => {
         await new Promise(resolve => setImmediate(resolve));
         if (id === "write-failure") fs.rmdirSync(tempState);
         expect(editor).toBe("");
-        expect(state().inputReceipt.requestId).toBe("one");
+        expect(state().inputReceipt.requestId).toBe("normalized");
       }
       handlers.get("session_switch")!({}, ctx);
-      expect(state().inputReceipt.requestId).toBe("one");
+      expect(state().inputReceipt.requestId).toBe("normalized");
 
       for (const changedEditor of [false, true]) {
         editor = "";
@@ -363,7 +377,7 @@ describe("OMP seat extension: wired into OMP", () => {
         arm("replacement", "different input");
         await new Promise(resolve => setImmediate(resolve));
         expect(editor).toBe(changedEditor ? "human draft" : "");
-        expect(state().inputReceipt.requestId).toBe("one");
+        expect(state().inputReceipt.requestId).toBe("normalized");
       }
 
       // A selector or another extension consuming the marker never acknowledges the detached composer.
@@ -372,7 +386,7 @@ describe("OMP seat extension: wired into OMP", () => {
       dispatch("\x1b[200~next\x1b[201~", false);
       await new Promise(resolve => setImmediate(resolve));
       expect(editor).toBe("");
-      expect(state().inputReceipt.requestId).toBe("one");
+      expect(state().inputReceipt.requestId).toBe("normalized");
       editor = "human draft";
       expect(dispatch("\x1b[200~next\x1b[201~")).toEqual({ consume: true });
       expect(editor).toBe("human draft");

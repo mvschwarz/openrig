@@ -1448,8 +1448,10 @@ export class StartupOrchestrator {
         if (received) input.inputDeliveryFailure = `${error} Input may be staged; inspect it before retrying.`;
         return { error: input.inputDeliveryFailure ?? error };
       }
-      if (received) await received();
-      else await this.sleep(200);
+      if (received) {
+        const warning = await received();
+        if (warning) input.warnings.push(warning);
+      } else await this.sleep(200);
     } catch (error) {
       if (!received) throw error;
       input.inputDeliveryFailure = `${(error as Error).message} Enter was not sent; input may be staged. Inspect it before retrying.`;

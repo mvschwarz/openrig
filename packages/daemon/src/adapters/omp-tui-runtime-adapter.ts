@@ -152,7 +152,10 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
             throw new Error("OMP changed or exited during input delivery; Enter was not sent. Inspect the staged input before retrying.");
           }
           const receipt = current.inputReceipt;
-          if (receipt && receipt.requestId === id && receipt.sequence > sequence && receipt.sha256 === sha256) return;
+          if (receipt && receipt.requestId === id && receipt.sequence > sequence && receipt.sha256 === sha256) {
+            if (receipt.stagedSha256 && receipt.stagedSha256 !== sha256) return "OMP normalized tabs or line endings in the staged text.";
+            return;
+          }
           await this.sleep(50);
         }
         throw new Error("OMP has not acknowledged the complete paste within 15 seconds; Enter was not sent. Text may be staged; inspect it before retrying.");
@@ -202,17 +205,20 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     const failed: Array<{ effectiveId: string; error: string }> = [];
     const selectedPlugins: string[] = [];
     const paths = binding.tmuxSession ? this.launcher.paths(binding.tmuxSession) : null;
-    const previousPlugins = new Set(binding.tmuxSession ? this.launcher.pluginRoots(binding.tmuxSession).map(root => nodePath.basename(root)) : []);
+    const selection = binding.tmuxSession ? this.launcher.readPluginSelection(binding.tmuxSession) : undefined;
+    if (selection?.warning) warnings.push(selection.warning);
+    const previousPlugins = new Set(selection?.roots.map(root => nodePath.basename(root)));
     const skills = binding.seatSkillsRoot ?? (paths && nodePath.join(paths.agentDir, "skills"));
     const pluginIds = new Set(plan.entries.filter(entry => entry.category === "plugin").map(entry => entry.effectiveId));
     const selectedSkills = new Set(plan.entries.filter(entry => entry.category === "skill").map(entry => entry.effectiveId));
     if (paths) {
-      this.requireWritable(paths.seatRoot, paths.selectedPluginsPath);
+      if (!selection?.warning) this.requireWritable(paths.seatRoot, paths.selectedPluginsPath);
       this.fs.mkdirp(paths.seatRoot);
     }
 
     if (binding.seatSkillsRoot && !insideSeatStorageFolder(nodePath.dirname(binding.seatSkillsRoot), binding.seatSkillsRoot)) {
-      return { projected, skipped, failed: plan.entries.map(entry => ({ effectiveId: entry.effectiveId, error: "OMP seat skill storage has a linked or invalid path" })) };
+      return { projected, skipped, failed: plan.entries.map(entry => ({ effectiveId: entry.effectiveId, error: "OMP seat skill storage has a linked or invalid path" })),
+        ...(warnings.length ? { warnings } : {}) };
     }
     for (const entry of plan.entries) {
       // The planner compares only SKILL.md for a directory skill, and nothing inside a plugin. Their other files can
@@ -223,6 +229,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         skipped.push(entry.effectiveId);
         continue;
       }
+      let projectingPortableSkills = false;
       try {
         if (entry.category === "skill" && entry.classification === "operator_conflict") {
           skipped.push(entry.effectiveId);
@@ -230,6 +237,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
           continue;
         }
         if (entry.category === "plugin" && !this.pluginAppliesToOmp(entry, previousPlugins.has(ompPluginDirName(entry.effectiveId)))) {
+          projectingPortableSkills = true;
           const root = nodePath.join(entry.absolutePath, "skills");
           let copied = false;
           for (const id of this.topLevelEntries(root, true)) {
@@ -262,6 +270,11 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         else skipped.push(entry.effectiveId);
       } catch (err) {
         if (entry.category === "plugin") {
+          if (selection?.warning && !projectingPortableSkills) {
+            skipped.push(entry.effectiveId);
+            warnings.push(`OMP could not refresh native plugin ${entry.effectiveId}: ${(err as Error).message}`);
+            continue;
+          }
           const dir = ompPluginDirName(entry.effectiveId);
           if (previousPlugins.has(dir)) selectedPlugins.push(dir);
         }
@@ -270,9 +283,11 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     }
 
     if (paths) {
-      const selection = paths.selectedPluginsPath + "." + randomUUID();
-      this.fs.writeFile(selection, JSON.stringify(selectedPlugins));
-      this.rename(selection, paths.selectedPluginsPath);
+      if (!selection?.warning) {
+        const temporary = paths.selectedPluginsPath + "." + randomUUID();
+        this.fs.writeFile(temporary, JSON.stringify(selectedPlugins));
+        this.rename(temporary, paths.selectedPluginsPath);
+      }
       if (skills) for (const id of this.topLevelEntries(skills)) {
         const target = nodePath.join(skills, id);
         const owner = nodePath.join(target, ".openrig-plugin");
@@ -330,7 +345,8 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
               try {
                 const textResult = await this.tmux.sendText(binding.tmuxSession, content);
                 if (!textResult.ok) throw new Error(textResult.message);
-                await received();
+                const warning = await received();
+                if (warning) warnings.push(warning);
                 const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
                 if (!submitResult.ok) throw new Error(submitResult.message);
               } finally { received.cancel?.(); }
@@ -411,7 +427,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
       };
     }
 
-    const { appliedLaunch } = outcome;
+    const { appliedLaunch, warnings } = outcome;
     const sessionFile = outcome.state.sessionFile;
     if (!sessionFile) {
       return { ok: false, error: "omp launch: OMP became ready but reported no session file" };
@@ -432,8 +448,8 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
 
     // OMP writes a new session's file with its first turn. The seat is ready, but until then there is no history to
     // resume; the extension reports the file to the daemon once it exists.
-    if (!this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
-    return { ok: true, resumeToken: validation.token, resumeType: RESUME_TYPE, appliedLaunch };
+    return { ok: true, appliedLaunch, ...(warnings ? { warnings } : {}),
+      ...(this.fs.exists(validation.token) ? { resumeToken: validation.token, resumeType: RESUME_TYPE } : {}) };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

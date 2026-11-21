@@ -47,7 +47,8 @@ export interface OmpSeatState extends PiRunnerState {
   nodeId?: string;
   generation?: string;
   inputProtocol?: number;
-  inputReceipt?: { sequence: number; requestId: string; sha256: string };
+  /** sha256 identifies the requested paste. A different editor representation has its own digest. */
+  inputReceipt?: { sequence: number; requestId: string; sha256: string; stagedSha256?: string };
   /** The extension's contract version, for diagnosis. */
   protocol?: number;
   /** OMP's process id, as the extension saw it. */

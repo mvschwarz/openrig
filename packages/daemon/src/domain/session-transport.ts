@@ -4165,7 +4165,10 @@ export class SessionTransport {
     try {
       // Native OMP acknowledges complete paste dispatch; a fixed delay races slow terminal ingestion.
       if (inputReceived) {
-        try { await inputReceived(); } catch (error) {
+        try {
+          const warning = await inputReceived();
+          if (warning) sendAdvisory = [sendAdvisory, warning].filter(Boolean).join(" ");
+        } catch (error) {
           return observe({ ok: false, sessionName, sent: true, inputPhase: "written", reason: "submit_failed", outcome: "failed", error: (error as Error).message });
         }
       } else await this.sleep(200);

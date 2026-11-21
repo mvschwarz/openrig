@@ -250,8 +250,9 @@ export interface ForkSource {
  *  `launchInstructions`, the launch's own developer instructions and no file at all. */
 export interface GuidanceChoice { file: string | null; note?: string; launchInstructions?: true }
 
-/** Prepared before typing; await after paste and before Enter. Cancel releases the request and must be idempotent. */
-export type PreparedInput = (() => Promise<void>) & { cancel?: () => void };
+/** Prepare before typing and await after paste, before Enter. A warning describes a change to the staged text.
+ *  Cancel releases the request and must be idempotent. */
+export type PreparedInput = (() => Promise<void | string>) & { cancel?: () => void };
 
 export interface RuntimeAdapter {
   /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */

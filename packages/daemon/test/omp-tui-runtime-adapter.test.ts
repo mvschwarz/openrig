@@ -27,7 +27,10 @@ function fakeSeat(files: Record<string, string>, omp: Omp = (launchId) => ({ rea
   const fs = {
     ...memoryProjectionFiles(files),
     copyFile: (source: string, dest: string) => { files[dest] = files[source]!; },
-    readFile: (path: string) => files[path]!,
+    readFile: (path: string) => {
+      if (!(path in files)) throw Object.assign(new Error(`No such file: ${path}`), { code: "ENOENT" });
+      return files[path]!;
+    },
     writeFile: (path: string, content: string) => { files[path] = content; },
     exists: (path: string) => path in files || Object.keys(files).some((file) => file.startsWith(`${path}/`)),
     mkdirp: () => {},
@@ -373,9 +376,50 @@ describe("OMP projection into the seat's own home", () => {
     expect(launcher.pluginRoots(seat)).toEqual([]);
   });
 
+  it.each(["read error", "invalid JSON", "invalid entry"])("preserves an unreadable plugin selection (%s) through a failed refresh and launch", async fault => {
+    const files: Record<string, string> = {
+      "/source/package.json": JSON.stringify({ omp: { extensions: ["./index.js"] } }),
+      "/source/index.js": "export default function () {}",
+    };
+    const { adapter, fs, launcher, tmux } = fakeSeat(files);
+    const selected = plan([entry({ category: "plugin", effectiveId: "core", absolutePath: "/source" })]);
+    const initial = await adapter.project(selected, binding());
+    expect(initial.failed).toEqual([]);
+    expect(initial.warnings ?? []).toEqual([]);
+    const installed = paths.pluginsDir + "/core";
+    expect(launcher.pluginRoots(seat)).toEqual([installed]);
+    const healthy = fs.readFile(paths.selectedPluginsPath);
+    if (fault === "invalid JSON") files[paths.selectedPluginsPath] = "{";
+    if (fault === "invalid entry") files[paths.selectedPluginsPath] = '["core","../other"]';
+    const original = files[paths.selectedPluginsPath];
+    const read = fs.readFile;
+    fs.readFile = path => {
+      if (fault === "read error" && path === paths.selectedPluginsPath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return read(path);
+    };
+    fs.copyFile = () => { throw new Error("source refresh failed"); };
+    const result = await adapter.project(selected, binding());
+    expect(result.failed).toEqual([]);
+    expect(result.skipped).toContain("core");
+    expect(result.warnings).toContainEqual(expect.stringContaining("source refresh failed"));
+    expect(files[paths.selectedPluginsPath]).toBe(original);
+    expect(result.warnings).toContainEqual(expect.stringContaining(paths.selectedPluginsPath));
+    expect(fs.readFile(installed + "/index.js")).toBe(files["/source/index.js"]);
+    expect(await adapter.launchHarness(binding(), { name: seat })).toMatchObject({
+      ok: true, warnings: [expect.stringContaining(paths.selectedPluginsPath)],
+    });
+    const command = tmux.sendShellCommand.mock.calls[0]![1];
+    expect(command).toContain(extension);
+    expect(command).not.toContain(installed);
+    expect(files[paths.selectedPluginsPath]).toBe(original);
+    fs.readFile = read;
+    files[paths.selectedPluginsPath] = healthy;
+    expect(launcher.pluginRoots(seat)).toEqual([installed]);
+  });
+
   it("does not discover plugin roots from unselected files or malformed selection metadata", () => {
     const { launcher, fs } = fakeSeat({ [`${paths.pluginsDir}/old/package.json`]: "{}" });
-    expect(launcher.pluginRoots(seat)).toEqual([]);
+    expect(launcher.readPluginSelection(seat)).toEqual({ roots: [] });
     fs.writeFile(paths.selectedPluginsPath, JSON.stringify(["../old", ".", null]));
     expect(launcher.pluginRoots(seat)).toEqual([]);
     fs.writeFile(paths.selectedPluginsPath, "broken json");
@@ -414,18 +458,22 @@ describe("OMP projection into the seat's own home", () => {
     expect(sent()).not.toContain("portable-plugin");
   });
 
-  it("delivers startup text as one pasted block followed by a single submit", async () => {
-    const { adapter, tmux, fs } = fakeSeat({ "/src/first-turn.txt": "line one\nline two" });
+  it.each(["line one\nline two", "line one\r\nline two"])("submits the acknowledged startup file once and reports any editor normalization (%j)", async original => {
+    const staged = "line one\nline two";
+    const { adapter, tmux, fs } = fakeSeat({ "/src/first-turn.txt": original });
     fs.writeFile(paths.statePath, JSON.stringify({ ready: true, launchId: "attempt-1", updatedAt: "t", inputProtocol: 1 }));
     tmux.sendText.mockImplementationOnce(async () => {
       fs.writeFile(paths.statePath, JSON.stringify({ ready: true, launchId: "attempt-1", updatedAt: "t", inputProtocol: 1,
-        inputReceipt: { requestId: JSON.parse(fs.readFile(`${paths.statePath}.input.json`)).id, sequence: 1, sha256: createHash("sha256").update("line one\nline two").digest("hex") } }));
+        inputReceipt: { requestId: JSON.parse(fs.readFile(`${paths.statePath}.input.json`)).id, sequence: 1,
+          sha256: createHash("sha256").update(original).digest("hex"),
+          stagedSha256: staged !== original ? createHash("sha256").update(staged).digest("hex") : undefined } }));
       return { ok: true };
     });
     const result = await adapter.deliverStartup([{ path: "first-turn.txt", absolutePath: "/src/first-turn.txt", ownerRoot: "/src",
       deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }], binding());
     expect(result).toMatchObject({ delivered: 1, failed: [] });
-    expect(tmux.sendText).toHaveBeenCalledWith(seat, "line one\nline two");
+    expect(result.warnings ?? []).toEqual(staged === original ? [] : [expect.stringContaining("normalized")]);
+    expect(tmux.sendText).toHaveBeenCalledWith(seat, original);
     expect(vi.mocked(tmux.sendKeys).mock.calls).toEqual([[seat, ["Enter"]]]);
   });
 });

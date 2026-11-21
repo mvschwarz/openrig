@@ -258,9 +258,10 @@ export function createSeatReporter(options) {
   return {
     inputAvailable() { inputAvailable = true; },
     /** A managed paste is complete and staged through OMP's public editor API. */
-    inputReceived(text, requestId) {
+    inputReceived(text, requestId, stagedText = text) {
       if (exited) return false;
       const receipt = { sequence: ++inputSequence, requestId, sha256: createHash("sha256").update(text).digest("hex") };
+      if (stagedText !== text) receipt.stagedSha256 = createHash("sha256").update(stagedText).digest("hex");
       if (!writeState({ inputReceipt: receipt })) return false;
       inputReceipt = receipt;
       return true;
@@ -463,10 +464,12 @@ export default function openrigSeat(pi) {
             const current = JSON.parse(fs.readFileSync(`${seat.statePath}.input.json`, "utf8"));
             if (current.id !== request.id || current.expiresAt < Date.now() || ctx.ui.getEditorText() !== marker) return;
             // Only a focused editor that received our exact marker is replaced. This bypasses large-paste menus
-            // and collapsed attachments for managed input, retaining the exact text the sender provided.
+            // and collapsed attachments for managed input.
             ctx.ui.setEditorText(text);
             ownedText = ctx.ui.getEditorText();
-            acknowledged = ownedText === text && reporter.inputReceived(text, request.id);
+            // Stock OMP 18.22 uses LF and expands each tab to three spaces in setEditorText.
+            const matches = ownedText === text || ownedText === text.replace(/\r\n?/g, "\n").replaceAll("\t", "   ");
+            acknowledged = matches && reporter.inputReceived(text, request.id, ownedText);
           } catch { /* No acknowledgement: the sender withholds Enter. */ }
           finally {
             // Remove only this request’s marker or staged value, including OMP’s normalized text.

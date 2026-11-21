@@ -72,7 +72,7 @@ export interface OmpLaunchRequest {
 }
 
 export type OmpLaunchOutcome =
-  | { ok: true; state: OmpSeatState; appliedLaunch: AppliedLaunchObservation }
+  | { ok: true; state: OmpSeatState; appliedLaunch: AppliedLaunchObservation; warnings?: string[] }
   | { ok: false; reason: "send_failed" | "exited" | "session_not_found" | "timeout"; message: string; evidence?: string };
 
 export class OmpSeatLauncher {
@@ -110,18 +110,31 @@ export class OmpSeatLauncher {
   }
 
   /** Only the last successful selection can load. Retained files from deselected plugins are not executable roots. */
-  pluginRoots(sessionName: string): string[] {
+  readPluginSelection(sessionName: string): { roots: string[]; warning?: string } {
     const { pluginsDir, selectedPluginsPath } = this.paths(sessionName);
+    let raw: string;
     try {
-      const ids: unknown = JSON.parse(this.fs.readFile(selectedPluginsPath));
-      if (!Array.isArray(ids)) return [];
-      return [...new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0
-        && id !== "." && id !== ".." && nodePath.basename(id) === id && wellFormedPluginName(id)
-        && this.fs.exists(nodePath.join(pluginsDir, id, "package.json"))))]
-        .sort().map(id => nodePath.join(pluginsDir, id));
-    } catch {
-      return [];
+      raw = this.fs.readFile(selectedPluginsPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { roots: [] };
+      return { roots: [], warning: `OMP could not read plugin selection ${selectedPluginsPath}: ${String(error)}` };
     }
+    try {
+      const ids: unknown = JSON.parse(raw);
+      if (!Array.isArray(ids) || !ids.every((id): id is string => typeof id === "string" && id.length > 0
+        && id !== "." && id !== ".." && nodePath.basename(id) === id && wellFormedPluginName(id))) {
+        throw new Error("expected an array of valid plugin directory names");
+      }
+      const roots = [...new Set(ids)].sort().map(id => nodePath.join(pluginsDir, id))
+        .filter(root => this.fs.exists(nodePath.join(root, "package.json")));
+      return { roots };
+    } catch (error) {
+      return { roots: [], warning: `OMP could not read plugin selection ${selectedPluginsPath}: ${String(error)}` };
+    }
+  }
+
+  pluginRoots(sessionName: string): string[] {
+    return this.readPluginSelection(sessionName).roots;
   }
 
   skillRoot(sessionName: string): string | undefined {
@@ -153,6 +166,7 @@ export class OmpSeatLauncher {
     } catch {
       // Not on the daemon's launch PATH: leave it to the pane's.
     }
+    const selection = this.readPluginSelection(sessionName);
     const bare = buildOmpLaunchCommand({
       ompCommand,
       paths,
@@ -160,7 +174,7 @@ export class OmpSeatLauncher {
       cwd: request.cwd,
       launchId,
       seatExtensionPath: this.deps.seatExtensionPath,
-      pluginRoots: this.pluginRoots(sessionName),
+      pluginRoots: selection.roots,
       model: request.model ?? undefined,
       thinking: request.effort ?? undefined,
       approvalMode,
@@ -190,7 +204,8 @@ export class OmpSeatLauncher {
     const sent = await this.tmux.sendShellCommand(sessionName, command, undefined, { execInScript: true });
     if (!sent.ok) return { ok: false, reason: "send_failed", message: `Failed to send launch command: ${sent.message}` };
 
-    return this.waitForSeat(sessionName, launchId, appliedLaunch, wanted, priorPane);
+    const outcome = await this.waitForSeat(sessionName, launchId, appliedLaunch, wanted, priorPane);
+    return outcome.ok && selection.warning ? { ...outcome, warnings: [selection.warning] } : outcome;
   }
 
   /** Wait for THIS attempt's sidecar. A pane that returns to its shell first means OMP exited without loading the

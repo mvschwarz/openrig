@@ -57,6 +57,6 @@ export class OmpTuiResumeAdapter {
     if (outcome.state.sessionFile !== sessionFile) {
       return { ok: false, code: "attention_required", message: "OMP resume failed: OMP is ready but does not report the requested session file" };
     }
-    return { ok: true, appliedLaunch: outcome.appliedLaunch };
+    return { ok: true, appliedLaunch: outcome.appliedLaunch, ...(outcome.warnings ? { warnings: outcome.warnings } : {}) };
   }
 }

@@ -241,7 +241,13 @@ describe("StartupOrchestrator", () => {
       const prepareInput = vi.fn((_session: string, _text: string): PreparedInput => {
         calls.push("prepare");
         const first = waits.length === 0;
-        const wait = vi.fn(async () => { calls.push("receive"); if (first) await gate; });
+        const wait = vi.fn(async () => {
+          calls.push("receive");
+          if (first) {
+            await gate;
+            return "OMP normalized tabs or line endings in the staged text.";
+          }
+        });
         const cancel = vi.fn();
         waits.push(wait); cancels.push(cancel);
         return Object.assign(wait, { cancel });
@@ -255,7 +261,7 @@ describe("StartupOrchestrator", () => {
       expect(tmux.sendText).toHaveBeenCalledOnce();
       expect(tmux.sendKeys).not.toHaveBeenCalled();
       release();
-      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready", warnings: expect.arrayContaining([expect.stringContaining("normalized")]) });
       expect(calls.slice(0, 4)).toEqual(["prepare", "paste", "receive", "enter"]);
       expect(prepareInput.mock.calls).toEqual(vi.mocked(tmux.sendText).mock.calls);
       expect(tmux.sendKeys).toHaveBeenCalledTimes(prepareInput.mock.calls.length);

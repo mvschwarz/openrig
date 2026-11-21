@@ -290,15 +290,15 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const { sendText, sendKeys } = spies();
     let acknowledge!: () => void;
     const receipt = new Promise<void>(resolve => { acknowledge = resolve; });
-    const prepareInput = vi.fn(() => async () => receipt);
+    const prepareInput = vi.fn(() => async () => { await receipt; return "OMP normalized tabs or line endings in the staged text."; });
     const transport = makeTransport(mockTmux({ sendText, sendKeys }), { prepareInput });
-    const delivered = transport.send(seat, "slow message\nsecond line");
+    const delivered = transport.send(seat, "slow message\r\nsecond line");
     await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
     await new Promise(resolve => setTimeout(resolve, 350));
     expect(sendKeys).not.toHaveBeenCalled();
-    expect(prepareInput).toHaveBeenCalledWith(seat, "slow message\nsecond line");
+    expect(prepareInput).toHaveBeenCalledWith(seat, "slow message\r\nsecond line");
     acknowledge();
-    expect((await delivered).ok).toBe(true);
+    expect(await delivered).toMatchObject({ ok: true, warning: expect.stringContaining("normalized") });
     expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Enter"]);
   });
 

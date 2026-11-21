@@ -1358,9 +1358,12 @@ input channel. Each choice has its own state directory and resume-token type.
 
 The TUI loads OpenRig’s seat extension to report readiness, activity, context usage
 and the exact session file. It acknowledges a managed paste in its composer before
-OpenRig sends Enter. Approval dialogs appear in the pane. By default the native UI
+OpenRig sends Enter. If the editor expands tabs or converts line endings to LF,
+the send or startup result reports the change. Approval dialogs appear in the pane. By default the native UI
 uses `always-ask`, including on kernel seats. An explicit `full_bypass` policy selects
 `yolo`. The native UI ignores the ambient `OPENRIG_YOLO` setting. The TUI loads selected native OMP extensions and portable skills at launch.
+If OpenRig cannot read the saved native plugin selection, it keeps the file and
+launches the seat with a warning. It omits those plugin roots for that launch.
 
 Both OMP modes pass an explicit seat effort to the child as `--thinking` on
 launch, runtime switch and resume. This previews a switch to RPC. Use
