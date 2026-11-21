@@ -1275,6 +1275,67 @@ describe("supported seat and queue integration", () => {
     expect(f.submissions.filter(s => s.includes(`Your queue row ${item.qitemId}`))).toEqual([]);
   });
 
+  // #48: the sender's notice is in the outbox before the owner's rung is marked, so neither a restart between the two nor a
+  // send that definitely wrote nothing loses it or marks it told; a send that may have landed is never repeated.
+  const heldPastWindow = async (f: ReturnType<typeof fixture>) => {
+    await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    f.db.prepare("UPDATE nodes SET runtime='claude-code' WHERE id='b'").run();
+    const item = await f.repo.create({ sourceSession: "sibling@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
+    return item;
+  };
+  const toRung = async (f: ReturnType<typeof fixture>, qitemId: string, tick: () => Promise<unknown>) => {
+    await tick();
+    f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 45 * 60_000).toISOString(), qitemId);
+    for (let i = 0; i < 3 && notes(f, qitemId, "escalation-rung: orchestrator").length === 0; i++) await tick();
+    expect(notes(f, qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
+  };
+  const toldOf = (f: ReturnType<typeof fixture>, qitemId: string) =>
+    f.submissions.filter(s => s.includes(`Your queue row ${qitemId} to worker@test is held, not lost`));
+
+  it("a restart between the owner's rung and the sender's notice leaves the notice owed, and the next daemon sends it once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    const item = await heldPastWindow(f);
+    const { runWakeLadderTick } = await import("../src/domain/queue-wake-ladder.js");
+    const tickWith = (repo: QueueRepository) => runWakeLadderTick({ db: f.db, queueRepo: repo, retryCap: 3, retryIntervalSeconds: 0,
+      unconfirmedWindowMinutes: 30, resolveOrchestrator: () => "orch@test", attemptWake: async () => "verified" });
+    // The daemon that stops: the same database and outbox, and it never gets to send (no transport).
+    const stopped = new QueueRepository(f.db, new EventBus(f.db), { loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    stopped.attachOutbox(f.outbox);
+    await toRung(f, item.qitemId, () => tickWith(stopped));
+    expect(notes(f, item.qitemId, "held-sender-notice:")).toEqual([]);
+    expect(toldOf(f, item.qitemId)).toEqual([]);
+    expect(f.repo.listOwedHeldSenderNotices()).toEqual([expect.objectContaining({ sender: "sibling@test", qitemId: item.qitemId, state: "pending" })]);
+    // The daemon after the restart.
+    await tickWith(f.repo); await tickWith(f.repo);
+    expect(toldOf(f, item.qitemId)).toHaveLength(1);
+    expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toHaveLength(1);
+    expect(f.repo.listOwedHeldSenderNotices()).toEqual([]);
+    expect(typedInto(f, "a")).toEqual([]);
+  });
+
+  it("a sender notice that definitely wrote nothing is recorded as failed, stays owed and goes again; the owner's escalation stands", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    const item = await heldPastWindow(f);
+    // The sender's seat can't be reached on the first try, before anything is typed (the transport's own no-write shape).
+    vi.spyOn(f.transport, "send").mockImplementationOnce(async (session: string) =>
+      ({ ok: false, sessionName: session, sent: false, inputPhase: "not_reached", reason: "session_missing", error: "No text was sent." }) as never);
+    const tick = await heldLadder(f, 30);
+    await toRung(f, item.qitemId, tick);
+    expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toEqual([expect.stringContaining("outcome=failed:")]);
+    const [owed] = f.repo.listOwedHeldSenderNotices();
+    expect(owed).toMatchObject({ sender: "sibling@test", qitemId: item.qitemId, state: "failed" });
+    expect(toldOf(f, item.qitemId)).toEqual([]);
+    await tick();
+    expect(toldOf(f, item.qitemId)).toHaveLength(1);
+    expect(notes(f, item.qitemId, "held-sender-notice: sibling@test outcome=")).toHaveLength(2);
+    expect(f.outbox.getById(owed!.outboxId)!.deliveryState).not.toMatch(/^(pending|failed|sending)$/);
+    await tick();
+    expect(toldOf(f, item.qitemId)).toHaveLength(1);
+    expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
+    expect(typedInto(f, "a")).toEqual([]);
+  });
+
   it("rechecks queue applicability before paste", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });

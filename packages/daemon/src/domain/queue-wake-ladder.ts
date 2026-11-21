@@ -15,6 +15,7 @@ import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELA
   promptKindFromReason, resolveEscalationReturnRoute, routeOnThisHost, type PromptKind } from "./return-route.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
+import { HELD_SENDER_NOTICE_PREFIX } from "./outbox-handler.js";
 import { readWakeOutcome } from "./connection-contract.js";
 import { runSyncSite } from "./sync-site-wrap.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
@@ -626,20 +627,61 @@ function appendMarker(repo: QueueRepository, row: QueueItem, note: string, admit
   });
 }
 
+interface HeldSenderNotice { sender: string; body: string; outboxId: string | null }
+
 /** #48: a held row's sender is told once per held episode, beside the recovery row to its owner, that the row is held
  *  and not lost. Nothing is typed into the held seat. A sender that is OpenRig, a person (or one the human registry can't
- *  classify) or the destination itself is skipped. */
-async function noticeHeldSender(deps: WakeLadderDeps, m: { row: QueueItem; view: LadderView }, owner: string, now: Date): Promise<void> {
+ *  classify) or the destination itself is skipped. The notice is recorded in the outbox here, before the owner's rung is
+ *  marked, and sent after it (sendHeldSenderNotice): a restart in between, or a send that definitely wrote nothing,
+ *  leaves it owed for the next tick's owed-notice pass, never lost and never marked told. */
+function stageHeldSenderNotice(deps: WakeLadderDeps, m: { row: QueueItem; view: LadderView }, owner: string, now: Date): HeldSenderNotice | null {
   const { row } = m, dest = row.destinationSession, sender = row.sourceSession;
   const held = readWakeOutcome(row.lastNudgeResult);
   if (m.view.senderNoticed || held?.fact !== "held" || !sender || sender === dest || isOpenRigSender(sender)
-    || /@(system|external)$/.test(sender)) return;
-  try { if (deps.queueRepo.isHumanDestination(sender)) return; } catch { return; }
+    || /@(system|external)$/.test(sender)) return null;
+  try { if (deps.queueRepo.isHumanDestination(sender)) return null; } catch { return null; }
   const body = held.heldBy === "typing-guard"
     ? `Your queue row ${row.qitemId} to ${dest} is held, not lost: ${dest}'s typing guard holds its wakes, so nothing was typed there. It's readable with rig seat held-messages ${dest}, and a recovery row went to ${owner}.`
     : `Your queue row ${row.qitemId} to ${dest} is still held after ${minutesSince(row.tsCreated, now)} min (${m.view.attempts} retries): ${dest}'s draft-aware guard stopped each try before typing anything (a draft, a prompt, a seat that wasn't ready, or input it couldn't read or reach). The row stays pending, not lost, and a recovery row went to ${owner}.`;
-  const outcome = await deps.queueRepo.noticeHeldSender(sender, body);
-  appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${sender} outcome=${outcome}`, true);
+  const episode = lastMeaningfulTransition(deps.db, row.qitemId)?.id ?? 0;
+  return { sender, body, outboxId: deps.queueRepo.stageHeldSenderNotice(row.qitemId, episode, sender, body) };
+}
+
+/** #48: send a staged notice and record its actual outcome on the row. With no outbox it's sent at once, as before. */
+async function sendHeldSenderNotice(deps: WakeLadderDeps, row: QueueItem, notice: HeldSenderNotice | null): Promise<void> {
+  if (!notice) return;
+  const outcome = notice.outboxId ? await deps.queueRepo.deliverHeldSenderNotice(notice.outboxId)
+    : await deps.queueRepo.noticeHeldSender(notice.sender, notice.body);
+  // A recorded notice that wasn't sent now (no transport yet, or already settled) gets no marker: it's owed or done.
+  if (notice.outboxId && outcome.startsWith("skipped:")) return;
+  appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${notice.sender} outcome=${outcome}`, true);
+}
+
+/** #48: sender notices recorded but not sent (a restart came between the owner's rung and the send) or definitely not
+ *  written, while their row is still pending and held in the same episode. A failed one goes again after the retry
+ *  interval, up to the retry cap; delivered, uncertain or held ones are never sent again, and one whose sender's rig is
+ *  draining waits. A notice whose row moved on is retired with why. */
+async function deliverOwedSenderNotices(deps: WakeLadderDeps, now: Date, intervalS: number, cap: number): Promise<void> {
+  for (const owed of deps.queueRepo.listOwedHeldSenderNotices()) {
+    const row = owed.qitemId ? deps.queueRepo.getById(owed.qitemId) : null;
+    const episode = row ? lastMeaningfulTransition(deps.db, row.qitemId)?.id ?? 0 : 0;
+    if (!row || row.state !== "pending" || readWakeOutcome(row.lastNudgeResult)?.fact !== "held"
+      || owed.outboxId !== `${HELD_SENDER_NOTICE_PREFIX}${row.qitemId}-${episode}`) {
+      if (deps.queueRepo.retireHeldSenderNotice(owed.outboxId, LADDER_ACTOR, "its row is no longer held in that episode") && row) {
+        appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${owed.sender} outcome=retired:no longer held`, true);
+      }
+      continue;
+    }
+    if (deps.queueRepo.deliveryDrains.holds(owed.sender)) continue;
+    if (owed.state === "failed") {
+      const prefix = `${LADDER_SENDER_NOTICE_PREFIX} ${owed.sender} outcome=`;
+      const tried = deps.db.prepare(`SELECT COUNT(*) AS n, MAX(ts) AS last FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
+        AND substr(transition_note, 1, ?) = ?`).get(row.qitemId, episode, prefix.length, prefix) as { n: number; last: string | null };
+      if (tried.n >= cap || (tried.last !== null && now.getTime() - Date.parse(tried.last) < intervalS * 1000)) continue;
+    }
+    const outcome = await deps.queueRepo.deliverHeldSenderNotice(owed.outboxId);
+    if (!outcome.startsWith("skipped:")) appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${owed.sender} outcome=${outcome}`, true);
+  }
 }
 
 function minutesSince(ts: number | string | null | undefined, now: Date): number {
@@ -753,6 +795,11 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       await advancePromptRefusals(deps, now, intervalS, graceS, resolveOrch, attemptWake, actions);
     } catch (err) {
       log(`[wake-ladder] prompt refusal pass failed; continuing existing ladder: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      await deliverOwedSenderNotices(deps, now, intervalS, cap);
+    } catch (err) {
+      log(`[wake-ladder] held sender notice pass failed; continuing existing ladder: ${err instanceof Error ? err.message : String(err)}`);
     }
     let exhaustedThisTick = 0;
     const usagePoolBySeat = new Map<string, UsageLimitPool>();
@@ -1020,12 +1067,13 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           };
           if (members.some(m => deliveryHeld(deps.queueRepo, m.row)) || carrierDeferred()) continue;
           for (const m of needsOrchRung) {
+            const notice = stageHeldSenderNotice(deps, m, floorDest, now);
             appendMarker(
               deps.queueRepo,
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator self-skip (resolves to ${orch === null ? "no orchestrator" : "destination"}) reason=${m.reason}`,
             );
-            await noticeHeldSender(deps, m, floorDest, now);
+            await sendHeldSenderNotice(deps, m.row, notice);
             if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, carrierDeferred)) {
               appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
               exhaustedThisTick += 1;
@@ -1039,6 +1087,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           const outcome = await attemptWake(escRow.qitemId, recoveryOwner);
           if (outcome === "deferred:rig_delivery_drain") continue;
           for (const m of needsOrchRung) {
+            const notice = stageHeldSenderNotice(deps, m, recoveryOwner, now);
             appendMarker(
               deps.queueRepo,
               m.row,
@@ -1046,7 +1095,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               true,
             );
             actions.push({ qitemId: m.row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
-            await noticeHeldSender(deps, m, recoveryOwner, now);
+            await sendHeldSenderNotice(deps, m.row, notice);
             if (!outcome.startsWith("failed:")) {
               // Delivered (or durable-unconfirmed — the aggregate row itself is now the
               // orchestrator's durable obligation; S02 nets it if it sits unclaimed).

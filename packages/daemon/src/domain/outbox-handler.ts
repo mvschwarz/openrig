@@ -15,6 +15,8 @@ import type Database from "better-sqlite3";
  * select it. Single source of truth for the drain query only.
  */
 export const WAKE_INTENT_PREFIX = "wake-intent-";
+/** #48: a held queue row's one notice to its sender in one held episode (`<prefix><qitem>-<episode>`). */
+export const HELD_SENDER_NOTICE_PREFIX = "held-sender-notice-";
 /** The sender a watchdog's reminders carry; their audit pointer is the job. */
 const WATCHDOG_SENDER = "watchdog@system";
 /** Who a coalesced held message records as having retired it (#2430). */
@@ -667,6 +669,20 @@ export class OutboxHandler {
   reopenHeld(outboxId: string): boolean {
     return this.db.prepare("UPDATE outbox_entries SET delivery_state='pending' WHERE outbox_id=? AND delivery_state='retained'")
       .run(outboxId).changes === 1;
+  }
+
+  /** #48: claim an entry that was never tried, or whose last try definitely wrote nothing (failed), for one more send.
+   *  One delivered, uncertain (indeterminate), held, retired or already in flight is left as it is, so an uncertain send
+   *  is never repeated. */
+  claimUnsent(outboxId: string): boolean {
+    return this.db.prepare("UPDATE outbox_entries SET delivery_state='sending' WHERE outbox_id=? AND delivery_state IN ('pending','failed')")
+      .run(outboxId).changes === 1;
+  }
+
+  /** #48: an entry never sent, or definitely not written, that is no longer owed: retired with who and why, never sent. */
+  retireUnsent(outboxId: string, actor: string, reason: string): boolean {
+    return this.db.prepare(`UPDATE outbox_entries SET delivery_state='retired', retired_at=?, retired_by=?, retirement_reason=?
+      WHERE outbox_id=? AND delivery_state IN ('pending','failed')`).run(new Date().toISOString(), actor, reason, outboxId).changes === 1;
   }
 
   retire(outboxId: string, actor: string, reason: string): OutboxEntry {

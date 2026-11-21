@@ -73,7 +73,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   qitemId: string;
   actorSession?: string;
 }
-import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
@@ -2222,9 +2222,10 @@ export class QueueRepository {
 
   /** #48: a queue wake the draft-aware guard held is tried again when its seat reports idle, through the same guarded
    *  delivery, which re-checks the input and holds it again if it still can't go. Only while the seat is still in
-   *  draft-aware mode: switching modes replays nothing. Only rows created straight to the seat: a handed-off row's
-   *  retries are the wake ladder's. A hold-mode wake is never retried. Each try is one of the ladder's attempts, so the
-   *  existing wake retry cap bounds them; the ladder's one held notice comes past that cap or the unconfirmed window. */
+   *  draft-aware mode: switching modes alone replays nothing, and a retry already admitted goes once. Only rows created
+   *  straight to the seat: a handed-off row's retries are the wake ladder's. A hold-mode wake is never retried. Each try
+   *  is one of the ladder's attempts, so the existing wake retry cap bounds them; the ladder's one held notice comes past
+   *  that cap or the unconfirmed window. */
   async retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
     if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return;
     const addresses = this.resolveSessionAddresses(sessionName);
@@ -2248,8 +2249,57 @@ export class QueueRepository {
     }
   }
 
+  /** #48: the wake ladder's one notice to a held row's sender in one held episode, recorded in the outbox before the ladder
+   *  marks the owner's rung, so a restart before it's sent, or a send that definitely wrote nothing, leaves it owed rather
+   *  than lost. Recording it again in the same episode returns the same entry. Null with no outbox: the ladder then sends
+   *  it at once with noticeHeldSender, as before, with no custody. */
+  stageHeldSenderNotice(qitemId: string, episode: number, sender: string, body: string): string | null {
+    if (!this.outbox) return null;
+    const outboxId = `${HELD_SENDER_NOTICE_PREFIX}${qitemId}-${episode}`;
+    this.outbox.record({ outboxId, senderSession: OPENRIG_SENDER, destinationSession: sender, body, auditPointer: qitemId });
+    return outboxId;
+  }
+
+  /** #48: send a recorded sender notice, as noticeHeldSender does. Only one never tried, or one whose last try definitely
+   *  wrote nothing, is sent; delivered, uncertain, held or in-flight ones aren't sent again. The entry keeps the actual
+   *  outcome (delivered, failed, indeterminate or retained), and the returned string is the ladder's record. */
+  async deliverHeldSenderNotice(outboxId: string): Promise<string> {
+    if (!this.outbox || !this.transport) return "skipped:no transport";
+    const entry = this.outbox.getById(outboxId);
+    if (!entry) return "skipped:no notice";
+    if (!this.outbox.claimUnsent(outboxId)) return `skipped:${entry.deliveryState}`;
+    let outcome: WakeAttemptOutcome;
+    try {
+      outcome = this.classifyWakeResult(await this.transport.send(entry.destinationSession,
+        wrapPaneEnvelope(OPENRIG_SENDER, entry.destinationSession, entry.body), { verify: true, actorSession: OPENRIG_SENDER, openrigNotice: true }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outcome = isWakeTimeoutSignal(message) ? { classified: "indeterminate", nudgeResult: `indeterminate:${message}` }
+        : { classified: "failed", nudgeResult: `failed:${message}` };
+    }
+    // Only a definite no-write stays retryable; anything that may have reached the sender is never sent again.
+    this.outbox.finalizeDelivery(outboxId, outcome.classified === "verified" ? "delivered" : outcome.classified === "failed" ? "failed"
+      : outcome.classified === "retained" ? "retained" : "indeterminate");
+    return outcome.nudgeResult;
+  }
+
+  /** #48: recorded sender notices still owed (never tried, or definitely not written), oldest first. */
+  listOwedHeldSenderNotices(limit = 50): Array<{ outboxId: string; sender: string; qitemId: string | null; state: "pending" | "failed" }> {
+    if (!this.outbox) return [];
+    return (this.db.prepare(`SELECT outbox_id, destination_session, audit_pointer, delivery_state FROM outbox_entries
+      WHERE substr(outbox_id, 1, ?) = ? AND delivery_state IN ('pending','failed') ORDER BY ts_dispatched, rowid LIMIT ?`)
+      .all(HELD_SENDER_NOTICE_PREFIX.length, HELD_SENDER_NOTICE_PREFIX, limit) as Array<{ outbox_id: string; destination_session: string; audit_pointer: string | null; delivery_state: "pending" | "failed" }>)
+      .map((row) => ({ outboxId: row.outbox_id, sender: row.destination_session, qitemId: row.audit_pointer, state: row.delivery_state }));
+  }
+
+  /** #48: a recorded sender notice whose row is no longer held in that episode isn't sent; it's retired with the reason. */
+  retireHeldSenderNotice(outboxId: string, actor: string, reason: string): boolean {
+    return this.outbox?.retireUnsent(outboxId, actor, reason) ?? false;
+  }
+
   /** #48: the wake ladder's one notice to a held row's sender, sent as OpenRig through the same guarded transport (the
-   *  sender's own guard applies). Returns the outcome for the ladder's record. */
+   *  sender's own guard applies), with no custody: the path for a repository with no outbox. Returns the outcome for the
+   *  ladder's record. */
   async noticeHeldSender(sender: string, body: string): Promise<string> {
     if (!this.transport) return "skipped:no transport";
     try {
