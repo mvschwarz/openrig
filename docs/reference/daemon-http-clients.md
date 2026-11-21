@@ -326,6 +326,15 @@ What reads these declarations:
   states.
 - **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
   a missing, zero, negative or unparseable `limit` defaults to 20.
+- **A watchdog job's quiet count:** `GET /api/watchdog/<jobId>/status` (what `rig watchdog status` prints) returns
+  `quiet` beside `job` and `recentHistory`: `{ since, total, byReason, lastReason }`. It counts the quiet decisions
+  the engine made for that job: a policy's skip whose reason is in the engine's quiet set (a policy's own `not_due`
+  included) and the active-wake throttle's `active_wake_not_due`. It doesn't count scheduler ticks, loud skips,
+  delivered work, or the other evaluations that end without a history row (a job no longer active, a rig delivery
+  drain, a wake-accounting retry, a reminder held for its pass). It is kept in memory: `since` is when the daemon
+  started, and a restart counts again from zero. A job with no quiet decision yet reads `total: 0` and
+  `lastReason: null`. Two reads give a rate of quiet decisions; that rate alone doesn't show the scheduler's cadence
+  or health, and the loud outcomes stay in `recentHistory`.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body

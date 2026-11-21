@@ -307,12 +307,14 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     });
 
     const row = await createNoNudge("deadsrc@ops", "parked@ops", "Dead source task", 90);
-    // 1) No reachable fallback anywhere -> 0 items, 0 wakes, recorded as action="unreported" with destination.
+    // 1) No reachable fallback anywhere -> 0 items, 0 wakes, recorded as action="unreported" with destination (outcome="partial" per #3541).
+    const rUnreportedStatus = createStuckSweepStatus();
     const rUnreported = await runStuckSweep({
-      db, queueRepo: queue, status: createStuckSweepStatus(), unclaimedAgeMinutes: 60,
+      db, queueRepo: queue, status: rUnreportedStatus, unclaimedAgeMinutes: 60,
       log: () => {}, isRegisteredHost: () => false, resolveRecoveryAgentSeat: () => null, resolveOperatorSeat: () => null,
     });
-    expect(rUnreported.outcome).toBe("findings");
+    expect(rUnreported.outcome).toBe("partial");
+    expect(rUnreportedStatus.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
     expect(allFindings()).toHaveLength(0);
     expect(nudgesSent).toHaveLength(0);
     expect(rUnreported.findings).toContainEqual({
@@ -1704,10 +1706,11 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     const t2 = new Date("2026-11-21T04:00:00.000Z");
     const newerRow = await createNoNudge("lead@ops", "parked@ops", "Newer task after dismissal", 90, t2);
     const newerLogs: string[] = [];
+    const newerStatus = createStuckSweepStatus();
     const newerRes = await runStuckSweep({
       db,
       queueRepo: queue,
-      status: createStuckSweepStatus(),
+      status: newerStatus,
       unclaimedAgeMinutes: 60,
       now: t2,
       log: (line) => newerLogs.push(line),
@@ -1715,7 +1718,8 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
       resolveRecoveryAgentSeat: () => null,
       resolveOperatorSeat: () => null,
     });
-    expect(newerRes.outcome).toBe("findings");
+    expect(newerRes.outcome).toBe("partial");
+    expect(newerStatus.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 2 });
     expect(newerRes.findings).toContainEqual({
       kind: "unroutable-notice",
       qitemId: existingRow.qitemId,

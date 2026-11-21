@@ -7,10 +7,14 @@ import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-d
 // tmux-credential-environment tests observe the raw process boundary and real tmux instead.
 function adapterFor(exec: ExecFn, files: TmuxFileOps = defaultTmuxFileOps(), argv?: ArgvExecFn): TmuxAdapter {
   const content = new Map<string, string>();
-  return new TmuxAdapter(async command => {
+  const adapter = new TmuxAdapter(async command => {
     const file = [...content.keys()].find(p => command.endsWith(p) || command.endsWith("'" + p + "'"));
     return exec(command.includes("source-file ") && file ? "tmux " + content.get(file)!.trimEnd() : command);
   }, { ...files, writeFile: async (p, body, opts) => { await files.writeFile(p, body, opts); content.set(p, body); } }, argv);
+  // #3253: the calls pinned here are a daemon's that has already checked its server's bus once (on Linux, a daemon's
+  // first launch runs startServer first; tmux-server-systemd-scope.test.ts covers that).
+  (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
+  return adapter;
 }
 
 const NO_SERVER_ERROR = new Error("no server running on /tmp/tmux-1000/default");
