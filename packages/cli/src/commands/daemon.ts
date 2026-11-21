@@ -2,7 +2,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, processStartToken } from "../daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, markReservationRetained, processStartToken } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
@@ -98,11 +98,17 @@ export function realDeps(): LifecycleDeps {
     readProcessState: (pid) => readProcessState(pid),
   });
 
+  // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
+  const pidNamespace = (): string | undefined => {
+    if (process.platform !== "linux") return "host";
+    try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
+  };
+
   return {
     processLiveness,
     acquireStartLock: () => {
-      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness });
-      if (lock.archived) console.error(`A start reservation from before this boot was left behind; archived it as ${lock.archived}`);
+      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness, pidNamespace: pidNamespace() });
+      if (lock.archived) console.error(`An abandoned start reservation (from before this boot, or whose recorded launcher and child are both gone) was archived as ${lock.archived}`);
       return lock;
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
@@ -166,15 +172,12 @@ export function realDeps(): LifecycleDeps {
     isProcessAlive,
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
     listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
-    // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
-    pidNamespace: () => {
-      if (process.platform !== "linux") return "host";
-      try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
-    },
+    pidNamespace,
     // #3315: what the start records and stop checks to confirm a start reservation still names its child.
     bootId: currentBootId,
     processStartToken,
     releaseStartReservation: archiveSpentReservation,
+    retainStartReservation: markReservationRetained,
   };
 }
 
@@ -185,7 +188,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("start")
     .description("Start the daemon")
-    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on.\n")
+    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on; so is one from\nthis boot whose recorded launcher and child are both gone in this shell's pid namespace and that no stop retained.\n")
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")

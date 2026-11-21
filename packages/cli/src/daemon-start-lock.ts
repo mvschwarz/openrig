@@ -17,7 +17,8 @@ export interface ReservedChildIdentity {
 export interface DaemonStartLock {
   recordChild(pid: number, identity?: ReservedChildIdentity): void;
   release(preserve?: boolean): void;
-  /** Where a reservation left from before this boot was archived, when this launch did so. */
+  /** Where an abandoned reservation (from before this boot, or one whose recorded launcher and child are both
+   *  gone) was archived, when this launch did so. */
   archived?: string;
 }
 
@@ -28,19 +29,30 @@ export interface StaleLockCheck {
   bootedAtMs: number;
   /** Three-state liveness (`createProcessLiveness`): only "dead" counts as gone. */
   processLiveness: (pid: number) => "alive" | "dead" | "unknown";
+  /** This shell's pid namespace ("host" where the OS has none). Without it, no reservation from this boot is archived. */
+  pidNamespace?: string;
   /** Test seam: runs after the reservation was inspected and before it is claimed. */
   afterInspect?: () => void;
 }
 
 /** One supported local launch owns pre-bind initialization through publication.
  * ponytail: no age-based takeover — a dead launcher can leave a live unbound child.
- * The one exception is a reservation from an earlier boot: a reboot ends every process it could name.
+ * Two exceptions. The first is a reservation from an earlier boot: a reboot ends every process it could name.
  * A reservation that records its boot ID is from an earlier boot when that ID differs from this one's;
  * PIDs don't matter then, since after a reboot they may belong to unrelated processes.
  * One without a boot ID (written by an older CLI) must have been written and last changed before
  * this boot, with every recorded PID positively dead; the PID check covers a clock that jumped after
  * boot, and a PID that can't be inspected keeps the refusal.
- * Otherwise hard-crash recovery inspects the recorded PIDs before archiving this file. */
+ * The second: a reservation from this boot is archived only when it records both a launcher and a child, both are positively
+ * dead, and its PIDs are numbered in this shell's pid namespace (one that records none is read as the host's,
+ * which only an OS without pid namespaces reports). A live or uninspectable PID, a missing child record (the
+ * launcher may have died between the spawn and recording it) or another namespace keeps the refusal, and so does
+ * a reservation that `rig daemon stop` retained after a shutdown it couldn't verify (`markReservationRetained`):
+ * that state is unknown, not gone. The start notes in the archive that it archived it.
+ * Every route that removes another launch's reservation (both of these, and `rig daemon stop`'s release) first takes
+ * one claim on its inode (`claimAndArchive`), so two of them that both find it removable can't both remove it; the stop's
+ * retention mark takes the same claim, so it lands before a removal's content check or not at all. The
+ * owning launcher's own release needs no claim: while it runs, nothing else finds its reservation removable. */
 export function acquireDaemonStartLock(home: string, stale?: StaleLockCheck): DaemonStartLock {
   fs.mkdirSync(home, { recursive: true });
   const file = path.join(home, "daemon-start.lock");
@@ -50,7 +62,7 @@ export function acquireDaemonStartLock(home: string, stale?: StaleLockCheck): Da
     fd = fs.openSync(file, "wx", 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    archived = stale ? archiveIfBeforeBoot(file, stale) : undefined;
+    archived = stale ? archiveIfAbandoned(file, stale) : undefined;
     if (!archived) throw reserved(file);
     try {
       fd = fs.openSync(file, "wx", 0o600);
@@ -110,14 +122,11 @@ export function currentBootId(): string | undefined {
   }
 }
 
-/** Archives a reservation from an earlier boot (see `acquireDaemonStartLock`) and returns the archive's path.
- * Anything unreadable or from this boot stays where it is, and so does a legacy one naming a PID that isn't
- * positively dead. One launch wins: the archive is a hard link named after the inspected file's inode, made
- * with link(2), which never replaces an existing name. A launch that lost the race, or whose path now holds a
- * different file, gets EEXIST or a mismatched inode and keeps the refusal. Only the winner removes the old
- * name, and nothing else can replace it while it exists, so the winner never removes another launch's lock.
- * A winner that dies between link and unlink leaves both names; later starts refuse, as before this change. */
-function archiveIfBeforeBoot(file: string, stale: StaleLockCheck): string | undefined {
+/** Archives an abandoned reservation (see `acquireDaemonStartLock`) and returns the archive's path: one from an
+ * earlier boot, or one from this boot whose recorded launcher and child are both positively dead in this shell's
+ * pid namespace. Anything unreadable stays where it is, and so does one naming a PID that isn't positively dead.
+ * One launch wins, through `claimAndArchive`. */
+function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undefined {
   let text: string;
   let inspected: fs.Stats;
   let fd: number;
@@ -137,42 +146,114 @@ function archiveIfBeforeBoot(file: string, stale: StaleLockCheck): string | unde
   const pids: number[] = [];
   let startedAtMs = Number.NaN;
   let lockBootId: string | undefined;
+  let hasLauncher = false;
+  let hasChild = false;
+  let retainedByStop = false;
+  let recordedNamespace: string | undefined;
+  const validPid = (pid: unknown): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 0;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
-    let record: { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown; bootId?: unknown };
+    let record: { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown; bootId?: unknown; pidNamespace?: unknown; retainedBy?: unknown };
     try {
       record = JSON.parse(line);
     } catch {
       return undefined;
     }
-    for (const pid of [record.launcherPid, record.childPid]) {
-      if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) pids.push(pid);
-    }
+    if (validPid(record.launcherPid)) { pids.push(record.launcherPid); hasLauncher = true; }
+    if (validPid(record.childPid)) { pids.push(record.childPid); hasChild = true; }
     if (typeof record.startedAt === "string") startedAtMs = Date.parse(record.startedAt);
     if (typeof record.bootId === "string" && record.bootId) lockBootId = record.bootId;
+    if (typeof record.pidNamespace === "string" && record.pidNamespace) recordedNamespace = record.pidNamespace;
+    if (record.retainedBy !== undefined) retainedByStop = true;
   }
   if (!Number.isFinite(startedAtMs) || pids.length === 0) return undefined;
-  if (lockBootId && stale.bootId) {
-    if (lockBootId === stale.bootId) return undefined;
-  } else {
-    if (Math.max(startedAtMs, inspected.mtimeMs) >= stale.bootedAtMs) return undefined;
-    if (!pids.every((pid) => stale.processLiveness(pid) === "dead")) return undefined;
+  const allDead = (): boolean => pids.every((pid) => stale.processLiveness(pid) === "dead");
+  const earlierBoot = lockBootId && stale.bootId
+    ? lockBootId !== stale.bootId
+    : Math.max(startedAtMs, inspected.mtimeMs) < stale.bootedAtMs && allDead();
+  if (!earlierBoot) {
+    // This boot: only a launch whose launcher and recorded child are both positively gone, numbered in this shell's
+    // pid namespace, and that no stop retained. A pending or unknown child keeps today's refusal.
+    const sameNamespace = stale.pidNamespace !== undefined && (recordedNamespace ?? "host") === stale.pidNamespace;
+    if (retainedByStop || !(hasLauncher && hasChild && sameNamespace && allDead())) return undefined;
   }
   stale.afterInspect?.();
   const stamp = new Date(startedAtMs).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   const target = `${file}.abandoned-${stamp}-${inspected.ino}`;
+  if (!claimAndArchive(file, inspected, text, target)) return undefined;
+  if (!earlierBoot) {
+    // Say that a start archived it, and why: the reservation itself only records the launch.
+    try {
+      fs.appendFileSync(target, JSON.stringify({ archivedBy: "start", reason: "launcher-and-child-gone", launcherPid: process.pid, at: new Date().toISOString() }) + "\n");
+    } catch {
+      // The archive is already in place; the note is only for whoever inspects it.
+    }
+  }
+  return target;
+}
+
+/** #3637 — moves the reservation at `file`, still the `inspected` inode, to `target` and removes `file`, only after
+ * taking the one claim on that inode that every remover takes: a hard link named after the inode, made with link(2),
+ * which never replaces an existing name. Whoever gets EEXIST, a missing file, another inode under the claim, or
+ * content other than the `text` it decided on (a stop may have appended a retention since; the stop takes this same
+ * claim to append it, so none lands between this check and the move) keeps the reservation
+ * where it is. While the claim exists no other remover can remove `file`, so the winner never removes another
+ * launch's lock, whichever archive name each would use. The claim goes once the move is done. A remover that dies
+ * holding the claim leaves it, and later removals of that inode refuse until it's cleared by hand. */
+function claimAndArchive(file: string, inspected: fs.Stats, text: string, target: string): boolean {
+  const claim = `${file}.claim-${inspected.ino}`;
   try {
+    fs.linkSync(file, claim);
+  } catch {
+    return false;
+  }
+  try {
+    const claimed = fs.statSync(claim);
+    if (claimed.dev !== inspected.dev || claimed.ino !== inspected.ino) return false;
+    if (fs.readFileSync(claim, "utf8") !== text) return false;
     fs.linkSync(file, target);
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { fs.unlinkSync(claim); } catch { /* already gone */ }
+  }
+}
+
+/** #3637 — `rig daemon stop` keeps a reservation after a shutdown it couldn't verify (the child didn't exit, the
+ *  listener isn't confirmed closed, no matching receipt, or an incomplete one), and marks it before its signal
+ *  ("stopping") so no start archives it while the shutdown is being verified. It records that here, only while the
+ *  file still holds exactly `expected`, so a later start doesn't take that unknown state for an abandoned launch.
+ *  It holds the removers' claim on the inode (`claimAndArchive`) across that check and the write, so no remover moves
+ *  the reservation between them: while a remover holds the claim, nothing is written and the stop refuses.
+ *  Returns the reservation's new text, or undefined when nothing was written. */
+export function markReservationRetained(file: string, expected: string, reason: string): string | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r+");
   } catch {
     return undefined;
   }
-  const linked = fs.statSync(target);
-  if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
-    fs.unlinkSync(target);
+  let claim: string | undefined;
+  try {
+    const opened = fs.fstatSync(fd);
+    const name = `${file}.claim-${opened.ino}`;
+    fs.linkSync(file, name);
+    claim = name;
+    const claimed = fs.statSync(claim);
+    if (claimed.dev !== opened.dev || claimed.ino !== opened.ino) return undefined;
+    const text = fs.readFileSync(fd, "utf8");
+    if (text !== expected) return undefined;
+    const record = JSON.stringify({ retainedBy: "stop", reason, at: new Date().toISOString() }) + "\n";
+    fs.writeSync(fd, record, Buffer.byteLength(text));
+    return text + record;
+  } catch {
     return undefined;
+  } finally {
+    if (claim) { try { fs.unlinkSync(claim); } catch { /* already gone */ } }
+    fs.closeSync(fd);
   }
-  fs.unlinkSync(file);
-  return target;
 }
 
 /** #3315 — a token that names one process for as long as it lives: on Linux its start time in clock ticks since boot
@@ -220,21 +301,6 @@ export function archiveSpentReservation(file: string, expected: string): string 
   }
   if (text !== expected) return undefined;
   const target = `${file}.stopped-${inspected.ino}`;
-  try {
-    fs.linkSync(file, target);
-  } catch {
-    return undefined;
-  }
-  try {
-    const linked = fs.statSync(target);
-    if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
-      fs.unlinkSync(target);
-      return undefined;
-    }
-    fs.unlinkSync(file);
-  } catch {
-    // Left for the operator; the caller warns that the reservation was not released.
-    return undefined;
-  }
-  return target;
+  // Left for the operator when the claim or the move fails; the caller warns that the reservation was not released.
+  return claimAndArchive(file, inspected, text, target) ? target : undefined;
 }
