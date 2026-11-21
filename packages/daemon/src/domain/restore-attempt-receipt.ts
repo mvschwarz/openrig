@@ -109,7 +109,10 @@ export function deriveRestoreAttemptReceipt(
       reconciliations,
       currentNodes,
       unresolvedIntendedSeats,
-      currentIntendedSetVerdict: rollupRestoreRigResult(currentNodes),
+      // Every intended seat kept down leaves no node to roll up (the empty rollup is `failed`): the attempt's own verdict
+      // stands, a restore that launched nothing on purpose or one that failed before any seat (a service boot).
+      currentIntendedSetVerdict: currentNodes.length === 0 && keptDown.size > 0 ? originalResult.rigResult
+        : rollupRestoreRigResult(currentNodes),
     };
   } catch (error) {
     return { ok: false, code: "attempt_corrupt", message: `Restore attempt ${attemptId} could not be decoded: ${(error as Error).message}` };

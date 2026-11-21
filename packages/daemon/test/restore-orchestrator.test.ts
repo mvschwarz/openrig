@@ -2839,6 +2839,53 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.warnings.join("\n")).not.toContain("was skipped");
       expect(result.result.rigResult).toBe("fully_restored");
     });
+
+    it("A pool-slot read that throws doesn't fail the restore: every seat restores on the ordinary path, and a warning names the failed read.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const read = vi.spyOn(SeatPoolSlotsRepository.prototype, "isDrainedPoolNode").mockImplementation(() => {
+        throw new Error("pool read down");
+      });
+      try {
+        const result = await orchestrator().restore(snapshot.id);
+        expect(read).toHaveBeenCalled();
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) return;
+        // Its pool state unknown, the drained agent is an ordinary seat: restore starts it, and keeps nothing down.
+        expect(result.result.keptDown).toBeUndefined();
+        expect(result.result.nodes.map((node) => node.nodeId)).toEqual(expect.arrayContaining([model.id, agent.id]));
+        const warning = result.result.warnings.find((line) => line.includes("seat pool read failed"));
+        expect(warning).toContain("dev.impl-s1");
+        expect(warning).toContain("pool read down");
+        expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
+      } finally { read.mockRestore(); }
+    });
+
+    it("A selection of a single drained agent launches nothing and keeps it down: a fully restored result and receipt, not a validation failure with no blocker.", async () => {
+      const { snapshot, agent } = seedPool("drained");
+      // What the snapshot route records from `intendedSeats` naming only the agent.
+      const selected = updateSnapshotData(snapshot, (data) => {
+        data.topologyRoster = { version: 1, source: "operator_explicit", intendedNodeIds: [agent.id] };
+      });
+      const before = sessionsOf(agent.id);
+      const tmux = mockTmux();
+      const result = await orchestrator(tmux).restore(selected.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(result.result.nodes).toEqual([]);
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.blockers).toBeUndefined();
+      expect(result.result.warnings.join("\n")).toContain("nothing to launch: dev.impl-s1 is a drained seat pool agent");
+      expect(vi.mocked(tmux.createSession)).not.toHaveBeenCalled();
+      expect(sessionsOf(agent.id)).toEqual(before);
+      // The attempt's receipt has no seat to roll up and keeps the attempt's verdict, not the empty rollup's `failed`.
+      const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started'").get() as { seq: number };
+      const receipt = deriveRestoreAttemptReceipt(db, selected.rigId, attempt.seq);
+      if (!receipt.ok) throw new Error(receipt.message);
+      expect(receipt.currentNodes).toEqual([]);
+      expect(receipt.unresolvedIntendedSeats).toEqual([]);
+      expect(receipt.currentIntendedSetVerdict).toBe("fully_restored");
+    });
   });
 
   it("restore.completed: exact payload with RestoreResult in DB + subscriber", async () => {
