@@ -31,6 +31,7 @@ import { bundleInstallContext, bundleInstallContextLines, isExistingBundleTarget
 import { confirmStoppedGenerations } from "./running-name-guard.js";
 import { inspectBundleBehaviour } from "./bundle-behaviour-inspect.js";
 import { getDaemonVersion } from "./daemon-version.js";
+import { unverifiedModelWarning } from "./rigspec-preflight.js";
 import { rigNameComposeProjectConflict, withRigName } from "./rig-name-override.js";
 
 /** Bootstrap mode */
@@ -391,6 +392,12 @@ export class BootstrapOrchestrator {
   ): Promise<BootstrapResult> {
     const { mode, autoApprove, approvedActionKeys } = opts;
 
+    if (mode === "plan") {
+      for (const node of spec.nodes) {
+        if (node.model) warnings.push(unverifiedModelWarning(node.id, node.model));
+      }
+    }
+
     // --- Stage 2: RESOLVE_PACKAGES ---
     const packageRefs = new Set<string>();
     for (const node of spec.nodes) {
@@ -708,20 +715,22 @@ export class BootstrapOrchestrator {
     });
 
     if (!instantiateOutcome.ok) {
-      errors.push(`Rig import failed: ${instantiateOutcome.code}`);
+      errors.push(`Rig import failed: ${"message" in instantiateOutcome ? instantiateOutcome.message : instantiateOutcome.code}`);
       stages.push({ stage: "import_rig", status: "failed", detail: instantiateOutcome });
       const finalStatus: BootstrapStatus = hasExecFailures || packageInstallFailed ? "partial" : "failed";
       this.deps.bootstrapRepo.updateRunStatus(run.id, finalStatus);
       return { runId: run.id, status: finalStatus, stages, errors, warnings };
     }
 
-    stages.push({ stage: "import_rig", status: "ok", detail: instantiateOutcome.result });
+    const failedNodes = instantiateOutcome.result.nodes.filter((n) => n.status === "failed");
+    stages.push({ stage: "import_rig", status: failedNodes.length > 0 ? "failed" : "ok", detail: instantiateOutcome.result });
+    errors.push(...failedNodes.map((n) => `${n.logicalId}: ${n.error ?? "launch failed"}`));
     if (instantiateOutcome.result.warnings?.length) {
       warnings.push(...instantiateOutcome.result.warnings);
     }
 
     // --- DONE ---
-    const finalStatus: BootstrapStatus = hasExecFailures || packageInstallFailed ? "partial" : "completed";
+    const finalStatus: BootstrapStatus = hasExecFailures || packageInstallFailed || failedNodes.length > 0 ? "partial" : "completed";
     this.deps.bootstrapRepo.updateRunStatus(run.id, finalStatus, { rigId: instantiateOutcome.result.rigId });
 
     return {

@@ -721,6 +721,56 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedProfileFreshLaunchCommand("fleet"));
   });
 
+  it.each(["fresh", "resume", "fork"] as const)("prepares a named profile's generated pod state before %s dispatch", async kind => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "codex-profile-state-"));
+    try {
+      const home = nodePath.join(root, "home"), cwd = nodePath.join(root, "project");
+      const shared = nodePath.join(root, "shared-docs"), state = nodePath.join(shared, "rigs/test-rig/state/dev");
+      const workspace = nodePath.join(root, "workspace");
+      fs.mkdirSync(home); fs.mkdirSync(cwd);
+      fs.writeFileSync(nodePath.join(home, "fleet.config.toml"), 'sandbox_mode = "workspace-write"\n');
+      vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", shared);
+      const prepareTeamWorkspace = vi.fn(() => [workspace]);
+      const tmux = mockTmux();
+      let stateReadyAtDispatch = false;
+      vi.mocked(tmux.sendText).mockImplementation(async () => {
+        stateReadyAtDispatch = fs.existsSync(state);
+        return { ok: true };
+      });
+      const adapter = new CodexRuntimeAdapter({ tmux, codexHome: home, sleep: async () => {},
+        listProcesses: () => [], resolveGitAddDirs: async () => [], prepareTeamWorkspace,
+        verifyProfilePreflight: async profile => ({ ok: true, profile }),
+        fsOps: { readFile: p => fs.readFileSync(p, "utf8"), writeFile: (p, text) => fs.writeFileSync(p, text),
+          exists: fs.existsSync, mkdirp: p => fs.mkdirSync(p, { recursive: true }), homedir: home },
+      });
+      const opts = { name: "dev-qa@test-rig", ...(kind === "resume" ? { resumeToken: "previous-thread" } : {}),
+        ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-thread", pendingIdAllowed: true } } : {}) };
+      await adapter.launchHarness({ ...makeBinding(cwd), codexConfigProfile: "fleet", teamPermissionDefault: true }, opts);
+      expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain(`--add-dir ${quote(state)}`);
+      expect(stateReadyAtDispatch).toBe(true);
+      expect(fs.existsSync(workspace)).toBe(false);
+      expect(prepareTeamWorkspace).not.toHaveBeenCalled();
+      fs.writeFileSync(nodePath.join(state, "proof.md"), "owned pod state");
+      expect(fs.readFileSync(nodePath.join(state, "proof.md"), "utf8")).toBe("owned pod state");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); vi.unstubAllEnvs(); }
+  });
+
+  it("omits the generated pod state when its preparation fails", async () => {
+    const tmux = mockTmux(), fsOps = mockFs();
+    const state = testQueueRoot("/fixture/shared");
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", "/fixture/shared");
+    fsOps.mkdirp = p => { if (p === state) throw new Error("fixture state unavailable"); };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps, sleep: async () => {},
+        resolveGitAddDirs: async () => [], verifyProfilePreflight: async profile => ({ ok: true, profile }) });
+      const result = await adapter.launchHarness({ ...makeBinding(), codexConfigProfile: "fleet" }, { name: "dev-qa@test-rig" });
+      expect(result.ok).toBe(true);
+      expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).not.toContain(state);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("fixture state unavailable"));
+    } finally { warning.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
   it("omits generated writable roots for a read-only profile on fresh, resume and fork launches", async () => {
     const codexHome = "/private/codex";
     const fsOps = mockFs({ [`${codexHome}/locked.config.toml`]: 'sandbox_mode = "read-only"\napproval_policy = "never"\n' });

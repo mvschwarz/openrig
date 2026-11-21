@@ -2189,3 +2189,70 @@ describe("scope create dependency identity", () => {
     expect(fm.depends_on).toEqual(["OPR.0.3.2.1"]);
   });
 });
+
+// A project nested in another workspace (its own project.yaml and missions) mints ids with its project.yaml's optional
+// scope.idPrefix; without one, an id the enclosing project's missions already use is named, not refused.
+describe("a nested project's mission ids", () => {
+  let root: string;
+  const nested = () => path.join(root, "projects", "ops");
+  beforeEach(() => {
+    root = mktemp();
+    writeFile(path.join(root, "project.yaml"), "metadata:\n  id: parent\n");
+    writeFile(path.join(root, "missions", "backlog", "README.md"), "---\nid: OPR.99.0.1\n---\n# backlog\n");
+    writeFile(path.join(root, "missions", "release-0.7.21", "README.md"), "---\nid: OPR.0.7.21\n---\n# release\n");
+  });
+  afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  it("mints the nested project's own prefix for an escape-band and a release mission", async () => {
+    writeFile(path.join(nested(), "project.yaml"), "scope:\n  idPrefix: OPS\n");
+    const work = await run(["mission", "create", "work", "--json"], path.join(nested(), "missions"));
+    expect(work.exitCode).toBe(0);
+    expect(JSON.parse(work.stdout).mission).toMatchObject({ id: "OPS.99.0.1", advisories: [] });
+    const release = await run(["mission", "create", "release-0.7.21", "--json"], path.join(nested(), "missions"));
+    expect(release.exitCode).toBe(0);
+    expect(JSON.parse(release.stdout).mission).toMatchObject({ id: "OPS.0.7.21", advisories: [] });
+  });
+
+  it("names an id the enclosing project's missions already use, and still creates the mission, when no prefix is declared", async () => {
+    writeFile(path.join(nested(), "project.yaml"), "metadata:\n  id: ops\n");
+    const r = await run(["mission", "create", "work", "--json"], path.join(nested(), "missions"));
+    expect(r.exitCode).toBe(0);
+    const mission = JSON.parse(r.stdout).mission;
+    expect(mission.id).toBe("OPR.99.0.1");
+    expect(mission.advisories).toEqual([`Mission ID OPR.99.0.1 is already used by ${path.join(root, "missions", "backlog")} in the enclosing project's missions (${path.join(root, "missions")}). Edit this mission's id: before creating its slices, since their ids inherit it. For later missions, set scope.idPrefix (2-3 uppercase letters, such as OPS) in this project's project.yaml, or pass --id.`]);
+    expect(fs.existsSync(path.join(nested(), "missions", "work"))).toBe(true);
+  });
+
+  it("still creates the mission when the enclosing project's missions can't be read, and says the check couldn't run", async () => {
+    writeFile(path.join(nested(), "project.yaml"), "metadata:\n  id: ops\n");
+    // A file where the enclosing missions folder should be: reading it fails (ENOTDIR) for any user.
+    fs.rmSync(path.join(root, "missions"), { recursive: true, force: true });
+    writeFile(path.join(root, "missions"), "not a folder\n");
+    const r = await run(["mission", "create", "work", "--json"], path.join(nested(), "missions"));
+    expect(r.exitCode).toBe(0);
+    const mission = JSON.parse(r.stdout).mission;
+    expect(mission.id).toBe("OPR.99.0.1");
+    expect(mission.advisories).toHaveLength(1);
+    expect(mission.advisories[0]).toMatch(/^The enclosing project's mission IDs couldn't be checked for OPR\.99\.0\.1: .*ENOTDIR/);
+    expect(fs.existsSync(path.join(nested(), "missions", "work"))).toBe(true);
+  });
+
+  it("keeps OPR, with a warning, for a scope.idPrefix that isn't 2-3 uppercase letters", async () => {
+    writeFile(path.join(nested(), "project.yaml"), "scope:\n  idPrefix: ops\n");
+    const r = await run(["mission", "create", "later", "--id", "OPR.99.0.7", "--json"], path.join(nested(), "missions"));
+    expect(r.exitCode).toBe(0);
+    const minted = await run(["mission", "create", "work", "--json"], path.join(nested(), "missions"));
+    expect(minted.exitCode).toBe(0);
+    const mission = JSON.parse(minted.stdout).mission;
+    expect(mission.id).toBe("OPR.99.0.8");
+    expect(mission.advisories).toEqual([`${path.join(nested(), "project.yaml")}: optional scope.idPrefix must be 2-3 uppercase letters (such as OPS); kept OPR`]);
+  });
+
+  it("gives a mission with no id the project's prefix when its first slice is created", async () => {
+    writeFile(path.join(nested(), "project.yaml"), "scope:\n  idPrefix: OPS\n");
+    writeFile(path.join(nested(), "missions", "older", "README.md"), "# older, no id yet\n");
+    const r = await run(["slice", "create", "older", "first", "--json"], path.join(nested(), "missions"));
+    expect(r.exitCode).toBe(0);
+    expect(readFrontmatter(path.join(nested(), "missions", "older", "README.md")).id).toBe("OPS.99.0.1");
+  });
+});

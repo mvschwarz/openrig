@@ -17,7 +17,8 @@ const lastCheck = (value: unknown, timeZone: string) => typeof value === "string
 
 export function workflowOverview(execution: ExecutionViewSnap, width: number): ContentLine[] {
   const instances = execution.lifecycle_instances;
-  if (!instances?.length) return [{ text: "" }, { text: instances ? "  Workflows: none bound to this mission" : "  Workflows: projection unavailable" }];
+  // #3616: a mission with no workflow bound doesn't use them, so there's no line; a projection that wasn't read still says so.
+  if (!instances?.length) return instances ? [] : [{ text: "" }, { text: "  Workflows: projection unavailable" }];
   const lines: ContentLine[] = [{ text: "" }, sectionRule("WORKFLOWS", width)];
   for (const instance of [...instances].sort((a, b) => Number(["completed", "aborted"].includes(text(a.status))) - Number(["completed", "aborted"].includes(text(b.status))))) {
     lines.push(listItem(`${title(instance)} · ${text(instance.status, "unknown")}`, open(`workflow:${instance.instance_id}`)));

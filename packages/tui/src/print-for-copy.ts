@@ -6,15 +6,22 @@
 // It writes nothing to the clipboard, opens nothing, and reads no input other than the Enter
 // that returns.
 import { ALT_SCREEN_OFF, ALT_SCREEN_ON, MOUSE_DISABLE, MOUSE_ENABLE, PASTE_DISABLE, PASTE_ENABLE } from "./input.js";
+import { terminalSafeText } from "./terminal-safe-text.js";
 
 export const PRINT_FOR_COPY_RETURN_HINT = "Select the line above to copy it. Press Enter to return to OpenRig.";
 const LEAVE = PASTE_DISABLE + MOUSE_DISABLE + ALT_SCREEN_OFF;
 const RESTORE = ALT_SCREEN_ON + MOUSE_ENABLE + PASTE_ENABLE;
 
-/** The exact text printed on the normal screen: heading, the value on its own unbroken line, hint. */
+/** The exact text printed on the normal screen: heading, the value on its own unbroken line, hint.
+ *
+ *  The value is cleaned of terminal control here, at the one sink that writes it: this function puts
+ *  bytes on the operator's terminal, and a value that arrived from a daemon answer or a socket path
+ *  must not be able to move the cursor (or push a clipboard payload) while the operator is selecting
+ *  the line. Elements are separated by a space, so a control byte between two fields cannot glue them
+ *  together in what gets copied. */
 export function printForCopyText(label: string, value: string): string {
-  const oneLine = value.replace(/[\r\n]+/g, "");
-  return `\r\n${label}\r\n\r\n${oneLine}\r\n\r\n${PRINT_FOR_COPY_RETURN_HINT}\r\n`;
+  const oneLine = terminalSafeText(value).replace(/[\r\n]+/g, "");
+  return `\r\n${terminalSafeText(label)}\r\n\r\n${oneLine}\r\n\r\n${PRINT_FOR_COPY_RETURN_HINT}\r\n`;
 }
 
 /** How the wait ended: the user pressed Enter, or terminal input ended, closed or failed. */

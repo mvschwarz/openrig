@@ -5,13 +5,15 @@ import path from "node:path";
  * Replace a file through exclusively created sibling staging and an atomic rename.
  * Preserve the source mode so read-only packaged assets can be provisioned repeatedly.
  * Never follow an existing temporary slot, and clean only this invocation's staging.
- * If staging creation fails, retain the prior in-place copy behavior and its error.
+ * If staging creation fails, retain the prior in-place copy behavior and its error,
+ * unless atomicOnly requires propagating the staging error without touching the destination.
  */
-export function replaceFile(src: string, dest: string): void {
+export function replaceFile(src: string, dest: string, options: { atomicOnly?: boolean } = {}): void {
   let staging: string;
   try {
     staging = fs.mkdtempSync(path.join(path.dirname(dest), ".openrig-asset-"));
-  } catch {
+  } catch (error) {
+    if (options.atomicOnly) throw error;
     fs.copyFileSync(src, dest);
     return;
   }

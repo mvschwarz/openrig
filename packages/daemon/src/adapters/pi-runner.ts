@@ -849,6 +849,8 @@ export interface RunnerIo {
   readFirstLine?(path: string): string | null;
   /** The entry ids of a complete, valid Pi session file (a fork's parent); null when it isn't one. Never blocks. */
   readSessionEntryIds?(path: string): Promise<ReadonlySet<string> | null>;
+  /** #1275: the id of the last complete non-header entry in a local session file, read from its tail without scanning history. */
+  readLastEntryId?(path: string): string | null;
   now(): string;
 }
 
@@ -865,6 +867,20 @@ const COMPACT_ID = "pi-runner-compact:";
 const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 const NEGOTIATE_ID = "omp-runner-negotiate";
+const MAX_PENDING_CURSOR_REFRESHES = 16;
+/** #1275: completed turns a pending unanchored full read blocks new full reads before being treated as lost. */
+export const MAX_UNANCHORED_REFRESH_HOLD_TURNS = 3;
+const UNKNOWN_SINCE_CODE = "unknown_since";
+const UNKNOWN_ENTRIES_CURSOR_RE = /^unknown entries cursor\b/i;
+const ENTRY_NOT_FOUND_RE = /^entry not found\b/i;
+const OVERSIZED_RESTORE_ERROR_RE = /\bexceeded the transport limit\b|\breassembly limit\b/i;
+const OVERSIZED_REASSEMBLY_DROP_RE = /\babove the \d+-byte reassembly limit$/;
+
+function isUnknownCursorError(detail: string, code: string | undefined): boolean {
+  return code === UNKNOWN_SINCE_CODE
+    || UNKNOWN_ENTRIES_CURSOR_RE.test(detail)
+    || ENTRY_NOT_FOUND_RE.test(detail);
+}
 /** RPC commands that carry operator input. Their failure means the seat
  *  cannot do the requested work; other command failures are not attention. */
 const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow_up: true };
@@ -925,6 +941,72 @@ export async function readPiSessionEntryIds(
     return null;
   } finally {
     await handle?.close().catch(() => {});
+  }
+}
+
+const SESSION_TAIL_CHUNK_BYTES = 64 * 1024;
+/** #1275: largest trailing entry read locally to seed or recover a history cursor; larger lines return null. */
+export const SESSION_TAIL_READ_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * #1275: read the `id` of the last complete non-header entry in a local Pi or OMP JSONL session file without
+ * reading earlier history. Opens non-blocking and checks `isFile()` so a FIFO or device cannot stall the runner;
+ * requires a trailing newline and an unchanged file size across the read so a torn or concurrent write answers null.
+ */
+export function readSessionTailEntryId(
+  path: string,
+  limitBytes = SESSION_TAIL_READ_LIMIT_BYTES,
+  /** Test seam only: called after fstat and after reading the tail bytes, to mutate the file at those points. */
+  testHooks?: { afterStat?: () => void; afterRead?: () => void },
+): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0 || limitBytes <= 0) return null;
+    const size = stat.size;
+    testHooks?.afterStat?.();
+    const floor = Math.max(0, size - limitBytes);
+    const parts: Buffer[] = [];
+    let cursor = size;
+    let foundLineStart = false;
+    while (cursor > floor) {
+      const readStart = Math.max(floor, cursor - SESSION_TAIL_CHUNK_BYTES);
+      const length = cursor - readStart;
+      const chunk = Buffer.allocUnsafe(length);
+      let offset = 0;
+      while (offset < length) {
+        const bytesRead = fs.readSync(fd, chunk, offset, length - offset, readStart + offset);
+        if (bytesRead === 0) return null;
+        offset += bytesRead;
+      }
+      if (cursor === size && chunk[length - 1] !== 0x0a) return null;
+      const searchEnd = cursor === size ? length - 1 : length;
+      const newline = chunk.subarray(0, searchEnd).lastIndexOf(0x0a);
+      if (newline >= 0) {
+        parts.push(chunk.subarray(newline + 1, searchEnd));
+        foundLineStart = true;
+        break;
+      }
+      parts.push(chunk.subarray(0, searchEnd));
+      cursor = readStart;
+    }
+    if (!foundLineStart && floor > 0) return null;
+    testHooks?.afterRead?.();
+    if (fs.fstatSync(fd).size !== size) return null;
+    const lineBytes = parts.length === 1 ? parts[0]! : Buffer.concat(parts.reverse());
+    if (lineBytes.byteLength === 0) return null;
+    const entry = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(lineBytes)) as unknown;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const { type, id } = entry as { type?: unknown; id?: unknown };
+    if (type === "session" || typeof id !== "string" || !id) return null;
+    return id;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort */ }
+    }
   }
 }
 
@@ -1019,6 +1101,38 @@ export class RunnerCore {
   /** #1275: OMP protocol v2. The limit offered while negotiating, then the decoder once OMP accepts. */
   private v2Limit: number | null = null;
   private frameDecoder: OmpFrameDecoder | null = null;
+  /** #1275: true while the startup catch-up get_entries request is still awaiting a reply. */
+  private catchUpPending = false;
+  /** #1275: true when an unattributed oversized v2 drop happened while startup catch-up was in flight. */
+  private catchUpSuspectedOversizedDrop = false;
+  /** #1275: report startup restore replay loss at most once per launch. */
+  private catchUpReplayLossReported = false;
+  /** #1275: cursor sequence at which the startup catch-up request was dispatched. */
+  private catchUpSentSeq = 0;
+  /** #1275: true when the saved cursor was refused as unknown so refresh re-anchors instead of repeating it. */
+  private unheldSavedCursor = false;
+  /** #1275: true after an unanchored full get_entries failed for size so later turns do not repeat it. */
+  private unanchoredFullReadOversized = false;
+  /** #1275: monotonic ordering for concurrent turn-end refreshes and live event cursor updates. */
+  private cursorSeq = 0;
+  private liveCursorSeq = 0;
+  private lastCursorAdvanceSeq = 0;
+  private refreshSequence = 0;
+  private lastSettledRefreshSeq = 0;
+  private completedTurns = 0;
+  private readonly pendingRefreshes = new Map<string, {
+    id: string;
+    seq: number;
+    sentSeq: number;
+    dispatchedTurn: number;
+    requestSince: string | undefined;
+    anchorId?: string;
+    isRecovery?: boolean;
+    suspectedOversizedDrop?: boolean;
+    mayHaveBeenDropped?: boolean;
+  }>();
+  private readonly oversizedSinceIds = new Set<string>();
+  private readonly rejectedSinceIds = new Set<string>();
 
   constructor(
     private io: RunnerIo,
@@ -1099,10 +1213,18 @@ export class RunnerCore {
       if (this.v2Limit !== null) this.io.sendRpc({ type: "negotiate_protocol", protocolVersion: 2, id: NEGOTIATE_ID });
     }
     this.io.sendRpc({ type: "get_state", id: GET_STATE_ID });
+    this.unheldSavedCursor = false;
+    this.unanchoredFullReadOversized = false;
+    this.catchUpSuspectedOversizedDrop = false;
+    this.catchUpReplayLossReported = false;
+    this.oversizedSinceIds.clear();
+    this.rejectedSinceIds.clear();
     if (this.opts.catchUpSince) {
       // Durable catch-up cursor (FR-5): replay session entries the previous
       // runner instance had not yet projected. Mirror-only; activity states
       // are live-only signals.
+      this.catchUpPending = true;
+      this.catchUpSentSeq = ++this.cursorSeq;
       this.io.sendRpc({ type: "get_entries", since: this.opts.catchUpSince, id: CATCH_UP_ID });
     }
     this.refreshPaneStatus();
@@ -1158,7 +1280,29 @@ export class RunnerCore {
 
   /** A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was. */
   private reportDroppedFrame(reason: string | null | undefined): void {
-    if (reason) this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
+    if (!reason) return;
+    const catchUpWasPending = this.catchUpPending;
+    const oversizedDrop = OVERSIZED_REASSEMBLY_DROP_RE.test(reason);
+    if (oversizedDrop) {
+      if (this.catchUpPending && this.opts.catchUpSince) {
+        this.catchUpPending = false;
+        this.catchUpSuspectedOversizedDrop = true;
+      }
+      for (const pending of this.pendingRefreshes.values()) {
+        if (pending.seq <= this.lastSettledRefreshSeq) continue;
+        pending.suspectedOversizedDrop = true;
+      }
+    } else {
+      for (const pending of this.pendingRefreshes.values()) {
+        if (pending.seq <= this.lastSettledRefreshSeq) continue;
+        if (pending.requestSince === undefined) pending.mayHaveBeenDropped = true;
+      }
+    }
+    this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
+    if (oversizedDrop && catchUpWasPending && !this.catchUpReplayLossReported) {
+      this.catchUpReplayLossReported = true;
+      this.diag("[omp-runner] Startup restore replay was in flight when an oversized chunked frame was dropped; missed restore history may have been lost, and later cursor refreshes will not replay it.");
+    }
   }
 
   private get runtime(): string { return this.opts.runtime ?? "pi"; }
@@ -1521,6 +1665,7 @@ export class RunnerCore {
     }
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
+      const code = typeof record.code === "string" ? record.code : undefined;
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
       const compactId = this.runtime === "pi" && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)
         ? record.id : null;
@@ -1553,12 +1698,57 @@ export class RunnerCore {
         if (this.runtime === "omp") this.io.stopChild?.();
         return;
       }
-      if (record.id === CATCH_UP_ID && this.runtime === "pi") {
-        // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
-        // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
-        this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
-        this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+      if (record.id === CATCH_UP_ID) {
+        this.catchUpPending = false;
+        this.catchUpSuspectedOversizedDrop = false;
+        const oversized = OVERSIZED_RESTORE_ERROR_RE.test(detail);
+        const unknown = isUnknownCursorError(detail, code);
+        if (oversized) {
+          this.recordOversizedSince(this.opts.catchUpSince);
+        } else if (unknown) {
+          this.recordRejectedSince(this.opts.catchUpSince);
+          if (this.lastEntryId === this.opts.catchUpSince) this.unheldSavedCursor = true;
+        }
+        if (this.runtime === "pi") {
+          // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
+          // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
+          if (!oversized && this.lastEntryId === this.opts.catchUpSince) this.unheldSavedCursor = true;
+          this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
+          this.requestCursorRefresh(true);
+          return;
+        }
+        this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
+        if (!this.catchUpReplayLossReported) {
+          this.catchUpReplayLossReported = true;
+          this.diag(`[${this.runtime}-runner] Startup restore replay was lost; later cursor refreshes will advance without replaying missed history.`);
+        }
+        if (unknown && this.unheldSavedCursor) {
+          this.requestCursorRefresh(true);
+        }
         return;
+      }
+      if (this.isCursorRefreshId(record.id)) {
+        const failed = this.pendingRefreshes.get(record.id);
+        if (failed) {
+          this.pendingRefreshes.delete(record.id);
+          if (OVERSIZED_RESTORE_ERROR_RE.test(detail)) {
+            if (failed.requestSince !== undefined) {
+              this.recordOversizedSince(failed.requestSince);
+            } else {
+              this.unanchoredFullReadOversized = true;
+            }
+          }
+          if (failed.seq >= this.lastSettledRefreshSeq) {
+            this.lastSettledRefreshSeq = failed.seq;
+            if (failed.requestSince !== undefined && isUnknownCursorError(detail, code)) {
+              this.recordRejectedSince(failed.requestSince);
+              if (failed.requestSince === this.lastEntryId) this.unheldSavedCursor = true;
+              this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
+              if (!failed.isRecovery) this.requestCursorRefresh(true);
+              return;
+            }
+          }
+        }
       }
       this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
       // Only a rejected input means the seat cannot do the requested work.
@@ -1615,20 +1805,215 @@ export class RunnerCore {
       this.postSessionIdentity();
       return;
     }
-    if (record.id === CURSOR_REFRESH_ID || record.id === CATCH_UP_ID) {
-      const data = (record.data ?? record) as Record<string, unknown>;
-      const entries = Array.isArray(data.entries) ? data.entries : (Array.isArray(record.entries) ? record.entries : []);
+    if (this.isCursorRefreshId(record.id) || record.id === CATCH_UP_ID) {
+      const isCatchUp = record.id === CATCH_UP_ID;
+      let meta: { id: string; seq: number; sentSeq: number; requestSince: string | undefined; anchorId?: string; isRecovery?: boolean } | undefined;
+      if (isCatchUp) {
+        this.catchUpPending = false;
+        this.catchUpSuspectedOversizedDrop = false;
+      } else {
+        meta = this.pendingRefreshes.get(record.id);
+        if (this.refreshSequence > 0 && !meta) return;
+        if (meta) this.pendingRefreshes.delete(record.id);
+      }
+      const rawData = record.data !== null && typeof record.data === "object" && !Array.isArray(record.data)
+        ? record.data as Record<string, unknown>
+        : undefined;
+      const rawEntries = Array.isArray(rawData?.entries) ? rawData.entries : (Array.isArray(record.entries) ? record.entries : null);
+      if (rawEntries === null) {
+        if (meta && meta.seq >= this.lastSettledRefreshSeq) this.lastSettledRefreshSeq = meta.seq;
+        return;
+      }
+      const entries = rawEntries;
       const last = entries.at(-1);
-      const lastId = last !== null && typeof last === "object" && typeof (last as Record<string, unknown>).id === "string"
+      const lastId = last !== null && typeof last === "object" && !Array.isArray(last)
+        && typeof (last as Record<string, unknown>).id === "string" && ((last as Record<string, unknown>).id as string).length > 0
         ? (last as Record<string, unknown>).id as string
         : undefined;
-      if (lastId) {
-        this.lastEntryId = lastId;
-        this.writeSidecar({});
+      if (entries.length > 0 && lastId === undefined) {
+        if (meta && meta.seq >= this.lastSettledRefreshSeq) this.lastSettledRefreshSeq = meta.seq;
+        this.reportUsageFacts(entries);
+        return;
+      }
+      if (!isCatchUp && meta !== undefined && meta.seq < this.lastSettledRefreshSeq) {
+        this.reportUsageFacts(entries);
+        return;
+      }
+      if (meta) this.lastSettledRefreshSeq = meta.seq;
+
+      if (isCatchUp) {
+        if (this.opts.catchUpSince) {
+          this.oversizedSinceIds.delete(this.opts.catchUpSince);
+          this.rejectedSinceIds.delete(this.opts.catchUpSince);
+        }
+        if (this.lastEntryId === this.opts.catchUpSince) this.unheldSavedCursor = false;
+        const canAdvance = lastId !== undefined && lastId !== this.lastEntryId
+          && (this.lastCursorAdvanceSeq <= this.catchUpSentSeq
+            || (this.lastEntryId !== undefined && this.entriesContainId(entries, this.lastEntryId)));
+        if (canAdvance) {
+          this.lastEntryId = lastId;
+          this.unheldSavedCursor = false;
+          this.rejectedSinceIds.delete(lastId);
+          this.lastCursorAdvanceSeq = ++this.cursorSeq;
+          this.writeSidecar({});
+        }
+      } else {
+        if (meta?.requestSince !== undefined) {
+          this.oversizedSinceIds.delete(meta.requestSince);
+          this.rejectedSinceIds.delete(meta.requestSince);
+        } else if (meta !== undefined) {
+          this.unanchoredFullReadOversized = false;
+        }
+        const confirmedId = entries.length === 0
+          ? (record.success === true ? meta?.anchorId : undefined)
+          : lastId;
+        if (confirmedId !== undefined) {
+          const canAdvance = meta === undefined
+            || meta.sentSeq >= this.liveCursorSeq
+            || (lastId !== undefined && this.lastEntryId !== undefined && this.entriesContainId(entries, this.lastEntryId));
+          if (canAdvance) {
+            this.unheldSavedCursor = false;
+            this.rejectedSinceIds.delete(confirmedId);
+            if (this.lastEntryId !== confirmedId) {
+              this.lastEntryId = confirmedId;
+              this.lastCursorAdvanceSeq = ++this.cursorSeq;
+              this.writeSidecar({});
+            }
+          }
+        }
       }
       this.reportUsageFacts(entries);
       return;
     }
+  }
+
+  private isCursorRefreshId(id: unknown): id is string {
+    return id === CURSOR_REFRESH_ID || (typeof id === "string" && id.startsWith(`${CURSOR_REFRESH_ID}:`));
+  }
+
+  /** Matches main reportUsageFacts predicate: Pi --usage-facts seats keep full get_entries refreshes for retry. */
+  private isPiUsageFactsActive(): boolean {
+    return Boolean(this.opts.usageFacts) && this.runtime === "pi" && Boolean(this.io.postUsageFacts);
+  }
+
+  private readableSessionFile(): string | undefined {
+    return !this.resumedElsewhere() ? this.sessionFile : undefined;
+  }
+
+  private entriesContainId(entries: unknown[], targetId: string): boolean {
+    for (const entry of entries) {
+      if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && (entry as { id?: unknown }).id === targetId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private dispatchCursorRefresh(since: string | undefined, anchorId?: string, isRecovery = false): void {
+    const seq = ++this.refreshSequence;
+    const sentSeq = ++this.cursorSeq;
+    const id = seq === 1 ? CURSOR_REFRESH_ID : `${CURSOR_REFRESH_ID}:${seq}`;
+    if (this.pendingRefreshes.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldestKey = this.pendingRefreshes.keys().next().value;
+      if (oldestKey !== undefined) {
+        const evicted = this.pendingRefreshes.get(oldestKey);
+        this.pendingRefreshes.delete(oldestKey);
+        if (evicted?.suspectedOversizedDrop) {
+          if (evicted.requestSince !== undefined) this.recordOversizedSince(evicted.requestSince);
+          else this.unanchoredFullReadOversized = true;
+        }
+      }
+    }
+    this.pendingRefreshes.set(id, {
+      id,
+      seq,
+      sentSeq,
+      dispatchedTurn: this.completedTurns,
+      requestSince: since,
+      ...(anchorId ? { anchorId } : {}),
+      ...(isRecovery ? { isRecovery: true } : {}),
+    });
+    this.io.sendRpc(since ? { type: "get_entries", since, id } : { type: "get_entries", id });
+  }
+
+  private recordOversizedSince(since: string | undefined): void {
+    if (!since || this.oversizedSinceIds.has(since)) return;
+    if (this.oversizedSinceIds.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldest = this.oversizedSinceIds.keys().next().value;
+      if (oldest !== undefined) this.oversizedSinceIds.delete(oldest);
+    }
+    this.oversizedSinceIds.add(since);
+  }
+
+  private recordRejectedSince(since: string | undefined): void {
+    if (!since || this.rejectedSinceIds.has(since)) return;
+    if (this.rejectedSinceIds.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldest = this.rejectedSinceIds.keys().next().value;
+      if (oldest !== undefined) this.rejectedSinceIds.delete(oldest);
+    }
+    this.rejectedSinceIds.add(since);
+  }
+
+  private isSinceBlockedOversized(since: string): boolean {
+    if (this.oversizedSinceIds.has(since)) return true;
+    if (this.catchUpSuspectedOversizedDrop && this.opts.catchUpSince === since) return true;
+    for (const pending of this.pendingRefreshes.values()) {
+      if (pending.suspectedOversizedDrop && pending.requestSince === since) return true;
+    }
+    return false;
+  }
+
+  private isUnanchoredBlockedOversized(): boolean {
+    if (this.unanchoredFullReadOversized) return true;
+    for (const pending of this.pendingRefreshes.values()) {
+      if (pending.suspectedOversizedDrop && pending.requestSince === undefined) return true;
+    }
+    return false;
+  }
+
+  private hasInFlightUnanchoredRefresh(): boolean {
+    for (const pending of this.pendingRefreshes.values()) {
+      if (
+        pending.requestSince === undefined
+        && pending.seq > this.lastSettledRefreshSeq
+        && !pending.suspectedOversizedDrop
+        && !pending.mayHaveBeenDropped
+        && this.completedTurns - pending.dispatchedTurn < MAX_UNANCHORED_REFRESH_HOLD_TURNS
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** #1275: refresh the cursor boundedly using `since` from the saved position or local session tail,
+   *  keeping full reads for active Pi --usage-facts seats. */
+  private requestCursorRefresh(isRecovery = false, allowUnanchoredFullRead = true): void {
+    if (this.isPiUsageFactsActive()) {
+      this.dispatchCursorRefresh(undefined, undefined, isRecovery);
+      return;
+    }
+    let skippedOversizedSince = false;
+    if (!this.unheldSavedCursor && this.lastEntryId !== undefined && !this.rejectedSinceIds.has(this.lastEntryId)) {
+      if (!this.isSinceBlockedOversized(this.lastEntryId)) {
+        this.dispatchCursorRefresh(this.lastEntryId, undefined, isRecovery);
+        return;
+      }
+      skippedOversizedSince = true;
+    }
+    const sessionFile = this.readableSessionFile();
+    const tailId = sessionFile ? this.io.readLastEntryId?.(sessionFile) ?? null : null;
+    if (tailId && !(this.unheldSavedCursor && tailId === this.lastEntryId) && !this.rejectedSinceIds.has(tailId)) {
+      if (!this.isSinceBlockedOversized(tailId)) {
+        this.dispatchCursorRefresh(tailId, tailId, isRecovery);
+        return;
+      }
+      skippedOversizedSince = true;
+    }
+    if (!allowUnanchoredFullRead || skippedOversizedSince || this.isUnanchoredBlockedOversized() || this.hasInFlightUnanchoredRefresh()) {
+      return;
+    }
+    this.dispatchCursorRefresh(undefined, undefined, isRecovery);
   }
 
   /** OPR.0.7.0.2: report usage from the persisted entries a get_entries response returned (catch-up after a
@@ -1882,12 +2267,18 @@ export class RunnerCore {
         this.refreshPaneStatus();
       }
     }
-    // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
-    // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
-    const entryId = typeof event.entryId === "string" ? event.entryId
+    // Durable cursor (#2117, #2870, #1275): explicit entryId string takes precedence (empty string
+    // leaves cursor put, as on main); on OMP without entryId, non-empty event.id advances it
+    // (Pi requires explicit entryId only).
+    const entryId = typeof event.entryId === "string"
+      ? event.entryId
       : (this.runtime === "omp" && typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
       this.lastEntryId = entryId;
+      this.unheldSavedCursor = false;
+      this.rejectedSinceIds.delete(entryId);
+      this.liveCursorSeq = ++this.cursorSeq;
+      this.lastCursorAdvanceSeq = this.liveCursorSeq;
       this.writeSidecar({});
     }
 
@@ -1993,9 +2384,10 @@ export class RunnerCore {
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
-      // completed turn — get_entries returns append-order entries with stable
-      // ids; the response handler advances the cursor from the tail.
-      this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+      // completed turn using a bounded read (#1275).
+      const completedTurn = this.runtime !== "omp" || event.isTerminal !== false;
+      this.requestCursorRefresh(false, completedTurn);
+      if (completedTurn) this.completedTurns += 1;
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
@@ -2776,6 +3168,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       } catch { return null; }
     },
     readSessionEntryIds: (path) => readPiSessionEntryIds(path),
+    readLastEntryId: (path) => readSessionTailEntryId(path),
   };
 
   const core = new RunnerCore(io, {

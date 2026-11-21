@@ -1076,14 +1076,17 @@ Examples:
     .action(async (instanceId: string, opts: { reason: string; actorSession?: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.post<{ closedPacketIds?: string[]; status?: string }>(
+        const res = await client.post<{ closedPacketIds?: string[]; alreadyClosedPacketIds?: string[]; advisories?: string[]; status?: string }>(
           `/api/workflow/${encodeURIComponent(instanceId)}/abort`,
           { reason: opts.reason, actorSession: opts.actorSession },
         );
         printResult(opts.json ?? false, res.data, res.status);
+        printWorkflowAdvisories(res.data?.advisories);
+        const alreadyClosed = res.data?.alreadyClosedPacketIds?.length ?? 0;
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Aborted workflow ${instanceId}`,
-          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`,
+          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`
+            + (alreadyClosed > 0 ? `; ${alreadyClosed} already closed by the queue (see the advisory)` : ""),
           next: `Inspect: rig workflow trace ${instanceId}`,
         });
       });

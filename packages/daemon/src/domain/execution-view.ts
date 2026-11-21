@@ -270,8 +270,8 @@ function readMissionSlices(missionsRoot: string, mission: string): SliceFacts[] 
 }
 
 /** Locate the slice facts for a dep id, resolving out-of-mission deps to their
- *  own release dir by id prefix (OPR.0.5.5.x -> release-0.5.5). */
-function resolveDep(
+ *  own release dir by id prefix (OPR.0.5.5.x -> release-0.5.5). Exported for its test. */
+export function resolveDep(
   depId: string,
   current: SliceFacts[],
   missionsRoot: string | null,
@@ -281,7 +281,8 @@ function resolveDep(
   if (inMission) return inMission;
   if (cache.has(depId)) return cache.get(depId) ?? null;
   let found: SliceFacts | null = null;
-  const m = depId.match(/^OPR\.(\d+\.\d+\.\d+)\.\d+$/);
+  // Any project's prefix (dot-id's 2-3 uppercase letters), so a nested project's own release ids resolve too.
+  const m = depId.match(/^[A-Z]{2,3}\.(\d+\.\d+\.\d+)\.\d+$/);
   if (m && missionsRoot) {
     const releaseDir = `release-${m[1]}`;
     for (const s of readMissionSlices(missionsRoot, releaseDir)) {

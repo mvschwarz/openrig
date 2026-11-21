@@ -52,6 +52,12 @@ keeps an entry for the workspace root beside the bundle's, under the id from the
 workspace's own `project.yaml` (`default` when it declares none); if that id is the
 bundle's project id, install reports a conflict and writes no catalog.
 
+## Project scope IDs
+
+The optional `scope.idPrefix` in `project.yaml` sets this project's mission and slice ID prefix: two or three uppercase
+letters, defaulting to `OPR`. For a project nested in another's workspace, choose a different prefix so its generated
+IDs don't repeat the enclosing project's. The setting does not guarantee globally unique IDs.
+
 ## Project-world install
 
 `project.yaml` may select project context and managed skills together:
