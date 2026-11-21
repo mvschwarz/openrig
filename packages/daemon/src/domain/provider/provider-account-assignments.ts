@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { AccountRefProvider } from "./provider-account-refs.js";
+import type { AccountRefKind, AccountRefProvider } from "./provider-account-refs.js";
 
 // #3625 slice 3: a rig's account assignment per provider, and each seat's latest applied result, on the daemon that runs
 // the rig. References only, never credential bytes.
@@ -19,9 +19,19 @@ export interface AssignmentIntent {
 
 /** What an apply gave the seat: kept from its last switched or pending-successor result, so a later failure doesn't erase
  *  it. A seat whose configuration still matches it follows an assignment; it isn't a seat override. */
+/** An account's reference as an apply used it, so a label later pointed elsewhere isn't taken for it. */
+export interface AppliedAccount {
+  kind: AccountRefKind;
+  file: string | null;
+  codexHome: string | null;
+  login: string | null;
+}
+
 export interface AppliedReference {
   /** The label of the account it came from, as that apply named it (read back; the apply's own label when saved). */
   label?: string | null;
+  /** That account's reference when the apply used it; null when it isn't known (an older result). */
+  account?: AppliedAccount | null;
   file: string | null;
   fileKind: "token" | "api-key" | null;
   codexHome: string | null;
@@ -45,11 +55,20 @@ export interface AssignmentResult {
 
 type ResultRow = { rig_id: string; provider: AccountRefProvider; node_id: string; seat: string; label: string; kind: AssignmentResultKind;
   detail: string; recovery: string | null; activity: string; ref_file: string | null; ref_kind: "token" | "api-key" | null;
-  codex_home: string | null; codex_login: string | null; applied_label: string | null; applied_at: string };
+  codex_home: string | null; codex_login: string | null; applied_label: string | null; applied_account: string | null; applied_at: string };
+
+function appliedAccountOf(json: string | null): AppliedAccount | null {
+  if (json === null) return null;
+  try {
+    const v = JSON.parse(json) as Partial<AppliedAccount>;
+    const text = (x: unknown) => (typeof x === "string" ? x : null);
+    return typeof v.kind === "string" ? { kind: v.kind as AccountRefKind, file: text(v.file), codexHome: text(v.codexHome), login: text(v.login) } : null;
+  } catch { return null; }
+}
 
 function fromRow(r: ResultRow): AssignmentResult {
   const applied = r.ref_file !== null || r.codex_home !== null || r.codex_login !== null
-    ? { label: r.applied_label, file: r.ref_file, fileKind: r.ref_kind, codexHome: r.codex_home, codexLogin: r.codex_login } : null;
+    ? { label: r.applied_label, account: appliedAccountOf(r.applied_account), file: r.ref_file, fileKind: r.ref_kind, codexHome: r.codex_home, codexLogin: r.codex_login } : null;
   return { rigId: r.rig_id, provider: r.provider, nodeId: r.node_id, seat: r.seat, label: r.label, kind: r.kind, detail: r.detail,
     recovery: r.recovery, activity: r.activity, at: r.applied_at, applied };
 }
@@ -81,16 +100,18 @@ export class ProviderAccountAssignmentsRepository {
     const a = result.applied;
     const took = a !== undefined;
     this.db.prepare(`INSERT INTO provider_assignment_results (rig_id, provider, node_id, seat, label, kind, detail, recovery, activity,
-        ref_file, ref_kind, codex_home, codex_login, applied_label, applied_at) VALUES (@rig, @provider, @node, @seat, @label, @kind, @detail, @recovery, @activity,
-        @file, @fileKind, @home, @login, @appliedLabel, @at)
+        ref_file, ref_kind, codex_home, codex_login, applied_label, applied_account, applied_at) VALUES (@rig, @provider, @node, @seat, @label, @kind, @detail, @recovery, @activity,
+        @file, @fileKind, @home, @login, @appliedLabel, @appliedAccount, @at)
       ON CONFLICT (rig_id, provider, node_id) DO UPDATE SET seat = excluded.seat, label = excluded.label, kind = excluded.kind,
         detail = excluded.detail, recovery = excluded.recovery, activity = excluded.activity, applied_at = excluded.applied_at,
         ref_file = CASE WHEN @took THEN excluded.ref_file ELSE ref_file END, ref_kind = CASE WHEN @took THEN excluded.ref_kind ELSE ref_kind END,
         codex_home = CASE WHEN @took THEN excluded.codex_home ELSE codex_home END, codex_login = CASE WHEN @took THEN excluded.codex_login ELSE codex_login END,
-        applied_label = CASE WHEN @took THEN excluded.applied_label ELSE applied_label END`)
+        applied_label = CASE WHEN @took THEN excluded.applied_label ELSE applied_label END,
+        applied_account = CASE WHEN @took THEN excluded.applied_account ELSE applied_account END`)
       .run({ rig: result.rigId, provider: result.provider, node: result.nodeId, seat: result.seat, label: result.label, kind: result.kind,
         detail: result.detail, recovery: result.recovery, activity: result.activity, at: result.at, took: took ? 1 : 0,
-        file: a?.file ?? null, fileKind: a?.fileKind ?? null, home: a?.codexHome ?? null, login: a?.codexLogin ?? null, appliedLabel: took ? result.label : null });
+        file: a?.file ?? null, fileKind: a?.fileKind ?? null, home: a?.codexHome ?? null, login: a?.codexLogin ?? null, appliedLabel: took ? result.label : null,
+        appliedAccount: a?.account ? JSON.stringify({ kind: a.account.kind, file: a.account.file, codexHome: a.account.codexHome, login: a.account.login }) : null });
   }
 
   /** Every rig's assignment, for status. */

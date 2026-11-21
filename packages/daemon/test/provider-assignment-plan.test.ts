@@ -83,7 +83,7 @@ describe("the daemon's assignment plan", () => {
     db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'c1'").run(path.join(dir, "prepared-link"));
     const effectAfter = async (appliedHome: string) => {
       new ProviderAccountAssignmentsRepository(db).saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "prep",
-        kind: "pending_successor", detail: "d", recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: appliedHome, codexLogin: null } });
+        kind: "pending_successor", detail: "d", recovery: null, activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome: appliedHome, codexLogin: null } });
       const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" });
       return planned.ok ? planned.plan.rows[0]!.effect : planned.message;
     };
@@ -102,7 +102,7 @@ describe("the daemon's assignment plan", () => {
     const assignments = new ProviderAccountAssignmentsRepository(db);
     assignments.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "r", requestedBy: null, at: "t" });
     assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "pending_successor", detail: "d",
-      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: prepared, codexLogin: null } });
+      recovery: null, activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome: prepared, codexLogin: null } });
     const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" });
     expect(planned.ok && planned.plan.rows.map((r) => [r.effect, r.asApplied])).toEqual([["unchanged", true]]);
     const model = await service().getReadModel();
@@ -122,7 +122,7 @@ describe("the daemon's assignment plan", () => {
     expect((await planFor()).rows.map((r) => r.effect)).toEqual(["change"]);
     // What an in-place apply saves: the home and the login it activated there.
     assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d",
-      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome, codexLogin: "team" } });
+      recovery: null, activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome, codexLogin: "team" } });
     const again = await planFor();
     // Its configuration names no login and the home's active login isn't read: it's unchanged only as the apply left it.
     expect(again.rows.map((r) => [r.effect, r.asApplied])).toEqual([["unchanged", true]]);
@@ -136,7 +136,7 @@ describe("the daemon's assignment plan", () => {
     expect(model.bindings.find((b) => b.seatSession === "c1@fleet")!.assignment).toMatchObject({ state: "follows", asApplied: true });
     // A result that switched another home isn't this seat's: its own home would switch.
     assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d",
-      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: path.join(dir, "elsewhere"), codexLogin: "team" } });
+      recovery: null, activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome: path.join(dir, "elsewhere"), codexLogin: "team" } });
     expect((await planFor()).rows.map((r) => r.effect)).toEqual(["change"]);
   });
 
@@ -153,7 +153,7 @@ describe("the daemon's assignment plan", () => {
     };
     const save = (label: string, kind: "switched" | "unchanged" | "failed_before_effect", moved: boolean) => assignments.saveResult({ rigId: "rig-fleet",
       provider: "codex", nodeId: "c1", seat: "c1@fleet", label, kind, detail: "d", recovery: null, activity: "idle", at: "t",
-      ...(moved ? { applied: { file: null, fileKind: null, codexHome, codexLogin: "team" } } : {}) });
+      ...(moved ? { applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome, codexLogin: "team" } } : {}) });
     save("team", "switched", true);
     expect(await standing()).toEqual(["unchanged", "follows"]);
     // A re-apply of team leaves it unchanged, which moves nothing: it still follows team, and the next re-apply restarts nothing.
@@ -173,7 +173,7 @@ describe("the daemon's assignment plan", () => {
     fs.writeFileSync(path.join(codexHome, "auth-seat-registry.tsv"), "seat\trig\truntime\tcwd\tauth_profile\tupdated_ts\nc1@fleet\tfleet\tcodex\t/w\tteam\t2026-11-21T06:00:00Z\n", { mode: 0o600 });
     const effectAfter = async (appliedHome: string) => {
       new ProviderAccountAssignmentsRepository(db).saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team",
-        kind: "switched", detail: "d", recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: appliedHome, codexLogin: "team" } });
+        kind: "switched", detail: "d", recovery: null, activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome: appliedHome, codexLogin: "team" } });
       const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "next", includeOverrides: false, daemon: "host-a" });
       return planned.ok ? planned.plan.rows[0]!.effect : planned.message;
     };

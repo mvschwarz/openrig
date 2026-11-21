@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ClaudeSeatTokenRef } from "../claude-seat-token.js";
-import type { AssignmentIntent, AssignmentResultKind } from "./provider-account-assignments.js";
+import type { AppliedAccount, AssignmentIntent, AssignmentResultKind } from "./provider-account-assignments.js";
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
 import type { SeatAccountConfiguration } from "./provider-types.js";
 
@@ -29,6 +29,8 @@ export interface PlanSeatFacts {
   followsAssignment?: boolean;
   /** The label of the account the apply it follows gave it: kept when a later result moved nothing. */
   appliedLabel?: string;
+  /** That account's reference as the apply used it; null when it isn't known. */
+  appliedAccount?: AppliedAccount | null;
   /** The seat's latest applied result. */
   lastResult?: { kind: AssignmentResultKind; label: string; detail: string; at: string } | null;
 }
@@ -162,10 +164,16 @@ function unchanged(seat: PlanSeatFacts, input: Comparison): boolean {
   return seat.configured?.source === "registry" && seat.configured.profileRef === account.login && sameHome(input, seat.codexHome, account.codexHome);
 }
 
-/** The seat's configuration is still what an apply of this label gave it. The apply that moved it counts, not its latest
- *  result: a later apply that left it unchanged, or one that failed for another label, didn't move it anywhere else. */
-function appliedThis(seat: PlanSeatFacts, label: string): boolean {
-  return !!seat.followsAssignment && seat.appliedLabel === label;
+/** The seat's configuration is still what an apply of this label gave it, when the label still names the reference that
+ *  apply used. The apply that moved it counts, not its latest result: a later apply that left it unchanged, or one that
+ *  failed for another label, didn't move it anywhere else. A label removed and added again naming another reference is
+ *  another account. With no reference to compare (the label was removed), the label alone says what the apply was. */
+function appliedThis(seat: PlanSeatFacts, label: string, input: Comparison | null): boolean {
+  if (!seat.followsAssignment || seat.appliedLabel !== label) return false;
+  if (!input) return true;
+  const was = seat.appliedAccount, now = input.account;
+  return !!was && was.kind === now.kind && was.file === now.file && was.login === now.login
+    && (was.codexHome === now.codexHome || sameHome(input, was.codexHome, now.codexHome));
 }
 
 /** A seat whose configuration names no login of its own: a Codex seat on its home's active login, whether an apply
@@ -184,10 +192,10 @@ export const asAppliedText = (label: string) => `still as the apply of ${label} 
 export function assignmentStanding(seat: PlanSeatFacts, account: AccountRef | null, intent: AssignmentIntent,
   resolveHome?: (home: string) => string): { state: "follows" | "override" | "not_applied"; override?: string; asApplied?: true } {
   // A removed label: what an apply of it left is still known, its reference isn't.
-  if (!account) return appliedThis(seat, intent.label) ? { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) } : { state: "not_applied" };
+  if (!account) return appliedThis(seat, intent.label, null) ? { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) } : { state: "not_applied" };
   const comparison: Comparison = { account, ...(resolveHome ? { resolveHome } : {}) };
   if (unchanged(seat, comparison)) return { state: "follows" };
-  if (appliedThis(seat, intent.label)) return { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };
+  if (appliedThis(seat, intent.label, comparison)) return { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };
   const override = seatOverride(seat, comparison);
   return override ? { state: "override", override } : { state: "not_applied" };
 }
@@ -231,7 +239,7 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
     if (unchanged(seat, input)) return { seat, effect: "unchanged" };
     // Still as an apply of this label left it: nothing to do, so a re-apply doesn't restart it (or its Codex home) again.
     // With --account-home, only when that's the home it was moved to.
-    if (appliedThis(seat, account.label) && (!input.accountHome
+    if (appliedThis(seat, account.label, input) && (!input.accountHome
       || (seat.ownHome?.source === "account-switch" && sameHome(input, seat.ownHome.home, input.accountHome)))) {
       return { seat, effect: "unchanged", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };
     }

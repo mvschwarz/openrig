@@ -203,6 +203,44 @@ describe("an assigned label that has been removed", () => {
   });
 });
 
+describe("a label removed and added again naming another reference is another account", () => {
+  it("a Claude seat the earlier max-2 moved is planned to move again and isn't read as following", async () => {
+    seat("a");
+    await apply("max-2");
+    expect(await planEffects("max-2")).toEqual({ "a@fleet": "unchanged" });
+    const refs = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
+    expect(refs.remove("claude", "max-2")).toMatchObject({ ok: true, assignedTo: ["rig fleet (claude)"] });
+    refs.add({ provider: "claude", label: "max-2", tokenFile: path.join(dir, "max-3") });
+    // a is still on the first max-2's file: the plan moves it, and status doesn't say it follows.
+    expect(readClaudeSeatTokenRef(db, "a")).toMatchObject({ tokenFile: path.join(dir, "max-2") });
+    expect(await planEffects("max-2")).toEqual({ "a@fleet": "change" });
+    expect((await statusOf())["a@fleet"]).toMatchObject({ state: "not_applied", applied: { kind: "switched", label: "max-2" } });
+    expect((await statusOf())["a@fleet"]).not.toHaveProperty("referenceMissing");
+  });
+
+  it("a Codex seat on its home's login, switched in place to team, isn't on a team that names another login", async () => {
+    const codexHome = path.join(dir, ".codex");
+    fs.mkdirSync(path.join(codexHome, "auth-profiles"), { recursive: true });
+    for (const login of ["team", "other"]) fs.writeFileSync(path.join(codexHome, "auth-profiles", `${login}.json`), CONTENT, { mode: 0o600 });
+    const refs = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
+    refs.add({ provider: "codex", label: "team", codexHome, login: "team" });
+    seat("c1", "fleet", "codex");
+    const repo = new ProviderAccountAssignmentsRepository(db);
+    repo.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "the login team", requestedBy: null, at: "t" });
+    repo.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d", recovery: null,
+      activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome, codexLogin: "team" } });
+    const effect = async () => {
+      const planned = await svc.assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" });
+      if (!planned.ok) throw new Error(planned.message);
+      return [planned.plan.rows[0]!.effect, (await statusOf())["c1@fleet"]!.state];
+    };
+    expect(await effect()).toEqual(["unchanged", "follows"]);
+    refs.remove("codex", "team");
+    refs.add({ provider: "codex", label: "team", codexHome, login: "other" });
+    expect(await effect()).toEqual(["change", "not_applied"]);
+  });
+});
+
 describe("status only compares seats whose rig has an assignment", () => {
   it("a seat with a result but no assignment for its rig reads no_assignment with that result, and its homes aren't read", async () => {
     seat("a");
@@ -239,7 +277,7 @@ describe("status for a Codex seat moved to a prepared home", () => {
     const repo = new ProviderAccountAssignmentsRepository(db);
     repo.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "the login team", requestedBy: null, at: "t" });
     repo.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "pending_successor", detail: "d",
-      recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: prepared, codexLogin: null } });
+      recovery: null, activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome, login: "team" }, file: null, fileKind: null, codexHome: prepared, codexLogin: null } });
     expect((await statusOf())["c1@fleet"]).toMatchObject({ provider: "codex", state: "follows" });
     // The rig is assigned another account: the seat still follows the earlier one, so it's not an override, and not on this one.
     repo.setIntent({ rigId: "rig-fleet", provider: "codex", label: "other", reference: "the login other", requestedBy: null, at: "t2" });
@@ -281,7 +319,7 @@ describe("a re-apply that changes nothing keeps a Codex seat on the apply that m
     const repo = new ProviderAccountAssignmentsRepository(db);
     repo.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "the login team", requestedBy: "lead@fleet", at: "t" });
     repo.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind, detail: "d", recovery: null,
-      activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: home, codexLogin: login } });
+      activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome: codexHome(), login: "team" }, file: null, fileKind: null, codexHome: home, codexLogin: login } });
   };
 
   it("a seat on its home's login, switched in place", async () => {

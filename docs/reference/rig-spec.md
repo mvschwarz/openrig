@@ -891,7 +891,8 @@ rig provider account remove budget --provider claude
 - Adding an account checks the reference first. If the check fails, nothing is stored and the refusal says why.
 - Removing a label a rig is assigned to goes ahead with a warning naming those rigs. Their seats, the seats'
   credentials, and the recorded assignment and results stay as they were. Status shows the reference as missing, and
-  planning or applying that label is refused until it's added again.
+  planning or applying that label is refused until it's added again. Added again naming another reference, it's another
+  account: seats an apply put on the earlier reference aren't on it, and the next apply moves them.
 - A label is your name for a reference, not proof of the login a running seat uses.
 
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,

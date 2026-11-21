@@ -100,6 +100,9 @@ describe("applying an assignment on the daemon", () => {
     expect(result.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "switched"], ["b@fleet", "unchanged"]]);
     expect(result.report.results[1]!.detail).toBe('kept (seat override): its own token file ' + path.join(dir, "max-1") + ' ("max-1")');
     expect(readClaudeSeatTokenRef(db, "a")).toMatchObject({ label: "max-2", tokenFile: path.join(dir, "max-2") });
+    // The result keeps the account's reference as the apply used it, beside the reference the seat was given.
+    expect(new ProviderAccountAssignmentsRepository(db).results("rig-fleet", "claude").find((r) => r.seat === "a@fleet")!.applied)
+      .toMatchObject({ label: "max-2", account: { kind: "claude_token_file", file: path.join(dir, "max-2"), codexHome: null, login: null } });
     expect(claude.relaunchInPane).not.toHaveBeenCalled();
 
     const again = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);

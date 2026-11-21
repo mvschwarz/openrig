@@ -317,7 +317,7 @@ export class ProviderServiceImpl implements ProviderService {
           }
           assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
           label: input.label, kind: result.kind, detail: result.detail, recovery: result.recovery ?? null, activity: result.activity, at: result.at,
-          ...(applied ? { applied } : {}) });
+          ...(applied ? { applied: { ...applied, account: { kind: account.kind, file: account.file, codexHome: account.codexHome, login: account.login } } } : {}) });
         },
         now,
       });
@@ -356,7 +356,7 @@ export class ProviderServiceImpl implements ProviderService {
         session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
         configured: seatConfigured, claudeRef, ownHome,
         codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
-        ...(follows ? { followsAssignment: true, ...(a?.label ? { appliedLabel: a.label } : {}) } : {}),
+        ...(follows ? { followsAssignment: true, ...(a?.label ? { appliedLabel: a.label } : {}), appliedAccount: a?.account ?? null } : {}),
         ...(last ? { lastResult: { kind: last.kind, label: last.label, detail: last.detail, at: last.at } } : {}),
       };
     });
