@@ -1098,9 +1098,18 @@ and there's no threshold to obey.
   hand-off is needed.
 - **The Observatory is optional:** it can show readings, but you don't need it to rotate.
 
-**The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
-moving Claude seats, aren't supported moves yet: say so instead of improvising. A Codex seat with a home of its own
-moves alone, with `rig provider switch --seat` (above).
+**The unit is a Codex home, with every seat on it.** Moving only some of the seats on a shared home to a different
+account isn't a supported move: say so instead of improvising. A Codex seat with a home of its own, or a Claude seat,
+moves alone with `rig provider switch --seat` (above).
+
+**A whole rig moves with `rig provider assign`.**
+- Add the account by label first, with `rig provider account add`.
+- `rig provider assign <rig> --provider <p> --account <label>` shows a plan and changes nothing. Seats with their own
+  choice of account are kept unless you add `--include-overrides`.
+- Apply exactly that plan with `--apply --plan <digest>`. Each seat's result is reported on its own, and nothing is
+  retried.
+- `rig provider status` then shows each seat against the rig's assignment.
+- The reference is rig-spec's "Assigning an account to a whole rig".
 
 0. **Load the person's account policy.**
    - It's the context pack named `account-policy`: check `rig context list` for it, then read it with

@@ -865,6 +865,106 @@ neither selects accounts automatically nor imposes a spending limit. Downgrade o
 API-key Claude seats back to subscription credentials: older OpenRig versions cannot read the new
 credential kind correctly.
 
+### Assigning an account to a whole rig
+
+`rig provider switch` moves one seat. `rig provider assign` moves every seat of one provider in a rig to one
+account, in two steps: a plan that changes nothing, then an apply of exactly that plan. Each seat moves through the
+same switch, so it keeps its conversation the way `rig provider switch` would.
+
+**Accounts.** The daemon knows each account by your label and a reference on its own machine:
+
+```sh
+rig provider account add work --provider claude --token-file /home/me/keys/claude-work
+rig provider account add budget --provider claude --api-key-file /home/me/keys/claude-api
+rig provider account add team --provider codex --codex-home /home/me/.codex --login team
+rig provider account list
+rig provider account remove budget --provider claude
+```
+
+- A Claude reference is the absolute path of a private (0600 or 0400) file holding a subscription token or an API key.
+  A Codex reference is a Codex home and the name of a login saved there (`rig auth list --codex-home <home>` lists
+  them).
+- Only the reference is stored. The file isn't read or copied, and no credential passes through OpenRig.
+- Adding an account checks the reference first. If the check fails, nothing is stored and the refusal says why.
+- A label can't be removed while a rig is assigned to it; assign that rig another account first.
+- A label is your name for a reference, not proof of the login a running seat uses.
+
+**The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
+and changes nothing. Here team-dev is running, team-qa is stopped with a saved conversation, and team-review has its
+own token file:
+
+```text
+Plan 27f91203ba75 on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
+team-dev@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity idle
+team-qa@my-rig: from the login in /home/me/.claude; precheck safe; next launch: the reference is saved now, and the seat's next launch resumes its conversation on it; activity unknown
+team-review@my-rig: kept (seat override): its own token file /home/me/keys/claude-own ("own"); --include-overrides moves it too
+A plan only: nothing was changed. Apply exactly this plan with: rig provider assign my-rig --provider claude --account work --apply --plan 27f91203ba75
+```
+
+The rows read like this:
+- **A seat that would change** shows its configured account, the switch's precheck verdict, how it keeps its
+  conversation, and what it's doing now. A busy seat is noted, not refused: a switch interrupts work in flight,
+  including background commands.
+- **`unchanged`** means the seat is already on the account.
+- **`kept (seat override)`** means the seat has its own choice of account: its own token or API-key file, its own home,
+  or a saved login in the Codex seat registry. It's kept unless you add `--include-overrides`.
+- **Seats of the other runtime** are listed as not affected.
+
+Codex seats have two extra cases:
+- **In place, on Linux only.** A Codex seat switches in place by changing its Codex home's active login, so every seat
+  on that home moves with it. The plan lists each home's seats: this rig's "would restart", and a seat in another rig
+  shows the `rig seat restart` it would need. Elsewhere the row reads "unsupported in place".
+- **To a prepared home.** `--account-home <dir>` moves the seats to that home instead, as fresh successors with a
+  handover. Nothing falls back to this by itself.
+
+**Applying it.** `--apply --plan <digest>` computes the plan again, and refuses without changing anything unless it's
+still the plan you reviewed. A seat's activity changing doesn't count as a change. Only one apply runs for a rig at a
+time. Seats move one at a time, and each gets one result:
+
+| Result | Meaning |
+|---|---|
+| `unchanged` | Already on the account, or kept as an override. |
+| `switched` | Moved to the account and relaunched or restarted on it. |
+| `pending-successor` | Moved to the prepared home, where a fresh successor took the seat with a handover. |
+| `unsupported` | Can't move in place here, for example a Codex seat that isn't on Linux. |
+| `failed-before-effect` | Refused or failed before changing anything, including a seat whose precheck was unsafe. |
+| `unknown` | Something may have changed. The result names the command that recovers or checks it. |
+
+- **A failure doesn't stop the others.** Nothing is rolled back or retried.
+- **After an unknown on a Codex home,** that home's remaining seats are skipped.
+- **Seats in another rig** on a switched home are listed with their restart command, never restarted.
+- **Each result is stored as it lands,** with what the seat was doing when it was reached.
+- **The rig's assignment** (label, reference, who asked, when) is stored with the first seat that's on the account or
+  may be. An apply where every seat was refused leaves the rig's earlier assignment as it was.
+- **The CLI waits about 120 seconds** for each seat that changes or restarts. If it times out, the apply may still be
+  running: don't run it again, and read the plan to see each seat's result.
+- **The exit code** is 1 when any seat failed or is unknown.
+
+**Status.** `rig provider status` shows each Claude and Codex seat against its rig's assignment, beside its configured
+account. In `--json` this is `assignment` on each `bindings` row. A seat's state is one of:
+- **follows:** configured as the assigned account, or still as this assignment's apply left it. A Codex seat with no
+  login of its own reads "still as the apply of `<label>` left its home". The login active in that home isn't read,
+  so a later `rig auth switch` there isn't seen.
+- **override:** configured with its own choice of another account.
+- **not applied:** the rig has an assignment, but the seat isn't on it yet. Its last result says why.
+- **no assignment:** the rig has none for that provider.
+
+"Configured" and "applied" describe what the seat's next launch uses and what an apply reported. They aren't proof of
+the login a running session uses.
+
+**Other machines.**
+- `--host <id>` runs `rig provider account`, `assign` or `status` on that registered machine over its SSH entry. The
+  rig, the labels and the paths are that machine's.
+- A lost connection during an add, a remove or an apply is reported as an unknown outcome, naming the read that checks
+  it.
+- `rig provider status --all-hosts` (or `--hosts`) shows each HTTP host's seats with their assignments. An SSH entry
+  there points at `rig provider status --host <id>`.
+
+**What it doesn't do.**
+- It doesn't sign in, or create or copy credentials. Signing in on another machine is tracked in #3628.
+- It doesn't assign seats added to the rig later: run the assignment again.
+- A Codex seat moves in place only on Linux.
+
 ### Choosing the Claude instruction file
 
 OpenRig writes its instructions for Claude Code members into managed blocks in

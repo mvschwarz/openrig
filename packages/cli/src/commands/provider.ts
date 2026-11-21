@@ -63,7 +63,7 @@ function printClaude(claude: { credentialKind?: "api-key"; label: string; tokenF
 /** Build provider views and account switches; an isolated-home switch first requires the daemon to acknowledge its plan. */
 export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunOnHostDeps; env?: NodeJS.ProcessEnv } = {}): Command {
   const cmd = new Command("provider").description(
-    "Provider accounts and usage signals, and moving one Codex seat to another login saved in its Codex home",
+    "Provider accounts and usage signals, and moving seats to another account: one seat with switch, a whole rig with assign",
   );
   const getDeps = (): StatusDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -462,7 +462,12 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
 
   cmd
     .command("status")
-    .description("The whole four-block provider read model (accounts, bindings, signals)")
+    .description("The whole four-block provider read model (accounts, bindings, signals), with each seat's account assignment")
+    .addHelpText("after", `
+Each Claude and Codex seat whose rig has an assignment (rig provider assign) is shown against it: follows (configured as
+the assigned account, or still as its apply left it), override (its own choice of another account), or not applied yet,
+with its last applied result. In --json this is assignment on each bindings row. Configured and applied are what the
+seat's next launch uses and what an apply reported, not proof of the login a running session uses.`)
     .option("--json", "Output as parseable JSON")
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
@@ -1112,11 +1117,13 @@ with a handover instead. Nothing falls back to that by itself.
 A configured account is what a seat's next launch uses, not proof of the login a running session uses.
 
 --apply --plan <digest> computes the plan again and refuses, changing nothing, unless it's the one you reviewed. It then
-stores the rig's assignment and moves each seat through the existing switch, one at a time, reporting each result as
-unchanged, switched, pending-successor, unsupported, failed-before-effect or unknown. A failure doesn't stop the other
-seats; nothing is rolled back or retried, and an unknown result names its recovery command. After an unknown on a Codex
-home, that home's other seats are skipped. Seats in other rigs on a switched home are listed, never restarted.
-The plan shows the rig's assignment and each seat's last result afterwards. It exits 1 when any seat failed or is unknown.`)
+moves each seat through the existing switch, one at a time, reporting each result as unchanged, switched,
+pending-successor, unsupported, failed-before-effect or unknown. A failure doesn't stop the other seats; nothing is
+rolled back or retried, and an unknown result names its recovery command. After an unknown on a Codex home, that home's
+other seats are skipped. Seats in other rigs on a switched home are listed, never restarted.
+The rig's assignment is stored with the first seat that's on the account or may be, so an apply where every seat was
+refused leaves the earlier one. Afterwards the plan shows the assignment and each seat's last result, and rig provider
+status shows each seat against it. It exits 1 when any seat failed or is unknown.`)
     .action(async (rig: string, opts: { provider?: string; account?: string; includeOverrides?: boolean; accountHome?: string; apply?: boolean; plan?: string;
       host?: string; json?: boolean }) => {
       const problem = providerProblem(opts.provider, true) ?? (opts.account ? null : "Name the account: --account <label> (rig provider account list).")
