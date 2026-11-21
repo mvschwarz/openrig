@@ -424,6 +424,9 @@ function agentDetailLines(
           // effort report is this host's read — a remote seat has none here.
           ...(localSeat ? wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth) : []),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
+          ...(localSeat && (agent.canRun ?? !agent.live)
+            ? [fieldLine({ label: "action", value: "run ▸", link: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: agent.name } })]
+            : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
           ...(localSeat
             ? [fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } })]
