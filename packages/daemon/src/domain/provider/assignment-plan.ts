@@ -27,6 +27,8 @@ export interface PlanSeatFacts {
   activity: "running" | "needs_input" | "idle" | "unknown";
   /** The seat's configuration is still what an earlier apply gave it: it follows an assignment, so it isn't an override. */
   followsAssignment?: boolean;
+  /** The label of the account the apply it follows gave it: kept when a later result moved nothing. */
+  appliedLabel?: string;
   /** The seat's latest applied result. */
   lastResult?: { kind: AssignmentResultKind; label: string; detail: string; at: string } | null;
 }
@@ -160,10 +162,10 @@ function unchanged(seat: PlanSeatFacts, input: Comparison): boolean {
   return seat.configured?.source === "registry" && seat.configured.profileRef === account.login && sameHome(input, seat.codexHome, account.codexHome);
 }
 
-/** The seat's configuration is still what an apply of this label gave it: its last result moved it there. */
+/** The seat's configuration is still what an apply of this label gave it. The apply that moved it counts, not its latest
+ *  result: a later apply that left it unchanged, or one that failed for another label, didn't move it anywhere else. */
 function appliedThis(seat: PlanSeatFacts, label: string): boolean {
-  const last = seat.lastResult;
-  return !!seat.followsAssignment && last?.label === label && (last.kind === "switched" || last.kind === "pending_successor");
+  return !!seat.followsAssignment && seat.appliedLabel === label;
 }
 
 /** A seat whose configuration names no login of its own: a Codex seat on its home's active login (not a home an account

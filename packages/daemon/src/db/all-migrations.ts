@@ -3,6 +3,7 @@ import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_t
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { providerAccountRefsSchema } from "./migrations/179_provider_account_refs.js";
 import { providerAccountAssignmentsSchema } from "./migrations/180_provider_account_assignments.js";
+import { providerAssignmentAppliedLabelSchema } from "./migrations/181_provider_assignment_applied_label.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -367,4 +368,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatPoolSchema,
   providerAccountRefsSchema,
   providerAccountAssignmentsSchema,
+  providerAssignmentAppliedLabelSchema,
 ];

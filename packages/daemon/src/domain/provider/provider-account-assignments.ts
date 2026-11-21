@@ -20,6 +20,8 @@ export interface AssignmentIntent {
 /** What an apply gave the seat: kept from its last switched or pending-successor result, so a later failure doesn't erase
  *  it. A seat whose configuration still matches it follows an assignment; it isn't a seat override. */
 export interface AppliedReference {
+  /** The label of the account it came from, as that apply named it (read back; the apply's own label when saved). */
+  label?: string | null;
   file: string | null;
   fileKind: "token" | "api-key" | null;
   codexHome: string | null;
@@ -43,11 +45,11 @@ export interface AssignmentResult {
 
 type ResultRow = { rig_id: string; provider: AccountRefProvider; node_id: string; seat: string; label: string; kind: AssignmentResultKind;
   detail: string; recovery: string | null; activity: string; ref_file: string | null; ref_kind: "token" | "api-key" | null;
-  codex_home: string | null; codex_login: string | null; applied_at: string };
+  codex_home: string | null; codex_login: string | null; applied_label: string | null; applied_at: string };
 
 function fromRow(r: ResultRow): AssignmentResult {
   const applied = r.ref_file !== null || r.codex_home !== null || r.codex_login !== null
-    ? { file: r.ref_file, fileKind: r.ref_kind, codexHome: r.codex_home, codexLogin: r.codex_login } : null;
+    ? { label: r.applied_label, file: r.ref_file, fileKind: r.ref_kind, codexHome: r.codex_home, codexLogin: r.codex_login } : null;
   return { rigId: r.rig_id, provider: r.provider, nodeId: r.node_id, seat: r.seat, label: r.label, kind: r.kind, detail: r.detail,
     recovery: r.recovery, activity: r.activity, at: r.applied_at, applied };
 }
@@ -75,19 +77,20 @@ export class ProviderAccountAssignmentsRepository {
   /** Saves a seat's result as it lands. The applied reference changes only with a switched or pending-successor result. */
   saveResult(result: Omit<AssignmentResult, "applied"> & { applied?: AppliedReference }): void {
     // The apply passes the account a result put the seat on (a switch, or a seat it brought in that was already on it). A
-    // result without one keeps the seat's earlier applied account.
+    // result without one keeps the seat's earlier applied account, and the label it came from.
     const a = result.applied;
     const took = a !== undefined;
     this.db.prepare(`INSERT INTO provider_assignment_results (rig_id, provider, node_id, seat, label, kind, detail, recovery, activity,
-        ref_file, ref_kind, codex_home, codex_login, applied_at) VALUES (@rig, @provider, @node, @seat, @label, @kind, @detail, @recovery, @activity,
-        @file, @fileKind, @home, @login, @at)
+        ref_file, ref_kind, codex_home, codex_login, applied_label, applied_at) VALUES (@rig, @provider, @node, @seat, @label, @kind, @detail, @recovery, @activity,
+        @file, @fileKind, @home, @login, @appliedLabel, @at)
       ON CONFLICT (rig_id, provider, node_id) DO UPDATE SET seat = excluded.seat, label = excluded.label, kind = excluded.kind,
         detail = excluded.detail, recovery = excluded.recovery, activity = excluded.activity, applied_at = excluded.applied_at,
         ref_file = CASE WHEN @took THEN excluded.ref_file ELSE ref_file END, ref_kind = CASE WHEN @took THEN excluded.ref_kind ELSE ref_kind END,
-        codex_home = CASE WHEN @took THEN excluded.codex_home ELSE codex_home END, codex_login = CASE WHEN @took THEN excluded.codex_login ELSE codex_login END`)
+        codex_home = CASE WHEN @took THEN excluded.codex_home ELSE codex_home END, codex_login = CASE WHEN @took THEN excluded.codex_login ELSE codex_login END,
+        applied_label = CASE WHEN @took THEN excluded.applied_label ELSE applied_label END`)
       .run({ rig: result.rigId, provider: result.provider, node: result.nodeId, seat: result.seat, label: result.label, kind: result.kind,
         detail: result.detail, recovery: result.recovery, activity: result.activity, at: result.at, took: took ? 1 : 0,
-        file: a?.file ?? null, fileKind: a?.fileKind ?? null, home: a?.codexHome ?? null, login: a?.codexLogin ?? null });
+        file: a?.file ?? null, fileKind: a?.fileKind ?? null, home: a?.codexHome ?? null, login: a?.codexLogin ?? null, appliedLabel: took ? result.label : null });
   }
 
   /** Every rig's assignment, for status. */

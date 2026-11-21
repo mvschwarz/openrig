@@ -355,7 +355,7 @@ export class ProviderServiceImpl implements ProviderService {
         session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
         configured: seatConfigured, claudeRef, ownHome,
         codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
-        ...(follows ? { followsAssignment: true } : {}),
+        ...(follows ? { followsAssignment: true, ...(a?.label ? { appliedLabel: a.label } : {}) } : {}),
         ...(last ? { lastResult: { kind: last.kind, label: last.label, detail: last.detail, at: last.at } } : {}),
       };
     });

@@ -124,6 +124,30 @@ describe("the daemon's assignment plan", () => {
     expect((await planFor()).rows.map((r) => r.effect)).toEqual(["change"]);
   });
 
+  it("a Codex seat on its home's login stays on the apply that switched it after later results that moved nothing", async () => {
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
+    seat("fleet", "c1", "codex", "c1@fleet");
+    const assignments = new ProviderAccountAssignmentsRepository(db);
+    assignments.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "r", requestedBy: null, at: "t" });
+    const standing = async () => {
+      const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" });
+      if (!planned.ok) throw new Error(planned.message);
+      const model = await service().getReadModel();
+      return [planned.plan.rows[0]!.effect, model.bindings.find((b) => b.seatSession === "c1@fleet")!.assignment!.state];
+    };
+    const save = (label: string, kind: "switched" | "unchanged" | "failed_before_effect", moved: boolean) => assignments.saveResult({ rigId: "rig-fleet",
+      provider: "codex", nodeId: "c1", seat: "c1@fleet", label, kind, detail: "d", recovery: null, activity: "idle", at: "t",
+      ...(moved ? { applied: { file: null, fileKind: null, codexHome, codexLogin: "team" } } : {}) });
+    save("team", "switched", true);
+    expect(await standing()).toEqual(["unchanged", "follows"]);
+    // A re-apply of team leaves it unchanged, which moves nothing: it still follows team, and the next re-apply restarts nothing.
+    save("team", "unchanged", false);
+    expect(await standing()).toEqual(["unchanged", "follows"]);
+    // An apply of another account that failed for this seat moved nothing either.
+    save("other", "failed_before_effect", false);
+    expect(await standing()).toEqual(["unchanged", "follows"]);
+  });
+
   it("a Codex seat follows an earlier assignment only when its saved login is that name in that home", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     fs.writeFileSync(path.join(codexHome, "auth-profiles", "next.json"), CONTENT, { mode: 0o600 });
