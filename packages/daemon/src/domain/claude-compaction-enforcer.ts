@@ -483,6 +483,16 @@ export interface RestoreDeliveryAttempt {
 /** Legacy #2575 threshold for old diagnostics. Managed input now follows ordinary draft-delivery defaults. */
 export const UNREADABLE_POLLS_BEFORE_DELIVERY = 2;
 const UNKNOWN_READINESS_POLLS_BEFORE_DELIVERY = 2;
+/** An attempt reached `done`, and no RESTORED note appeared beside its map within the wait: whether the seat took up the
+ *  restore is unknown. */
+export interface RestoreUptakeUnknown {
+  sessionName: string;
+  attemptId: string;
+  mapPath: string;
+  doneAt: string;
+  waitedMinutes: number;
+}
+
 export interface RestoreDeliveryFailure {
   sessionName: string;
   attemptId: string;
@@ -597,6 +607,9 @@ export const COMPACTION_RECORD_FILE = "COMPACTION-STATE.json";
 /** How old a record may be for a restarted daemon to resume it. An older open record isn't resumed: it reads as
  *  stranded, so whoever reaches the seat is told its restore may still be owed. Operational, not measured. */
 export const RESTART_RECOVERY_WINDOW_MS_DEFAULT = 6 * 60 * 60_000;
+/** How long after an attempt reaches `done` the seat has to write its RESTORED note beside the map before its uptake is
+ *  reported unknown. The post-restore audit asks for that note. */
+export const RESTORE_UPTAKE_WAIT_MS_DEFAULT = 30 * 60_000;
 /** This daemon process. A record this process wrote is its own state, never something to recover. */
 const DAEMON_PROCESS_ID = randomUUID();
 
@@ -659,6 +672,8 @@ interface CompactionRecord {
   sessionId?: string;
   /** When the attempt stopped (`updatedAt` is rewritten later). */
   endedAt?: number;
+  /** When the post-restore audit was sent and the attempt reached `done`, so a restart keeps the restore's uptake check. */
+  doneAt?: number;
   /** Begun after an attempt that ended then: its request goes only to a seat its send reads idle, and a restart before
    *  it goes out keeps the ended attempt's gate (#2682). */
   afterEnded?: number;
@@ -757,6 +772,11 @@ export class ClaudeCompactionEnforcer {
   private readonly recovered = new Set<string>();
   /** Open records too old to resume: the seat's restore may still be owed. */
   private readonly stranded = new Map<string, CompactionRecord>();
+  /** Attempts that reached `done`, until the seat's RESTORED note appears beside the map or the wait passes. `since` is the
+   *  map's own time: only a note written after it counts. */
+  private readonly restoreUptake = new Map<string, { attemptId: string; mapPath: string; since: number; doneAt: number }>();
+  private readonly restoreUptakeWaitMs: number;
+  private readonly onRestoreUptakeUnknown?: (unknown: RestoreUptakeUnknown) => Promise<void>;
   /** Seats whose owed restore steps follow a /compact whose outcome is unknown; never replay that command. */
   private readonly afterUncertainCompact = new Set<string>();
   /** #3389: seats whose /compact write was accepted and whose compaction report has not come yet: the turn boundary waits. */
@@ -790,6 +810,9 @@ export class ClaudeCompactionEnforcer {
       onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
       /** All owed stages landed; independent of the optional post-restore usage sample. */
       onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
+      /** No RESTORED note appeared beside a done attempt's map within the wait. Once per attempt; nothing is resent. */
+      onRestoreUptakeUnknown?: (unknown: RestoreUptakeUnknown) => Promise<void>;
+      restoreUptakeWaitMs?: number;
       terminalPolicies?: TerminalPolicyStore;
       dedupWindowMs?: number;
       openrigHome?: string;
@@ -819,6 +842,8 @@ export class ClaudeCompactionEnforcer {
   ) {
     this.onRestoreDeliveryFailure = opts?.onRestoreDeliveryFailure;
     this.onRestoreDeliveryComplete = opts?.onRestoreDeliveryComplete;
+    this.onRestoreUptakeUnknown = opts?.onRestoreUptakeUnknown;
+    this.restoreUptakeWaitMs = opts?.restoreUptakeWaitMs ?? RESTORE_UPTAKE_WAIT_MS_DEFAULT;
     this.onPreparationFailure = opts?.onPreparationFailure;
     this.terminalPolicies = opts?.terminalPolicies;
     this.settingsStore = settingsStore;
@@ -849,6 +874,7 @@ export class ClaudeCompactionEnforcer {
    */
   async maybeAutoCompact(input: EnforcerInput): Promise<EnforcerOutcome> {
     this.reconcilePreparations();
+    this.checkRestoreUptake(input.sessionName);
     const gated = await this.endedAttemptGate(input);
     if (gated) return gated;
     return this.withDeliveryGuard(input, () => this.maybeAutoCompactUnchecked(input));
@@ -1022,6 +1048,7 @@ export class ClaudeCompactionEnforcer {
     const unsampled = { ...rest, usedPercentage: null };
     this.recoverSeat(input);
     this.reconcilePreparations();
+    this.checkRestoreUptake(input.sessionName);
     // #3389: this runs every poll for a seat with no fresh sample, the one that owes a late report's sequence.
     if (input.runtime === "claude-code") this.reseedIfOwed(input.sessionName);
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
@@ -1322,6 +1349,8 @@ export class ClaudeCompactionEnforcer {
       if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       this.pendingPostCompactRestore.delete(input.sessionName);
       this.persistStage(input.sessionName, "done", undefined, this.overUnreadableDelivery("compliance_prompt", compliance));
+      this.persistStageFields(input.sessionName, { doneAt: this.now() });
+      this.watchRestoreUptake(input.sessionName, this.records.get(input.sessionName)?.record);
       this.records.delete(input.sessionName);
       this.afterUncertainCompact.delete(input.sessionName);
       this.restoreCarry.delete(input.sessionName);
@@ -1620,6 +1649,7 @@ export class ClaudeCompactionEnforcer {
   private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false, policyActor: TerminalActor = { source: "openrig" },
     startedAt = this.now()): PreparationAttempt {
     const attemptId = randomUUID();
+    this.restoreUptake.delete(input.sessionName); // a new attempt replaces the last one's uptake check
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
     const preparationRoot = policy.preparationRoot || null;
     const fallbackMapPath = path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
@@ -1997,6 +2027,36 @@ export class ClaudeCompactionEnforcer {
     if (held) this.records.set(session, held); else this.records.delete(session);
   }
 
+  /** Start the uptake check for an attempt that just reached `done`, when its map exists (a --skip-map attempt has none to
+   *  write the note beside). */
+  private watchRestoreUptake(session: string, record: CompactionRecord | undefined): void {
+    if (!record?.doneAt) return;
+    let since: number;
+    try { since = fs.statSync(record.mapPath).mtimeMs; } catch { return; }
+    this.restoreUptake.set(session, { attemptId: record.attemptId, mapPath: record.mapPath, since, doneAt: record.doneAt });
+  }
+
+  /** A delivered restore isn't proof the seat took it up. When no RESTORED note newer than the map appears beside it within
+   *  the wait, say once that uptake is unknown. Nothing is resent or held, and the check ends either way. */
+  private checkRestoreUptake(session: string): void {
+    const watch = this.restoreUptake.get(session);
+    if (!watch) return;
+    const dir = path.dirname(watch.mapPath);
+    let restored = false;
+    try {
+      restored = fs.readdirSync(dir).some(name => /^RESTORED-.*\.md$/.test(name) && fs.statSync(path.join(dir, name)).mtimeMs > watch.since);
+    } catch { /* an unreadable folder holds no note */ }
+    if (restored) { this.restoreUptake.delete(session); return; }
+    if (this.now() - watch.doneAt < this.restoreUptakeWaitMs) return;
+    this.restoreUptake.delete(session);
+    const unknown: RestoreUptakeUnknown = { sessionName: session, attemptId: watch.attemptId, mapPath: watch.mapPath,
+      doneAt: new Date(watch.doneAt).toISOString(), waitedMinutes: Math.round(this.restoreUptakeWaitMs / 60_000) };
+    void Promise.resolve().then(() => this.onRestoreUptakeUnknown?.(unknown)).catch(error => {
+      console.warn("[compaction] restore uptake notice failed", { sessionName: session, attemptId: watch.attemptId,
+        errorClass: error instanceof Error ? error.name : typeof error });
+    });
+  }
+
   /** Write fields onto the seat's current record, when it has one. */
   private persistStageFields(session: string, patch: Partial<CompactionRecord>): void {
     const current = this.records.get(session);
@@ -2173,6 +2233,7 @@ export class ClaudeCompactionEnforcer {
         // An operator's own request keeps its authority while its watch is kept, as an owed stage does, or a late report
         // would owe nothing when automatic compaction is off.
         if (record.mode === "manual" && this.lateCompactSignal.has(session)) this.setManualStage(session, "audit-sent", undefined, record.operatorInitiated);
+        if (record.doneAt !== undefined && this.now() - record.doneAt < this.restartRecoveryWindowMs) this.watchRestoreUptake(session, record);
       }
       return;
     }
@@ -2312,6 +2373,7 @@ export class ClaudeCompactionEnforcer {
   }
 
   cancelPreparation(session: string): PreparationState | null {
+    this.restoreUptake.delete(session);
     const attempt = this.pendingPreCompactPrep.get(session);
     if (attempt) attempt.cancelled = true;
     const record = this.records.get(session)?.record;
@@ -2371,6 +2433,7 @@ export class ClaudeCompactionEnforcer {
    * record. Occupant-scoped (no atom-B): the retiring occupant is gone, so a name match IS the ghost.
    */
   invalidateOccupant(sessionName: string): void {
+    this.restoreUptake.delete(sessionName);
     this.stopPreparation(sessionName, "stale_generation");
     this.lastEnded.delete(sessionName);
     this.persistStage(sessionName, "ended");
