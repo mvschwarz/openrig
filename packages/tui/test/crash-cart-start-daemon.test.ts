@@ -48,11 +48,19 @@ describe("daemon start caller budget", () => {
     expect(daemonStartTimeoutMs(180)).toBe(budget.DAEMON_START_COMMAND_TIMEOUT_MS);
     expect(daemonStartTimeoutMs(30)).toBe(30_000 + margin);
     expect(daemonStartTimeoutMs(600)).toBe(600_000 + margin);
+    expect(daemonStartTimeoutMs(900)).toBe(900_000 + margin);
   });
 
-  it.each([null, undefined, "240", 0, 601, 1.5])("falls back to the longest accepted wait when the setting reads %s", (setting) => {
+  it("accepts waits up to the longest whose budget a Node timer can hold", () => {
+    const max = (lifecycleBudget as unknown as Record<string, number>).DAEMON_START_READINESS_WAIT_MAX_SECONDS!;
+    expect(daemonStartTimeoutMs(max)).toBeLessThanOrEqual(2 ** 31 - 1);
+    expect(daemonStartTimeoutMs(max) + 1_000).toBeGreaterThan(2 ** 31 - 1);
+    expect(max).toBe(2147464);
+  });
+
+  it.each([null, undefined, "240", 0, 2147465, 1.5])("falls back to the longest accepted wait when the setting reads %s", (setting) => {
     // A shorter backstop could end a start the CLI is still waiting on; the CLI keeps its own deadline.
-    expect(daemonStartTimeoutMs(setting)).toBe(daemonStartTimeoutMs(600));
+    expect(daemonStartTimeoutMs(setting)).toBe(daemonStartTimeoutMs(2147464));
   });
 
   it("uses that timeout for all three asynchronous TUI daemon-start calls", () => {

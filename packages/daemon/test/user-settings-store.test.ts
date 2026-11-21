@@ -405,12 +405,15 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("daemon.start_readiness_wait_seconds")).toMatchObject({ value: 240, source: "file" });
     process.env["OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS"] = "30";
     expect(store.resolveOne("daemon.start_readiness_wait_seconds")).toMatchObject({ value: 30, source: "env" });
-    for (const value of ["0", "601", "1.5", "45junk", "abc"]) {
+    // Above 600 (a 15-minute start), up to the Node timer bound on the TUI's budget.
+    for (const value of ["900", "2147464"]) expect(() => store.set("daemon.start_readiness_wait_seconds", value)).not.toThrow();
+    store.set("daemon.start_readiness_wait_seconds", "240");
+    for (const value of ["0", "2147465", "1.5", "45junk", "abc"]) {
       expect(() => store.set("daemon.start_readiness_wait_seconds", value)).toThrow(/Invalid value for daemon\.start_readiness_wait_seconds/);
     }
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      process.env["OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS"] = "601";
+      process.env["OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS"] = "2147465";
       expect(store.resolveOne("daemon.start_readiness_wait_seconds")).toMatchObject({ value: 240, source: "file" });
       expect(stderr).toHaveBeenCalledWith(expect.stringContaining("env override for daemon.start_readiness_wait_seconds rejected"));
     } finally {

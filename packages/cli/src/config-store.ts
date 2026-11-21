@@ -1085,8 +1085,10 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
     }
   },
   "daemon.start_readiness_wait_seconds": (raw, coerced) => {
-    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
-      throw new Error(`Invalid value for daemon.start_readiness_wait_seconds: must be an integer in [1, 600], got "${raw}"`);
+    // The ceiling is the Node timer bound on a caller's budget (DAEMON_START_READINESS_WAIT_MAX_SECONDS in
+    // daemon-shutdown.ts): the TUI's start call can't time out later than 2^31 - 1 ms.
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isSafeInteger(coerced) || coerced < 1 || coerced > 2147464) {
+      throw new Error(`Invalid value for daemon.start_readiness_wait_seconds: must be a whole number of seconds in [1, 2147464], got "${raw}"`);
     }
   },
   "runtime.readiness_timeout_seconds": (raw, coerced) => {

@@ -880,7 +880,7 @@ version, from checking the environment to a useful report to the OpenRig team.
   Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
   line about every 20 s: let it finish rather than starting again. Synchronous work can run past
   the budget, and it isn't a cure for a slow start. `rig config set daemon.start_readiness_wait_seconds`
-  (1-600, or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS`) sets that budget for later starts.
+  (whole seconds, or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS`) sets that budget for later starts.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
   slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
   of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
