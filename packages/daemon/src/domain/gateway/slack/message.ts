@@ -62,10 +62,7 @@ export interface OutboundMessageOpts {
   extraBlocks?: unknown[];
   /** M1 A5b: outbound image attachments, rendered as Block Kit `image` blocks (the wired seam). */
   mediaRefs?: SlackMediaRef[];
-  /** #47 — an https evidenceRef that is NOT an image (GitLab issue link, PROOF.md URL, …),
-   *  rendered as a plain link in the message text + a context block. NEVER a Block Kit
-   *  `image` block: Slack rejects the ENTIRE message with `invalid_blocks` when an image
-   *  block's URL is not a real image, silently and permanently breaking delivery. */
+  /** An HTTPS evidence reference rendered as a link in the message text and context block. */
   evidenceLink?: string | null;
   /** S10 / A1.2 — the structured seat-attribution header (rig/host/seat/session), rendered as
    *  one sender context line in ONE honest bot identity. Authorship lives in OUR record;

@@ -99,8 +99,7 @@ export interface SubsystemSlackDeliveryOpts {
 }
 
 const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-/** Local evidence files uploaded into the thread: images, video (Slack plays mp4/webm/mov inline)
- *  and PDF. Wider than LOCAL_IMAGE_EXT, which gates https Block Kit image blocks. */
+/** Local evidence types uploaded into the thread, including images, videos and PDFs. */
 const LOCAL_ATTACHMENT_EXT = new Set([...LOCAL_IMAGE_EXT, ".mp4", ".webm", ".mov", ".pdf"]);
 /** Well under Slack's 1 GB per-file limit, and bounded for a daemon that holds the bytes in memory. */
 export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
@@ -495,12 +494,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       opts.release?.(key);
     }
 
-    // G — a LOCAL image evidenceRef (the founder screenshot) rides the EXTERNAL-UPLOAD flow
-    // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE
-    // but does NOT fail the decision: the text delivered; failing here would replay the whole
-    // post and duplicate the human notification (the H red). https refs already rode as Block
-    // Kit image blocks above; refs that are not attachments (e.g. a PROOF.md path) are a clean
-    // skip, and an attachment that can't be sent is logged.
+    // Local attachments use Slack's external upload flow in the conversation thread.
+    // HTTPS evidence already appeared as a link in the posted message. Unsupported
+    // local files are skipped. A failed upload is logged without reposting the decision.
     const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
       ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
       : null;
