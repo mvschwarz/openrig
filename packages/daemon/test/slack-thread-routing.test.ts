@@ -256,6 +256,74 @@ describe("inbound routing — the four classes, wrong-seat ABSENCE pinned", () =
   });
 });
 
+describe("a reply in a thread OpenRig's own machinery posted reaches a seat that reads it", () => {
+  // A wake escalation's alert is signed by the daemon (daemon@kernel), so its root's seat is OpenRig itself, which reads
+  // nothing typed to it. The reply goes where a person's top-level message in that channel goes.
+  function setup(channelReader: string | null) {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    map.open({ threadTs: "T-ALERT", channel: "C-OPS", human: "mike@external", seat: "daemon@kernel", conversationId: "q-alert" });
+    map.open({ threadTs: "T-SWEEP", channel: "C-OPS", human: "mike@external", seat: "stuck-sweep@system", conversationId: "q-sweep" });
+    map.open({ threadTs: "T-SEAT", channel: "C-OPS", human: "mike@external", seat: "dev-driver@v-openrig-build", conversationId: "q-seat" });
+    map.recordPart({ messageTs: "P-ALERT", channel: "C-OPS", threadTs: "T-SEAT", seat: "daemon@kernel", conversationId: "q-alert" });
+    const asked: (string | undefined)[] = [];
+    const route = makeThreadRouteResolver({
+      map, unroutedDestination: "orch-lead@v-openrig-build",
+      resolveChannelDestination: (channel) => { asked.push(channel); return channel === "C-OPS" ? channelReader : null; },
+    });
+    return { map, route, asked };
+  }
+  const reply = (thread_ts: string): SlackEvent => ({ type: "message", user: "U1", text: "why does this keep firing?", ts: "9.1", channel: "C-OPS", thread_ts } as SlackEvent);
+
+  it("goes to the channel's inbound seat, keeping the thread and the alert it replies to", () => {
+    const { route } = setup("operator-agent@kernel");
+    const r = route(reply("T-ALERT"));
+    expect(r).toMatchObject({ destination: "operator-agent@kernel", routeClass: "existing-thread", correlationQitemId: "q-alert" });
+    expect(r.tags).toEqual(expect.arrayContaining(["thread", "reply-to:q-alert"]));
+    expect(r.tags).not.toContain("unrouted-signal");
+    expect(r.destination).not.toBe("daemon@kernel");
+  });
+
+  it("goes to the orchestrator slot when the channel has no inbound seat", () => {
+    const { route } = setup(null);
+    expect(route(reply("T-ALERT")).destination).toBe("orch-lead@v-openrig-build");
+  });
+
+  it("a closed alert root and a @system actor's root route the same way", () => {
+    const { map, route } = setup("operator-agent@kernel");
+    map.close("T-ALERT", "C-OPS");
+    expect(route(reply("T-ALERT"))).toMatchObject({ destination: "operator-agent@kernel", routeClass: "closed-thread" });
+    expect(route(reply("T-SWEEP"))).toMatchObject({ destination: "operator-agent@kernel", correlationQitemId: "q-sweep" });
+  });
+
+  it("a reaction on an alert posted into another seat's thread reaches the channel's reader", () => {
+    const { route } = setup("operator-agent@kernel");
+    expect(route({ type: "reaction_added", thread_ts: "P-ALERT", channel: "C-OPS" } as never))
+      .toMatchObject({ destination: "operator-agent@kernel", correlationQitemId: "q-alert" });
+  });
+
+  it("a seat's own thread still routes to exactly that seat, and the channel isn't consulted for it", () => {
+    const { route, asked } = setup("operator-agent@kernel");
+    expect(route(reply("T-SEAT")).destination).toBe("dev-driver@v-openrig-build");
+    expect(asked).toEqual([]);
+  });
+
+  it("through the inbound router, the person's reply lands on the reader as a row", async () => {
+    const { route } = setup("operator-agent@kernel");
+    const creates: { destination: string; tags?: string[] }[] = [];
+    const fs = memFs();
+    const router = new InboundRouter({
+      queue: { createQitem: async (i) => { creates.push({ destination: i.destination, tags: i.tags }); return `qitem-${creates.length}`; } },
+      seen: new SeenStore("/s.jsonl", fs, clock),
+      deadLetter: new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock),
+      destination: "orch-lead@v-openrig-build",
+      resolveSender: () => ({ admitted: true, source: "mike@external" }),
+      resolveRoute: route,
+    });
+    expect((await router.route(reply("T-ALERT"))).landed).toBe(true);
+    expect(creates).toEqual([expect.objectContaining({ destination: "operator-agent@kernel", tags: expect.arrayContaining(["reply-to:q-alert"]) })]);
+  });
+});
+
 describe("outbound threading through the REAL delivery path (one reply root per durable conversation)", () => {
   let home: string;
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "s10-thr-")); });
