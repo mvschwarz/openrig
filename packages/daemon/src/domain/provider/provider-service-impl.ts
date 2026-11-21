@@ -137,9 +137,6 @@ export interface ProviderServiceImplDeps {
   platform?: NodeJS.Platform;
 }
 
-/** #3625: who set an assignment when the request names no seat, e.g. rig run from a shell that isn't one. */
-const NOT_A_SEAT = "a caller that isn't a seat";
-
 export class ProviderServiceImpl implements ProviderService {
   constructor(private readonly deps: ProviderServiceImplDeps) {}
 
@@ -311,8 +308,7 @@ export class ProviderServiceImpl implements ProviderService {
         activityOf: (seat) => this.activityOf(seat),
         save: (result, applied) => {
           if (!stored && tookEffect(result.kind, result.seat)) {
-            assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference,
-              requestedBy: input.requestedBy ?? NOT_A_SEAT, at: now() });
+            assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
             stored = true;
           }
           assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,

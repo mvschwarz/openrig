@@ -167,11 +167,11 @@ describe("applying an assignment on the daemon", () => {
     expect(next.ok && next.plan.rows.map((r) => [r.seat, r.effect])).toEqual([["mine@fleet", "kept_override"]]);
   });
 
-  it("an assignment set from a caller that isn't a seat says so, rather than naming nobody", async () => {
+  it("an assignment set from a caller that isn't a seat stores no seat: requestedBy stays null", async () => {
     seat("a");
     const claude = stoppedClaude();
     await svc.applyAssignment(request("max-2", await digestOf("max-2", claude), { requestedBy: null }), { claudeSeat: claude });
-    expect(new ProviderAccountAssignmentsRepository(db).intent("rig-fleet", "claude")?.requestedBy).toBe("a caller that isn't a seat");
+    expect(new ProviderAccountAssignmentsRepository(db).intent("rig-fleet", "claude")).toMatchObject({ label: "max-2", requestedBy: null });
   });
 
   it("a seat an earlier assignment moved follows the rig's assignment; one that chose its own account is still an override", async () => {

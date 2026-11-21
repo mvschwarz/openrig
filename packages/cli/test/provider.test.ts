@@ -752,6 +752,19 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     expect(JSON.parse(json.logs[0]!)).toEqual(MODEL);
   });
 
+  it("an assignment set from a caller that isn't a seat says so in the readable lines; --json keeps the daemon's null", async () => {
+    const unnamed = { ...intended, requestedBy: null };
+    const model = { ...MODEL, bindings: [seatRow("a@fleet", { provider: "claude", state: "follows", intended: unnamed, applied: switched })] };
+    const { logs } = await run(["status"], deps(() => model));
+    expect(logs).toContain("    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by a caller that isn't a seat; this seat is configured as assigned");
+    const json = await run(["status", "--json"], deps(() => model));
+    expect(JSON.parse(json.logs[0]!).bindings[0].assignment.intended.requestedBy).toBeNull();
+    const plan = { daemon: "host-a", rig: "fleet", provider: "claude", account: { label: "max-2", reference: "the token file /keys/max-2" }, includeOverrides: false,
+      rows: [], codexHomes: [], digest: "0123456789ab", note: "", intent: unnamed };
+    const planned = await run(["assign", "fleet", "--provider", "claude", "--account", "max-2"], deps(() => ({ ok: true, plan })));
+    expect(planned.logs).toContain("The rig's claude assignment: max-2 (the token file /keys/max-2), applied 2026-11-21T08:00:00.000Z by a caller that isn't a seat.");
+  });
+
   it("a seat that follows the assignment in its own file or home reads as the assignment, not as its own choice", async () => {
     const home = { source: "default_login", home: "/homes/succ", homeFrom: "account-switch", homeNote: "n" };
     const model = { ...MODEL, bindings: [

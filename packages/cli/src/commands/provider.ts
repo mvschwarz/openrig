@@ -184,6 +184,9 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     return `${f["reason"] ?? "no reason given"}${f["detail"] !== undefined ? ` (${f["detail"]})` : ""}`;
   }
 
+  // #3625: who set a rig's assignment. A request from outside any seat (e.g. rig run from a plain shell) stores none.
+  function setBy(requestedBy: unknown): string { return typeof requestedBy === "string" && requestedBy ? requestedBy : "a caller that isn't a seat"; }
+
   // A seat that follows its rig's assignment has that account in its own file or home: worded as the assignment, not as a
   // choice of its own.
   function configuredText(c: Record<string, unknown>, follows = false): string {
@@ -224,7 +227,7 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
         : a["state"] === "not_applied" ? notAppliedText(intended, applied)
           : "";
     const lines = [intended
-      ? `    assignment: rig ${r["rigName"]}'s ${a["provider"]} seats to ${intended["label"]} (${intended["reference"]}), set ${intended["at"]}${intended["requestedBy"] ? ` by ${intended["requestedBy"]}` : ""}; ${standing}`
+      ? `    assignment: rig ${r["rigName"]}'s ${a["provider"]} seats to ${intended["label"]} (${intended["reference"]}), set ${intended["at"]} by ${setBy(intended["requestedBy"])}; ${standing}`
       : `    assignment: none for rig ${r["rigName"]}'s ${a["provider"]} seats`];
     if (applied) {
       lines.push(`    last applied: ${String(applied["kind"]).replace(/_/g, "-")} (${applied["label"]}, ${applied["at"]}): ${applied["detail"]}`);
@@ -1065,7 +1068,7 @@ that machine. Only the command and its output cross the connection.`);
     console.log(`Plan ${plan.digest} on ${plan.daemon}: rig ${plan.rig}'s ${plan.provider} seats to ${plan.account.label} (${plan.account.reference})`
       + `${plan.accountHome ? `, as fresh successors on ${plan.accountHome}` : ""}.`);
     if (plan.intent) {
-      console.log(`The rig's ${plan.provider} assignment: ${plan.intent.label} (${plan.intent.reference}), applied ${plan.intent.at}${plan.intent.requestedBy ? ` by ${plan.intent.requestedBy}` : ""}.`);
+      console.log(`The rig's ${plan.provider} assignment: ${plan.intent.label} (${plan.intent.reference}), applied ${plan.intent.at} by ${setBy(plan.intent.requestedBy)}.`);
     }
     for (const row of plan.rows) {
       const last = row.lastResult ? `  last applied: ${kindWords(row.lastResult.kind)} (${row.lastResult.label}, ${row.lastResult.at}): ${row.lastResult.detail}` : null;
