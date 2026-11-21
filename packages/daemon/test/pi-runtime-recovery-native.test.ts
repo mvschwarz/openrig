@@ -43,8 +43,13 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
     const identities: Record<string, unknown>[] = [];
     const runId = managedRun ? "fixture-run" : undefined;
     const daemon = http.createServer(async (req, res) => {
+      // A managed run also opens its runner channel: after the POST hello it subscribes with a bodiless GET. That request is
+      // left open, unanswered, until teardown closes the connections; only a request with a JSON body is an event.
+      if (req.method === "GET") return;
       let body = ""; for await (const chunk of req) body += chunk;
-      const event = JSON.parse(body); identities.push(event);
+      let event: Record<string, unknown>;
+      try { event = JSON.parse(body) as Record<string, unknown>; } catch { res.statusCode = 400; res.end(); return; } // cut off at teardown
+      identities.push(event);
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ ok: true, tokenPersisted: event.sessionFile === sessionFile && event.runId === runId }));
     });
