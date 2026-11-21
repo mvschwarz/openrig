@@ -48,7 +48,9 @@ export interface StaleLockCheck {
  * which only an OS without pid namespaces reports). A live or uninspectable PID, a missing child record (the
  * launcher may have died between the spawn and recording it) or another namespace keeps the refusal. Such a
  * reservation is archived under the name `rig daemon stop` gives a spent one (`archiveSpentReservation`), so a
- * start and a stop that both find it race for one name, and link(2) lets only one of them remove it. */
+ * start and a stop that both find it race for one name, and link(2) lets only one of them remove it; the start
+ * then notes in the archive that it archived it. A reservation that `rig daemon stop` retained after a shutdown it
+ * couldn't verify (`markReservationRetained`) keeps the refusal: that state is unknown, not gone. */
 export function acquireDaemonStartLock(home: string, stale?: StaleLockCheck): DaemonStartLock {
   fs.mkdirSync(home, { recursive: true });
   const file = path.join(home, "daemon-start.lock");
@@ -148,11 +150,12 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
   let lockBootId: string | undefined;
   let hasLauncher = false;
   let hasChild = false;
+  let retainedByStop = false;
   let recordedNamespace: string | undefined;
   const validPid = (pid: unknown): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 0;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
-    let record: { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown; bootId?: unknown; pidNamespace?: unknown };
+    let record: { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown; bootId?: unknown; pidNamespace?: unknown; retainedBy?: unknown };
     try {
       record = JSON.parse(line);
     } catch {
@@ -163,6 +166,7 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
     if (typeof record.startedAt === "string") startedAtMs = Date.parse(record.startedAt);
     if (typeof record.bootId === "string" && record.bootId) lockBootId = record.bootId;
     if (typeof record.pidNamespace === "string" && record.pidNamespace) recordedNamespace = record.pidNamespace;
+    if (record.retainedBy !== undefined) retainedByStop = true;
   }
   if (!Number.isFinite(startedAtMs) || pids.length === 0) return undefined;
   const allDead = (): boolean => pids.every((pid) => stale.processLiveness(pid) === "dead");
@@ -171,9 +175,9 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
     : Math.max(startedAtMs, inspected.mtimeMs) < stale.bootedAtMs && allDead();
   if (!earlierBoot) {
     // This boot: only a launch whose launcher and recorded child are both positively gone, numbered in this shell's
-    // pid namespace. A pending or unknown child keeps today's refusal.
+    // pid namespace, and that no stop retained. A pending or unknown child keeps today's refusal.
     const sameNamespace = stale.pidNamespace !== undefined && (recordedNamespace ?? "host") === stale.pidNamespace;
-    if (!(hasLauncher && hasChild && sameNamespace && allDead())) return undefined;
+    if (retainedByStop || !(hasLauncher && hasChild && sameNamespace && allDead())) return undefined;
   }
   stale.afterInspect?.();
   const stamp = new Date(startedAtMs).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -190,7 +194,38 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
     return undefined;
   }
   fs.unlinkSync(file);
+  if (!earlierBoot) {
+    // The archive's name is the one a stop gives a clean release: say that a start archived it, and why.
+    try {
+      fs.appendFileSync(target, JSON.stringify({ archivedBy: "start", reason: "launcher-and-child-gone", launcherPid: process.pid, at: new Date().toISOString() }) + "\n");
+    } catch {
+      // The archive is already in place; the note is only for whoever inspects it.
+    }
+  }
   return target;
+}
+
+/** #3637 — `rig daemon stop` keeps a reservation after a shutdown it couldn't verify (the child didn't exit, the
+ *  listener isn't confirmed closed, no matching receipt, or an incomplete one). It records that here, only while the
+ *  file still holds exactly `expected`, so a later start doesn't take that unknown state for an abandoned launch.
+ *  Returns whether the record was written. */
+export function markReservationRetained(file: string, expected: string, reason: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r+");
+  } catch {
+    return false;
+  }
+  try {
+    const text = fs.readFileSync(fd, "utf8");
+    if (text !== expected) return false;
+    fs.writeSync(fd, JSON.stringify({ retainedBy: "stop", reason, at: new Date().toISOString() }) + "\n", Buffer.byteLength(text));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** #3315 — a token that names one process for as long as it lives: on Linux its start time in clock ticks since boot

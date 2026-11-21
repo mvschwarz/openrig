@@ -537,6 +537,22 @@ describe("local startup reservation", () => {
       expect(lock.archived).toBeDefined();
       lock.release();
     }));
+    it("refuses one that a stop retained after a shutdown it couldn't verify, though both PIDs are dead", () => withHome((home) => {
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS });
+      fs.appendFileSync(file, JSON.stringify({ retainedBy: "stop", reason: "incomplete-shutdown", at: "2026-11-10T21:10:00.000Z" }) + "\n");
+      expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS })).toThrow(/already reserved/);
+      expect(fs.readdirSync(home)).toEqual(["daemon-start.lock"]);
+    }));
+    it("notes in the archive that a start archived it, since the name is the one a stop's release uses", () => withHome((home) => {
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = stoppedOf(file);
+      const text = fs.readFileSync(file, "utf8");
+      const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS });
+      expect(lock.archived).toBe(archive);
+      const archived = fs.readFileSync(archive, "utf8");
+      expect(archived.startsWith(text)).toBe(true);
+      expect(JSON.parse(archived.slice(text.length))).toMatchObject({ archivedBy: "start", reason: "launcher-and-child-gone", launcherPid: process.pid });
+      lock.release();
+    }));
     it("has one winner when a stop releases the same spent reservation between this start's inspection and its claim", () => withHome((home) => {
       const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = stoppedOf(file);
       const text = fs.readFileSync(file, "utf8");

@@ -27,7 +27,7 @@ import {
   type LifecycleDeps,
   type DaemonState,
 } from "../src/daemon-lifecycle.js";
-import { archiveSpentReservation } from "../src/daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, markReservationRetained } from "../src/daemon-start-lock.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -2281,6 +2281,7 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
         pid === CHILD && opts.token !== null ? opts.token ?? "linux:777" : undefined),
       pidNamespace: () => (opts.pidNamespace === null ? undefined : opts.pidNamespace ?? "host"),
       releaseStartReservation: vi.fn(archiveSpentReservation),
+      retainStartReservation: vi.fn(markReservationRetained),
       sleep: async () => {},
       kill: vi.fn((pid: number) => {
         signalled = true;
@@ -2517,6 +2518,32 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     const timedOut = (pid: number) => JSON.stringify({ ...JSON.parse(cleanReceipt(pid)), outcome: "timed-out", phase: "drain" });
     expect((await stop(reservedDeps({ receipt: timedOut })) as Error).message).toMatch(/incomplete shutdown: timed-out/);
     expect(fs.existsSync(lockFile())).toBe(true);
+  });
+
+  it("a reservation stop retained after a shutdown it couldn't verify keeps a later start refused, though both PIDs are gone", async () => {
+    // The start's same-boot check, as realDeps passes it: this boot, this shell's namespace, both PIDs dead.
+    const nextStart = () => acquireDaemonStartLock(home, { bootId: "boot-A", bootedAtMs: Date.parse(STARTED_AT) - 60_000, processLiveness: () => "dead", pidNamespace: "host" });
+    const timedOut = (pid: number) => JSON.stringify({ ...JSON.parse(cleanReceipt(pid)), outcome: "timed-out", phase: "drain" });
+    for (const [receipt, reason] of [[timedOut, "incomplete-shutdown"], [null, "no-receipt"]] as const) {
+      const deps = reservedDeps({ receipt });
+      const raw = validLock();
+      expect((await stop(deps)) as Error).toBeInstanceOf(Error);
+      expect(deps.retainStartReservation).toHaveBeenCalledWith(lockFile(), raw, reason);
+      const kept = fs.readFileSync(lockFile(), "utf8");
+      expect(kept.startsWith(raw)).toBe(true);
+      expect(JSON.parse(kept.slice(raw.length))).toMatchObject({ retainedBy: "stop", reason });
+      expect(() => nextStart()).toThrow(/already reserved/);
+      expect(fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock."))).toEqual([]);
+      fresh();
+    }
+  });
+
+  it("a later stop still reads a reservation an earlier stop retained, and releases it after a clean shutdown", async () => {
+    fs.writeFileSync(lockFile(), validLock() + JSON.stringify({ retainedBy: "stop", reason: "no-receipt", at: NOW.toISOString() }) + "\n");
+    const deps = reservedDeps({ lock: null });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+    expect(fs.existsSync(lockFile())).toBe(false);
   });
 
   it("stopped, but a reservation that changed before its release is left in place", async () => {

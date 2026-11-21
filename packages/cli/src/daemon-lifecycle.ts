@@ -296,6 +296,8 @@ export interface LifecycleDeps {
   /** #3315 — release a spent start reservation still holding exactly `raw` (production: archiveSpentReservation);
    *  returns where it went, or undefined when it was left in place. Absent = stop never releases one. */
   releaseStartReservation?: (file: string, raw: string) => string | undefined;
+  /** #3637: records on the reservation that stop retained it after a shutdown it couldn't verify (`markReservationRetained`). */
+  retainStartReservation?: (file: string, raw: string, reason: string) => boolean;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -1042,12 +1044,14 @@ function readStartReservation(deps: LifecycleDeps, file: string): StartReservati
   const raw = deps.exists(file) ? deps.readFile(file) : null;
   if (raw === null) return "absent";
   const lines = raw.split("\n").filter((line) => line.trim());
-  if (lines.length !== 2) return "malformed";
+  if (lines.length < 2) return "malformed";
   let head: Record<string, unknown>;
   let child: Record<string, unknown>;
   try {
     head = JSON.parse(lines[0]!) ?? {};
     child = JSON.parse(lines[1]!) ?? {};
+    // #3637: after them, only the records of an earlier stop that retained it.
+    for (const line of lines.slice(2)) if ((JSON.parse(line) as { retainedBy?: unknown } | null)?.retainedBy !== "stop") return "malformed";
   } catch {
     return "malformed";
   }
@@ -1163,16 +1167,24 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const present = deps.isProcessAlive(r.childPid);
   const effect = await ctx.listener();
   const observation = `targeted ${ctx.target}; checked ${ctx.check}; start-reservation child PID ${r.childPid} ${present ? "present" : "absent"}; listener ${effect}; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
+  // #3637: each retention below is recorded on the reservation, so a later start keeps refusing it.
+  const retain = (reason: string): void => { deps.retainStartReservation?.(file, r.raw, reason); };
   if (present) {
+    retain("not-exited");
     throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
       (effect === "responding" ? " (still listening)" : "") + "; start reservation retained.");
   }
-  if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; start reservation retained.`);
+  if (effect !== "refused") {
+    retain("listener-unverified");
+    throw new Error(`Daemon stop verification is unverified: ${observation}; start reservation retained.`);
+  }
   const { receipt, receiptPath } = readShutdownReceipt(deps, path.join(home, "daemon.json"));
   if (!(receipt?.pid === r.childPid && Date.parse(receipt.startedAt) >= notBefore)) {
+    retain("no-receipt");
     throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); start reservation retained. Inspect ${path.join(home, "daemon.log")}.`);
   }
   if (!isCleanShutdown(receipt)) {
+    retain("incomplete-shutdown");
     throw new Error(`Daemon stopped with incomplete shutdown: ${receipt.outcome}; phase=${receipt.phase}; ${observation}. Pending effects are unverified; start reservation retained; inspect ${receiptPath}.`);
   }
   // Both PIDs it names are gone: release the reservation, unless it changed meanwhile.
