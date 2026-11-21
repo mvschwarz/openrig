@@ -2,6 +2,7 @@ import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { piAccountStateRoot, piAccountSwitchStateRoot } from "../src/domain/pi-account-state.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { withCommunityHarnessResolver } from "../src/adapters/community-harness-runtime-adapter.js";
 import { providerRoutes } from "../src/routes/provider.js";
 // Slice 16: a live seat moves between Codex and Claude Code, successor first. Real repositories on an in-memory
 // database; tmux and the runtime adapters are fakes that keep which pane each session holds, so the exchange, the
@@ -87,6 +88,9 @@ describe("live seat runtime switch", () => {
   });
   let fakeTmux: ReturnType<typeof tmux>;
 
+  // Community harness presets this test writes, standing in for what an install puts on disk.
+  let presetsDir: string;
+
   const adapter = (runtime: string): RuntimeAdapter => ({
     runtime,
     launchHarness: vi.fn(async () => ({ ok: true, resumeToken: runtime === "codex" ? "0198b1f0-0000-7000-8000-000000000001" : "11111111-2222-4333-8444-555555555555",
@@ -121,6 +125,7 @@ describe("live seat runtime switch", () => {
   beforeEach(async () => {
     db = createFullTestDb();
     home = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-switch-"));
+    presetsDir = path.join(home, "community-harnesses");
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
     eventBus = new EventBus(db);
@@ -918,6 +923,73 @@ describe("live seat runtime switch", () => {
     expect(grants.standing(old.grantId)).toBe("current");
   });
 
+  it("a community harness target is staged through its installed preset's adapter", async () => {
+    // A preset installed on this daemon defines `cursor`; the switch must reach it even though no seat has run it yet.
+    const community = { ...adapter("cursor"), runtime: "cursor" } as unknown as RuntimeAdapter;
+    const builtIns = { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi") };
+    const withResolver = withCommunityHarnessResolver(builtIns as Record<string, RuntimeAdapter>, {
+      tmux: fakeTmux as unknown as TmuxAdapter,
+      presetsDir: () => presetsDir,
+    });
+    // The resolver only knows presets it can load, so a real one goes on disk for this case.
+    fs.mkdirSync(presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(presetsDir, "cursor.yaml"),
+      "format: 1\nname: cursor\ncommand: node C:/fixture/cursor.mjs\nmaintainer: test\nlaunch_result: true\n", "utf8");
+
+    const result = await service({ runtimeAdapters: withResolver }).setRuntime({ seatRef: SEAT, runtime: "cursor", reason: "limit", dryRun: true });
+    expect(result).toMatchObject({ ok: true, dryRun: true, changed: true, from: "codex", to: "cursor" });
+    expect(community.runtime).toBe("cursor");
+  });
+
+  it("a switch to a community harness commits the harness and its conversation, and back is accepted", async () => {
+    // The successor must carry the harness on its session and the preset's own conversation type, or a relaunch, a
+    // restore, or a switch back can't resolve any of it. This exercises the commit, which nothing covered before.
+    const builtIns = { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi") };
+    const withResolver = withCommunityHarnessResolver(builtIns as Record<string, RuntimeAdapter>, {
+      tmux: fakeTmux as unknown as TmuxAdapter, presetsDir: () => presetsDir });
+    fs.mkdirSync(presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(presetsDir, "cursor.yaml"),
+      "format: 1\nname: cursor\ncommand: node C:/fixture/cursor.mjs\nmaintainer: test\nlaunch_result: true\nresume: true\n", "utf8");
+    // The harness's launcher reports its conversation as `community:cursor`, the type the built-in validator doesn't know.
+    const community = { ...adapter("cursor"), runtime: "cursor",
+      launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "community:cursor-abc-123", resumeType: "community:cursor" })) } as unknown as RuntimeAdapter;
+
+    const svc = service({ runtimeAdapters: { ...withResolver, cursor: community } });
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "cursor", reason: "Move to the harness" }))
+      .toMatchObject({ ok: true, changed: true, from: "codex", to: "cursor" });
+
+    const committed = db.prepare("SELECT agent_app, resume_type, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(nodeId) as { agent_app: string | null; resume_type: string | null; resume_token: string | null };
+    expect(committed.agent_app).toBe("cursor");
+    expect(committed.resume_type).toBe("community:cursor");
+    expect(committed.resume_token).toBe("community:cursor-abc-123");
+
+    // Back to a built-in is accepted now that the successor's selection names the harness, and its token is a built-in's.
+    const back = { ...adapter("codex"), runtime: "codex",
+      launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "0198b1f0-0000-7000-8000-000000000001", resumeType: "codex_id" })) } as unknown as RuntimeAdapter;
+    const svcBack = service({ runtimeAdapters: { ...withResolver, codex: back } });
+    onSleep = () => {
+      const open = openSwitch();
+      if (open?.phase !== "preparing" || !handoverTyped()) return;
+      svcBack.confirm({ seatRef: SEAT, switchId: open.id, note: "back to codex", actorSession: SEAT, generation: open.successor_generation });
+    };
+    const backResult = await svcBack.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Back to a built-in" });
+    expect(backResult).toMatchObject({ ok: true, changed: true, from: "cursor", to: "codex" });
+  });
+
+  it("a community harness target with an unreadable preset is still refused before any successor starts", async () => {
+    fs.mkdirSync(presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(presetsDir, "broken.yaml"), "format: 1\nname: broken\n", "utf8");
+    const builtIns = { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi") };
+    const withResolver = withCommunityHarnessResolver(builtIns as Record<string, RuntimeAdapter>, {
+      tmux: fakeTmux as unknown as TmuxAdapter,
+      presetsDir: () => presetsDir,
+    });
+    expect(await service({ runtimeAdapters: withResolver }).setRuntime({ seatRef: SEAT, runtime: "broken", reason: "x", dryRun: true }))
+      .toMatchObject({ ok: false, code: "runtime_target_unavailable" });
+  });
+
   it("without a confirmation in time nothing changes: the current occupant keeps the seat and its claim, and the staged successor is retired", async () => {
     const claimed = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
     queueRepo.claim({ qitemId: claimed.qitemId, destinationSession: SEAT });
@@ -977,7 +1049,18 @@ describe("live seat runtime switch", () => {
     it("a seat on another runtime", async () => {
       db.prepare("UPDATE nodes SET runtime = 'omp' WHERE id = ?").run(nodeId);
       expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))
-        .toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: expect.stringMatching(/only Codex, Claude Code and Pi seats can change runtime/) });
+        .toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: expect.stringMatching(/only Codex, Claude Code, Pi and community-harness seats can change runtime/) });
+    });
+    it("a community harness target whose preset this daemon doesn't have", async () => {
+      // The runtime name alone doesn't prove a preset is installed: an unknown name and an uninstalled harness both refuse.
+      expect(await service().setRuntime({ seatRef: SEAT, runtime: "cursor", reason: "x", dryRun: true }))
+        .toMatchObject({ ok: false, code: "runtime_target_unavailable" });
+    });
+    it("a source seat on a community harness only switches once its preset is installed", async () => {
+      db.prepare("UPDATE nodes SET runtime = 'cursor' WHERE id = ?").run(nodeId);
+      // No preset loaded, so nothing resolves this harness: the seat isn't switched as if it were a built-in one.
+      expect(await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "x", dryRun: true }))
+        .toMatchObject({ ok: false, code: "runtime_switch_unsupported" });
     });
     it("a target this daemon can't start", async () => {
       expect(await service({ runtimeAdapters: { codex: adapter("codex") } }).setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))

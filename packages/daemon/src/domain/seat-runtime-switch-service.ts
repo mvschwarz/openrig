@@ -12,6 +12,11 @@ import { ulid } from "ulid";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
+import type { RuntimeHint } from "./discovery-types.js";
+import { communityHarnessAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import type { EventBus } from "./event-bus.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { QueueRepository } from "./queue-repository.js";
@@ -150,6 +155,19 @@ interface SwitchRow {
 
 /** What to do about a seat with no pane to switch. */
 const NO_PANE = "it has no bound tmux pane";
+
+/** The community harness a seat was launched for, from its bound session's retained selection. Null when it has none,
+ *  or when the schema predates that column.
+ *
+ *  Ordered by creation, not `updated_at`: a session row has no `updated_at` column (migration 002 creates it with
+ *  `created_at` only), so ordering by it threw and the catch below turned every community seat into "no selection". */
+function seatCommunityHarnessSelect(db: Database.Database, nodeId: string): string | null {
+  try {
+    const row = db.prepare(`SELECT ${sessionCommunityHarnessSelect(db)} AS app FROM sessions s
+      WHERE s.node_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`).get(nodeId) as { app?: string | null } | undefined;
+    return row?.app ?? null;
+  } catch { return null; }
+}
 const NO_PANE_GUIDANCE = "If the seat is stopped, start it first, then switch it. If it has never started, there's nothing to switch: "
   + "declare the other runtime for this member in its rig spec and bring the team up again from that spec. That makes a new "
   + "generation of the seat, and it doesn't carry this seat's edges, settings or queued work the way a switch does.";
@@ -199,8 +217,9 @@ export class SeatRuntimeSwitchService {
   /** Validate and plan a successor-first runtime/account move, executing it under the seat's lifecycle guard unless dry-run. */
   async setRuntime(input: SetRuntimeInput): Promise<SetRuntimeResult> {
     const refuse = (code: string, message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code, message, ...(guidance ? { guidance } : {}) });
-    if (input.runtime !== "codex" && input.runtime !== "claude-code" && input.runtime !== "pi") {
-      return refuse("invalid_runtime_settings", "Choose --runtime codex, --runtime claude-code or --runtime pi.");
+    // A built-in runtime, or a community harness whose installed preset defines it. Anything else is a typo, not a target.
+    if (input.runtime !== "codex" && input.runtime !== "claude-code" && input.runtime !== "pi" && !isCommunityHarnessRuntime(input.runtime)) {
+      return refuse("invalid_runtime_settings", "Choose --runtime codex, --runtime claude-code, --runtime pi, or the name of an installed community harness (rig community-harness list).");
     }
     const target: SwitchRuntime = input.runtime;
     if (input.clearAccountHome !== undefined && typeof input.clearAccountHome !== "boolean") return refuse("invalid_runtime_settings", "clearAccountHome must be true or false.");
@@ -255,8 +274,12 @@ export class SeatRuntimeSwitchService {
           : open.phase === "abandoned" ? "whose staged successor hasn't been retired" : "in progress"} (${open.from_runtime} → ${open.to_runtime}, switch ${open.id}).`,
         `Inspect it with rig seat status ${seatRef}; finish an interrupted one with rig seat set-runtime ${seatRef} --recover.`), switchId: open.id };
     }
-    if (node.runtime !== "codex" && node.runtime !== "claude-code" && node.runtime !== "pi") {
-      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex, Claude Code and Pi seats can change runtime.`);
+    // A seat on a community harness can move too: its adapter is resolved from the preset it was launched for.
+    const sourceRuntime: string = node.runtime ?? "";
+    const sourceIsCommunity = !!sourceRuntime && isCommunityHarnessRuntime(sourceRuntime)
+      && communityHarnessOf(seatCommunityHarnessSelect(db, node.id), sourceRuntime) !== null;
+    if (!sourceIsCommunity && sourceRuntime !== "codex" && sourceRuntime !== "claude-code" && sourceRuntime !== "pi") {
+      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex, Claude Code, Pi and community-harness seats can change runtime.`);
     }
     if (node.runtime === "pi" && target === "claude-code") {
       try {
@@ -276,7 +299,7 @@ export class SeatRuntimeSwitchService {
     }
     const binding = sessionRegistry.getBindingForNode(node.id);
     const sessionName = binding?.tmuxSession ?? null;
-    const base = { seat: { ref: seatRef, nodeId: node.id, rigId: node.rigId, session: sessionName ?? "" }, from: node.runtime, to: target, ...(input.clearAccountHome ? { accountHome: null } : {}) };
+    const base = { seat: { ref: seatRef, nodeId: node.id, rigId: node.rigId, session: sessionName ?? "" }, from: sourceRuntime, to: target, ...(input.clearAccountHome ? { accountHome: null } : {}) };
     if (node.runtime === target && input.accountHome === undefined && !(input.clearAccountHome && node.accountHome)) {
       if (explicit.model || explicit.effort || explicit.codexConfigProfile || explicit.permissionMode) {
         return refuse("runtime_unchanged", `${seatRef} already runs ${target}.`,
@@ -311,8 +334,14 @@ export class SeatRuntimeSwitchService {
     } catch (error) {
       return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: its session couldn't be read (${(error as Error).message}).`);
     }
-    if (!this.deps.runtimeAdapters?.[target]) {
-      return refuse("runtime_target_unavailable", `${target} isn't available on this daemon, so no successor can start here.`);
+    // A built-in target has its adapter in the map. A community target's comes from its installed preset, resolved the same
+    // way a relaunch resolves a seat's own harness, so a staged successor can actually start on it.
+    if (!this.deps.runtimeAdapters?.[target] && !communityHarnessAdapter(this.deps.runtimeAdapters, target)) {
+      // A harness name is the common typo (`--runtime cluade`), and naming the list is what tells them it's a harness.
+      const harness = isCommunityHarnessRuntime(target);
+      return refuse("runtime_target_unavailable", harness
+        ? `no installed community harness is named ${target}, so no successor can start here. List the ones this daemon has with "rig community-harness list".`
+        : `${target} isn't available on this daemon, so no successor can start here.`);
     }
 
     // Settings: the target's explicit permission choice, else member and rig policy. Never the source's selection.
@@ -335,7 +364,7 @@ export class SeatRuntimeSwitchService {
       if (!saved.ok && node.agentRef) return refuse("runtime_target_unavailable", saved.refusal.message);
       materials = planRuntimeSwitchMaterials({ db, node, rigName: status.status.rig_name, canonicalSession: sessionName!, runtime: target,
         explicit, saved: saved.ok ? saved.context : null, claudeManagedBlockFile: rigRepo.getRigClaudeManagedBlockFile(node.rigId) ?? undefined,
-        resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
+        rigRoot: rigRepo.getRigInstallRoot(node.rigId), resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
     } catch (error) { return refuse("runtime_target_unavailable", (error as Error).message); }
 
     // An explicit Codex target mode replaces the seat's envelope, which the commit clears; inherit keeps it.
@@ -456,7 +485,7 @@ export class SeatRuntimeSwitchService {
         ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
         seatEnv: withPluginDirs({ ...rigRepo.getEffectiveSeatEnv(node.id, changesPiRuntime || ctx.input.accountHome === undefined),
-          ...(ctx.input.accountHome !== undefined ? { [RUNTIME_HOME_VAR[target]]: ctx.input.accountHome } : {}) }, [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
+          ...(ctx.input.accountHome !== undefined && target in RUNTIME_HOME_VAR ? { [RUNTIME_HOME_VAR[target as keyof typeof RUNTIME_HOME_VAR]]: ctx.input.accountHome } : {}) }, [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
         ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       onPaneCreated: (pane) => {
         successorPane = pane;
@@ -630,13 +659,24 @@ export class SeatRuntimeSwitchService {
       const successor = sessionRegistry.registerClaimedSession(node.id, ctx.sessionName, "handover", ctx.successorGeneration);
       if (sessionRegistry.currentOccupantTenure(node.id)?.generationUuid !== ctx.successorGeneration) throw new Error("the successor's generation couldn't be recorded");
       db.prepare("UPDATE sessions SET origin = 'launched', restore_policy = ? WHERE id = ?").run(ctx.restorePolicy, successor.id);
+      // A successor on a community harness keeps that fact on its session, as a fresh launch and a restore both record it:
+      // without it a relaunch or restore can't resolve the harness, and switching back is refused.
+      if (isCommunityHarnessRuntime(target)) {
+        const found = loadCommunityHarnessPreset(target);
+        sessionRegistry.recordCommunityHarnessSelection(successor.id, target,
+          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined);
+      }
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
       const hooked = db.prepare("SELECT successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_token: string | null };
       const nativeId = hooked.successor_resume_token ?? ctx.launchResume?.token;
       if (nativeId) {
-        const token = validateResumeToken(target, nativeId);
-        if (token.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hooked.successor_resume_token ? "hook" : "scrape");
+        // A community harness's launcher reports `community:<name>`; that type is the preset's own, not a built-in's, so it is
+        // accepted here when it names this target. The built-in validator still decides every built-in token.
+        const communityToken = isCommunityHarnessRuntime(target) && nativeId.startsWith(`community:${target}`)
+          ? { ok: true as const, resumeType: `community:${target}`, token: nativeId } : null;
+        const token = communityToken ?? (isCommunityHarnessRuntime(target) ? null : validateResumeToken(target, nativeId));
+        if (token?.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hooked.successor_resume_token ? "hook" : "scrape");
       }
       const observations = new AppliedLaunchObservationStore(db);
       observations.invalidateGeneration(ctx.predecessorGeneration);
@@ -648,7 +688,8 @@ export class SeatRuntimeSwitchService {
         retiringGeneration: ctx.predecessorGeneration });
       db.prepare("UPDATE discovered_sessions SET status = 'vanished', claimed_node_id = NULL WHERE claimed_node_id = ?").run(node.id);
       const discovered = this.deps.discoveryRepo.upsertDiscoveredSession({ tmuxSession: ctx.sessionName, tmuxPane: ctx.successorPane, cwd: node.cwd!,
-        runtimeHint: target, confidence: "high" });
+        // The hint column records the runtime name as text, as a handover records a seat's; a community harness's name goes in as is.
+        runtimeHint: target as RuntimeHint, confidence: "high" });
       this.deps.discoveryRepo.markClaimed(discovered.id, node.id);
       db.prepare(`UPDATE seat_runtime_switches SET phase = 'committed', committed_at = ?, updated_at = ? WHERE id = ? AND phase = 'confirmed'`).run(at, at, ctx.id);
       if ((db.prepare("SELECT committed_at FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { committed_at: string | null }).committed_at !== at) {
