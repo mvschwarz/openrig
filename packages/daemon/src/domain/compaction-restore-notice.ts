@@ -165,9 +165,14 @@ function noticeKind(item: QueueItem): (typeof NOTICE_KINDS)[number] | null {
   return NOTICE_KINDS.find((k) => item.qitemId.startsWith(k.prefix)) ?? null;
 }
 
+const OPEN_NOTICE_LIMIT = 1000;
+
 function openNotices(queue: QueueRepository, sourceSession?: string): QueueItem[] {
-  return queue.list({ tag: "compaction", state: OPEN_NOTICE_STATES, limit: 1000, ...(sourceSession ? { sourceSession } : {}) })
-    .filter((item) => noticeKind(item) !== null);
+  const rows = queue.list({ tag: "compaction", state: OPEN_NOTICE_STATES, limit: OPEN_NOTICE_LIMIT, ...(sourceSession ? { sourceSession } : {}) });
+  if (rows.length >= OPEN_NOTICE_LIMIT) {
+    console.warn("[compaction] open notices reached the settle limit; older ones wait for the next settle", { limit: OPEN_NOTICE_LIMIT });
+  }
+  return rows.filter((item) => noticeKind(item) !== null);
 }
 
 /** Close an open notice the debt no longer backs, as #3415 closes it after delivery. `canceled` and `superseded`
@@ -186,7 +191,7 @@ function closeNotice(queue: QueueRepository, item: QueueItem, closureReason: "ca
 /** Where OpenRig can't tell whether the debt ended, the open notice says so once and stays open. */
 function noteOwedUnknown(queue: QueueRepository, item: QueueItem, why: string): void {
   const note = `${noticeKind(item)!.label} for ${item.sourceSession}: OpenRig can't tell whether this is still owed: ${why}`;
-  if (queue.listTransitions(item.qitemId).at(-1)?.transitionNote === note) return;
+  if (queue.listTransitions(item.qitemId).some((t) => t.actorSession === "system:compaction" && t.transitionNote === note)) return;
   try {
     queue.update({ qitemId: item.qitemId, actorSession: "system:compaction", expectState: item.state, transitionNote: note });
   } catch (error) {
@@ -213,7 +218,7 @@ export function settleCompactionNotices(queue: QueueRepository, ended: Compactio
         break;
       case "occupant_replaced": {
         const generation = ended.occupantGeneration ?? null;
-        const replaced = `the seat's occupant was replaced${generation ? ` (retiring generation ${generation})` : ""}, and OpenRig dropped this compaction with it; the new occupant doesn't inherit it.`;
+        const replaced = `the seat's occupant was replaced${generation ? ` (retiring generation ${generation})` : ""}, and OpenRig dropped this compaction with it; the new occupant doesn't inherit it. If the seat resumed the same conversation, check whether it still needs the restore.`;
         if (attemptId !== null) closeNotice(queue, item, "canceled", replaced);
         else if (generation === null) {
           noteOwedUnknown(queue, item, "the seat's occupant was replaced, but the retiring occupant's generation wasn't recorded, so OpenRig can't tell whether this notice was that occupant's. Close it if it was.");

@@ -366,7 +366,7 @@ describe("ClaudeCompactionEnforcer", () => {
       const ended = vi.fn(async (end: CompactionDebtEnded) => settleCompactionNotices(queue, end));
       const { transport } = makeSessionTransport();
       // The live occupant; a test swaps it to model a committed handover.
-      let live = "gen-1";
+      let live: string | null = "gen-1";
       const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
         postCompactRestoreCooldownMs: 0, dedupWindowMs: 0, onCompactionDebtEnded: ended,
         resolveOccupantGeneration: () => live, ...opts } as never);
@@ -383,7 +383,7 @@ describe("ClaudeCompactionEnforcer", () => {
         return attemptId;
       };
       const reasons = () => (ended.mock.calls as unknown as [CompactionDebtEnded][]).map(([end]) => end.reason);
-      return { db, queue, ended, enforcer, notice, compactSent, reasons, swap: (g: string) => { live = g; } };
+      return { db, queue, ended, enforcer, notice, compactSent, reasons, swap: (g: string | null) => { live = g; } };
     }
 
     it("rig compact --cancel closes the notice of the attempt it ended, and the cancel's result is unchanged", async () => {
@@ -454,16 +454,41 @@ describe("ClaudeCompactionEnforcer", () => {
       } finally { f.db.close(); }
     });
 
-    it("a swap that rolled back, with the retiring occupant still live, settles nothing", async () => {
+    it("rig seat launch --fresh invalidates before the new occupant is minted, and the notice still closes", async () => {
       const f = await withQueue();
       try {
         const attemptId = await f.compactSent();
         const id = await f.notice("restore", attemptId);
-        const before = f.reasons().length;
+        // The live tenure still reads the retiring generation: the successor's is written after the invalidation.
         f.enforcer.invalidateOccupant(seat, "gen-1");
         await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1" });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
+      } finally { f.db.close(); }
+    });
+
+    it("a preparing attempt whose occupant a later poll finds replaced settles that occupant's notices", async () => {
+      const f = await withQueue();
+      try {
+        await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        expect(f.enforcer.getPreparationState(seat)?.status).not.toBe("stopped");
+        f.swap("gen-2");
+        f.enforcer.reconcilePreparations();
+        await settled();
+        expect(f.enforcer.getPreparationState(seat)).toMatchObject({ status: "stopped", reason: "stale_generation" });
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1" });
+      } finally { f.db.close(); }
+    });
+
+    it("a preparing attempt whose occupant can't be read settles nothing", async () => {
+      const f = await withQueue();
+      try {
+        await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        const before = f.reasons().length;
+        f.swap(null);
+        f.enforcer.reconcilePreparations();
+        await settled();
         expect(f.reasons()).toHaveLength(before);
-        expect(f.queue.getById(id)?.state).toBe("pending");
       } finally { f.db.close(); }
     });
 

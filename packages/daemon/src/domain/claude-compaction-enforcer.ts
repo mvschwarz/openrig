@@ -2150,7 +2150,13 @@ export class ClaudeCompactionEnforcer {
       if (attempt.status === "stopped" || attempt.status === "compact-sent") continue;
       const generation = this.resolveOccupantGeneration?.(session)
         ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
-      if (generation !== attempt.occupantGeneration) this.stopPreparation(session, "stale_generation");
+      if (generation !== attempt.occupantGeneration) {
+        this.stopPreparation(session, "stale_generation");
+        // #3688: only a known, different occupant replaced this attempt's; an unreadable generation settles nothing.
+        if (generation !== null && attempt.occupantGeneration !== null) {
+          this.noticeDebtEnded({ sessionName: session, reason: "occupant_replaced", occupantGeneration: attempt.occupantGeneration });
+        }
+      }
       else if (!enabled && (attempt.mode === "automatic" || attempt.policyWasEnabled)) this.stopPreparation(session, "disabled");
       // A held map that stopped reading ready (its file or marker gone) stops the attempt (#2682).
       else if (attempt.prepared && !attempt.compactInFlight && !this.mapReady(attempt)) this.stopPreparation(session, "preparation_incomplete");
@@ -2237,7 +2243,8 @@ export class ClaudeCompactionEnforcer {
    * - An automatic preparation is waited on rather than begun again. A prompt whose delivery wasn't recorded may have
    *   reached the seat, so it is never sent again.
    * - A manual preparation stops, because its caller is gone.
-   * A record of another occupant, or in any other shape (see `readCompactionRecord`), is left alone. An open post-compact
+   * A record of another occupant is not resumed, and its notices settle (#3688); one in any other shape (see
+   * `readCompactionRecord`) is left alone. An open post-compact
    * record older than the recovery window isn't resumed; it reads as stranded, at the stage it owes.
    */
   recoverAfterRestart(input: { sessionName: string; cwd?: string | null; runtime: string | null }, preparationRoot: string | null): void {
@@ -2269,6 +2276,13 @@ export class ClaudeCompactionEnforcer {
     // This process's own record (another enforcer in it) is live state, not a predecessor's.
     if (record.daemon === this.daemonInstance) return;
     const live = this.resolveOccupantGeneration?.(session) ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
+    // #3688: a different occupant holds the seat after the restart (a reboot's relaunch mints a new generation without
+    // the invalidator), so this attempt's steps, uptake check and preparation are no longer owed, in any phase. Each
+    // branch below already ignores a known other occupant's record.
+    if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) {
+      this.noticeDebtEnded({ sessionName: session, reason: "occupant_replaced", occupantGeneration: record.occupantGeneration });
+      return;
+    }
     if (record.phase === "done") {
       // #3389: a sequence that went ahead without the seat's report still owes one more if the report comes late.
       if (record.occupantGeneration !== null && live === record.occupantGeneration) {
@@ -2303,7 +2317,6 @@ export class ClaudeCompactionEnforcer {
       }
       return;
     }
-    if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) return;
     const stale = this.now() - record.updatedAt > this.restartRecoveryWindowMs;
     // A /compact whose send had begun, or whose outcome was lost, is never sent again; its restore steps are owed in case it
     // ran. Only the first step reconciles that possible write; later input follows ordinary delivery settings.
@@ -2510,15 +2523,12 @@ export class ClaudeCompactionEnforcer {
   }
 
   /** #3688: settling a notice is bookkeeping. It runs after the caller (a handover runs this inside its transaction), and
-   *  a failure leaves a safe diagnostic without changing the cancel, attempt or handover that ended the debt. */
+   *  a failure leaves a safe diagnostic without changing the cancel, attempt or handover that ended the debt. It doesn't
+   *  wait for the successor's generation: `rig seat launch --fresh` invalidates before the new occupant is minted, and the
+   *  dropped state is gone either way, so OpenRig no longer owes those steps. */
   private noticeDebtEnded(ended: CompactionDebtEnded): void {
     if (!this.onCompactionDebtEnded) return;
-    void Promise.resolve().then(() => {
-      // A handover or runtime switch that rolled back keeps the retiring occupant live: its swap didn't happen.
-      if (ended.reason === "occupant_replaced" && ended.occupantGeneration != null
-        && this.resolveOccupantGeneration?.(ended.sessionName) === ended.occupantGeneration) return;
-      return this.onCompactionDebtEnded?.(ended);
-    }).catch(error => {
+    void Promise.resolve().then(() => this.onCompactionDebtEnded?.(ended)).catch(error => {
       console.warn("[compaction] debt-ended notice failed", { sessionName: ended.sessionName, reason: ended.reason,
         errorClass: error instanceof Error ? error.name : typeof error });
     });

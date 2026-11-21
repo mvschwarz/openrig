@@ -278,6 +278,22 @@ it('a stranded record reports its debt as unknown, and the next attempt as super
  expect(ended).toHaveBeenLastCalledWith({sessionName:seat,reason:'attempt_superseded',attemptId:next});
 });
 
+// #3688: a restart that finds another occupant in the seat (a reboot's relaunch mints a new generation without the
+// handover invalidator) settles the earlier occupant's notices.
+it.each(['owed','done','ended'])('a restart that finds another occupant settles the earlier occupant\'s compaction (%s)',async(phase)=>{
+ const f=fixture();const first=await compactedBy(f);
+ // done: every owed step delivered (the uptake check's phase); ended: the attempt was cancelled (a preparation notice's).
+ if(phase==='done'){for(let i=0;i<3;i++)await staleTick(first);expect(first.getOwedRestore(seat)).toBeNull();}
+ if(phase==='ended')first.cancelPreparation(seat);
+ f.generation('generation-two');
+ const sent=f.writes.length;
+ const ended=vi.fn();
+ const restarted=f.daemon(undefined,{onCompactionDebtEnded:ended});
+ await stateOf(restarted);await staleTick(restarted);await new Promise(resolve=>setImmediate(resolve));
+ expect(f.writes).toHaveLength(sent);
+ expect(ended).toHaveBeenCalledWith({sessionName:seat,reason:'occupant_replaced',occupantGeneration:'generation-one'});
+});
+
 it("a record in a shape this daemon doesn't write is ignored, so it can't hold up the seat's compaction",async()=>{
  const f=fixture();const first=f.daemon();await first.maybeAutoCompact(high);
  const record=recordFile(first);

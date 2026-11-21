@@ -556,7 +556,10 @@ describe("notices whose compaction debt ended without a delivery", () => {
     try {
       const stranded = await f.restore("one"), other = await f.restore("two");
       const before = f.queue.listTransitions(other);
-      for (let i = 0; i < 2; i++) settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", attemptId: "one" });
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", attemptId: "one" });
+      // Another transition in between (the owner parks it with a note) doesn't make the next restart say it again.
+      f.queue.update({ qitemId: stranded, actorSession: "owner@demo", transitionNote: "looking at it" });
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", attemptId: "one" });
       expect(f.queue.getById(stranded)?.state).toBe("pending");
       const notes = f.queue.listTransitions(stranded).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
       expect(notes).toHaveLength(1);
