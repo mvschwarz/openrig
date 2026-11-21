@@ -398,6 +398,7 @@ export class SeatActivityService {
     seat.usageLimitRestored = false;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
+    seat.hooksContradicted = false;
     seat.promotion.clear();
     seat.trust.clear();
     seat.inventory = null;
@@ -542,6 +543,7 @@ export class SeatActivityService {
     seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
     seat.structuralPrompt = undefined;
     seat.trust.clear();
+    seat.hooksContradicted = false;
     for (const decl of inventory.rungs) seat.trust.set(decl.rung, decl.initialTrust);
     seat.promotion.clear();
     this.arbitrate(seat);
@@ -591,8 +593,12 @@ export class SeatActivityService {
     // A typed usage limit holds until a strictly newer turn starts: a working boundary from the hooks or the seat's own
     // status. An idle prompt, a redraw or the limit's own menu is not a new turn. The rule holds in either arrival order:
     // a limit older than a working boundary already seen never arms (relay posts can arrive out of order).
+    // Of two readable limits the newer one holds, so a late-arriving older report can't replace it (and a working boundary
+    // between them can't then end it); an unread placeholder from a restart gives way to any real one.
     if (evidence.usageLimit) {
-      if (!this.newerWorkSeen(seat, evidence.observedAt)) {
+      const held = seat.usageLimit;
+      const older = held !== null && !held.unread && Date.parse(evidence.observedAt) < Date.parse(held.observedAt);
+      if (!this.newerWorkSeen(seat, evidence.observedAt) && !older) {
         seat.usageLimit = { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
       }
     } else if (evidence.activity === "working" && (evidence.rung === "lifecycle-hooks" || evidence.rung === "self-report")) {
@@ -646,6 +652,7 @@ export class SeatActivityService {
     seat.lastWorkAt = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
+    seat.hooksContradicted = false;
     seat.promotion.clear();
     for (const rung of seat.trust.keys()) seat.trust.set(rung, "absent");
     seat.inventory = null;
@@ -990,6 +997,7 @@ export class SeatActivityService {
     }
     if (nowMs - seat.contradictionSinceMs > CROSS_RUNG_CONTRADICTION_WINDOW_MS) {
       seat.trust.set("lifecycle-hooks", "identity-only");
+      seat.hooksContradicted = true;
       seat.contradictionSinceMs = null;
       this.emitRungHealth(seat, "lifecycle-hooks", hook!.sourceId, "authoritative", "identity-only",
         `cross-rung contradiction: hook claims working while window-sampling sees idle-at-prompt beyond ${CROSS_RUNG_CONTRADICTION_WINDOW_MS / 1000}s — degraded to identity-only (a silently-dropping source can never stay authoritative)`);
@@ -1082,7 +1090,11 @@ export class SeatActivityService {
     // A typed usage limit ended the last turn and no newer turn has started: nothing older says what the seat does now,
     // and a limit is neither work nor rest, so the seat reads unknown with the limit and its stated reset beside it.
     // A limit that couldn't be read back after a restart (unread) says only that: unknown, with no limit to show.
-    const held = seat.usageLimit && (seat.usageLimit.unread || this.rungTrust(seat, seat.usageLimit.rung) === "authoritative")
+    // The hooks' contradiction demotion is about their working claims (checkContradiction); a typed limit they posted is a
+    // separate claim and still holds through it. A rung that was never authoritative doesn't hold one.
+    const limitRung = seat.usageLimit?.rung;
+    const held = seat.usageLimit && (seat.usageLimit.unread || this.rungTrust(seat, seat.usageLimit.rung) === "authoritative"
+      || (limitRung === "lifecycle-hooks" && seat.hooksContradicted === true))
       ? seat.usageLimit : null;
     const usageLimit = held && !held.unread ? { rung: held.rung, observedAt: held.observedAt, resetsAt: held.resetsAt } : null;
     if (held) {
@@ -1233,6 +1245,8 @@ interface SeatLadderState {
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;
   contradictionSinceMs: number | null;
+  /** The hooks were demoted for contradicting the pane's idle (checkContradiction), until the next inventory or reset. */
+  hooksContradicted?: boolean;
   pendingIdle: { sinceMs: number; ticks: number; lastSeq: number } | null;
   waiters: SeatWaiter[];
   arbitrated: ArbitratedSeatState;

@@ -242,6 +242,78 @@ describe("a seat at its usage limit, across a daemon restart and on Codex", () =
     expect(f.seat(f.codex.id).usageLimit).toBeNull();
   });
 
+  it("lets a real limit replace an unread restart placeholder, even one dated before it", async () => {
+    const f = fixture();
+    f.clock.now += 3600_000;
+    await f.restart("unreadable");
+    const limitAt = f.clock.now - 10_000; // a delayed post from before the restart
+    await f.post("StopFailure", "rate_limit", { resetsAt: f.reset, occurredAt: new Date(limitAt).toISOString() });
+    expect(f.seat(f.claude.id).usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(limitAt).toISOString(), resetsAt: f.reset });
+  });
+
+  it("restores a limit that a turn's start shares its instant with, as live holds it (only a strictly later turn ends it)", async () => {
+    const f = fixture();
+    const at = f.clock.now;
+    await f.post("StopFailure", "rate_limit", { resetsAt: f.reset });
+    await f.post("UserPromptSubmit", null); // the same instant, delivered after: it reads first on a restart
+    const held = { rung: "lifecycle-hooks", observedAt: new Date(at).toISOString(), resetsAt: f.reset };
+    expect(f.seat(f.claude.id).usageLimit).toEqual(held);
+    f.clock.now += 3600_000;
+    await f.restart();
+    expect(f.seat(f.claude.id).usageLimit).toEqual(held);
+  });
+
+  describe("a Codex seat's banner episodes", () => {
+    function codex(f: ReturnType<typeof fixture>) {
+      f.oracle().declareRungInventory({ seatNodeId: f.codex.id, sessionName: f.codexSession }, CODEX_ACTIVITY_RUNG_INVENTORY);
+      const observe = (banner: typeof f.banner | null) => observeCodexLimitBanner({ store: f.store,
+        resolveGeneration: () => f.generation(f.codex.id), oracle: f.oracle(), sessionName: f.codexSession, banner,
+        observedAt: new Date(f.clock.now) });
+      const hook = (hookEvent: string, subtype: string | null = null) => expect(f.store.recordHookEvent({ runtime: "codex",
+        sessionName: f.codexSession, hookEvent, subtype, generation: f.generation(f.codex.id),
+        occurredAt: new Date(f.clock.now).toISOString() }).ok).toBe(true);
+      const latest = () => f.store.getLatestForNode({ nodeId: f.codex.id, sessionName: f.codexSession });
+      return { observe, hook, latest };
+    }
+
+    it("records the same banner again after a newer turn ended its episode, but not while the episode is still held", async () => {
+      const f = fixture(); const c = codex(f);
+      c.observe(f.banner);
+      f.clock.now += 1_000;
+      c.hook("UserPromptSubmit"); // a newer turn: the recorded episode is over
+      f.clock.now += 1_000;
+      const again = f.clock.now;
+      c.observe(f.banner); // the same reset text, with no banner-free capture between
+      expect(c.latest()).toMatchObject({ rawEvent: "at_limit" }); // a new typed row, after the turn's
+      expect(f.store.heldUsageLimitForSession(f.codexSession, "codex")).toMatchObject({ rawEvent: "at_limit" });
+
+      f.clock.now += 1_000;
+      c.hook("Notification"); // neutral: it ends nothing
+      f.clock.now += 1_000;
+      c.observe(f.banner); // still the same held episode: not recorded again
+      expect(c.latest()?.rawEvent).toBe("Notification");
+
+      f.clock.now += 3600_000;
+      await f.restart();
+      f.codexIdleSample();
+      expect(f.seat(f.codex.id).usageLimit).toEqual({ rung: "window-sampling", observedAt: new Date(again).toISOString(), resetsAt: null });
+    });
+
+    it("records the clear a banner-free capture shows behind a neutral notification, so a restart doesn't bring the limit back", async () => {
+      const f = fixture(); const c = codex(f);
+      c.observe(f.banner);
+      f.clock.now += 1_000;
+      c.hook("Notification"); // a neutral notification supersedes the limit row without ending it
+      f.clock.now += 1_000;
+      c.observe(null); // the banner is gone
+      expect(c.latest()).toMatchObject({ rawEvent: "Notification", rawSubtype: "usage_limit_cleared" });
+      f.clock.now += 3600_000;
+      await f.restart();
+      f.codexIdleSample();
+      expect(f.seat(f.codex.id).usageLimit).toBeNull();
+    });
+  });
+
   it("restores a Codex seat's banner limit after a restart", async () => {
     const f = fixture();
     recordCodexLimitBanner({ store: f.store, resolveGeneration: () => f.generation(f.codex.id), sessionName: f.codexSession,

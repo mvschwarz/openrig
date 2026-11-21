@@ -36,7 +36,7 @@ function hook(at: number, fields: Partial<AgentActivity>): void {
   if (evidence) svc.reportEvidence(evidence);
 }
 const promptSubmitted = (at: number) => hook(at, { state: "running", reason: "user_prompt_submit", rawEvent: "UserPromptSubmit" });
-const usageLimit = (at: number) => hook(at, { state: "unknown", reason: "usage_limit", rawEvent: "StopFailure", rawSubtype: "rate_limit", resetsAt: RESET });
+const usageLimit = (at: number, resetsAt = RESET) => hook(at, { state: "unknown", reason: "usage_limit", rawEvent: "StopFailure", rawSubtype: "rate_limit", resetsAt });
 const idlePrompt = (at: number) => hook(at, { state: "idle", reason: "idle_prompt", rawEvent: "Notification", rawSubtype: "idle_prompt" });
 
 /** Claude's own status file (sessions/<pid>.json), read by the real self-report reader. */
@@ -121,6 +121,34 @@ describe("a Claude seat at its usage-limit notice", () => {
     usageLimit(T0 + 30_000); // after that turn: the rule is unchanged
     expect(seat().usageLimit?.resetsAt).toBe(RESET);
     expect(seat().display).toBe("unknown");
+  });
+
+  it("keeps the newer of two limits when an older one arrives later, so a turn between them doesn't end it", () => {
+    const OLDER_RESET = "2026-11-20T08:00:00.000Z";
+    clock.now = T0 + 5_000;
+    usageLimit(T0 + 3_000);
+    usageLimit(T0 + 1_000, OLDER_RESET); // an earlier limit, delivered after the newer one
+    promptSubmitted(T0 + 2_000); // a turn between the two, delivered last
+    expect(seat().display).toBe("unknown");
+    expect(seat().usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(T0 + 3_000).toISOString(), resetsAt: RESET });
+  });
+
+  it("holds a typed limit that arrives after the hooks were demoted for contradicting the pane, until a newer turn", () => {
+    promptSubmitted(T0); // the hooks say working while the pane reads idle beyond the contradiction window
+    clock.now = T0 + 1_000;
+    idleSample(clock.now);
+    clock.now = T0 + 12_000;
+    idleSample(clock.now);
+    expect(seat().rungs.find((r) => r.rung === "lifecycle-hooks")?.trust).toBe("identity-only");
+
+    clock.now = T0 + 13_000;
+    usageLimit(clock.now);
+    expect(seat().display).toBe("unknown");
+    expect(seat().usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(T0 + 13_000).toISOString(), resetsAt: RESET });
+
+    clock.now = T0 + 14_000;
+    promptSubmitted(clock.now); // a strictly newer turn still ends it
+    expect(seat().usageLimit).toBeNull();
   });
 
   it("isn't inherited by a new occupant", () => {

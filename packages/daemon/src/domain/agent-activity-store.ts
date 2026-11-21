@@ -515,6 +515,9 @@ export class AgentActivityStore {
     let live: string | null = null;
     try { live = this.resolveOccupantGeneration?.(input.nodeId) ?? null; } catch { /* unknown: no record can be shown to be this occupant's */ }
     let uncertain = false;
+    // A clear ends a limit only when it's strictly later, as live: a limit recorded at the clear's own instant still holds,
+    // whichever of the two the emitter's sequence or the arrival put first.
+    let clearedAt: number | null = null;
     for (const row of rows) {
       const activity = parseActivityPayload(row.payload)?.activity;
       if (!activity) continue;
@@ -522,16 +525,28 @@ export class AgentActivityStore {
       const typed = input.runtime === "codex" ? activity.rawEvent === "at_limit"
         : isClaudeRateLimitHook(input.runtime, activity.rawEvent, activity.rawSubtype);
       if (!clears && !typed) continue;
+      if (clearedAt !== null && Date.parse(activity.eventAt ?? "") !== clearedAt) return null;
       const occupant = this.occupantOf(input.nodeId, activity.generation, live);
       if (occupant === "foreign") continue;
       // A clear whose occupant can't be shown may or may not have ended this occupant's limit: keep looking, and if a
       // limit of this occupant is found below it, say unknown rather than claim either way.
       if (occupant === "unknown") { if (typed) throw new Error("usage limit of an unresolved occupant"); uncertain = true; continue; }
-      if (clears) return null;
+      if (clears) {
+        const at = Date.parse(activity.eventAt ?? "");
+        if (!Number.isFinite(at)) return null;
+        clearedAt ??= at;
+        continue;
+      }
       if (uncertain) throw new Error("usage limit behind a clear of an unresolved occupant");
       return activity;
     }
     return null;
+  }
+
+  /** latestHeldUsageLimit for a session name alone (the Codex banner sweep's input), resolved to its node as hook records are. */
+  heldUsageLimitForSession(sessionName: string, runtime: string): AgentActivity | null {
+    const session = this._resolveSession({ sessionName });
+    return session ? this.latestHeldUsageLimit({ nodeId: session.node_id, sessionName: session.session_name, runtime }) : null;
   }
 
   /** Which occupant a recorded generation belongs to, by getLatestForNode's rules: "current" for the live generation or one
