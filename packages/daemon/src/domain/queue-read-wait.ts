@@ -3,9 +3,10 @@ import type { QueueItem, QueueRepository } from "./queue-repository.js";
 
 /** A read waits only while its own item remains actionable; a claim or progress note is not an answer. */
 export function waitForQueueItem(repo: QueueRepository, bus: EventBus, qitemId: string, seconds: number,
-  signal: AbortSignal): Promise<{ item: QueueItem | null; waited?: { outcome: "timeout"; seconds: number } }> {
-  if (seconds === 0) return Promise.resolve({ item: repo.getById(qitemId) });
+  signal: AbortSignal): Promise<{ item: QueueItem | null; parked: boolean; waited?: { outcome: "timeout"; seconds: number } }> {
+  if (seconds === 0) return Promise.resolve({ item: repo.getById(qitemId), parked: false });
   return new Promise((resolve, reject) => {
+    let parked = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let unsubscribe = () => {};
     const cleanup = () => {
@@ -18,10 +19,12 @@ export function waitForQueueItem(repo: QueueRepository, bus: EventBus, qitemId: 
       try {
         const item = repo.getById(qitemId);
         const active = item?.state === "pending" || item?.state === "in-progress";
-        if (!active || timedOut) {
-          cleanup();
-          resolve({ item, ...(active && timedOut ? { waited: { outcome: "timeout" as const, seconds } } : {}) });
+        if (active && !timedOut) {
+          parked = true;
+          return;
         }
+        cleanup();
+        resolve({ item, parked, ...(active && timedOut ? { waited: { outcome: "timeout" as const, seconds } } : {}) });
       } catch (error) { cleanup(); reject(error); }
     };
     // Subscribe before the first read: completion between the two cannot be lost.

@@ -1786,9 +1786,9 @@ export function queueRoutes(): Hono {
     if (!Number.isInteger(seconds) || seconds < 0 || seconds > 50) {
       return c.json({ error: "invalid_wait_seconds", message: "waitSeconds must be an integer from 0 to 50" }, 400);
     }
-    const { item, waited } = await waitForQueueItem(repo, getEventBus(c), qitemId, seconds, c.req.raw.signal);
+    const { item, parked, waited } = await waitForQueueItem(repo, getEventBus(c), qitemId, seconds, c.req.raw.signal);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
-    if (seconds > 0) exemptSlowOpRequest(c);
+    if (parked) exemptSlowOpRequest(c);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
     // The owner notification level is what the Slack selector keys on: a registered person who

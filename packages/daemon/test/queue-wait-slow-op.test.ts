@@ -94,12 +94,24 @@ describe("queue wait request measurements", () => {
     expect(await records()).toMatchObject([{ site: "request:GET /api/queue/qitem-missing", durationMs: 1_000 }]);
   });
 
-  it("still records a failed response after an opted-in read", async () => {
+  it("records a slow read of an already-finished item even with a positive wait", async () => {
     const item = await create();
     repo.update({ qitemId: item.qitemId, actorSession: "lead@team", state: "done", closureReason: "no-follow-on", nudge: false });
+    const response = await app.request(`/api/queue/${item.qitemId}?waitSeconds=1`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ state: "done" });
+    expect(await records()).toMatchObject([{ site: `request:GET /api/queue/${item.qitemId}`, durationMs: 1_000 }]);
+  });
+
+  it("still records an error after a genuinely parked read", async () => {
+    const item = await create();
     vi.spyOn(repo, "closingTransition").mockImplementationOnce(() => { throw new Error("projection failed"); });
     app.onError((_error, c) => c.json({ error: "projection_failed" }, 500));
-    expect((await app.request(`/api/queue/${item.qitemId}?waitSeconds=1`)).status).toBe(500);
-    expect(await records()).toMatchObject([{ site: `request:GET /api/queue/${item.qitemId}`, durationMs: 1_000 }]);
+    const timer = setTimeout(() => repo.update({ qitemId: item.qitemId, actorSession: "lead@team",
+      state: "done", closureReason: "no-follow-on", nudge: false }), 20);
+    try {
+      expect((await app.request(`/api/queue/${item.qitemId}?waitSeconds=1`)).status).toBe(500);
+      expect(await records()).toMatchObject([{ site: `request:GET /api/queue/${item.qitemId}`, durationMs: 1_000 }]);
+    } finally { clearTimeout(timer); }
   });
 });
