@@ -512,12 +512,16 @@ async function main() {
   // comes from the transcript), so they start in a staging folder beside it. Packet readers match `<session id>-*`.
   const outRoot = path.resolve(args.out);
   fs.mkdirSync(outRoot, { recursive: true });
-  // A stop part way (the PreCompact hook's time limit sends SIGTERM) still removes the staging folder.
+  // A handled stop part way still removes the staging folder: SIGTERM (the PreCompact hook's time limit) exits 143, and
+  // SIGINT (a person's Ctrl-C on the manual route) exits 130. A stop that can't be handled (SIGKILL) or a failed removal
+  // can still leave it.
   let staging = null;
-  process.once("SIGTERM", () => {
+  const removeStagingOn = (signal, code) => process.once(signal, () => {
     if (staging) fs.rmSync(staging, { recursive: true, force: true });
-    process.exit(143);
+    process.exit(code);
   });
+  removeStagingOn("SIGTERM", 143);
+  removeStagingOn("SIGINT", 130);
   staging = fs.mkdtempSync(path.join(outRoot, ".partial-"));
   let summary;
   let outputPaths;

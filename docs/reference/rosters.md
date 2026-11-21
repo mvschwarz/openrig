@@ -126,6 +126,16 @@ values. `rig_team` shows them as `participant: { app, kind }` on that member's e
 (its node kind). Absent or empty is unknown; neither is inferred from a name or label. A value that isn't a token is
 dropped on its own, `participant_problem` (`participantProblem` in `rig_team`) says why, and the roster still loads.
 
+A member can also declare `lead_of`, the team it's the entry point for, as a plain name of up to 40 characters. Where
+the daemon names no single lead (no `delegates_to` root, several, or one with no session) and exactly one entry of the
+rig declares it, `rig_team` shows that entry as `lead: { session, logicalId, declared: true, team }`, with the note
+"`<team>`'s entry point: send work for that team here. It doesn't manage this network or its other participants." If
+some rosters couldn't be read, the note adds that another entry point may be declared. A lead the daemon names always
+stays the lead. With several declarations there's no lead, and the note names them. The same seat declaring the same
+team in more than one roster, under either of its names, counts once; one seat declaring two teams counts as several.
+It's context only: nothing escalates or routes to a declared lead. A value that isn't a plain name is dropped,
+`lead_of_problem` says why, and the roster still loads.
+
 The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
 rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
 external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the

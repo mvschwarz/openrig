@@ -70,7 +70,8 @@ describe("restore-from-jsonl reads the transcript a line at a time", () => {
     expect(readdirSync(out).filter(entry => entry.startsWith(".partial-"))).toEqual([]);
   });
 
-  it("removes its staging folder when it's stopped part way, as the PreCompact hook's time limit stops it", async () => {
+  // SIGTERM is the PreCompact hook's time limit; SIGINT is a person's Ctrl-C on the manual route.
+  it.each([["SIGTERM", 143], ["SIGINT", 130]] as const)("removes its staging folder when %s stops it part way, exiting %i", async (signal, code) => {
     const dir = mkdtempSync(join(tmpdir(), "restore-stop-")); dirs.push(dir);
     const file = join(dir, "stop.jsonl");
     // About 64 MB, so the script is still reading when it's stopped.
@@ -87,8 +88,8 @@ describe("restore-from-jsonl reads the transcript a line at a time", () => {
     const staged = () => existsSync(out) && readdirSync(out).some((entry) => entry.startsWith(".partial-"));
     for (let i = 0; i < 2_000 && !staged(); i += 1) await new Promise((wait) => setTimeout(wait, 5));
     expect(staged()).toBe(true);
-    child.kill("SIGTERM");
-    expect(await exited).toBe(143);
+    child.kill(signal);
+    expect(await exited).toBe(code);
     expect(readdirSync(out)).toEqual([]);
   });
 });

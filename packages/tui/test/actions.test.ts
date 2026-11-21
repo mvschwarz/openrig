@@ -3,6 +3,7 @@ import { createViewState } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
 import { renderScreen } from "../src/render.js";
 import { demoSnapshot } from "../src/demo-data.js";
+import { resolveKeyAction } from "../src/input.js";
 
 // QA blocker 1: ACTIONS must be a real lifecycle path, not a false affordance.
 // The two acts map to the ONLY existing write contracts (web parity):
@@ -104,5 +105,37 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     s.dispatch(parseCommand("rig openrig-build"));
     const fallback = renderScreen(s.get(), snap, { cols: 119, rows: 34 }).lines.join("\n");
     expect(fallback).toContain("MODEL/EFFORT/NOW/ACTIONS on drill");
+  });
+});
+
+
+describe("seat page run action", () => {
+  it.each([
+    { canRun: undefined, live: false, visible: true },
+    { canRun: undefined, live: true, visible: false },
+    { canRun: true, live: true, visible: true },
+    { canRun: false, live: false, visible: false },
+  ])("uses the table eligibility for canRun=$canRun live=$live", ({ canRun, live, visible }) => {
+    const data = demoSnapshot(), rig = data.hosts[0]!.rigs.find(r => r.name === "openrig-build")!;
+    const agent = rig.pods.flatMap(p => p.agents).find(a => a.name === "dev50.qa")!;
+    Object.assign(agent, { canRun, live });
+    rig.id = "served-rig-id";
+    const store = createViewState({ instanceId: "t", getSnapshot: () => data });
+    store.dispatch(parseCommand("agent dev50.qa"));
+    for (const cols of [100, 140]) {
+      const screen = renderScreen(store.get(), data, { cols, rows: 44 });
+      const row = screen.lines.findIndex(line => line.includes("run ▸"));
+      const target = screen.contentTargets.findIndex(t => t.action.type === "act" && t.action.act === "run");
+      expect(row >= 0).toBe(visible);
+      expect(target >= 0).toBe(visible);
+      if (visible) {
+        const action = { type: "act", act: "run", rigId: "served-rig-id", agent: "dev50.qa" };
+        expect(hitAt(screen, screen.lines[row]!.indexOf("run ▸") + 1, row + 1)?.action).toEqual(action);
+        expect(resolveKeyAction({ type: "key", key: "enter", action: { type: "activate" } },
+          { ...store.get(), focusedPane: "content", contentSelection: target }, screen, 0)).toEqual(action);
+      }
+      expect(screen.contentTargets.some(t => t.action.type === "act" && t.action.act === "open-terminal"
+        && t.action.view === "seat:openrig-build/dev50.qa")).toBe(true);
+    }
   });
 });

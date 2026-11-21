@@ -30,6 +30,28 @@ export interface RemoteUpLeafDeps {
 /** Matches the CLI's LONG_RUNNING_UP_TIMEOUT_MS for standalone remote ups. */
 export const REMOTE_UP_TIMEOUT_MS = 120_000;
 
+function bootstrapFailureDetails(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const reasons = new Set<string>();
+  const seats: string[] = [];
+  if ("stages" in payload && Array.isArray(payload.stages)) {
+    for (const stage of payload.stages) {
+      if (!stage || typeof stage !== "object" || !("detail" in stage)) continue;
+      const detail = stage.detail;
+      if (!detail || typeof detail !== "object" || !("nodes" in detail) || !Array.isArray(detail.nodes)) continue;
+      for (const node of detail.nodes) {
+        if (!node || typeof node !== "object" || node.status !== "failed" || typeof node.logicalId !== "string" || typeof node.error !== "string") continue;
+        seats.push(`${node.logicalId}: ${node.error}`);
+        reasons.add(node.error);
+      }
+    }
+  }
+  const errors = "errors" in payload && Array.isArray(payload.errors)
+    ? payload.errors.filter((error): error is string => typeof error === "string" && !reasons.has(error))
+    : [];
+  return [...seats, ...errors].join("; ");
+}
+
 export interface RemoteUpBody {
   sourceRef: string;
   autoApprove?: boolean;
@@ -56,7 +78,21 @@ export async function remoteUpLeaf(
     env: deps.env,
     readFile: deps.readFile,
   });
-  if (res.ok) return { ok: true };
+  if (res.ok) {
+    // A 2xx is not a full success: /api/up answers 200 with the bootstrap
+    // outcome in the body (completed | partial | failed | …). A partial or
+    // failed bootstrap — one seat failed to launch — must report a failed
+    // entry with the failed-seat reason, so a sequential topology cannot
+    // claim all rigs launched; the walk's per-entry reporting keeps the
+    // surviving siblings running.
+    const payload = (res.payload ?? {}) as { status?: unknown; errors?: unknown };
+    const status = typeof payload.status === "string" ? payload.status : "completed";
+    if (status === "partial" || status === "failed") {
+      const errors = bootstrapFailureDetails(res.payload);
+      return { ok: false, error: `[remote-command-failed] remote up on host ${host.id} answered HTTP ${res.status} with status ${status}${errors ? `: ${errors}` : ""}` };
+    }
+    return { ok: true };
+  }
 
   switch (res.kind) {
     case "bearer":
@@ -79,7 +115,8 @@ export async function remoteUpLeaf(
       // Same classification vocabulary as the CLI transport (classifyHttpFailedStep).
       const status = res.status ?? 0;
       const cls = status === 401 || status === 403 ? "permission-gate" : status >= 400 && status < 600 ? "remote-command-failed" : "remote-daemon-unreachable";
-      const detail = res.detail ? `HTTP ${res.status}: ${res.detail}` : `HTTP ${res.status}`;
+      const errors = [res.detail, bootstrapFailureDetails(res.payload)].filter(Boolean).join("; ");
+      const detail = errors ? `HTTP ${res.status}: ${errors}` : `HTTP ${res.status}`;
       return { ok: false, error: `[${cls}] remote up on host ${host.id} failed: ${detail}` };
     }
   }
