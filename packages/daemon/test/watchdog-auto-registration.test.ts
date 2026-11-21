@@ -157,7 +157,8 @@ describe("W2c watchdog auto-registration — production composition", () => {
       deps.sessionRegistry.registerClaimedSession(claimed.id, "external-seat-without-canonical-rig");
       deps.sessionRegistry.registerClaimedSession(node.id, "bad:seat@exclusion-rig");
 
-      expect(register).not.toHaveBeenCalled();
+      // The seats' own (idle-gate) jobs: a running seat also arms its rig name's parked-owner job (#3634).
+      expect(register.mock.calls.filter(([input]) => (input as { policy?: string }).policy === "idle-gate-qitem")).toEqual([]);
       if (ensure) expect(ensure).not.toHaveBeenCalled();
       if (coverage) expect(coverage).not.toHaveBeenCalled();
       expect(autoRows(db, "r01-dev-qa")).toHaveLength(0);
@@ -902,6 +903,26 @@ describe("#3634 parked-owner-consumer jobs follow archive, unarchive, delete and
       // Control: the same transition leaves an operator-stopped job stopped.
       expect(states(db, "held")).toEqual(["stopped"]);
       expect(ids(db, "held")).toEqual(heldId);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a claimed seat of an unarchived name with no job gets exactly one active job, with no restart", async () => {
+    const { db, deps, eventLoopMonitor } = await boot();
+    try {
+      // A rig created by a repository without the hook: an unarchived name that never got its job.
+      const raw = new RigRepository(db);
+      const rig = raw.createRig("hookless");
+      const node = raw.addNode(rig.id, "dev-qa", { role: "qa", runtime: "codex" });
+      expect(states(db, "hookless")).toEqual([]);
+      deps.sessionRegistry.registerClaimedSession(node.id, "dev-qa@hookless");
+      expect(states(db, "hookless")).toEqual(["active"]);
+      // Another transition leaves that one job as it is.
+      const armed = ids(db, "hookless");
+      deps.sessionRegistry.registerClaimedSession(node.id, "dev-qa@hookless");
+      expect(ids(db, "hookless")).toEqual(armed);
     } finally {
       eventLoopMonitor.stop();
       db.close();

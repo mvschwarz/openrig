@@ -2793,14 +2793,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       rigRepo.onRigUnarchived = (rig) => {
         arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       };
-      // A seat of an archived name runs again (restore, launch or claim without unarchive): the name is watched again,
-      // so it is armed as at startup. A job archive or delete retired comes back (same id); a name with none gets one;
-      // an active or stopped job stays as it is. A name with an unarchived row is armed by creation, unarchive and
-      // start, and archive never retires it, so its seats change nothing here.
+      // A seat runs (restore, launch or claim, with or without unarchive): its name is watched, so it is armed as at
+      // startup when it has no active or stopped job. A job archive or delete retired comes back (same id); a name with
+      // none gets one, also an unarchived name whose job was never registered (a rig created without the hook, or an
+      // ensure that only warned). A name with an active or stopped job is left untouched: the hook does not even call
+      // the ensure, so a seat transition writes nothing.
       sessionRegistry.onSessionRunning = (nodeId) => {
         const rig = db.prepare("SELECT r.name AS name FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
           .get(nodeId) as { name: string } | undefined;
-        if (!rig || rigRepo.findUnarchivedRigsByName(rig.name).length > 0) return;
+        if (!rig) return;
+        const held = watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rig.name), null)
+          .some((job) => job.state === "active" || job.state === "stopped");
+        if (held) return;
         arm(rig.name, (job) => watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(job, warn));
       };
     }
