@@ -1113,7 +1113,7 @@ export class ClaudeCompactionEnforcer {
     const guard = this.sessionTransport.deliveryGuard;
     try {
       const outcome = guard && input.runtime === "claude-code"
-        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], runIfCurrent) : await runIfCurrent();
+        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], runIfCurrent, [], { draftChecked: true }) : await runIfCurrent();
       // Refusals before send (policy, guard, observation) must be visible too. A send has already recorded its full result.
       // Waiting for the seat's report of its compaction is no delivery: nothing was attempted, so nothing failed.
       if (!outcome.triggered && outcome.reason !== "awaiting_compact_signal" && record?.record.lastDelivery === previous) {
@@ -1786,7 +1786,7 @@ export class ClaudeCompactionEnforcer {
       // any other level the manual preparation keeps its ordinary send.
       const guard = this.sessionTransport.deliveryGuard;
       prep = guard && this.queueOnlySeat(input.sessionName)
-        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send) : await send();
+        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send, [], { draftChecked: true }) : await send();
     } catch (error) {
       if (error instanceof DeliveryGuardError) {
         const written = (error as { inputWritten?: boolean }).inputWritten === true;
@@ -1864,7 +1864,7 @@ export class ClaudeCompactionEnforcer {
     let guardRefused = false;
     try {
       const guard = this.sessionTransport.deliveryGuard;
-      result = guard ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send) : await send();
+      result = guard ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send, [], { draftChecked: true }) : await send();
     } catch (error) {
       // A guard refusal is "nothing sent" only when the transport did not mark the write as issued or done.
       const written = (error as { inputWritten?: boolean } | null)?.inputWritten === true;

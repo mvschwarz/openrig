@@ -206,7 +206,7 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   if (!prep || prep.delivery === "not_sent") return manualReasonMessage(sessionName, outcome.reason);
   const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
   const detail = (outcome.reason === "preparation_incomplete" || outcome.reason === "map_complete_seat_never_idle"
-    || outcome.reason === "preparation_needs_input")
+    || outcome.reason === "preparation_needs_input" || outcome.reason.startsWith("draft_input_"))
     ? manualReasonMessage(sessionName, outcome.reason)
     : outcome.restoreOwed
       ? `/compact was not confirmed (${outcome.reason}) and is never sent again. Its restore steps follow in case it ran; the restore request tells the seat to say so and skip if it didn't compact.`
@@ -227,9 +227,11 @@ export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" 
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
     case "draft_input_busy":
+      return `Managed compaction for '${sessionName}' is waiting on its input box: there's text in it, or a person was typing moments ago, so it stopped before its next input and the draft stays as it is. Once the input box is empty, retry explicitly: rig compact ${shellQuote(sessionName)}. Read rig compact ${shellQuote(sessionName)} --state first. This attempt will not replay the held input.`;
     case "draft_input_unknown":
+      return `Managed compaction for '${sessionName}' stopped before its next input: OpenRig couldn't read its input box, and the seat's input protection holds input it can't read. Look at the seat's pane, then retry explicitly once its input box reads empty: rig compact ${shellQuote(sessionName)}. Read rig compact ${shellQuote(sessionName)} --state first. This attempt will not replay the held input.`;
     case "draft_input_changed":
-      return `Managed compaction stopped before its next input to preserve the composer in '${sessionName}'. Read rig compact ${shellQuote(sessionName)} --state; explicitly retry once its input box is empty. This attempt will not replay the held input.`;
+      return `Managed compaction for '${sessionName}' stopped before its next input: a person typed in its input box during the delivery, so nothing more was written. Once the input box is empty, retry explicitly: rig compact ${shellQuote(sessionName)}. Read rig compact ${shellQuote(sessionName)} --state first. This attempt will not replay the held input.`;
     case "terminal_policy_refused":
       return `Managed compaction for '${sessionName}' was refused by its terminal policy. Read rig seat status ${shellQuote(sessionName)}; an authorised policy change uses rig seat set-terminal-policy. The existing rig send --dangerously-interact --reason path is unchanged; prompt and interruption guards still apply.`;
     case "terminal_policy_unavailable":
