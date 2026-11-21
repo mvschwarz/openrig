@@ -45,6 +45,23 @@ beforeEach(() => {
 afterEach(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
 async function get(url: string) { const response = await app.request(url); return { status: response.status, body: await response.json() as any }; }
 describe("catalog project identity across work reads", () => {
+  it("lists catalog-declared rigs, including names without a running rig, and distinguishes absent from invalid", async () => {
+    file(path.join(root, "workspace.yaml"), "projects:\n  - id: a\n    root: a\n    rigs: [running-name, stopped-name]\n  - id: b\n    root: b\n");
+    let result = await get("/api/scopes/projects");
+    expect(result.status).toBe(200);
+    expect(result.body.projects.map((project: any) => ({ id: project.id, rigs: project.rigs }))).toEqual([
+      { id: "a", rigs: ["running-name", "stopped-name"] }, { id: "b", rigs: [] },
+    ]);
+    expect(result.body.projects[0].name).toBe("Same project");
+    file(path.join(root, "workspace.yaml"), "projects:\n  - id: a\n    root: a\n    rigs: invalid\n  - id: b\n    root: b\n");
+    result = await get("/api/scopes/projects");
+    expect(result.status).toBe(200);
+    expect(result.body.projects[0]).toMatchObject({ id: "a", rigs: null, rigsError: "Catalog rigs must be a list of rig names." });
+    expect(result.body.projects[1]).toMatchObject({ id: "b", rigs: [] });
+    fs.unlinkSync(path.join(root, "workspace.yaml"));
+    expect((await get("/api/scopes/projects")).body.projects[0]).toMatchObject({ id: "workspace", rigs: [] });
+  });
+
   it("keeps healthy missions and children reachable beside malformed source, then recovers", async () => {
     const bad = path.join(root, "a/missions/release-x/slices/02-bad/SPEC.md");
     file(bad, "---\nstatus: retired by another slice\n  kept for REASONING: preserve the original decision.\n---\n# Bad source\n");

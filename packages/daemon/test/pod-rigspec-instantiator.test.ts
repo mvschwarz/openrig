@@ -19,6 +19,10 @@ import { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
 import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import Database from "better-sqlite3";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
@@ -1920,6 +1924,52 @@ state: 2-named
     db.close();
   });
 
+  // A first start held at a trust dialog or another attention state leaves a live session the person clears later. It gets
+  // the seat's continuity notice as a ready start does, and arming it again keeps that job. A failed start gets none.
+  it.each([["ready", 1], ["attention_required", 1], ["failed", 0]] as const)(
+    "a first start that ends %s arms the seat's managed-compaction notice %i time(s)", async (outcome, armed) => {
+      const managedAgent = `
+version: "0.2"
+name: impl
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: managed-compaction
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: []
+`.trim();
+      // The watchdog store on its own fully migrated database, as the daemon has it: the instantiator's fixture lacks 074's columns.
+      const jobsDb = new Database(":memory:");
+      migrate(jobsDb, ALL_MIGRATIONS);
+      const jobs = new WatchdogJobsRepository(jobsDb);
+      const materializer = new ContinuityPolicyMaterializer(jobs, () => null);
+      const arm = vi.spyOn(materializer, "arm");
+      const startNode = async () => ({ ok: false as const, startupStatus: outcome, errors: [`startup ended ${outcome}`] });
+      const { db, inst } = setup({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: managedAgent }, undefined, undefined, undefined, materializer,
+        outcome === "ready" ? undefined : { startupOrchestrator: { startNode } });
+
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+      expect(result.ok).toBe(outcome === "ready");
+      const notices = () => jobs.listActive().filter((job) => job.specYaml.includes("continuity_mode: managed-compaction"));
+      expect(notices()).toHaveLength(armed);
+      if (armed) {
+        // The notice watches the session this start left running.
+        const seat = db.prepare("SELECT session_name FROM sessions").all() as Array<{ session_name: string }>;
+        expect(seat).toHaveLength(1);
+        expect(notices()[0]!.targetSession).toBe(seat[0]!.session_name);
+        const first = notices().map((job) => job.jobId);
+        expect(materializer.arm(arm.mock.calls[0]![0]).map((job) => job.jobId)).toEqual(first);
+        expect(notices().map((job) => job.jobId)).toEqual(first);
+      }
+      db.close();
+      jobsDb.close();
+    });
+
   it("HG-3 attention_required result carries the attentionNodes list (operator approve→resume path)", async () => {
     const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
@@ -2631,6 +2681,40 @@ state: 2-named
         const relaunched = await inst.launchPersistedFresh(rigId, nodeId);
         expect(relaunched.status, JSON.stringify(relaunched)).toBe("launched");
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 7 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    // #3395, spec section 5, "Stored": the retry launches from the seat's stored settings (its fragment can't carry
+    // `pool`), so it reads the stored pool block from the node, as the first start does.
+    it("A first-start retry of a seat reports its stored pool block that can't be used once in its warnings, and the retry still launches.", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: "." };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        // Stored as a re-apply writes a block that can't be used: as authored.
+        expect(rigRepo.setNodePool(worker.id, { raw: { max: -1 } })).toBe(true);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        const stored = "dev.worker pool.max: must be a whole number of 0 or more; pool not used";
+        expect(JSON.stringify(retried).split(stored).length - 1, JSON.stringify(retried)).toBe(1);
+        expect(rigRepo.getNodePool(worker.id)).toEqual({ raw: { max: -1 }, error: expect.any(String) });
       } finally {
         db.close();
       }

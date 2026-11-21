@@ -8,7 +8,7 @@ import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent, RunnerObservation, RunnerObservations } from "./types.js";
-import { PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
+import { ELICITATION_DESCRIPTOR, PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
@@ -88,6 +88,7 @@ const SOURCE_ORDER_WINDOW = 200;
 
 export class AgentActivityStore {
   private readonly permissionStops: PermissionStopObservations;
+  private readonly elicitations: PermissionStopObservations;
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
@@ -102,6 +103,7 @@ export class AgentActivityStore {
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
     this.permissionStops = new PermissionStopObservations(this.now);
+    this.elicitations = new PermissionStopObservations(this.now, undefined, new Set([ELICITATION_DESCRIPTOR]));
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
     this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
@@ -122,18 +124,49 @@ export class AgentActivityStore {
 
   getPermissionStopForNode(nodeId: string, sessionName: string): PermissionStopStatus {
     try {
-      const generation = this.resolveOccupantGeneration?.(nodeId);
-      const session = this._resolveSession({ nodeId, sessionName });
-      const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
-        WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
-      if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
-        || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
-        || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) {
+      const generation = this.currentClaudeOccupantGeneration(nodeId, sessionName);
+      if (!generation) {
         this.permissionStops.forget(nodeId);
         return unavailablePermissionStop();
       }
       return this.permissionStops.read(nodeId, generation);
     } catch { return unavailablePermissionStop(); }
+  }
+
+  /** An MCP elicitation reaching the seat's Claude (`completed` for its result or a later tool batch). Only the actor
+   *  and time are kept, with the same occupant checks as a permission request. No event, attention or activity. */
+  observeElicitation(input: { nodeId: string; sessionName: string; generation: string; actor: unknown; at: unknown;
+    completed: boolean }): void {
+    try {
+      if (this.currentClaudeOccupantGeneration(input.nodeId, input.sessionName) !== input.generation) return;
+      this.elicitations.observe({ ...input, command: ELICITATION_DESCRIPTOR });
+    } catch { /* Optional observation failure cannot change hook behavior. */ }
+  }
+
+  /** The newest permission or elicitation request from this occupant's main session that nothing settled yet, as an
+   *  ISO time, else null. Evidence a request reached that path, never that a dialog is open; a subagent's request
+   *  isn't tied to the main pane, so it doesn't count. */
+  getUnsettledInputRequestForNode(nodeId: string, sessionName: string): string | null {
+    try {
+      const generation = this.currentClaudeOccupantGeneration(nodeId, sessionName);
+      if (!generation) return null;
+      const times = [this.permissionStops, this.elicitations]
+        .map(observations => observations.unsettledRequestAt(nodeId, generation, null))
+        .filter((at): at is number => at !== null);
+      return times.length ? new Date(Math.max(...times)).toISOString() : null;
+    } catch { return null; }
+  }
+
+  /** The current registered generation of a running, unretired Claude occupant bound to this session, else null. */
+  private currentClaudeOccupantGeneration(nodeId: string, sessionName: string): string | null {
+    const generation = this.resolveOccupantGeneration?.(nodeId);
+    const session = this._resolveSession({ nodeId, sessionName });
+    const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
+    if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
+      || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
+      || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) return null;
+    return generation;
   }
 
   /** #99: whether a hook's Claude session id is the seat's own Claude session (its current resume token). A helper

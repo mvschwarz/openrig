@@ -14,7 +14,8 @@
 //   R (unplaced)  movable rows that got no free agent in this plan.
 //
 //   desired = R + O
-//   target  = drain ? 0 : min(max, max(min, desired, O + S))
+//   wanted  = max(min, desired, O + S)             the demand before the clamp
+//   target  = drain ? 0 : min(max, wanted)
 //   current = L + S
 //   surplus = max(0, current − I − target)
 //   room    = max − (adding + live + draining slots on record)
@@ -22,6 +23,9 @@
 // Surplus first cancels `reserved` adds, newest first, then drains free agents idle past `idle_grace_s`, newest first.
 // An `issued` attempt is never cancelled or drained by sizing. A held message counts once, as occupancy: there is no
 // separate term for it and no "+1".
+//
+// A plan that would read `steady` while `wanted` is above `max` and movable rows are still unplaced reads
+// `max_reached` instead: the pool is full and work waits. Only the reason changes; the target and the intents stay.
 
 /** A slot's phase. Nothing is removed: a drained agent keeps its node, sessions and history. */
 export type SeatPoolPhase = "adding" | "live" | "draining" | "drained";
@@ -105,8 +109,8 @@ export interface SeatPoolPlan {
   current: number;
   surplus: number;
   room: number;
-  /** The terms the target came from, for the job's history. */
-  counts: { live: number; starting: number; issued: number; occupied: number; unplaced: number };
+  /** The terms the target came from, for the job's history. `wanted` is the demand before the clamp to `max`. */
+  counts: { live: number; starting: number; issued: number; occupied: number; unplaced: number; wanted: number };
 }
 
 /** Whether a slot takes room under `max`: every slot on record except a `drained` one. */
@@ -215,9 +219,8 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
   const unplaced = movable.length - receiving.size;
 
   const current = live.length + starting.length;
-  const target = spec.drain
-    ? 0
-    : Math.min(spec.max, Math.max(spec.min, unplaced + occupied.length, occupied.length + starting.length));
+  const wanted = Math.max(spec.min, unplaced + occupied.length, occupied.length + starting.length);
+  const target = spec.drain ? 0 : Math.min(spec.max, wanted);
   const surplus = Math.max(0, current - issued.length - target);
   const room = seatPoolRoom(spec, agents);
   // Inside the cooldown after the latest step. An unreadable time starts no cooldown.
@@ -251,6 +254,8 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
     else if (cooling) reason = "cooldown";
     else intents.push({ kind: "add", count });
   }
+  // Full at max with work still waiting: not steady. The dispatches above stay, and no add is made.
+  if (reason === "steady" && wanted > spec.max && unplaced > 0) reason = "max_reached";
   if (cooling && drainable.length > 0) reason = "cooldown";
 
   return {
@@ -260,6 +265,8 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
     current,
     surplus,
     room,
-    counts: { live: live.length, starting: starting.length, issued: issued.length, occupied: occupied.length, unplaced },
+    counts: {
+      live: live.length, starting: starting.length, issued: issued.length, occupied: occupied.length, unplaced, wanted,
+    },
   };
 }

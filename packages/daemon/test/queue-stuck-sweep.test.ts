@@ -333,14 +333,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(registered.isLocalHumanDecisionWithoutGateway(candidate)).toBe(false);
   });
 
-  it("a row whose destination no longer resolves does not stop the other findings, and the pass still reports the failure", async () => {
+  it("falls back to the source on an unknown_destination_rig refusal without stopping unrelated findings", async () => {
     // A historic row addressed to a rig that has since gone: admitted when it was created, refused now.
     let rigGone = false;
     repo = new QueueRepository(db, bus, {
-      validateRig: (destination) => !(rigGone && destination.endsWith("@product-team")),
+      validateRig: (destination) => !(rigGone && destination === "legacy-worker"),
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
     });
-    const orphan = await mkRow("dev1-impl@product-team");
+    const orphan = await mkRow("legacy-worker");
     const valid = await mkRow("worker@r");
     ageCreated(orphan.qitemId, 130);
     ageCreated(valid.qitemId, 120);
@@ -350,20 +350,19 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     // The later, unrelated row is still recovered.
     const created = await findingsFor(valid.qitemId);
     expect(created).toEqual([expect.objectContaining({ destinationSession: "worker@r", state: "pending" })]);
-    expect(result.findings).toEqual([expect.objectContaining({ qitemId: valid.qitemId, action: "created" })]);
-    // The pass still fails visibly, naming the row it could not route, and counts what it did route.
-    expect(result.outcome).toBe("failed");
-    expect(result.error).toContain(orphan.qitemId);
-    expect(status.snapshot()).toMatchObject({ lastOutcome: "failed", consecutiveFailures: 1, findingsRouted: 1 });
-    expect(await findingsFor(orphan.qitemId)).toEqual([]);
+    expect(result.findings).toContainEqual(expect.objectContaining({ qitemId: valid.qitemId, action: "created" }));
+    expect(result.outcome).toBe("findings");
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "findings", consecutiveFailures: 0, findingsRouted: 2 });
+    expect(await findingsFor(orphan.qitemId)).toEqual([expect.objectContaining({ destinationSession: "sender@r", state: "pending" })]);
     // The orphan row itself is left as it was.
-    expect(repo.getById(orphan.qitemId)).toMatchObject({ state: "pending", destinationSession: "dev1-impl@product-team" });
+    expect(repo.getById(orphan.qitemId)).toMatchObject({ state: "pending", destinationSession: "legacy-worker" });
 
-    // The next pass refreshes the made finding rather than duplicating it, and still reports the failure.
+    // The next pass refreshes both findings rather than duplicating them.
     const again = (await runSweep()).result;
-    expect(again.outcome).toBe("failed");
+    expect(again.outcome).toBe("findings");
     expect(await findingsFor(valid.qitemId)).toEqual([expect.objectContaining({ qitemId: created[0]!.qitemId })]);
-    expect(again.findings).toEqual([expect.objectContaining({ qitemId: valid.qitemId, action: "refreshed" })]);
+    expect(again.findings).toHaveLength(2);
+    expect(again.findings).toContainEqual(expect.objectContaining({ qitemId: valid.qitemId, action: "refreshed" }));
   });
 
   it("OVERDUE HALF: a claimed-never-closed row past closure_required_at yields exactly one finding row to the claimant, evidence inline", async () => {

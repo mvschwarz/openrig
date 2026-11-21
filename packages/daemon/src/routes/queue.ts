@@ -14,8 +14,8 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
-import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
+import { inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
@@ -110,6 +110,38 @@ export function crossHostProvenanceTags(existing: string[] | undefined): string[
   return [...base, ...additions];
 }
 
+/**
+ * #3018 — the identity a FORWARDING daemon relays to the host that keeps the record. The forwarded body
+ * carries only a `sourceSession`, so the receiving daemon fell back to `claimed:v1`; the CLI's
+ * `rig queue update --host` calls that host directly and already carries the sender header.
+ * The actor is re-stamped with THIS daemon's host suffix (the same value the forwarded body's
+ * sourceSession carries), and the relay/provenance markers keep the receiving hop from presenting a
+ * relayed actor as transport-verified (resolveRecordedProvenance records relay:v1). `Via` marks the
+ * request as another hop, so a loopback receiver doesn't read it as a direct local client. A request
+ * with no transport identity stays header-less: a body claim is never laundered into a relayed one.
+ */
+export function relayedSenderHeaders(c: { req: { header: (name: string) => string | undefined } }): Record<string, string> | undefined {
+  const sender = transportSenderSession(c as Context);
+  const selfId = getSelfHostId();
+  if (!sender || !selfId) return undefined;
+  if (c.req.header(ORIGIN_UNKNOWN_HEADER) === "true") {
+    return {
+      [SENDER_IDENTITY_HEADER]: sender,
+      [ORIGIN_UNKNOWN_HEADER]: "true",
+      [RELAY_HEADER]: selfId,
+      via: selfId,
+      [IDENTITY_PROVENANCE_HEADER]: "origin-unknown:v1",
+    };
+  }
+  const relayedHere = !!c.req.header(RELAY_HEADER)?.trim();
+  return {
+    [SENDER_IDENTITY_HEADER]: stampSelfHostSuffix(sender),
+    [RELAY_HEADER]: selfId,
+    via: selfId,
+    [IDENTITY_PROVENANCE_HEADER]: relayedHere ? "claimed:v1" : "transport:v1",
+  };
+}
+
 /** Human requests: canonical human destination or human blocker, excluding
  * explicit updates. Tier labels alone never create a human obligation. The same
  * predicate runs in SQL before LIMIT in QueueRepository.listAttention. */
@@ -128,30 +160,47 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+type HandoffSuccessorFace = { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string };
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): HandoffSuccessorFace {
+  return handoffSuccessorsMany(repo, [item]).get(item.qitemId)!;
+}
+
+/** #3645: handoffSuccessors for a page of rows, with the same face per row, from two statements for the whole page
+ *  (QueueRepository.handoffSuccessorReads) instead of a listing and a getById per row. A lookup that fails says so on
+ *  every row of the page; it never fails the read. */
+export function handoffSuccessorsMany(repo: QueueRepository, items: ReadonlyArray<Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">>): Map<string, HandoffSuccessorFace> {
+  const faces = new Map<string, HandoffSuccessorFace>();
+  if (items.length === 0) return faces;
+  let reads: ReturnType<QueueRepository["handoffSuccessorReads"]>;
   try {
     // Newest first, one past the bound so a cut list is known.
-    const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
+    reads = repo.handoffSuccessorReads(items.map((item) => item.qitemId),
+      items.flatMap((item) => item.closureTarget?.startsWith("qitem-") ? [item.closureTarget] : []), HANDOFF_SUCCESSOR_LIMIT + 1);
+  } catch {
+    for (const item of items) faces.set(item.qitemId, { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." });
+    return faces;
+  }
+  for (const item of items) {
+    const found = reads.bySource.get(item.qitemId) ?? [];
     const truncated = found.length > HANDOFF_SUCCESSOR_LIMIT;
     const successors: HandoffSuccessor[] = found.slice(0, HANDOFF_SUCCESSOR_LIMIT)
       .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
       .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
     const target = item.closureTarget;
     if (target?.startsWith("qitem-") && !successors.some((s) => s.qitemId === target)) {
-      const named = repo.getById(target);
+      const named = reads.byId.get(target);
       if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
     }
-    if (successors.length > 0) return { successors, ...(truncated ? { successorsTruncated: true as const } : {}) };
-    return {
+    if (successors.length > 0) { faces.set(item.qitemId, { successors, ...(truncated ? { successorsTruncated: true as const } : {}) }); continue; }
+    faces.set(item.qitemId, {
       successors,
       successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
         ? `${item.closureReason === "superseded" ? "Its recorded successor on another host is" : "It was handed to another host; its successor there is"} ${target}. This daemon has no copy.`
         : item.closureReason === "superseded" ? "No successor row was found on this daemon for this supersession."
           : "No row on this daemon was made by this handoff.",
-    };
-  } catch {
-    return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
+    });
   }
+  return faces;
 }
 
 export function queueRoutes(): Hono {
@@ -341,6 +390,8 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        // An update's expected state (--expect-state) no longer matches the row; nothing was written.
+        : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
@@ -421,6 +472,8 @@ export function queueRoutes(): Hono {
     hostId: string,
     path: string,
     forwardBody: Record<string, unknown>,
+    /** #3018: relay this daemon's resolved sender to the host that keeps the record (create only). */
+    relayIdentity = false,
   ): Promise<
     | { ok: true; payload: unknown; status: number }
     | { ok: false; response: Response }
@@ -456,12 +509,16 @@ export function queueRoutes(): Hono {
         "unsupported-transport",
       );
     }
+    const relay = relayIdentity ? relayedSenderHeaders(c) : undefined;
     const res = await remoteJsonRequest(resolved.host, path, {
       method: "POST",
       body: forwardBody,
       timeoutMs: QUEUE_FORWARD_TIMEOUT_MS,
       fetchImpl,
-      headers: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : undefined,
+      headers: {
+        ...(c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : {}),
+        ...(relay ?? {}),
+      },
     });
     if (res.ok) {
       // The origin daemon's structured response, verbatim — its row is the
@@ -759,7 +816,7 @@ export function queueRoutes(): Hono {
     const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
-    let route = requestedRoute === undefined ? null
+    let route: { address: string; basis: ReturnRouteBasis } | null = requestedRoute === undefined ? null
       : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
@@ -815,7 +872,9 @@ export function queueRoutes(): Hono {
         sourceSession: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? sourceSession : stampSelfHostSuffix(sourceSession),
         tags: crossHostProvenanceTags(withRouteNotCarriedTag(body.tags, routeNotCarried)),
       };
-      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
+      // #3018: relay this daemon's resolved sender (relayedSenderHeaders), so the host that keeps the
+      // record writes a relayed actor instead of falling back to a bare body claim.
+      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody, true);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
@@ -834,6 +893,12 @@ export function queueRoutes(): Hono {
     try {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
+      // Work a seat gives out as a new row keeps the route of the one routed row it holds, so its prompts still reach the
+      // person's conversation (return-route.ts). A route named here, or none at all, is unchanged.
+      if (requestedRoute === undefined && !route) {
+        const inherited = inheritedReturnRoute(getRepo(c).db, sourceSession, body.destinationSession!);
+        if (inherited) route = { address: inherited, basis: "inherited" };
+      }
       const item = await getRepo(c).create({
         qitemId: createId,
         sourceSession,
@@ -1036,6 +1101,7 @@ export function queueRoutes(): Hono {
       actorSession?: string;
       classificationBinding?: unknown;
       state?: QueueState;
+      expectState?: QueueState | null;
       reopen?: boolean;
       closureRequiredAt?: string;
       transitionNote?: string;
@@ -1064,6 +1130,8 @@ export function queueRoutes(): Hono {
         qitemId,
         actorSession,
         state: body.state,
+        // Optional compare-and-set: the repository checks it inside the update's transaction.
+        expectState: body.expectState,
         reopen: body.reopen,
         closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
@@ -1624,9 +1692,9 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
-        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))
-        ? { ...item, ...handoffSuccessors(repo, item) } : item));
+      const faces = handoffSuccessorsMany(repo, items.filter((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))));
+      return c.json(items.map((item) => faces.has(item.qitemId) ? { ...item, ...faces.get(item.qitemId) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through

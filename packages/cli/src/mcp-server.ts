@@ -121,6 +121,24 @@ type InventorySeat = SeatActivityFields & {
   sessionStatus?: string | null;
 };
 
+const NO_SINGLE_LEAD = "No single lead: the rig has no one seat that delegates to others and that nothing delegates to, or that seat has no session.";
+
+/** Where the daemon names no single lead (no delegation root, several, or one with no session), a roster entry's declared
+ *  lead_of can still name a team's entry point. Exactly one gives the lead, marked declared; several give none, and the note
+ *  names them. A lead the daemon names always wins, and nothing routes or escalates to a declared lead. An unread roster may
+ *  hold another declaration, so the note says so. */
+function declaredLead(view: Record<string, unknown>, declared: Array<{ session: string; team: string; logicalId: string | null }>,
+  rostersIncomplete = false): Record<string, unknown> {
+  if (view.leadNote !== NO_SINGLE_LEAD || declared.length === 0) return {};
+  if (declared.length > 1) {
+    return { leadNote: `${NO_SINGLE_LEAD} Several roster entries declare lead_of (${declared.map((d) => `${d.session} for ${d.team}`).join(", ")}), so none is shown as the lead.` };
+  }
+  const [d] = declared;
+  return { lead: { session: d!.session, logicalId: d!.logicalId, declared: true, team: d!.team },
+    leadNote: `${d!.team}'s entry point: send work for that team here. It doesn't manage this network or its other participants.`
+      + (rostersIncomplete ? " Some rosters couldn't be read, so another entry point may be declared." : "") };
+}
+
 /** A rig's team from its detail (authored delegates_to edges and the daemon's representative) and its node inventory
  *  (sessions and activity, passed on as the daemon reports them). */
 function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown> {
@@ -144,9 +162,7 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
     return { rig, lead: null, leadNote: "This daemon doesn't report a rig's lead; it needs a newer daemon.", seats };
   }
   const session = detail.representative ?? null;
-  if (!session) {
-    return { rig, lead: null, leadNote: "No single lead: the rig has no one seat that delegates to others and that nothing delegates to, or that seat has no session.", seats };
-  }
+  if (!session) return { rig, lead: null, leadNote: NO_SINGLE_LEAD, seats };
   return { rig, lead: { session, logicalId: seats.find((seat) => seat.session === session)?.logicalId ?? null }, seats };
 }
 
@@ -214,7 +230,7 @@ const ROSTERS_INCOMPLETE_EXTERNAL = "Some rosters couldn't be read, so hosted me
  *  null for a seat whose presence isn't shown (an external caller's own), and that entry has none. */
 async function hostedMembersOf(folder: string, rigName: string, nodeSeats: ReadonlySet<string>,
   selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence | null>, external: boolean):
-  Promise<{ members: HostedMember[]; seats: Map<string, SeatRosterEntry>; note?: string }> {
+  Promise<{ members: HostedMember[]; seats: Map<string, SeatRosterEntry>; note?: string; declaredLeads?: Array<{ session: string; team: string }> }> {
   const incomplete = external ? ROSTERS_INCOMPLETE_EXTERNAL : ROSTERS_INCOMPLETE;
   const seats = new Map<string, SeatRosterEntry>();
   try {
@@ -228,17 +244,21 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
   if (warnings.length > 0) console.error(`rig_team: ${warnings.join("; ")}`);
   const unread = warnings.length > 0 ? { note: incomplete } : {};
   const hostedHere = (member: RosterMember) => member.hosted === true && member.seat.endsWith(`@${rigName}`);
+  // A declared entry point (lead_of) on any of this rig's entries, whoever is asking.
+  const declaring = rosters.flatMap((roster) => roster.members.filter((member) => member.lead_of && member.seat.endsWith(`@${rigName}`)));
   const candidates = rosters.flatMap((roster) => roster.members
     .filter((member) => external ? nodeSeats.has(member.seat) || hostedHere(member) : hostedHere(member) && !nodeSeats.has(member.seat))
     .map((member) => ({ roster: roster.id, member })));
-  if (candidates.length === 0) return { members: [], seats, ...unread };
+  if (candidates.length === 0 && declaring.length === 0) return { members: [], seats, ...unread };
   const host = await selfHostId();
   if (!host) {
     return { members: [], seats, note: external
       ? "This daemon's host id isn't known yet, so hosted members on its rosters, and the roster entries of the team's seats, can't be matched to it."
       : "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
   }
-  // A seat in two rosters is one member: the first roster (by file name) supplies its entry.
+  // A seat in two rosters is one member: the first roster (by file name) supplies its entry. Every entry that declares
+  // lead_of counts, and an entry without one declares nothing; rig_team keeps one declaration per resolved seat and team.
+  const declaredLeads = declaring.filter((member) => member.host === host).map((member) => ({ session: member.seat, team: member.lead_of! }));
   const members = new Map<string, HostedMember>();
   for (const { roster, member } of candidates) {
     if (member.host !== host || members.has(member.seat) || seats.has(member.seat)) continue;
@@ -250,7 +270,7 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
     if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
     else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
   }
-  return { members: [...members.values()], seats, ...unread };
+  return { members: [...members.values()], seats, declaredLeads, ...unread };
 }
 
 const TAKES_REQUESTS_UNKNOWN = "Some rosters couldn't be read, or this daemon's host id isn't known yet, so whether this seat takes requests isn't known.";
@@ -2128,7 +2148,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_team")) server.registerTool(
     "rig_team",
     {
-      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up. An entry's participant.app and participant.kind, where a roster records them, are which client it uses (such as chatgpt or claude-code) and what kind of participant it is, as the service that gave it access recorded them; absent is unknown, and a seat's own kind is its node kind.", READ_ONLY),
+      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up. An entry's participant.app and participant.kind, where a roster records them, are which client it uses (such as chatgpt or claude-code) and what kind of participant it is, as the service that gave it access recorded them; absent is unknown, and a seat's own kind is its node kind. Where the daemon names no single lead and exactly one roster entry declares lead_of, lead is that entry with declared: true and its team: the team's entry point for new work, not a manager of others' work, and nothing escalates to it.", READ_ONLY),
       inputSchema: z.object({
         rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
@@ -2201,9 +2221,16 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows`, checkIn: await checkInOf(seat) };
           }, !!access?.external);
         const note = hosted.note ? { hostedMembersNote: hosted.note } : {};
+        // A declared entry point names the lead only where the daemon names no single lead; a lead it names always wins.
+        // One per seat (either of its names) and team: the same seat declaring two teams is two declarations.
+        const resolved = (hosted.declaredLeads ?? []).map((d) => ({ ...d, logicalId: inventory.find((seat) =>
+          seat.canonicalSessionName === d.session || logicalAddress(seat.logicalId) === d.session)?.logicalId ?? null }));
+        const declaredSeat = (d: { session: string; logicalId: string | null }) => d.logicalId ?? d.session;
+        const led = declaredLead(view, resolved.filter((d, i) =>
+          resolved.findIndex((e) => declaredSeat(e) === declaredSeat(d) && e.team === d.team) === i), !!hosted.note);
         // The names a person knows the team by are for a person's assistant on an external grant; an internal caller's
         // answer is as it was.
-        if (!access?.external) return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });
+        if (!access?.external) return mapResult({ status: 200, data: { ...view, ...led, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });
         // The caller's own entry keeps its address and identity, with no line about its own activity.
         // A node seat on a roster carries its authored entry and presence; a seat on none is as the daemon reports it.
         const seats = (view.seats as Array<Record<string, unknown>>).map((seat) => {
@@ -2224,7 +2251,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const team = rosterTeamName(rostersFolder(), rigName);
         const rigView = { ...(view.rig as Record<string, unknown>), ...(team.name ? { displayName: team.name } : {}),
           ...(team.problem ? { displayNameProblem: team.problem } : {}) };
-        return mapResult({ status: 200, data: { ...view, rig: rigView, seats, hostedMembers, ...note } }, undefined, { structured: true });
+        return mapResult({ status: 200, data: { ...view, ...led, rig: rigView, seats, hostedMembers, ...note } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
