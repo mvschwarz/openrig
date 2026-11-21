@@ -4631,7 +4631,9 @@ export class QueueRepository {
    * preserving earlier clicks and leaving the other questions unanswered. A completed
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
-  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
+  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean;
+    /** The answering person's recorded identity (a Slack reply's `gateway:slack:v1` and entity id), for the close. */
+    identityProvenance?: string | null; identityPrincipal?: string | null }): boolean {
     const passed = this.passRunnerAnswerToDecider(input);
     if (passed !== null) return passed;
     let mine = true;
@@ -4648,9 +4650,13 @@ export class QueueRepository {
         const questions = item.humanQuestions ?? [];
         const decision = questions.length && unansweredQuestions(questions, item.humanAnswers ?? {}).length === 0
           ? formatHumanAnswers(questions, item.humanAnswers ?? {}).join("; ") : humanAnswerText(winner.body);
-        return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession));
+        // The close is theirs, so it carries the identity their answer row was created with (none for an older row).
+        const created = this.transitionLog.listForQitem(winner.qitemId)[0];
+        return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession),
+          { provenance: created?.identityProvenance ?? null, principal: created?.identityPrincipal ?? null });
       }
-      return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
+      return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true,
+        { provenance: input.identityProvenance ?? null, principal: input.identityPrincipal ?? null });
     })();
     if (!result) return false;
     for (const event of result.persistedEvents) {
@@ -4792,8 +4798,10 @@ export class QueueRepository {
     return row && row.replyTo === qitemId && row.sourceSession !== actorSession ? row : null;
   }
 
-  /** Close a pending direct ask as `actor`, its typed words under the first unanswered question. Inside a transaction. */
-  private closeDirectAsk(item: QueueItem, actor: string, decision: string, primaryUser: boolean) {
+  /** Close a pending direct ask as `actor`, with that answer's recorded identity, its typed words under the first
+   *  unanswered question. Inside a transaction. */
+  private closeDirectAsk(item: QueueItem, actor: string, decision: string, primaryUser: boolean,
+    identity: { provenance: string | null; principal: string | null }) {
     const asked = item.destinationSession;
     let transitionNote = asked === actor ? "direct human reply received"
       : primaryUser && actor === UNATTRIBUTED_ACTOR
@@ -4810,6 +4818,8 @@ export class QueueRepository {
       closureReason: "no-follow-on",
       transitionNote,
       ownerNotificationKind: "human-decision-resolved",
+      identityProvenance: identity.provenance,
+      identityPrincipal: identity.principal,
     });
   }
 
