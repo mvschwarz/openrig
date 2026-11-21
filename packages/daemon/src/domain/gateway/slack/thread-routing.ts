@@ -16,6 +16,32 @@
 
 import type { SlackEvent } from "./inbound.js";
 import type { ThreadSeatMap } from "./thread-seat-map.js";
+import { isOpenRigSender } from "../../../lib/pane-envelope.js";
+
+/** The daemon's own `…@system` actors, by exact name. Not the suffix: a rig may be named `system`, and its seats
+ *  (`worker@system`) are real readers of their own threads. */
+const OPENRIG_SYSTEM_ACTORS: ReadonlySet<string> = new Set([
+  "daemon@system", "watchdog@system", "stuck-sweep@system", "wake-ladder@system", "queue@system",
+  "claim@system", "outbox@system", "model-monitor@system", "slack-gateway@system",
+]);
+
+/** OpenRig's own machinery (the daemon, a subsystem actor such as `system:health`, or one of its `@system` actors): it
+ *  posts, such as a wake escalation's or a health finding's alert, but no seat behind it reads a reply. */
+function isOpenRigMachinery(seat: string): boolean {
+  return isOpenRigSender(seat) || OPENRIG_SYSTEM_ACTORS.has(seat);
+}
+
+/** Who reads a person's reply in a thread recorded for `seat` in `channel`. A thread OpenRig's machinery posted goes where
+ *  a person's top-level message in its channel goes (the channel's inbound seat or its rig's representative, else the
+ *  orchestrator slot); every other thread is exactly its seat's. Inbound routing and a reply-to update's thread choice
+ *  share this, so the seat a reply reaches can answer in the same thread. */
+export function makeThreadReader(opts: {
+  unroutedDestination: string;
+  resolveChannelDestination?: (channel: string | undefined) => string | null;
+}): (seat: string, channel: string | undefined) => string {
+  return (seat, channel) =>
+    isOpenRigMachinery(seat) ? opts.resolveChannelDestination?.(channel) ?? opts.unroutedDestination : seat;
+}
 
 export interface InboundRoute {
   destination: string;
@@ -40,6 +66,7 @@ export function makeThreadRouteResolver(opts: {
   log?: (msg: string) => void;
 }): (ev: SlackEvent & { thread_ts?: string }) => InboundRoute {
   const log = opts.log ?? (() => {});
+  const readerOf = makeThreadReader(opts);
   return (ev) => {
     const threadTs = (ev as { thread_ts?: string }).thread_ts;
     if (threadTs) {
@@ -55,9 +82,10 @@ export function makeThreadRouteResolver(opts: {
         // A person's reply in the thread was not posted by OpenRig, so a reaction on it stays ignored.
         const part = opts.map.partOf(threadTs, ev.channel ?? "");
         if (part) {
-          log(`inbound reaction on ts=${threadTs} (posted for ${part.conversationId}) -> ${part.seat}`);
+          const destination = readerOf(part.seat, ev.channel);
+          log(`inbound reaction on ts=${threadTs} (posted for ${part.conversationId}) -> ${destination}`);
           return {
-            destination: part.seat,
+            destination,
             tags: [...BASE_TAGS, "thread", `reply-to:${part.conversationId}`],
             correlationQitemId: part.conversationId,
             routeClass: "existing-thread",
@@ -75,9 +103,11 @@ export function makeThreadRouteResolver(opts: {
         // only the conversation's newest root correlates to its current human gate.
         const newest = opts.map.resolveByConversation(mapping.conversationId);
         const current = !newest || (newest.threadTs === threadTs && newest.channel === mapping.channel);
-        log(`inbound routed thread_ts=${threadTs} -> ${mapping.seat} (${routeClass}${current ? "" : ", superseded root: no gate correlation"})`);
+        const destination = readerOf(mapping.seat, mapping.channel);
+        const via = destination === mapping.seat ? "" : `, posted by ${mapping.seat}: its channel's reader`;
+        log(`inbound routed thread_ts=${threadTs} -> ${destination} (${routeClass}${via}${current ? "" : ", superseded root: no gate correlation"})`);
         return {
-          destination: mapping.seat,
+          destination,
           tags: [...BASE_TAGS, "thread", `reply-to:${mapping.conversationId}`],
           ...(current ? { correlationQitemId: mapping.conversationId } : { arrivalThread: { threadTs, channel: mapping.channel } }),
           routeClass,
