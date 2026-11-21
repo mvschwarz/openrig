@@ -77,6 +77,16 @@ describe("applying an assignment", () => {
     expect(report.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: "/homes/a", command: "rig seat restart p@other --keep-conversation" }]);
   });
 
+  it("a peer whose restart on a switched home doesn't confirm is unknown on its own; the home's login is known, so the next peer still restarts", async () => {
+    const { d } = deps({}, { "c2@fleet": { ok: true, outcome: "relaunch_failed", message: "no resumed conversation", recoveryCommand: "rig launch fleet dev.c2 --snapshot-id s1" } });
+    const report = await applyAssignment(plan(CODEX, [
+      change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" }), change("c3@fleet", { runtime: "codex" }),
+    ], { codexHomes: [{ home: "/homes/a", seats: ["c1@fleet", "c2@fleet", "c3@fleet"].map((seat) => ({ seat, rig: "fleet", effect: "would restart" })) }] }), CODEX, d);
+    expect(d.restartPeer.mock.calls.map(([s]) => s)).toEqual(["c2@fleet", "c3@fleet"]);
+    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "switched"], ["c2@fleet", "unknown"], ["c3@fleet", "switched"]]);
+    expect(report.results[1]!.recovery).toBe("rig launch fleet dev.c2 --snapshot-id s1");
+  });
+
   it.each([
     ["an unknown restart", { outcome: "unknown", reasons: ["restart_native_unknown"], message: "not confirmed",
       seat: { seat: "c1@fleet", home: "/homes/a", account: "team", loginChanged: true, peers: [] } }],

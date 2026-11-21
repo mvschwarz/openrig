@@ -87,6 +87,13 @@ describe("the assignment plan", () => {
     expect(unknown.rows[0]!.continuity).toBe("unknown: the daemon can't tell whether the seat is running, so whether it keeps its conversation in place or at its next launch");
   });
 
+  it("--account-home leaves a Codex seat that's already on the account's own saved login where it is", async () => {
+    const on = seat("on@fleet", { runtime: "codex", configured: { source: "registry", profileRef: "team", home: "/homes/a", homeNote: "n" } as PlanSeatFacts["configured"] });
+    const { result, precheck } = plan({ account: CODEX, seats: [on, seat("off@fleet", { runtime: "codex" })], platform: "darwin", accountHome: "/prepared" });
+    expect((await result).rows.map((r) => [r.seat, r.effect])).toEqual([["on@fleet", "unchanged"], ["off@fleet", "change"]]);
+    expect(precheck.mock.calls.map(([s]) => s.session)).toEqual(["off@fleet"]);
+  });
+
   it("Codex continuity: in place on Linux; unsupported in place on macOS unless --account-home, then a fresh successor; never a fallback", async () => {
     const seats = [seat("c@fleet", { runtime: "codex" })];
     expect((await plan({ account: CODEX, seats }).result).rows[0]!.continuity).toBe("in place: the seat restarts on the same conversation");
