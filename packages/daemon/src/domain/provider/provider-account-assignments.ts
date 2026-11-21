@@ -105,7 +105,7 @@ export class ProviderAccountAssignmentsRepository {
     return (this.db.prepare("SELECT * FROM provider_assignment_results").all() as ResultRow[]).map(fromRow);
   }
 
-  /** The rigs whose assignment names this label: a label in use can't be removed. */
+  /** The rigs whose assignment names this label, named when the label is removed. */
   rigsUsing(provider: AccountRefProvider, label: string): string[] {
     return (this.db.prepare(`SELECT r.name FROM provider_account_assignments a JOIN rigs r ON r.id = a.rig_id
       WHERE a.provider = ? AND a.label = ? ORDER BY r.name`).all(provider, label) as Array<{ name: string }>).map((r) => r.name);

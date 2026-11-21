@@ -231,6 +231,10 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     const lines = [intended
       ? `    assignment: rig ${r["rigName"]}'s ${a["provider"]} seats to ${intended["label"]} (${intended["reference"]}), set ${intended["at"]} by ${setBy(intended["requestedBy"])}; ${standing}`
       : `    assignment: none for rig ${r["rigName"]}'s ${a["provider"]} seats`];
+    if (intended && a["referenceMissing"]) {
+      lines.push(`    reference missing: ${intended["label"]} was removed from this daemon's ${a["provider"]} accounts, so this seat is compared only `
+        + `with what an apply left it; add the label again or assign another account`);
+    }
     if (applied) {
       lines.push(`    last applied: ${String(applied["kind"]).replace(/_/g, "-")} (${applied["label"]}, ${applied["at"]}): ${applied["detail"]}`);
       if (applied["recovery"]) lines.push(`      recovery: ${applied["recovery"]}`);
@@ -1032,7 +1036,7 @@ that machine. Only the command and its output cross the connection.`);
 
   account
     .command("remove <label>")
-    .description("Remove an account's label; its file or saved login is left as it is")
+    .description("Remove an account's label; its file or saved login, and any rig assigned to it, are left as they are")
     .option("--provider <p>", "claude or codex")
     .option("--host <id>", "Remove it on that registered machine instead, over its SSH entry")
     .option("--json", "Output as parseable JSON")
@@ -1045,7 +1049,7 @@ that machine. Only the command and its output cross the connection.`);
       }
       const client = await getClient(getDeps());
       if (!client) { process.exitCode = 1; return; }
-      const res = await client.delete<{ ok: boolean; account?: AccountRefView; code?: string; message?: string }>(
+      const res = await client.delete<{ ok: boolean; account?: AccountRefView; warning?: string; code?: string; message?: string }>(
         `/api/provider/account-refs/${opts.provider}/${encodeURIComponent(label)}`);
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -1054,6 +1058,7 @@ that machine. Only the command and its output cross the connection.`);
       }
       if (handleHttpError(res, "account remove")) return;
       console.log(`Removed the ${opts.provider} account ${label}. Its ${res.data.account?.kind === "codex_saved_login" ? "saved login" : "file"} is left as it is, and seats already switched to it keep their own reference.`);
+      if (res.data.warning) console.log(`Warning: ${res.data.warning}`);
     });
 
   // #3625: the plan for moving a rig's seats of one provider to an account, computed by the daemon that runs the rig

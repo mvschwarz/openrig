@@ -7,7 +7,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { readClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
-import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
+import { accountRefUses, ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
 import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
 import { isSeat } from "../src/domain/provider/usage-across-hosts.js";
 import type { AssignmentApplyRequest, ClaudeSeatRelaunch } from "../src/domain/provider/provider-service.js";
@@ -170,6 +170,36 @@ describe("status: each seat against its rig's assignment", () => {
     expect((await statusOf())["a@fleet"]).toEqual({ provider: "claude", state: "not_applied",
       intended: { label: "max-3", reference: "the token file max-3", requestedBy: "lead@fleet", at: "t2" },
       applied: { kind: "unknown", label: "max-3", detail: "the relaunch didn't report a resumed conversation", at: "t2", recovery: "rig launch fleet dev.a --snapshot-id s1", activity: "idle" } });
+  });
+});
+
+describe("an assigned label that has been removed", () => {
+  it("leaves the seats, their credentials and what was recorded; status shows the reference as missing, and the plan and apply refuse", async () => {
+    seat("a");
+    await apply("max-2");
+    seat("c");
+    const removed = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) }).remove("claude", "max-2");
+    expect(removed).toMatchObject({ ok: true, assignedTo: ["rig fleet (claude)"] });
+    // The seat keeps its reference, and the rig its assignment and the seat's result.
+    expect(readClaudeSeatTokenRef(db, "a")).toMatchObject({ tokenFile: path.join(dir, "max-2") });
+    const intended = { label: "max-2", reference: `the token file ${path.join(dir, "max-2")}`, requestedBy: "lead@fleet", at: "2026-11-21T08:00:00.000Z" };
+    const status = await statusOf();
+    // a is as the apply of max-2 left it; c never had an apply. Neither can be compared with a reference that's gone.
+    expect(status["a@fleet"]).toMatchObject({ state: "follows", intended, applied: { kind: "switched", label: "max-2" }, referenceMissing: true });
+    expect(status["c@fleet"]).toEqual({ provider: "claude", state: "not_applied", intended, applied: null, referenceMissing: true });
+    expect(isSeat({ seatSession: "a@fleet", rigName: "fleet", runtime: "claude-code", configured: { source: "claude_token", label: "max-2", note: "n" },
+      allowance: { linked: false, reason: "r" }, assignment: status["a@fleet"] })).toBe(true);
+    // Planning or applying the removed label is refused by name, not attempted.
+    const planned = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, stoppedClaude());
+    expect(planned).toMatchObject({ ok: false, code: "unknown_account" });
+    const before = everything();
+    expect(await svc.applyAssignment({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a", digest: "d", requestedBy: "lead@fleet" },
+      { claudeSeat: stoppedClaude() })).toMatchObject({ ok: false, code: "unknown_account" });
+    expect(everything()).toBe(before);
+    // Added again, the label's reference is back, and so is the comparison.
+    new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: path.join(dir, "max-2") });
+    expect((await statusOf())["a@fleet"]).not.toHaveProperty("referenceMissing");
+    expect((await statusOf())["c@fleet"]).toMatchObject({ state: "not_applied" });
   });
 });
 

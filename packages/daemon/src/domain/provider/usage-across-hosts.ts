@@ -356,6 +356,7 @@ const seatAssignment: Check = record({
   applied: nullable(record({ kind: str, label: str, detail: str, at: str, recovery: optional(str), activity: optional(str) })),
   override: optional(str),
   asApplied: optional(oneOf(true)),
+  referenceMissing: optional(oneOf(true)),
 });
 
 /** A served seat account with every field the views read, typed as provider-types.ts says. */

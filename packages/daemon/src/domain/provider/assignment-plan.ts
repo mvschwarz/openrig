@@ -183,7 +183,8 @@ export const asAppliedText = (label: string) => `still as the apply of ${label} 
  *  last result didn't move it). Configuration only: never proof of the login a running session uses. */
 export function assignmentStanding(seat: PlanSeatFacts, account: AccountRef | null, intent: AssignmentIntent,
   resolveHome?: (home: string) => string): { state: "follows" | "override" | "not_applied"; override?: string; asApplied?: true } {
-  if (!account) return { state: "not_applied" };
+  // A removed label: what an apply of it left is still known, its reference isn't.
+  if (!account) return appliedThis(seat, intent.label) ? { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) } : { state: "not_applied" };
   const comparison: Comparison = { account, ...(resolveHome ? { resolveHome } : {}) };
   if (unchanged(seat, comparison)) return { state: "follows" };
   if (appliedThis(seat, intent.label)) return { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };

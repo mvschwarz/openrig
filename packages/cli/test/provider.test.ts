@@ -451,6 +451,9 @@ describe("rig provider account add|list|remove (#3625)", () => {
           return reply(201, { ok: true, account: sent.provider === "codex" ? CODEX : TOKEN });
         }
         if (req.method === "DELETE" && req.url === "/api/provider/account-refs/claude/max-1") return reply(200, { ok: true, account: TOKEN });
+        if (req.method === "DELETE" && req.url === "/api/provider/account-refs/claude/assigned") {
+          return reply(200, { ok: true, account: { ...TOKEN, label: "assigned" }, assignedTo: ["rig fleet (claude)"], warning: "assigned was assigned to rig fleet (claude). Those seats and their credentials are as they were, and status shows the reference as missing until the label is added again or another account is assigned (rig provider assign <rig> --provider claude --account <label>)." });
+        }
         if (req.method === "DELETE") return reply(404, { ok: false, code: "not_found", message: "There's no claude account labelled nope." });
         reply(404, { error: "not found" });
       });
@@ -523,6 +526,10 @@ describe("rig provider account add|list|remove (#3625)", () => {
     expect(removed.exitCode).toBeFalsy();
     expect(seen.at(-1)).toMatchObject({ method: "DELETE", url: "/api/provider/account-refs/claude/max-1" });
     expect(removed.logs[0]).toBe("Removed the claude account max-1. Its file is left as it is, and seats already switched to it keep their own reference.");
+    const assigned = await run(["account", "remove", "assigned", "--provider", "claude"], runningDeps(port));
+    expect(assigned.exitCode).toBeFalsy();
+    expect(assigned.logs).toEqual(["Removed the claude account assigned. Its file is left as it is, and seats already switched to it keep their own reference.",
+      "Warning: assigned was assigned to rig fleet (claude). Those seats and their credentials are as they were, and status shows the reference as missing until the label is added again or another account is assigned (rig provider assign <rig> --provider claude --account <label>)."]);
     const unknown = await run(["account", "remove", "nope", "--provider", "claude"], runningDeps(port));
     expect(unknown.exitCode).toBe(1);
     expect(unknown.logs).toEqual(["There's no claude account labelled nope."]);
@@ -797,6 +804,16 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     ]);
     // A label is the operator's name for a reference: never worded as the login a session uses.
     expect(logs.join("\n")).not.toMatch(/signed in|logged in|is using|running on|runs as/i);
+  });
+
+  it("says when the assigned label's reference has been removed", async () => {
+    const model = { ...MODEL, bindings: [seatRow("a@fleet", { provider: "claude", state: "follows", intended, applied: switched, referenceMissing: true })] };
+    const { logs } = await run(["status"], deps(() => model));
+    expect(logs.slice(logs.findIndex((l) => l.startsWith("  a@fleet")) + 1)).toEqual([
+      "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned",
+      "    reference missing: max-2 was removed from this daemon's claude accounts, so this seat is compared only with what an apply left it; add the label again or assign another account",
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
+    ]);
   });
 
   it("with the seat accounts served (usage windows on), the same lines sit under each seat; --json is the daemon's answer, assignment included", async () => {

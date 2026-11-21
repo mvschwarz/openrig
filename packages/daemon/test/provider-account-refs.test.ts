@@ -136,12 +136,15 @@ describe("provider account references", () => {
     expect(repo.get("claude", "max-1")?.file).toBe(first);
   });
 
-  it("won't remove a label something uses, and says what; an unknown label is not found", () => {
+  it("removes a label a rig is assigned to, with a warning naming the rig; an unknown label is not found", () => {
     const used = new ProviderAccountRefsRepository(db, { uses: (p, l) => (p === "claude" && l === "max-1" ? ["rig fleet (claude)"] : []) });
-    expect(used.add({ provider: "claude", label: "max-1", tokenFile: file("token", 0o600) }).ok).toBe(true);
-    expect(used.remove("claude", "max-1")).toEqual({ ok: false, code: "in_use", usedBy: ["rig fleet (claude)"],
-      message: "max-1 is assigned to rig fleet (claude); assign it another account first (rig provider assign <rig> --provider claude --account <label>). Nothing changed." });
-    expect(used.list()).toHaveLength(1);
+    const token = file("token", 0o600);
+    expect(used.add({ provider: "claude", label: "max-1", tokenFile: token }).ok).toBe(true);
+    expect(used.remove("claude", "max-1")).toEqual({ ok: true, account: expect.objectContaining({ label: "max-1" }), assignedTo: ["rig fleet (claude)"],
+      warning: "max-1 was assigned to rig fleet (claude). Those seats and their credentials are as they were, and status shows the reference "
+        + "as missing until the label is added again or another account is assigned (rig provider assign <rig> --provider claude --account <label>)." });
+    expect(used.list()).toHaveLength(0);
+    expect(fs.readFileSync(token, "utf8")).toBe(CONTENT);
     expect(used.remove("codex", "max-1")).toMatchObject({ ok: false, code: "not_found" });
   });
 

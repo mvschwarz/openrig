@@ -37,14 +37,13 @@ export type AccountRefRefusal =
   /** The reference is well formed but wouldn't work on this host: a missing, empty or non-private file, or no such login. */
   | "reference_unusable"
   | "duplicate_label"
-  | "not_found"
-  /** An assignment uses the label (slice 02 adds assignments). */
-  | "in_use";
+  | "not_found";
 
 export type AccountRefAddResult = { ok: true; account: AccountRef; warnings?: string[] } | { ok: false; code: AccountRefRefusal; message: string };
 export type AccountRefRemoveResult =
-  | { ok: true; account: AccountRef }
-  | { ok: false; code: AccountRefRefusal; message: string; usedBy?: string[] };
+  /** `assignedTo` and `warning` when rigs were assigned to the label: it's removed all the same. */
+  | { ok: true; account: AccountRef; assignedTo?: string[]; warning?: string }
+  | { ok: false; code: AccountRefRefusal; message: string };
 
 const PROVIDERS: readonly string[] = ["claude", "codex"];
 const NOTHING_STORED = "Nothing was stored.";
@@ -139,7 +138,7 @@ export function accountRefUses(db: Database.Database): (provider: AccountRefProv
 }
 
 export interface ProviderAccountRefsOptions {
-  /** What uses a label, so it can't be removed: slice 02's assignments. None until then. */
+  /** What uses a label, named in the warning when it's removed: the rigs assigned to it. */
   uses?: (provider: AccountRefProvider, label: string) => string[];
   now?: () => string;
 }
@@ -176,15 +175,17 @@ export class ProviderAccountRefsRepository {
     return { ok: true, account: this.get(input.provider, input.label)!, ...(warnings.length ? { warnings } : {}) };
   }
 
-  /** Removes the label, unless something still uses it. Seats already switched to it keep their own reference. */
+  /** Removes the label, and only the label. When rigs are assigned to it, the result names them with a warning: their
+   *  seats, the seats' credentials and the recorded assignment and results stay, and status shows the reference as
+   *  missing. */
   remove(provider: AccountRefProvider, label: string): AccountRefRemoveResult {
     const account = this.get(provider, label);
     if (!account) return { ok: false, code: "not_found", message: `There's no ${provider} account labelled ${label}.` };
-    const usedBy = this.opts.uses?.(provider, label) ?? [];
-    if (usedBy.length) {
-      return { ok: false, code: "in_use", usedBy, message: `${label} is assigned to ${usedBy.join(", ")}; assign ${usedBy.length === 1 ? "it" : "each"} another account first (rig provider assign <rig> --provider ${provider} --account <label>). Nothing changed.` };
-    }
+    const assignedTo = this.opts.uses?.(provider, label) ?? [];
     this.db.prepare("DELETE FROM provider_account_refs WHERE provider = ? AND label = ?").run(provider, label);
-    return { ok: true, account };
+    if (!assignedTo.length) return { ok: true, account };
+    return { ok: true, account, assignedTo, warning: `${label} was assigned to ${assignedTo.join(", ")}. Those seats and their credentials are `
+      + `as they were, and status shows the reference as missing until the label is added again or another account is assigned `
+      + `(rig provider assign <rig> --provider ${provider} --account <label>).` };
   }
 }

@@ -1693,7 +1693,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   API-key file, or a Codex home and saved login), never the secret. The plan changes nothing; `--apply --plan
   <digest>` applies exactly that plan, seat by seat, with each result reported and nothing retried. Seats with their
   own account are kept unless you add `--include-overrides`. `rig provider status` then shows each seat against the
-  rig's assignment, which isn't proof of the login a running session uses. `--host <id>` does all of this on
+  rig's assignment, which isn't proof of the login a running session uses. Removing a label a rig is assigned to
+  warns, names those rigs and goes ahead; their seats are left as they are. `--host <id>` does all of this on
   another machine over SSH. See rig-spec's "Assigning an account to a whole rig".
 - **Claude subscription/API-key switching resumes the same conversation and interrupts work:**
   `rig provider switch --seat <seat> --to-account api --api-key-file <abs>`; return with

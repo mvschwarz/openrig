@@ -889,7 +889,9 @@ rig provider account remove budget --provider claude
   them).
 - Only the reference is stored. The file isn't read or copied, and no credential passes through OpenRig.
 - Adding an account checks the reference first. If the check fails, nothing is stored and the refusal says why.
-- A label can't be removed while a rig is assigned to it; assign that rig another account first.
+- Removing a label a rig is assigned to goes ahead with a warning naming those rigs. Their seats, the seats'
+  credentials, and the recorded assignment and results stay as they were. Status shows the reference as missing, and
+  planning or applying that label is refused until it's added again.
 - A label is your name for a reference, not proof of the login a running seat uses.
 
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
@@ -970,6 +972,9 @@ account. In `--json` this is `assignment` on each `bindings` row, and on each `s
 - **not applied:** the rig has an assignment, but the seat isn't on it yet. Its last result says why; a seat no apply
   has reached yet has none.
 - **no assignment:** the rig has none for that provider.
+
+When the assigned label has been removed, `referenceMissing` is set and status says the reference is missing. With no
+reference to compare a seat's configuration with, a seat follows only when it's still as an apply of that label left it.
 
 "Configured" and "applied" describe what the seat's next launch uses and what an apply reported. They aren't proof of
 the login a running session uses.

@@ -369,7 +369,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const provider = c.req.param("provider");
     if (!VALID_PROVIDERS.has(provider)) return c.json({ error: `invalid provider: ${provider}` }, 400);
     const result = refs.remove(provider as AccountRefProvider, c.req.param("label"));
-    return c.json(result, result.ok ? 200 : result.code === "not_found" ? 404 : 409);
+    return c.json(result, result.ok ? 200 : 404);
   });
 
   // #3625: the plan for moving a rig's seats of one provider to an account by label. Read only; applying arrives later.

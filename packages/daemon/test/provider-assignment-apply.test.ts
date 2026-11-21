@@ -105,9 +105,9 @@ describe("applying an assignment on the daemon", () => {
     const again = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
     expect(again.ok && again.plan.intent).toEqual({ label: "max-2", reference: `the token file ${path.join(dir, "max-2")}`, requestedBy: "lead@fleet", at: "2026-11-21T07:00:00.000Z" });
     expect(again.ok && again.plan.rows.map((r) => [r.seat, r.effect, r.lastResult?.kind])).toEqual([["a@fleet", "unchanged", "switched"], ["b@fleet", "kept_override", "unchanged"]]);
-    // The label is in use now: removing it is refused, naming the rig.
+    // The label is in use now: removing it warns, naming the rig.
     const uses = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
-    expect(uses.remove("claude", "max-2")).toMatchObject({ ok: false, code: "in_use", usedBy: ["rig fleet (claude)"] });
+    expect(uses.remove("claude", "max-2")).toMatchObject({ ok: true, assignedTo: ["rig fleet (claude)"] });
     expect(JSON.stringify(result)).not.toContain(CONTENT);
   });
 
@@ -230,19 +230,20 @@ describe("applying an assignment on the daemon", () => {
     seat("a");
     const claude = stoppedClaude();
     const uses = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
+    const assignedTo = accountRefUses(db);
     expect((await svc.applyAssignment(request("max-1", await digestOf("max-1", claude)), { claudeSeat: claude })).ok).toBe(true);
-    // Moved to max-2 by hand: max-1 is still the rig's assignment, so it can't be removed.
+    // Moved to max-2 by hand: max-1 is still the rig's assignment.
     db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = 'a'").run(JSON.stringify({ label: "max-2", tokenFile: path.join(dir, "max-2") }));
-    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: false, code: "in_use" });
+    expect(assignedTo("claude", "max-1")).toEqual(["rig fleet (claude)"]);
     // Applying max-3 with the seat kept as an override moves nothing: max-1 stays assigned.
     const kept = await svc.applyAssignment(request("max-3", await digestOf("max-3", claude)), { claudeSeat: claude });
     expect(kept.ok && kept.report.results.map((r) => r.kind)).toEqual(["unchanged"]);
-    expect(uses.remove("claude", "max-3")).toMatchObject({ ok: true });
-    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: false, code: "in_use" });
+    expect(uses.remove("claude", "max-3")).not.toHaveProperty("assignedTo");
+    expect(assignedTo("claude", "max-1")).toEqual(["rig fleet (claude)"]);
     // Applying max-2, which the seat is already on, records it as the rig's assignment, and max-1 is free.
     const same = await svc.applyAssignment(request("max-2", await digestOf("max-2", claude)), { claudeSeat: claude });
     expect(same.ok && same.report.results.map((r) => [r.kind, r.detail])).toEqual([["unchanged", "already on max-2"]]);
-    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: true });
+    expect(uses.remove("claude", "max-1")).toEqual({ ok: true, account: expect.objectContaining({ label: "max-1" }) });
   });
 
   it("a second apply to the same rig while one runs is refused, with nothing changed", async () => {

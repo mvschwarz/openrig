@@ -394,9 +394,10 @@ export class ProviderServiceImpl implements ProviderService {
       const intent = intents.get(`${rigId}\0${provider}`);
       if (!intent) return { provider, state: "no_assignment", intended: null, applied };
       const intended = { label: intent.label, reference: intent.reference, requestedBy: intent.requestedBy, at: intent.at };
-      const standing = assignmentStanding({ ...facts.get(index)!, running: null, activity: "unknown" }, accountOf(provider, intent.label), intent, resolvedHome);
+      const account = accountOf(provider, intent.label);
+      const standing = assignmentStanding({ ...facts.get(index)!, running: null, activity: "unknown" }, account, intent, resolvedHome);
       return { provider, state: standing.state, intended, applied, ...(standing.override ? { override: standing.override } : {}),
-        ...(standing.asApplied ? { asApplied: true as const } : {}) };
+        ...(standing.asApplied ? { asApplied: true as const } : {}), ...(account ? {} : { referenceMissing: true as const }) };
     });
   }
 

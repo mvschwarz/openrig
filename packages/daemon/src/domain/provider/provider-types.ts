@@ -114,6 +114,9 @@ export interface SeatAssignment {
   /** Follows only as the apply of this label left its home: its configuration names no login, and the login active in
    *  that home isn't read, so a later change there isn't seen. */
   asApplied?: true;
+  /** The assigned label has been removed from this daemon's accounts. The seat is compared only with what an apply left
+   *  it (follows) or not (not_applied), since there's no reference to compare its configuration with. */
+  referenceMissing?: true;
 }
 
 export type SignalSourceClass =

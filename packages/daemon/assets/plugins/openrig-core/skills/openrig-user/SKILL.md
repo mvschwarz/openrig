@@ -1109,6 +1109,9 @@ moves alone with `rig provider switch --seat` (above).
 - Apply exactly that plan with `--apply --plan <digest>`. Each seat's result is reported on its own, and nothing is
   retried.
 - `rig provider status` then shows each seat against the rig's assignment.
+- `rig provider account remove` on a label a rig is assigned to warns, names those rigs and goes ahead. The seats keep
+  their credentials, and status shows the reference as missing until the label is added again or another account is
+  assigned.
 - The reference is rig-spec's "Assigning an account to a whole rig".
 
 0. **Load the person's account policy.**
