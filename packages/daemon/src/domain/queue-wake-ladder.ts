@@ -1718,14 +1718,17 @@ async function advancePromptRefusals(
     if (row && group.permissionHook?.includes("|prompt:") && !row.tags?.includes(group.permissionHook)
       && row.tags?.some(t => t.startsWith(permissionPrefix) && t.includes("|prompt:"))) {
       // Re-read the seat first, as the send boundary below does: the observation came before the awaited hook-review read,
-      // and its prompt may have cleared or changed since. An unreadable seat leaves the whole group for the next tick, so
-      // the prompt isn't marked handled without a wake; a prompt that's positively gone or replaced gets no stale wake.
+      // and its prompt may have cleared or changed since. Only a positive read lets the prompt be marked handled: clear, or
+      // blocked at a prompt whose start reads. A read that throws, finds no seat, or returns unknown or blocked without a
+      // start (as the reader does when its own reads fail) leaves the whole group for the next tick, so the prompt isn't
+      // marked handled without a wake; a prompt that's positively gone or replaced gets no stale wake.
       let current: PermissionPromptObservation | undefined;
       try { current = deps.readPermissionPrompts?.(dest).find(o => o.destination === dest); }
       catch (error) {
         (deps.log ?? console.error)(`[wake-ladder] permission hook read before a new-prompt wake unreadable for ${JSON.stringify(dest)}: ${String(error)}`);
         continue;
       }
+      if (current?.state !== "clear" && !(current?.state === "blocked" && current.prompt)) continue;
       const observed = permissionObservations.get(dest);
       if (current?.state === "blocked" && current.episode === observed?.episode && current.prompt === observed?.prompt
         && await wakeOwnerForNewPrompt(deps, row, dest, group.permissionHook, attemptWake) === "deferred") {

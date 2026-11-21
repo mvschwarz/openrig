@@ -767,7 +767,7 @@ it("the production reader keys each prompt by its own start; an alert owner with
   } finally { await scheduler.stop(); }
 });
 
-// #3611 r1: the four controls dev-guard asked for.
+// F1-F4: a request's run of hooks, a start read late, the reread before a new-prompt wake, and a deferred wake.
 it("a request owns every notification after it in its run: a third hook keeps the prompt's start and wakes no one again", async () => {
   const { f, lead, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
   const request = await later(0, "PermissionRequest", null);
@@ -822,6 +822,41 @@ it("a new prompt that clears while the tick awaits hook reviews gets no stale wa
     attemptWake: async (_id, target) => { woken.push(target); return "verified"; } });
   expect(woken).toEqual([lead]);
   expect(newPromptNotes(id)).toEqual([]);
+});
+
+it.each([
+  ["its hook read fails, so it returns unknown", "hook"],
+  ["its start read fails, so it returns blocked without a start", "start"],
+] as const)("a new prompt the reread can't identify stays owed: %s", async (_, failing) => {
+  const { f, repo, lead, read, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  const broken = makePermissionPromptReader({ db: f.db, log: () => {},
+    getLatestHook: destination => {
+      if (failing === "hook") throw new Error("retained events unreadable");
+      return f.store.getLatestForNode({ sessionName: destination, order: "source" });
+    },
+    getPromptStart: (destination, generation) => {
+      if (failing === "start") throw new Error("retained events unreadable");
+      return f.store.findPermissionPromptStart({ sessionName: destination, generation });
+    } });
+  // The tick's whole-inventory read stays healthy; only its scoped reread of the seat goes through the failing reader.
+  let scopedFails = false;
+  const reader = (destination?: string) => destination !== undefined && scopedFails ? broken(destination) : read(destination);
+  await later(0, "Notification", "permission_prompt");
+  await tick(reader);
+  const id = alerts()[0]!.qitemId;
+  const second = await later(14_000, "Notification", "permission_prompt");
+  scopedFails = true;
+  await tick(reader);
+  await tick(reader);
+  expect(woken).toEqual([lead]);
+  expect(newPromptNotes(id)).toEqual([]);
+  expect(repo.getById(id)!.tags!.some(t => t.includes(`|prompt:${second}|`))).toBe(false);
+  scopedFails = false;
+  await tick(reader);
+  await tick(reader);
+  expect(woken).toEqual([lead, lead]);
+  expect(newPromptNotes(id)).toHaveLength(1);
+  expect(newPromptNotes(id)[0]!.transitionNote).toContain(`woke ${lead} outcome=verified`);
 });
 
 it("a new prompt's wake that a drain defers stays owed on a pending alert, and goes once when the drain lets go", async () => {
