@@ -644,6 +644,24 @@ describe("rig doctor", () => {
     });
   }
 
+  it("--community-harnesses reports invalid presets without running the general checks", async () => {
+    const harnesses = [{ name: "broken", usable: false, path: "/presets/broken.yaml", problem: "missing maintainer" }];
+    const fetch = vi.fn(async () => Response.json({ dir: "/presets", harnesses }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const program = new Command();
+      program.addCommand(doctorCommand(makeDeps({ exec: () => { throw new Error("Unexpected provider check"); } })));
+      const { logs, exitCode } = await captureLogs(() =>
+        program.parseAsync(["node", "rig", "doctor", "--community-harnesses", "--json"]),
+      );
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/community-harnesses?preflight=true"), expect.anything());
+      expect(JSON.parse(logs.join("\n"))).toEqual({ healthy: false, dir: "/presets", harnesses });
+      expect(exitCode).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("--json produces structured output", async () => {
     const deps = makeDeps();
     const program = new Command();
