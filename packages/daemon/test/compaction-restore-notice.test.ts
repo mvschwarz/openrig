@@ -532,8 +532,24 @@ describe("notices whose compaction debt ended without a delivery", () => {
       const restore = await f.restore("one"), uptake = await f.uptake("one");
       const retiring = await f.preparation("gen-1"), successor = await f.preparation("gen-2");
       settleCompactionNotices(f.queue, { sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1" });
-      for (const id of [restore, uptake, retiring]) f.closedWith(id, "canceled", "the seat's occupant was replaced (retiring generation gen-1)");
+      for (const id of [restore, uptake, retiring]) f.closedWith(id, "canceled", "OpenRig invalidated the seat's occupant state (retiring generation gen-1)");
       expect(f.queue.getById(successor)?.state).toBe("pending");
+    } finally { f.db.close(); }
+  });
+
+  it.each([
+    ["an invalidation", undefined, ["OpenRig invalidated the seat's occupant state (retiring generation gen-1)", "before a handover or runtime-switch rollback"]],
+    ["a generation change after a restart", { live: "gen-2", when: "restart" as const },
+      ["OpenRig found after a restart that the seat's occupant generation changed from gen-1 to gen-2", "a reboot that adopts the same conversation"]],
+    ["a generation change on a poll", { live: "gen-2", when: "poll" as const },
+      ["OpenRig found on a poll that the seat's occupant generation changed from gen-1 to gen-2", "a reboot that adopts the same conversation"]],
+  ])("the closing reason reports what OpenRig observed: %s, and keeps the same-conversation caveat", async (_label, observedGeneration, says) => {
+    const f = await fixture();
+    try {
+      const restore = await f.restore("one");
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1", ...(observedGeneration ? { observedGeneration } : {}) });
+      for (const text of [...says, "doesn't by itself mean", "If the seat resumed the same conversation, check whether it still needs the restore"]) f.closedWith(restore, "canceled", text);
+      expect(f.queue.getById(restore)?.resolution).not.toContain("occupant was replaced");
     } finally { f.db.close(); }
   });
 
@@ -543,7 +559,7 @@ describe("notices whose compaction debt ended without a delivery", () => {
       const preparation = await f.preparation("gen-1"), restore = await f.restore("one"), uptake = await f.uptake("one");
       for (let i = 0; i < 2; i++) settleCompactionNotices(f.queue, { sessionName: seat, reason: "occupant_replaced", occupantGeneration: null });
       // The enforcer dropped the seat's restore and uptake by name, whatever the generation.
-      for (const id of [restore, uptake]) f.closedWith(id, "canceled", "the seat's occupant was replaced, and OpenRig dropped this compaction");
+      for (const id of [restore, uptake]) f.closedWith(id, "canceled", "OpenRig invalidated the seat's occupant state and dropped this compaction");
       expect(f.queue.getById(preparation)?.state).toBe("pending");
       const notes = f.queue.listTransitions(preparation).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
       expect(notes).toHaveLength(1);
@@ -565,6 +581,21 @@ describe("notices whose compaction debt ended without a delivery", () => {
       expect(notes).toHaveLength(1);
       expect(notes[0]).toContain("no longer retries these steps");
       expect(f.queue.listTransitions(other)).toEqual(before);
+    } finally { f.db.close(); }
+  });
+
+  it("says once on the preparing occupant's notice that its generation can't be read, and leaves every notice open", async () => {
+    const f = await fixture();
+    try {
+      const preparing = await f.preparation("gen-1"), other = await f.preparation("gen-2"), restore = await f.restore("one");
+      const before = [other, restore].map(id => f.queue.listTransitions(id));
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", occupantGeneration: "gen-1" });
+      f.queue.update({ qitemId: preparing, actorSession: "owner@demo", transitionNote: "looking at it" });
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", occupantGeneration: "gen-1" });
+      expect(f.queue.getById(preparing)?.state).toBe("pending");
+      const notes = f.queue.listTransitions(preparing).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
+      expect(notes).toEqual([expect.stringContaining("the seat's live occupant generation couldn't be read")]);
+      expect([other, restore].map(id => f.queue.listTransitions(id))).toEqual(before);
     } finally { f.db.close(); }
   });
 
@@ -606,6 +637,19 @@ describe("notices whose compaction debt ended without a delivery", () => {
       for (const id of gone) f.closedWith(id, "canceled", "writer@demo no longer exists on this host");
       expect(f.queue.getById(kept)?.state).toBe("pending");
     } finally { f.db.close(); }
+  });
+
+  it("past the settle limit, an older removed seat's notice behind newer kept ones stays open, and the warning doesn't promise a later settle reaches it", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = await fixture();
+    try {
+      const older = await f.restore("gone-seat-attempt");
+      for (let i = 0; i < 1000; i++) await f.restore(`kept-${i}`, "kept@demo");
+      for (let pass = 0; pass < 2; pass++) closeNoticesOfRemovedSeats(f.queue, (name) => name === "kept@demo");
+      expect(f.queue.getById(older)?.state).toBe("pending");
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("aren't checked"), { limit: 1000 });
+      expect(warning.mock.calls.map(([message]) => String(message)).join("\n")).not.toContain("next settle");
+    } finally { warning.mockRestore(); f.db.close(); }
   });
 
   it("a deleted rig's seats lose their notices; an archived rig's seats keep theirs", async () => {

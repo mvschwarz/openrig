@@ -26,6 +26,7 @@ import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
 // The home these tests pass explicitly (and assert in prompt text). A fixed path such as
@@ -450,7 +451,11 @@ describe("ClaudeCompactionEnforcer", () => {
         await settled();
         expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: reported });
         expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
-        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain(`the seat's occupant was replaced (retiring generation ${reported})`);
+        // The enforcer saw an invalidation, not a replacement: a handover or runtime switch can still roll back.
+        const note = f.queue.listTransitions(id).at(-1)?.transitionNote;
+        expect(note).toContain(`OpenRig invalidated the seat's occupant state (retiring generation ${reported})`);
+        expect(note).toContain("before a handover or runtime-switch rollback");
+        expect(note).toContain("If the seat resumed the same conversation, check whether it still needs the restore");
       } finally { f.db.close(); }
     });
 
@@ -472,23 +477,41 @@ describe("ClaudeCompactionEnforcer", () => {
       try {
         await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
         expect(f.enforcer.getPreparationState(seat)?.status).not.toBe("stopped");
+        const id = await f.notice("restore", "earlier-attempt");
         f.swap("gen-2");
         f.enforcer.reconcilePreparations();
         await settled();
         expect(f.enforcer.getPreparationState(seat)).toMatchObject({ status: "stopped", reason: "stale_generation" });
-        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1" });
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1",
+          observedGeneration: { live: "gen-2", when: "poll" } });
+        // The closing reason says what the poll saw: the generation change.
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain("OpenRig found on a poll that the seat's occupant generation changed from gen-1 to gen-2");
       } finally { f.db.close(); }
     });
 
-    it("a preparing attempt whose occupant can't be read settles nothing", async () => {
+    it("a preparing attempt whose occupant can't be read closes nothing, and its occupant's preparation notice says once that the state is unknown", async () => {
       const f = await withQueue();
       try {
         await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
-        const before = f.reasons().length;
-        f.swap(null);
+        const attempt = f.enforcer.getPreparationState(seat)!;
+        // The occupant's preparation notice from its earlier ended attempts: the reporter's id and tags.
+        const notice = await f.queue.create({ nudge: false, sourceSession: seat, destinationSession: "owner@rig", body: "ended attempts",
+          qitemId: `qitem-compaction-preparation-${createHash("sha256").update(`${seat}\0gen-1`).digest("hex").slice(0, 24)}`,
+          tags: ["compaction", "preparation-delivery", "occupant:gen-1"] });
+        const restore = await f.notice("restore", attempt.attemptId);
+        // A poll while the generation reads: nothing is said.
         f.enforcer.reconcilePreparations();
         await settled();
-        expect(f.reasons()).toHaveLength(before);
+        expect(f.queue.listTransitions(notice!.qitemId).filter(t => t.actorSession === "system:compaction")).toHaveLength(0);
+        f.swap(null);
+        for (let i = 0; i < 2; i++) { f.enforcer.reconcilePreparations(); await settled(); }
+        expect(f.enforcer.getPreparationState(seat)).toMatchObject({ status: "stopped", reason: "stale_generation" });
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "owed_unknown", occupantGeneration: "gen-1" });
+        expect(f.reasons()).not.toContain("occupant_replaced");
+        expect(f.queue.getById(notice!.qitemId)?.state).toBe("pending");
+        const notes = f.queue.listTransitions(notice!.qitemId).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
+        expect(notes).toEqual([expect.stringContaining("the seat's live occupant generation couldn't be read")]);
+        expect(f.queue.getById(restore)?.state).toBe("pending");
       } finally { f.db.close(); }
     });
 

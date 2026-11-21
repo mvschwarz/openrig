@@ -170,7 +170,8 @@ const OPEN_NOTICE_LIMIT = 1000;
 function openNotices(queue: QueueRepository, sourceSession?: string): QueueItem[] {
   const rows = queue.list({ tag: "compaction", state: OPEN_NOTICE_STATES, limit: OPEN_NOTICE_LIMIT, ...(sourceSession ? { sourceSession } : {}) });
   if (rows.length >= OPEN_NOTICE_LIMIT) {
-    console.warn("[compaction] open notices reached the settle limit; older ones wait for the next settle", { limit: OPEN_NOTICE_LIMIT });
+    // Each settle reads the same newest rows, so an older notice isn't reached while those stay open.
+    console.warn("[compaction] open notices reached the settle limit; older notices aren't checked by this settle, or by a later one while the newer ones stay open", { limit: OPEN_NOTICE_LIMIT });
   }
   return rows.filter((item) => noticeKind(item) !== null);
 }
@@ -217,17 +218,26 @@ export function settleCompactionNotices(queue: QueueRepository, ended: Compactio
         }
         break;
       case "occupant_replaced": {
+        // Say what OpenRig saw. An invalidation also precedes a handover or runtime-switch rollback, and a reboot that
+        // adopts the same conversation mints a new generation, so neither alone means the occupant changed.
         const generation = ended.occupantGeneration ?? null;
-        const replaced = `the seat's occupant was replaced${generation ? ` (retiring generation ${generation})` : ""}, and OpenRig dropped this compaction with it; the new occupant doesn't inherit it. If the seat resumed the same conversation, check whether it still needs the restore.`;
+        const observed = ended.observedGeneration;
+        const seen = observed
+          ? `OpenRig found ${observed.when === "restart" ? "after a restart" : "on a poll"} that the seat's occupant generation changed${generation ? ` from ${generation}` : ""} to ${observed.live}, and dropped this compaction with it. That happens when the occupant is replaced, and also on a reboot that adopts the same conversation`
+          : `OpenRig invalidated the seat's occupant state${generation ? ` (retiring generation ${generation})` : ""} and dropped this compaction with it. That happens when the occupant is replaced, and also before a handover or runtime-switch rollback`;
+        const replaced = `${seen}, so it doesn't by itself mean the occupant changed. A next occupant doesn't inherit this compaction. If the seat resumed the same conversation, check whether it still needs the restore.`;
         if (attemptId !== null) closeNotice(queue, item, "canceled", replaced);
         else if (generation === null) {
-          noteOwedUnknown(queue, item, "the seat's occupant was replaced, but the retiring occupant's generation wasn't recorded, so OpenRig can't tell whether this notice was that occupant's. Close it if it was.");
+          noteOwedUnknown(queue, item, "OpenRig invalidated the seat's occupant state, but the retiring occupant's generation wasn't recorded, so OpenRig can't tell whether this notice was that occupant's. Close it if it was.");
         } else if (item.qitemId === preparationNoticeId(sessionName, generation)) closeNotice(queue, item, "canceled", replaced);
         break;
       }
       case "owed_unknown":
         if (attemptId !== null && attemptId === ended.attemptId && kind.kind === "restore") {
           noteOwedUnknown(queue, item, "after a restart OpenRig found this compaction's record older than its recovery window, so it no longer retries these steps, and it can't tell whether the seat still needs them.");
+        } else if (attemptId === null && ended.attemptId === undefined && ended.occupantGeneration
+          && item.qitemId === preparationNoticeId(sessionName, ended.occupantGeneration)) {
+          noteOwedUnknown(queue, item, "a preparation stopped because the seat's live occupant generation couldn't be read, so OpenRig can't tell whether the occupant this notice is about is still in the seat. It stays open.");
         }
         break;
     }

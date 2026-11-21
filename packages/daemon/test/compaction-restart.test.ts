@@ -291,7 +291,7 @@ it.each(['owed','done','ended'])('a restart that finds another occupant settles 
  const restarted=f.daemon(undefined,{onCompactionDebtEnded:ended});
  await stateOf(restarted);await staleTick(restarted);await new Promise(resolve=>setImmediate(resolve));
  expect(f.writes).toHaveLength(sent);
- expect(ended).toHaveBeenCalledWith({sessionName:seat,reason:'occupant_replaced',occupantGeneration:'generation-one'});
+ expect(ended).toHaveBeenCalledWith({sessionName:seat,reason:'occupant_replaced',occupantGeneration:'generation-one',observedGeneration:{live:'generation-two',when:'restart'}});
 });
 
 it("a record in a shape this daemon doesn't write is ignored, so it can't hold up the seat's compaction",async()=>{

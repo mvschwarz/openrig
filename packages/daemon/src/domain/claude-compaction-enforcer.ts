@@ -494,15 +494,20 @@ export interface RestoreUptakeUnknown {
 }
 
 /** #3688: a seat's compaction debt ended without a delivery, so the notices it opened can be settled with the reason.
- *  `owed_unknown`: OpenRig stopped retrying, but can't tell whether the seat still needs the steps. */
+ *  `owed_unknown`: OpenRig stopped retrying, or stopped a preparation whose live generation can't be read, and can't
+ *  tell whether the seat still needs the steps. */
 export interface CompactionDebtEnded {
   sessionName: string;
   reason: "compaction_cancelled" | "attempt_superseded" | "occupant_replaced" | "owed_unknown";
   /** compaction_cancelled: the attempt the cancel ended. attempt_superseded: the new attempt, whose notices stay.
    *  owed_unknown: the attempt OpenRig stopped retrying. */
   attemptId?: string;
-  /** occupant_replaced: the retiring occupant's generation; null when it wasn't recorded. */
+  /** occupant_replaced: the retiring occupant's generation; null when it wasn't recorded. owed_unknown without an
+   *  attemptId: the generation of the occupant the stopped preparation was for. */
   occupantGeneration?: string | null;
+  /** occupant_replaced: the live generation OpenRig found in its place, after a restart or on a poll. Absent: OpenRig
+   *  invalidated the occupant's state (a handover, runtime switch or fresh launch, which may still roll back). */
+  observedGeneration?: { live: string; when: "restart" | "poll" };
 }
 
 export interface RestoreDeliveryFailure {
@@ -2152,9 +2157,12 @@ export class ClaudeCompactionEnforcer {
         ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
       if (generation !== attempt.occupantGeneration) {
         this.stopPreparation(session, "stale_generation");
-        // #3688: only a known, different occupant replaced this attempt's; an unreadable generation settles nothing.
-        if (generation !== null && attempt.occupantGeneration !== null) {
-          this.noticeDebtEnded({ sessionName: session, reason: "occupant_replaced", occupantGeneration: attempt.occupantGeneration });
+        // #3688: only a known, different occupant replaced this attempt's. An unreadable generation closes nothing; the
+        // preparing occupant's notice says the state is now unknown.
+        if (attempt.occupantGeneration !== null) {
+          this.noticeDebtEnded(generation !== null
+            ? { sessionName: session, reason: "occupant_replaced", occupantGeneration: attempt.occupantGeneration, observedGeneration: { live: generation, when: "poll" } }
+            : { sessionName: session, reason: "owed_unknown", occupantGeneration: attempt.occupantGeneration });
         }
       }
       else if (!enabled && (attempt.mode === "automatic" || attempt.policyWasEnabled)) this.stopPreparation(session, "disabled");
@@ -2280,7 +2288,8 @@ export class ClaudeCompactionEnforcer {
     // the invalidator), so this attempt's steps, uptake check and preparation are no longer owed, in any phase. Each
     // branch below already ignores a known other occupant's record.
     if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) {
-      this.noticeDebtEnded({ sessionName: session, reason: "occupant_replaced", occupantGeneration: record.occupantGeneration });
+      this.noticeDebtEnded({ sessionName: session, reason: "occupant_replaced", occupantGeneration: record.occupantGeneration,
+        observedGeneration: { live, when: "restart" } });
       return;
     }
     if (record.phase === "done") {
