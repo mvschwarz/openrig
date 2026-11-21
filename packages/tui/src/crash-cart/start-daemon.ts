@@ -24,23 +24,26 @@ export function runDaemonStart(
     const all = tail + chunk;
     return all.length > DAEMON_START_OUTPUT_TAIL_CHARS ? all.slice(-DAEMON_START_OUTPUT_TAIL_CHARS) : all;
   };
-  const child = spawn(file, args, { cwd: options.cwd });
-  // Like execFile, the timeout drops the pipes before the signal, so a grandchild that inherited them can't hold the
-  // result until it exits.
-  const timer = options.timeout > 0
-    ? setTimeout(() => { killed = true; child.stdout.destroy(); child.stderr.destroy(); child.kill("SIGTERM"); }, options.timeout)
-    : undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const finish = (error: DaemonStartError | null): void => {
     if (done) return;
     done = true;
     if (timer) clearTimeout(timer);
     callback(error, stdout, stderr);
   };
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => { stdout = keepTail(stdout, chunk); });
-  child.stderr.on("data", (chunk: string) => { stderr = keepTail(stderr, chunk); });
+  const child = spawn(file, args, { cwd: options.cwd });
+  // Like execFile, the error handler comes first and each stream is checked: a spawn that fails with EMFILE or ENFILE
+  // returns before creating the stdio streams and emits `error` on the next tick, and that error ends the start.
   child.on("error", (error: DaemonStartError) => finish(error));
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => { stdout = keepTail(stdout, chunk); });
+  child.stderr?.on("data", (chunk: string) => { stderr = keepTail(stderr, chunk); });
+  // Like execFile, the timeout drops the pipes before the signal, so a grandchild that inherited them can't hold the
+  // result until it exits.
+  if (options.timeout > 0) {
+    timer = setTimeout(() => { killed = true; child.stdout?.destroy(); child.stderr?.destroy(); child.kill("SIGTERM"); }, options.timeout);
+  }
   child.on("close", (code, signal) => {
     if (code === 0 && !killed) return finish(null);
     const error: DaemonStartError = new Error(`Command failed: ${[file, ...args].join(" ")}\n${stderr}`);

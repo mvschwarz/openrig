@@ -1,8 +1,28 @@
 import { readFileSync } from "node:fs";
 import * as lifecycleBudget from "../../daemon/src/daemon-shutdown.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { DAEMON_START_OUTPUT_TAIL_CHARS, daemonStartArgs, daemonStartTimeoutMs, runDaemonStart, type DaemonStartError } from "../src/crash-cart/start-daemon.js";
 import { resolveCrashCartKey } from "../src/crash-cart/keys.js";
+
+// #3637: Node's spawn on EMFILE or ENFILE returns a child with no stdio streams and emits `error` on the next tick.
+// The cell below turns that on for one start; every other start in this file runs the real spawn.
+const emfile = vi.hoisted(() => ({ on: false, kills: 0 }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:child_process")>();
+  const { EventEmitter } = await import("node:events");
+  return {
+    ...real,
+    spawn: (...args: Parameters<typeof real.spawn>) => {
+      if (!emfile.on) return real.spawn(...args);
+      const child = Object.assign(new EventEmitter(), {
+        stdout: null, stderr: null, stdin: null, pid: undefined,
+        kill: () => { emfile.kills += 1; return false; },
+      });
+      process.nextTick(() => child.emit("error", Object.assign(new Error("spawn rig EMFILE"), { code: "EMFILE", errno: -24, syscall: "spawn rig" })));
+      return child;
+    },
+  };
+});
 
 describe("local startup target", () => {
   it("starts only the intended local daemon, leaving occupant selection to the user", () => {
@@ -108,6 +128,25 @@ describe("daemon start output", () => {
   it("ends a start that outlives its timeout with SIGTERM", async () => {
     const { error } = await run("setTimeout(() => {}, 60_000)", 200);
     expect(error).toMatchObject({ killed: true, signal: "SIGTERM" });
+  });
+
+  it("ends with the error, once, when the spawn fails before its streams exist (EMFILE)", async () => {
+    emfile.on = true;
+    emfile.kills = 0;
+    try {
+      const calls: Array<DaemonStartError | null> = [];
+      await new Promise<void>((resolve, reject) => {
+        try {
+          runDaemonStart("rig", ["daemon", "start"], { cwd: process.cwd(), timeout: 50 }, (error) => { calls.push(error); resolve(); });
+        } catch (thrown) { reject(thrown); }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));   // past the timeout: the cleared timer never fires
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ code: "EMFILE" });
+      expect(emfile.kills).toBe(0);
+    } finally {
+      emfile.on = false;
+    }
   });
 
   it("returns at the timeout even when a grandchild still holds the output pipes", async () => {
