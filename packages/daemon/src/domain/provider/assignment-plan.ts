@@ -1,10 +1,13 @@
+import { createHash } from "node:crypto";
 import type { ClaudeSeatTokenRef } from "../claude-seat-token.js";
+import type { AssignmentIntent, AssignmentResultKind } from "./provider-account-assignments.js";
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
 import type { SeatAccountConfiguration } from "./provider-types.js";
 
 // #3625 slice 2: the plan for moving one rig's seats of one provider to an account this daemon knows by label. Computed
 // from what the daemon already has: each seat's configured account and its own choices, the per-seat precheck (read
-// only), the seat's activity, and the Codex home each Codex seat runs on. It changes nothing: applying arrives later.
+// only), the seat's activity, and the Codex home each Codex seat runs on. It changes nothing. Slice 3: it carries a digest
+// of what it would do, which an apply must name, and shows the rig's stored assignment and each seat's last result.
 
 /** What the daemon knows about one seat, on any rig (other rigs matter for Codex seats sharing a home). */
 export interface PlanSeatFacts {
@@ -22,6 +25,10 @@ export interface PlanSeatFacts {
   /** A Claude seat's process is running (it switches in place) or stopped (its next launch picks the account up). */
   running: boolean | null;
   activity: "running" | "needs_input" | "idle" | "unknown";
+  /** The seat's configuration is still what an earlier apply gave it: it follows an assignment, so it isn't an override. */
+  followsAssignment?: boolean;
+  /** The seat's latest applied result. */
+  lastResult?: { kind: AssignmentResultKind; label: string; detail: string; at: string } | null;
 }
 
 export interface AssignmentPlanInput {
@@ -36,6 +43,8 @@ export interface AssignmentPlanInput {
   platform: NodeJS.Platform;
   /** How two homes are compared: resolved, so a trailing slash or a link to the same directory is the same home. */
   resolveHome?: (home: string) => string;
+  /** The rig's stored assignment for this provider, if an apply has started one. */
+  intent?: AssignmentIntent | null;
 }
 
 /** A seat's check before it changes: the existing per-seat precheck, or, for a fresh successor, the account-home dry run. */
@@ -55,6 +64,8 @@ export interface PlanRow {
   continuity?: string;
   activity: PlanSeatFacts["activity"];
   notes?: string[];
+  /** The seat's latest applied result, from any earlier apply. */
+  lastResult?: { kind: AssignmentResultKind; label: string; detail: string; at: string };
 }
 
 export interface PlanHomePeer {
@@ -73,11 +84,28 @@ export interface AssignmentPlan {
   rows: PlanRow[];
   /** Codex: one switch per home, with every seat on it, in this rig or not. */
   codexHomes: Array<{ home: string; seats: PlanHomePeer[] }>;
+  /** The rig's stored assignment for this provider. */
+  intent?: { label: string; reference: string; requestedBy: string | null; at: string };
+  /** What the plan would do, hashed: `--apply --plan <digest>` acts only while it's the same. */
+  digest: string;
   note: string;
 }
 
 const RUNTIME_OF: Record<AccountRefProvider, string> = { claude: "claude-code", codex: "codex" };
-const NOTHING_CHANGED = "A plan only: nothing was changed. Applying it arrives in a later change.";
+const NOTHING_CHANGED = "A plan only: nothing was changed. Apply exactly this plan with --apply --plan <digest>.";
+
+/** The digest of what a plan would do. Left out, because they move on their own: each seat's activity, the notes (which
+ *  carry the busy note), precheck messages, the last results and the stored assignment. */
+export function planDigest(plan: Omit<AssignmentPlan, "digest">): string {
+  const material = {
+    daemon: plan.daemon, rig: plan.rig, provider: plan.provider, account: plan.account, includeOverrides: plan.includeOverrides,
+    accountHome: plan.accountHome ?? null,
+    rows: plan.rows.map((r) => [r.seat, r.runtime, r.current, r.effect, r.override ?? null,
+      r.precheck ? [r.precheck.safe, [...r.precheck.reasons].sort()] : null, r.continuity ?? null]),
+    codexHomes: plan.codexHomes.map((h) => [h.home, h.seats.map((s) => [s.seat, s.rig, s.effect])]),
+  };
+  return createHash("sha256").update(JSON.stringify(material)).digest("hex").slice(0, 12);
+}
 
 export function describeAccountRef(account: AccountRef): string {
   return account.kind === "codex_saved_login" ? `the login ${account.login} saved in ${account.codexHome}`
@@ -100,6 +128,7 @@ const sameHome = (input: AssignmentPlanInput, a: string | null, b: string | null
 /** The seat's own choice for another account, or null when it has none (or its choice is the target). */
 function seatOverride(seat: PlanSeatFacts, input: AssignmentPlanInput): string | null {
   const { account } = input;
+  if (seat.followsAssignment) return null;
   if (seat.ownHome && seat.ownHome.source !== "rig" && !sameHome(input, seat.ownHome.home, account.codexHome)) {
     return seat.ownHome.source === "account-switch" ? `its account home ${seat.ownHome.home}` : `its own home ${seat.ownHome.home} (member env)`;
   }
@@ -176,7 +205,8 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
   const rows: PlanRow[] = [];
   for (const d of decisions) {
     const { seat } = d;
-    const base = { seat: seat.session, runtime: seat.runtime, current: describeConfigured(seat.configured), activity: seat.activity };
+    const base = { seat: seat.session, runtime: seat.runtime, current: describeConfigured(seat.configured), activity: seat.activity,
+      ...(seat.lastResult ? { lastResult: seat.lastResult } : {}) };
     if (d.effect !== "change") {
       rows.push({ ...base, effect: d.effect, ...(d.override ? { override: d.override } : {}), ...(d.notes ? { notes: d.notes } : {}) });
       continue;
@@ -205,10 +235,13 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
         effect: s.rigName === input.rig ? "would restart" : `not restarted; needs rig seat restart ${s.session}` })) });
   }
 
-  return {
+  const plan: Omit<AssignmentPlan, "digest"> = {
     daemon: input.daemon, rig: input.rig, provider: account.provider,
     account: { label: account.label, kind: account.kind, reference: describeAccountRef(account) },
     includeOverrides: input.includeOverrides, ...(input.accountHome ? { accountHome: input.accountHome } : {}),
-    rows, codexHomes, note: NOTHING_CHANGED,
+    rows, codexHomes,
+    ...(input.intent ? { intent: { label: input.intent.label, reference: input.intent.reference, requestedBy: input.intent.requestedBy, at: input.intent.at } } : {}),
+    note: NOTHING_CHANGED,
   };
+  return { ...plan, digest: planDigest(plan) };
 }

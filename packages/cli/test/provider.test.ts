@@ -534,7 +534,7 @@ describe("rig provider account add|list|remove (#3625)", () => {
   });
 });
 
-describe("rig provider assign (#3625 slice 2: the plan)", () => {
+describe("rig provider assign (#3625 slices 2 and 3: the plan, and applying it)", () => {
   let server: http.Server;
   let port: number;
   const seen: string[] = [];
@@ -549,8 +549,20 @@ describe("rig provider assign (#3625 slice 2: the plan)", () => {
       { seat: "cl@fleet", runtime: "claude-code", current: "the login in /h/.claude", effect: "not_affected", activity: "idle", notes: ["a claude-code seat: a codex assignment doesn't touch it"] },
     ],
     codexHomes: [{ home: "/homes/a", seats: [{ seat: "c1@fleet", rig: "fleet", effect: "would restart" }, { seat: "p@other", rig: "other", effect: "not restarted; needs rig seat restart p@other" }] }],
-    note: "A plan only: nothing was changed. Applying it arrives in a later change.",
+    intent: { label: "team", reference: "the login team saved in /homes/a", requestedBy: "lead@fleet", at: "2026-11-21T07:00:00.000Z" },
+    digest: "0123456789ab",
+    note: "A plan only: nothing was changed.",
   };
+  PLAN.rows[2] = { ...PLAN.rows[2]!, lastResult: { kind: "switched", label: "team", detail: "restarted in place", at: "2026-11-21T07:00:00.000Z" } } as never;
+  const REPORT = { daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", reference: "the login team saved in /homes/a" }, digest: "0123456789ab",
+    results: [
+      { seat: "c1@fleet", kind: "switched", detail: "Restarted c1@fleet in place on \"team\"", activity: "running", at: "t" },
+      { seat: "c2@fleet", kind: "unchanged", detail: "kept (seat override): the saved login other (seat registry)", activity: "idle", at: "t" },
+      { seat: "c4@fleet", kind: "unknown", detail: "skipped: home outcome unknown", recovery: "rig seat restart c4@fleet --keep-conversation", activity: "idle", at: "t" },
+    ],
+    otherRigPeers: [{ seat: "p@other", rig: "other", home: "/homes/a", command: "rig seat restart p@other --keep-conversation" }],
+  };
+  const posted: unknown[] = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -558,6 +570,17 @@ describe("rig provider assign (#3625 slice 2: the plan)", () => {
       const reply = (status: number, data: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
       if (req.url?.includes("account=nope")) return reply(404, { ok: false, code: "unknown_account", message: "There's no codex account labelled nope on this daemon (rig provider account list --provider codex lists them)." });
       if (req.url?.startsWith("/api/provider/assignment-plan")) return reply(200, { ok: true, plan: PLAN });
+      if (req.url === "/api/provider/assignment-apply") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => {
+          const parsed = JSON.parse(body) as { plan: string };
+          posted.push(parsed);
+          if (parsed.plan === "ffffffffffff") return reply(409, { ok: false, code: "plan_changed", digest: "0123456789ab", message: "The plan for rig fleet changed since plan ffffffffffff was shown. Nothing changed." });
+          reply(200, { ok: true, report: REPORT });
+        });
+        return;
+      }
       reply(404, { error: "not found" });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -570,16 +593,18 @@ describe("rig provider assign (#3625 slice 2: the plan)", () => {
     expect(result.exitCode).toBeFalsy();
     expect(seen.at(-1)).toBe("GET /api/provider/assignment-plan?rig=fleet&provider=codex&account=team&includeOverrides=1&accountHome=%2Fprepared");
     expect(result.logs).toEqual([
-      "Plan on host-a: rig fleet's codex seats to team (the login team saved in /homes/a).",
+      "Plan 0123456789ab on host-a: rig fleet's codex seats to team (the login team saved in /homes/a).",
+      "The rig's codex assignment: team (the login team saved in /homes/a), applied 2026-11-21T07:00:00.000Z by lead@fleet.",
       "c1@fleet: from the login in /homes/a; precheck safe; in place: the seat restarts on the same conversation; activity running",
       "  busy (working): a switch interrupts work in flight",
       "c2@fleet: kept (seat override): the saved login other (seat registry); --include-overrides moves it too",
       "c3@fleet: unchanged, already on team",
+      "  last applied: switched (team, 2026-11-21T07:00:00.000Z): restarted in place",
       "cl@fleet: not affected (a claude-code seat: a codex assignment doesn't touch it)",
       "Codex home /homes/a: one switch; every seat on it:",
       "  c1@fleet (rig fleet): would restart",
       "  p@other (rig other): not restarted; needs rig seat restart p@other",
-      "A plan only: nothing was changed. Applying it arrives in a later change.",
+      "A plan only: nothing was changed. Apply exactly this plan with: rig provider assign fleet --provider codex --account team --include-overrides --account-home /prepared --apply --plan 0123456789ab",
     ]);
   });
 
@@ -603,13 +628,53 @@ describe("rig provider assign (#3625 slice 2: the plan)", () => {
     expect(seen.length).toBe(before);
   });
 
-  it("has no --apply yet: applying arrives in a later change", async () => {
+  it("--apply --plan applies the reviewed plan and prints each seat's result; a failed or unknown seat exits 1", async () => {
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], runningDeps(port));
+    expect(posted.at(-1)).toEqual({ rig: "fleet", provider: "codex", account: "team", plan: "0123456789ab" });
+    expect(result.logs).toEqual([
+      "Applied plan 0123456789ab on host-a: rig fleet's codex seats to team (the login team saved in /homes/a).",
+      'c1@fleet: switched: Restarted c1@fleet in place on "team"',
+      "  it was working when it was reached: work in flight, including background commands, didn't carry over",
+      "c2@fleet: unchanged: kept (seat override): the saved login other (seat registry)",
+      "c4@fleet: unknown: skipped: home outcome unknown",
+      "  recovery: rig seat restart c4@fleet --keep-conversation",
+      "p@other (rig other): not restarted; it shares /homes/a, so restart it yourself: rig seat restart p@other --keep-conversation",
+      "Each result is reported on its own: nothing was rolled back or retried.",
+    ]);
+    expect(result.exitCode).toBe(1);
+    const json = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab", "--json"], runningDeps(port));
+    expect(JSON.parse(json.logs[0]!)).toEqual({ ok: true, report: REPORT });
+  });
+
+  it("a plan that changed is refused with the daemon's reason, and nothing changed", async () => {
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "ffffffffffff"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs).toEqual(["The plan for rig fleet changed since plan ffffffffffff was shown. Nothing changed."]);
+  });
+
+  it.each([
+    [["--apply"], "--apply needs --plan <digest>"],
+    [["--plan", "0123456789ab"], "--plan names the plan to apply: add --apply"],
+    [["--apply", "--plan", "abc"], "--plan is the 12-character digest the plan showed"],
+  ])("checks --apply and --plan before asking: %j", async (flags, message) => {
     const before = seen.length;
-    const errors: string[] = [];
-    const cmd = providerCommand(runningDeps(port));
-    cmd.exitOverride().configureOutput({ writeErr: (s) => errors.push(s) });
-    for (const sub of cmd.commands) sub.exitOverride().configureOutput({ writeErr: (s) => errors.push(s) });
-    await expect(cmd.parseAsync(["node", "rig", "assign", "fleet", "--provider", "codex", "--account", "team", "--apply"])).rejects.toThrow(/unknown option/);
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", ...flags], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain(message);
     expect(seen.length).toBe(before);
+  });
+
+  it("waits 120 s for each seat that changes; a timeout says the apply may still be running, and how to see its results", async () => {
+    let waited: number | undefined;
+    const deps = { ...runningDeps(1), clientFactory: () => ({
+      get: async () => ({ status: 200, data: { ok: true, plan: PLAN } }),
+      post: async (_p: string, _b: unknown, o?: { timeoutMs?: number }) => { waited = o?.timeoutMs; throw new DaemonTimeoutError("timed out"); },
+    }) as never };
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], deps);
+    // PLAN has one seat that changes.
+    expect(waited).toBe(150_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain("The apply may still be running, seat by seat, so don't run it again");
+    expect(result.logs.join("\n")).toContain("rig provider assign fleet --provider codex --account team");
   });
 });

@@ -24,7 +24,7 @@ import type { CodexUsageWindows } from "./codex-usage-windows.js";
 import type { ClaudeUsageWindows } from "./claude-usage-windows.js";
 import type { UsageRefreshResult } from "./usage-windows.js";
 import type {
-  AssignmentPlanRequest,
+  AssignmentApplyRequest, AssignmentApplyResult, AssignmentApplyTools, AssignmentPlanRequest,
   AssignmentPlanResult,
   ProviderService,
   ProviderPrecheckInput,
@@ -36,7 +36,9 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
-import { planAssignment, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
+import { planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
+import { applyAssignment } from "./assignment-apply.js";
+import { ProviderAccountAssignmentsRepository } from "./provider-account-assignments.js";
 import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef } from "./provider-account-refs.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
@@ -72,6 +74,8 @@ const codexHomeLogins: CodexHomeLogins = {
 /** One seat switch at a time per Codex home in this daemon: a switch's save, activation and restart finish before the
  *  next switch on that home starts, so each restart loads the login its receipt names. */
 const switchesByHome = new Map<string, Promise<unknown>>();
+/** #3625: the rigs an assignment is being applied to now. In memory, so a daemon restart can't leave a rig locked. */
+const applying = new Set<string>();
 
 function oneSwitchPerHome<T>(home: string, run: (waited: boolean) => Promise<T>): Promise<T> {
   let key = home;
@@ -244,6 +248,61 @@ export class ProviderServiceImpl implements ProviderService {
    *  per-seat precheck it runs reads the seat (a Codex seat's restart plan stops nothing). */
   async assignmentPlan(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch,
     successorCheck?: (seat: string, accountHome: string) => Promise<PlanCheck>): Promise<AssignmentPlanResult> {
+    const planned = await this.planFor(input, { seatRestart, claudeSeat, successorCheck });
+    return planned.ok ? { ok: true, plan: planned.plan } : planned;
+  }
+
+  /** #3625 slice 3: the plan again, and if its digest is the one the person saw, each seat through the existing switch.
+   *  One apply per rig at a time; the assignment is stored when it starts, and each result as it lands. */
+  async applyAssignment(input: AssignmentApplyRequest, tools: AssignmentApplyTools): Promise<AssignmentApplyResult> {
+    const planned = await this.planFor(input, tools);
+    if (!planned.ok) return planned;
+    const { plan, account, rigId, nodeOf } = planned;
+    if (applying.has(rigId)) {
+      return { ok: false, code: "apply_in_progress", message: `An assignment is already being applied to rig ${input.rig} on this daemon. Nothing changed; its results show in the plan as they land.` };
+    }
+    if (plan.digest !== input.digest) {
+      return { ok: false, code: "plan_changed", digest: plan.digest,
+        message: `The plan for rig ${input.rig} changed since plan ${input.digest} was shown (it's ${plan.digest} now): a seat, its account, a precheck or a shared home is different. `
+          + `Nothing changed. Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+    }
+    applying.add(rigId);
+    try {
+      const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
+      const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
+      assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
+      const report = await applyAssignment(plan, account, {
+        switchSeat: (seat) => this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat),
+        restartPeer: async (seat, reason) => {
+          if (!tools.seatRestart) return { ok: false, code: "restart_unavailable", message: "The seat's restart isn't available here." };
+          const r = await tools.seatRestart.run(seat, reason);
+          return r.ok ? { ok: true, ...("outcome" in r && r.outcome ? { outcome: r.outcome } : {}), message: r.message,
+            ...("recoveryCommand" in r && typeof r.recoveryCommand === "string" ? { recoveryCommand: r.recoveryCommand } : {}),
+            ...("remainingStep" in r && typeof r.remainingStep === "string" ? { remainingStep: r.remainingStep } : {}) }
+            : { ok: false, code: r.code, message: r.message };
+        },
+        ...(tools.successor ? { successor: tools.successor } : {}),
+        activityOf: (seat) => this.activityOf(nodeOf.get(seat)?.nodeId ?? "", seat, nodeOf.get(seat)?.runtime ?? ""),
+        save: (result, applied) => assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
+          label: input.label, kind: result.kind, detail: result.detail, recovery: result.recovery ?? null, activity: result.activity, at: result.at,
+          ...(applied ? { applied } : {}) }),
+        now,
+      });
+      return { ok: true, report };
+    } finally {
+      applying.delete(rigId);
+    }
+  }
+
+  private activityOf(nodeId: string, session: string, runtime: string): PlanSeatFacts["activity"] {
+    return this.deps.agentActivityStore?.getLatestForNode({ nodeId, sessionName: session, now: new Date(),
+      order: runtime === "claude-code" ? "source" : "arrival" })?.state ?? "unknown";
+  }
+
+  private async planFor(input: AssignmentPlanRequest, tools: AssignmentApplyTools): Promise<
+    | { ok: true; plan: AssignmentPlan; account: AccountRef; rigId: string; nodeOf: Map<string, { nodeId: string; runtime: string }> }
+    | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string }> {
+    const { seatRestart, claudeSeat, successorCheck } = tools;
     const account = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
     if (!account) {
       return { ok: false, code: "unknown_account", message: `There's no ${input.provider} account labelled ${input.label} on this daemon (rig provider account list --provider ${input.provider} lists them).` };
@@ -255,36 +314,49 @@ export class ProviderServiceImpl implements ProviderService {
       : { provider: "claude", label: account.label, tokenFile: account.file! });
     if (problem) return { ok: false, code: "reference_unusable", message: `${input.label}'s reference no longer checks out: ${problem.message.replace(/ Nothing was stored\.$/, "")}` };
     const entries = this.seatEntries();
-    if (!entries.some(({ seat }) => seat.rigName === input.rig)) {
+    const inRig = entries.find(({ seat }) => seat.rigName === input.rig);
+    if (!inRig) {
       return { ok: false, code: "unknown_rig", message: `There's no rig named ${input.rig} with seats on this daemon (rig ps lists them).` };
     }
+    const rigId = (this.deps.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(inRig.nodeId) as { rig_id: string }).rig_id;
+    const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
+    const results = new Map(assignments.results(rigId, input.provider).map((r) => [r.nodeId, r]));
     const homes = this.homes();
     const configured = configuredSeatAccounts({ seats: entries.map(({ seat }) => seat), auth: readCodexAuthMetadata(this.deps.env ?? process.env),
       usage: [], claudeSamples: null, ...homes });
-    const now = new Date();
+    const nodeOf = new Map<string, { nodeId: string; runtime: string }>();
     const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => {
+      if (seat.rigName === input.rig) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
       const own = Object.hasOwn(RUNTIME_HOME_VAR, seat.runtime) ? seatRuntimeHome(this.deps.db, nodeId, seat.runtime as HomeRuntime) : {};
-      const activity = this.deps.agentActivityStore?.getLatestForNode({ nodeId, sessionName: seat.seatSession, now,
-        order: seat.runtime === "claude-code" ? "source" : "arrival" })?.state ?? "unknown";
+      const claudeRef = seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null;
+      const seatConfigured = configured[index]?.configured ?? null;
+      const ownHome = own.home && own.source ? { home: own.home, source: own.source } : null;
+      const last = seat.rigName === input.rig ? results.get(nodeId) : undefined;
+      // The seat's choice is still what an apply gave it: it follows the rig's assignment, so it isn't the seat's own.
+      const a = last?.applied;
+      const follows = !!a && ((claudeRef !== null && a.file === claudeRef.tokenFile && (a.fileKind === "api-key") === (claudeRef.kind === "api-key"))
+        || (ownHome?.source === "account-switch" && a.codexHome === ownHome.home && a.codexLogin === null)
+        || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin));
       return {
         session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
-        configured: configured[index]?.configured ?? null,
-        claudeRef: seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null,
-        ownHome: own.home && own.source ? { home: own.home, source: own.source } : null,
+        configured: seatConfigured, claudeRef, ownHome,
         codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
         running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
-        activity,
+        activity: this.activityOf(nodeId, seat.seatSession, seat.runtime),
+        ...(follows ? { followsAssignment: true } : {}),
+        ...(last ? { lastResult: { kind: last.kind, label: last.label, detail: last.detail, at: last.at } } : {}),
       };
     });
     const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
-      resolveHome: (home) => { try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); } } },
+      resolveHome: (home) => { try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); } },
+      intent: assignments.intent(rigId, input.provider) },
     // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
     (seat) => input.accountHome && account.provider === "codex"
       ? successorCheck ? successorCheck(seat.session, input.accountHome)
         : Promise.resolve({ safe: false, reasons: ["successor_not_checked"], message: "The account-home dry run isn't available here, so the move wasn't checked." })
       : this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat));
-    return { ok: true, plan };
+    return { ok: true, plan, account, rigId, nodeOf };
   }
 
   async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {

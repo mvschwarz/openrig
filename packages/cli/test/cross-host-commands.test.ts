@@ -808,6 +808,17 @@ describe("provider account --host (runs on that machine's SSH entry)", () => {
       { ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect to host: Connection refused" } as CrossHostResult);
     expect(captured.stderrLines.join("\n")).not.toContain("remote-outcome-unknown");
     expect(process.exitCode).toBe(1);
+
+    // Applying changes seats there: it forwards the digest, and a lost connection is an unknown outcome naming the plan,
+    // which shows each seat's last result.
+    ran = [];
+    await plan(["assign", "fleet", "--provider", "claude", "--account", "max-2", "--apply", "--plan", "0123456789ab", "--host", "vm-a"]);
+    expect(ran[0]!.argv).toEqual(["rig", "provider", "assign", "fleet", "--provider", "claude", "--account", "max-2", "--apply", "--plan", "0123456789ab"]);
+    captured.stderrLines.length = 0;
+    await plan(["assign", "fleet", "--provider", "claude", "--account", "max-2", "--apply", "--plan", "0123456789ab", "--host", "vm-a"],
+      { ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect to host: Connection refused" } as CrossHostResult);
+    expect(captured.stderrLines.join("\n")).toContain("remote-outcome-unknown");
+    expect(captured.stderrLines.join("\n")).toContain("rig provider assign fleet --provider claude --account max-2 --host vm-a");
   });
 
   it("an HTTP entry can't run it, and a bad option is refused here; neither runs anything", async () => {

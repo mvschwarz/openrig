@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { accountLabelProblem, claudeSeatTokenFileProblem, claudeSeatTokenRefProblem } from "../claude-seat-token.js";
 import { authList, resolveCodexHome, validateProfileName } from "../codex-auth.js";
+import { ProviderAccountAssignmentsRepository } from "./provider-account-assignments.js";
 
 // #3625 (slice 1): the accounts this daemon knows by the operator's label, each with a reference that is local to this
 // daemon's host: a Claude token or API-key file's absolute path, or a Codex home and the name of a login saved in it.
@@ -126,10 +127,10 @@ const fromRow = (row: AccountRefRow): AccountRef => ({
   createdAt: row.created_at,
 });
 
-/** What uses an account label: the rigs assigned to it. Nothing stores an assignment yet (that arrives with applying
- *  one), so no label is in use; this is the one place that answers it. */
-export function accountRefUses(_db: Database.Database): (provider: AccountRefProvider, label: string) => string[] {
-  return () => [];
+/** What uses an account label: the rigs assigned to it, each named as "rig <name> (<provider>)". */
+export function accountRefUses(db: Database.Database): (provider: AccountRefProvider, label: string) => string[] {
+  const assignments = new ProviderAccountAssignmentsRepository(db);
+  return (provider, label) => assignments.rigsUsing(provider, label).map((rig) => `rig ${rig} (${provider})`);
 }
 
 export interface ProviderAccountRefsOptions {

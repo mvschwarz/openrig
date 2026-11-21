@@ -980,40 +980,65 @@ that machine. Only the command and its output cross the connection.`);
       console.log(`Removed the ${opts.provider} account ${label}. Its ${res.data.account?.kind === "codex_saved_login" ? "saved login" : "file"} is left as it is, and seats already switched to it keep their own reference.`);
     });
 
-  // #3625 slice 2: the plan for moving a rig's seats of one provider to an account, computed by the daemon that runs the
-  // rig. It changes nothing.
+  // #3625: the plan for moving a rig's seats of one provider to an account, computed by the daemon that runs the rig
+  // (slice 2, it changes nothing), and applying exactly that plan, named by its digest (slice 3).
   type PlanRow = { seat: string; runtime: string; current: string; effect: "change" | "unchanged" | "kept_override" | "not_affected";
-    override?: string; precheck?: { safe: boolean; reasons: string[]; message?: string }; continuity?: string; activity: string; notes?: string[] };
+    override?: string; precheck?: { safe: boolean; reasons: string[]; message?: string }; continuity?: string; activity: string; notes?: string[];
+    lastResult?: { kind: string; label: string; detail: string; at: string } };
   type Plan = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; includeOverrides: boolean;
-    accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; effect: string }> }>; note: string };
-  const printPlan = (plan: Plan) => {
-    console.log(`Plan on ${plan.daemon}: rig ${plan.rig}'s ${plan.provider} seats to ${plan.account.label} (${plan.account.reference})`
+    accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; effect: string }> }>;
+    intent?: { label: string; reference: string; requestedBy: string | null; at: string }; digest: string; note: string };
+  type ApplyReport = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; digest: string;
+    results: Array<{ seat: string; kind: string; detail: string; recovery?: string; activity: string; at: string }>;
+    otherRigPeers: Array<{ seat: string; rig: string; home: string; command: string }> };
+  const kindWords = (kind: string) => kind.replace(/_/g, "-");
+  const printPlan = (plan: Plan, again: string) => {
+    console.log(`Plan ${plan.digest} on ${plan.daemon}: rig ${plan.rig}'s ${plan.provider} seats to ${plan.account.label} (${plan.account.reference})`
       + `${plan.accountHome ? `, as fresh successors on ${plan.accountHome}` : ""}.`);
+    if (plan.intent) {
+      console.log(`The rig's ${plan.provider} assignment: ${plan.intent.label} (${plan.intent.reference}), applied ${plan.intent.at}${plan.intent.requestedBy ? ` by ${plan.intent.requestedBy}` : ""}.`);
+    }
     for (const row of plan.rows) {
+      const last = row.lastResult ? `  last applied: ${kindWords(row.lastResult.kind)} (${row.lastResult.label}, ${row.lastResult.at}): ${row.lastResult.detail}` : null;
       if (row.effect === "not_affected") { console.log(`${row.seat}: not affected (${(row.notes ?? []).join("; ")})`); continue; }
-      if (row.effect === "unchanged") { console.log(`${row.seat}: unchanged, already on ${plan.account.label}`); continue; }
-      if (row.effect === "kept_override") { console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`); continue; }
-      const check = row.precheck?.safe ? "precheck safe" : `precheck UNSAFE: ${(row.precheck?.reasons ?? []).join(", ")}`;
-      console.log(`${row.seat}: from ${row.current}; ${check}; ${row.continuity}; activity ${row.activity}`);
-      if (row.override) console.log(`  overrides ${row.override}`);
-      if (row.precheck?.message) console.log(`  ${row.precheck.message}`);
-      for (const note of row.notes ?? []) console.log(`  ${note}`);
+      if (row.effect === "unchanged") console.log(`${row.seat}: unchanged, already on ${plan.account.label}`);
+      else if (row.effect === "kept_override") console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`);
+      else {
+        const check = row.precheck?.safe ? "precheck safe" : `precheck UNSAFE: ${(row.precheck?.reasons ?? []).join(", ")}`;
+        console.log(`${row.seat}: from ${row.current}; ${check}; ${row.continuity}; activity ${row.activity}`);
+        if (row.override) console.log(`  overrides ${row.override}`);
+        if (row.precheck?.message) console.log(`  ${row.precheck.message}`);
+        for (const note of row.notes ?? []) console.log(`  ${note}`);
+      }
+      if (last) console.log(last);
     }
     for (const group of plan.codexHomes) {
       console.log(`Codex home ${group.home}: one switch; every seat on it:`);
       for (const peer of group.seats) console.log(`  ${peer.seat} (rig ${peer.rig}): ${peer.effect}`);
     }
-    console.log(plan.note);
+    console.log(`A plan only: nothing was changed. Apply exactly this plan with: ${again} --apply --plan ${plan.digest}`);
+  };
+  const printApply = (report: ApplyReport) => {
+    console.log(`Applied plan ${report.digest} on ${report.daemon}: rig ${report.rig}'s ${report.provider} seats to ${report.account.label} (${report.account.reference}).`);
+    for (const r of report.results) {
+      console.log(`${r.seat}: ${kindWords(r.kind)}: ${r.detail}`);
+      if (r.activity === "running" || r.activity === "needs_input") console.log(`  it was ${r.activity === "running" ? "working" : "waiting for input"} when it was reached: work in flight, including background commands, didn't carry over`);
+      if (r.recovery) console.log(`  recovery: ${r.recovery}`);
+    }
+    for (const p of report.otherRigPeers) console.log(`${p.seat} (rig ${p.rig}): not restarted; it shares ${p.home}, so restart it yourself: ${p.command}`);
+    console.log("Each result is reported on its own: nothing was rolled back or retried.");
   };
 
   cmd
     .command("assign <rig>")
-    .description("The plan for moving a rig's seats of one provider to an account this daemon knows by label; nothing changes")
+    .description("Plan moving a rig's seats of one provider to an account this daemon knows by label, then apply that plan")
     .option("--provider <p>", "claude or codex: a mixed rig gets one assignment per provider")
     .option("--account <label>", "The account's label (rig provider account list)")
     .option("--include-overrides", "Also move seats with their own choice of account; by default they're kept and shown")
     .option("--account-home <dir>", "Codex: move the seats to this prepared home as fresh successors with a handover, instead of in place")
-    .option("--host <id>", "Plan on that registered machine instead, over its SSH entry; the rig and account are that daemon's")
+    .option("--apply", "Carry out the plan, one seat at a time; needs --plan with the digest the plan showed")
+    .option("--plan <digest>", "The digest of the plan you reviewed: apply acts only while the plan is still the same")
+    .option("--host <id>", "Plan or apply on that registered machine instead, over its SSH entry; the rig and account are that daemon's")
     .option("--json", "Output as parseable JSON")
     .addHelpText("after", `
 The daemon that runs the rig computes the plan from what it already has, and changes nothing: one row per seat, with its
@@ -1024,28 +1049,68 @@ A Codex seat switches in place only on Linux, by changing its Codex home's activ
 with it: the plan lists each one, in this rig ("would restart") or not ("not restarted; needs rig seat restart <seat>").
 Elsewhere it reads "unsupported in place"; name a prepared home with --account-home to move it as a fresh successor
 with a handover instead. Nothing falls back to that by itself.
-A configured account is what a seat's next launch uses, not proof of the login a running session uses.`)
-    .action(async (rig: string, opts: { provider?: string; account?: string; includeOverrides?: boolean; accountHome?: string; host?: string; json?: boolean }) => {
+A configured account is what a seat's next launch uses, not proof of the login a running session uses.
+
+--apply --plan <digest> computes the plan again and refuses, changing nothing, unless it's the one you reviewed. It then
+stores the rig's assignment and moves each seat through the existing switch, one at a time, reporting each result as
+unchanged, switched, pending-successor, unsupported, failed-before-effect or unknown. A failure doesn't stop the other
+seats; nothing is rolled back or retried, and an unknown result names its recovery command. After an unknown on a Codex
+home, that home's other seats are skipped. Seats in other rigs on a switched home are listed, never restarted.
+The plan shows the rig's assignment and each seat's last result afterwards. It exits 1 when any seat failed or is unknown.`)
+    .action(async (rig: string, opts: { provider?: string; account?: string; includeOverrides?: boolean; accountHome?: string; apply?: boolean; plan?: string;
+      host?: string; json?: boolean }) => {
       const problem = providerProblem(opts.provider, true) ?? (opts.account ? null : "Name the account: --account <label> (rig provider account list).")
-        ?? (opts.accountHome !== undefined && opts.provider !== "codex" ? "--account-home is for Codex seats." : null);
+        ?? (opts.accountHome !== undefined && opts.provider !== "codex" ? "--account-home is for Codex seats." : null)
+        ?? (opts.apply && !opts.plan ? "--apply needs --plan <digest>: the digest the plan showed. Run the plan first and review it." : null)
+        ?? (opts.plan !== undefined && !opts.apply ? "--plan names the plan to apply: add --apply." : null)
+        ?? (opts.plan !== undefined && !/^[0-9a-f]{12}$/.test(opts.plan) ? "--plan is the 12-character digest the plan showed." : null);
       if (problem) return refusal(`${problem} Nothing changed.`);
+      const again = `rig provider assign ${rig} --provider ${opts.provider} --account ${opts.account}${opts.includeOverrides ? " --include-overrides" : ""}`
+        + `${opts.accountHome !== undefined ? ` --account-home ${opts.accountHome}` : ""}`;
       if (opts.host) {
         return onHost(opts.host, ["provider", "assign", rig, "--provider", opts.provider!, "--account", opts.account!,
           ...(opts.includeOverrides ? ["--include-overrides"] : []), ...(opts.accountHome !== undefined ? ["--account-home", opts.accountHome] : []),
-          ...(opts.json ? ["--json"] : [])], { json: opts.json });
+          ...(opts.apply ? ["--apply", "--plan", opts.plan!] : []), ...(opts.json ? ["--json"] : [])],
+        { json: opts.json, ...(opts.apply ? { changes: `${again} --host ${opts.host} (its plan shows each seat's last result)` } : {}) });
       }
       const client = await getClient(getDeps());
       if (!client) { process.exitCode = 1; return; }
       const qs = new URLSearchParams({ rig, provider: opts.provider!, account: opts.account!,
         ...(opts.includeOverrides ? { includeOverrides: "1" } : {}), ...(opts.accountHome !== undefined ? { accountHome: opts.accountHome } : {}) });
       const res = await client.get<{ ok: boolean; plan?: Plan; code?: string; message?: string }>(`/api/provider/assignment-plan?${qs.toString()}`);
-      if (opts.json) {
-        console.log(JSON.stringify(res.data));
-        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+      if (!opts.apply) {
+        if (opts.json) {
+          console.log(JSON.stringify(res.data));
+          if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+          return;
+        }
+        if (handleHttpError(res, "assignment plan")) return;
+        printPlan(res.data.plan!, again);
         return;
       }
-      if (handleHttpError(res, "assignment plan")) return;
-      printPlan(res.data.plan!);
+      // The plan is read first only to size the wait: the daemon checks the digest itself.
+      const changing = res.data.plan?.rows.filter((r) => r.effect === "change").length ?? 1;
+      type ApplyResponse = { status: number; data: { ok: boolean; report?: ApplyReport; code?: string; message?: string; digest?: string } };
+      let applied: ApplyResponse;
+      try {
+        applied = await client.post<ApplyResponse["data"]>("/api/provider/assignment-apply", { rig, provider: opts.provider, account: opts.account,
+          plan: opts.plan, ...(opts.includeOverrides ? { includeOverrides: true } : {}), ...(opts.accountHome !== undefined ? { accountHome: opts.accountHome } : {}) },
+        { timeoutMs: SWITCH_TIMEOUT_MS * Math.max(1, changing) + 30_000 });
+      } catch (err) {
+        if (!(err instanceof DaemonTimeoutError)) throw err;
+        console.error(`The CLI timed out waiting for the daemon. The apply may still be running, seat by seat, so don't run it again: `
+          + `a second apply to the rig is refused while one runs. Each seat's result shows in the plan as it lands: ${again}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(applied.data));
+        if (applied.status >= 400) process.exitCode = applied.status >= 500 ? 2 : 1;
+      } else {
+        if (handleHttpError(applied, "assignment apply")) return;
+        printApply(applied.data.report!);
+      }
+      if (applied.data.report?.results.some((r) => r.kind === "failed_before_effect" || r.kind === "unknown")) process.exitCode = 1;
     });
 
   return cmd;
