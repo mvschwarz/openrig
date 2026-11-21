@@ -1573,6 +1573,8 @@ export class PodRigInstantiator {
           }
         }
         const rig = this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        // Grouping must persist with creation, so a missing migration leaves no partial rig.
+        if (rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(rig.id, rigSpec.seatSlice);
         opts?.recordCreated?.(rig.id);
         return rig;
       });
@@ -1581,8 +1583,6 @@ export class PodRigInstantiator {
       createdRigId = rig.id;
       const nonInterruptive = opts?.nonInterruptive ?? rigSpec.nonInterruptive;
       if (nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, nonInterruptive);
-      // #80: the rig's seat grouping, read at each seat launch (both pod-aware rig-create sites).
-      if (rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(rigId, rigSpec.seatSlice);
       // PL-007: persist typed workspace block (when declared) on the rig
       // record. Whoami / node-inventory read it via getRigWorkspace().
       if (rigSpec.workspace) {

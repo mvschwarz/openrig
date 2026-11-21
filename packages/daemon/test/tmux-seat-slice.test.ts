@@ -230,6 +230,17 @@ describe("a grouped scope that fails after its check passed starts again on toda
     const result = await h.adapter.createSession("impl-a@alpha", "/work", A);
     expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("grouping not applied")] });
     expect(h.seatScopes().map(sliceOf)).toEqual(["openrigseats-alpha.slice"]);
+    expect(h.tmuxCalls("respawn-pane")).toHaveLength(1);
+  });
+
+  it("removes the session a grouped fresh launch kept when its ungrouped limited retry is refused", async () => {
+    const h = makeAdapter({ sliceRigs: { "node-a": "alpha" }, limits: { "node-a": { tasksMax: 256 } } });
+    vi.spyOn(h.adapter, "isPaneDead").mockResolvedValue(true);
+    h.adapter.procRead = async () => "pending\n";
+    const result = await h.adapter.createSession("impl-a@alpha", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified" });
+    expect(h.tmuxCalls("respawn-pane")).toHaveLength(1);
+    expect(h.tmuxCalls("kill-session").join("\n")).toContain("kill-session -t '$3'");
   });
 
   it("a grouped start that can't be confirmed goes on with a warning and runs nothing again", async () => {

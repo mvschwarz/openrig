@@ -68,6 +68,21 @@ describe("seat_slice on the rig record", () => {
 });
 
 describe("seat_slice from a spec to each seat launch", () => {
+  it("leaves no rig behind if its grouping cannot be stored", async () => {
+    const db = createFullTestDb();
+    const setup = createTestApp(db, { podInstantiatorFsOps: {
+      exists: () => true,
+      readFile: () => 'name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n',
+    } });
+    try {
+      db.exec("ALTER TABLE rigs DROP COLUMN seat_slice");
+      const spec = RigSpecCodec.serialize(RigSpecSchema.normalize(rig({ seat_slice: "rig" })));
+      const result = await setup.podInstantiator.instantiate(spec, "/work/fixture");
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, message: expect.stringContaining("migration is required") });
+      expect(db.prepare("SELECT name FROM rigs").all()).toEqual([]);
+    } finally { db.close(); }
+  });
+
   it("a rig created from a spec stores its grouping before any seat launches, and exports it", async () => {
     for (const declared of [true, false]) {
       const db = createFullTestDb();

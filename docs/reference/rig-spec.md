@@ -1258,7 +1258,8 @@ pods: [...]
 - **Every seat, with or without limits:** a seat with `process_limits` gets its scope, with the same limits, checked the
   same way, beneath the rig's slice instead of directly in `openrigseats.slice`. A seat without limits, which otherwise
   starts in the terminal server's process tree, gets a scope with no limit beneath the rig's slice. Fresh launches,
-  restores, relaunches, respawns and a restart in place's respawn all start the seat there.
+  restores, relaunches, respawns and a restart in place's respawn all start the seat there. A grouped seat without limits
+  also leaves the terminal server's scope, so any limit on that scope no longer covers it.
 - **Weights are yours:** OpenRig sets no CPU weight, quota or other property on any slice; it only names the slice
   when it starts a scope. Give the rigs their shares in your systemd user manager, at run time or in a drop-in, for
   example `systemctl --user set-property openrigseats-alpha.slice CPUWeight=200`, or
@@ -1275,8 +1276,8 @@ pods: [...]
   tree for a seat without), and the launch returns the warning `seat_slice requested, grouping not applied: <reason>`.
   Grouping never refuses a launch. That covers a host without systemd or cgroup v2, a user manager that won't start
   the scope (a masked slice, for example), a rig name whose slice name would exceed 255 characters, and a grouped scope
-  that fails after its check passed (the seat then starts again on the ungrouped path). The next launch tries the rig's
-  slice again.
+  that fails after its check passed. The seat starts again on the ungrouped path only when its command is confirmed not
+  to have started; an unconfirmed start warns and stands, without another start. The next launch tries the rig's slice again.
 - **Status:** `rig seat status` reports `process_limits` as before; the scope it names sits beneath the rig's slice when
   the seat is grouped. To see a seat's placement, read its pane process's cgroup (`cat /proc/<pid>/cgroup`) or
   `systemctl --user status openrigseats-<rig>.slice`.

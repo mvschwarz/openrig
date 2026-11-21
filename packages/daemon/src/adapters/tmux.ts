@@ -2116,9 +2116,12 @@ export class TmuxAdapter {
     // In the same pane when tmux kept it, else in a new session of the same name.
     const startAgain = async (more: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string }) => {
       const kept = await this.probeSession(name).catch(() => ({ state: "unknown" as const }));
-      return kept.state === "present"
-        ? this.respawnPaneUnchecked(created, undefined, { ...(cwd != null ? { cwd } : {}), env: seatEnv, ...more })
-        : this.createSessionUnchecked(name, cwd, env, more);
+      if (kept.state !== "present") return this.createSessionUnchecked(name, cwd, env, more);
+      const retried = await this.respawnPaneUnchecked(created, undefined, { ...(cwd != null ? { cwd } : {}), env: seatEnv, ...more });
+      if (!retried.ok && retried.processLimits) {
+        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(retried.processLimits), await this.removeRefusedSession(name, made));
+      }
+      return retried;
     };
     const pane = /^%\d+$/.test(created) ? created : null;
     if (notices.capped) {
