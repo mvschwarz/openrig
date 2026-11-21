@@ -14,12 +14,65 @@ import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.
 import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect, recordedRunner } from "./session-registry.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 /** Default identity-reconcile cadence: 5s. Process identity changes rarely
  *  (a seat's pane/process is stable for its whole life), and the check is
  *  more expensive than the 1Hz activity poll (per-seat pane PID + command
  *  tmux reads), so a slower cadence is the right cost/freshness trade. */
 export const DEFAULT_IDENTITY_POLL_INTERVAL_MS = 5000;
+/** daemon.identity_poll_interval_ms only slows the reconciler down: below the default it would cost more, not less. */
+export const MIN_IDENTITY_POLL_INTERVAL_MS = DEFAULT_IDENTITY_POLL_INTERVAL_MS;
+/** The ceiling of daemon.identity_poll_interval_ms (the settings store's bound too): a cap on the cadence, the time
+ *  between scheduled sweep attempts; start schedules the first one interval in. It is not a freshness deadline: stored
+ *  verdicts carry no age limit in the running/active projection, reconcileAll skips every tick that comes due while a
+ *  sweep's reads are still pending, and a change seen after a sweep began waits for a later sweep, so noticing a
+ *  stopped or replaced pane process, revoking its grants, or verifying a seat launched without a verdict can take
+ *  longer than one interval. */
+export const MAX_IDENTITY_POLL_INTERVAL_MS = 30_000;
+/** The setting behind the cadence: `daemon.identity_poll_interval_ms`, mapped from OPENRIG_IDENTITY_POLL_INTERVAL_MS. */
+export const IDENTITY_POLL_INTERVAL_KEY = "daemon.identity_poll_interval_ms";
+type ReadIdentityPollSetting = () => { value: unknown; source?: string };
+/** The cadence of the seat identity reconciler, from the typed setting `daemon.identity_poll_interval_ms`
+ *  (config.json, or OPENRIG_IDENTITY_POLL_INTERVAL_MS; `rig config` shows it with its source). STARTUP-ONLY: read once
+ *  when the daemon starts; changing it takes a daemon restart. Each sweep reads tmux for every running seat's pane and,
+ *  for some seats, the process table; on a large fleet a slower cadence trades identity freshness for that load: a
+ *  longer interval can delay the sweep noticing a stopped seat or a changed pane process, updating its identity verdict,
+ *  and performing the grant revocation that goes with it. Unset keeps the 5 s default. The settings store validates
+ *  the value: `rig config set` refuses one outside MIN..MAX, and an env value outside it is dropped with a warning on
+ *  stderr (a valid config.json value is used, otherwise the default). A value that still reaches here outside MIN..MAX
+ *  (a hand-edited config.json the store could not check) keeps the default, with a warning. */
+export function resolveIdentityPollIntervalMs(
+  read: ReadIdentityPollSetting = () => new SettingsStore().resolveOne(IDENTITY_POLL_INTERVAL_KEY as never),
+  warn: (message: string) => void = (message) => console.warn(message),
+): number {
+  let setting: { value: unknown; source?: string };
+  try {
+    setting = read();
+  } catch (err) {
+    warn(`[seat-identity] ${IDENTITY_POLL_INTERVAL_KEY} could not be read (${err instanceof Error ? err.message : String(err)});`
+      + ` using ${DEFAULT_IDENTITY_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_IDENTITY_POLL_INTERVAL_MS;
+  }
+  const ms = Number(setting.value);
+  if (!Number.isSafeInteger(ms) || ms < MIN_IDENTITY_POLL_INTERVAL_MS || ms > MAX_IDENTITY_POLL_INTERVAL_MS) {
+    warn(`[seat-identity] ${IDENTITY_POLL_INTERVAL_KEY}=${JSON.stringify(setting.value)} is not a whole number of milliseconds`
+      + ` in ${MIN_IDENTITY_POLL_INTERVAL_MS}..${MAX_IDENTITY_POLL_INTERVAL_MS}; using ${DEFAULT_IDENTITY_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_IDENTITY_POLL_INTERVAL_MS;
+  }
+  return ms;
+}
+/** Starts the identity reconciler on the cadence of `daemon.identity_poll_interval_ms` (read once, here) and returns
+ *  it; with no reconciler, returns the cadence without starting anything. */
+export function startIdentityReconciler(
+  reconciler: { start(intervalMs?: number): void } | undefined,
+  read?: ReadIdentityPollSetting,
+  warn?: (message: string) => void,
+): number {
+  const ms = resolveIdentityPollIntervalMs(read, warn);
+  reconciler?.start(ms);
+  return ms;
+}
 
 /** Foreground commands that read as a bare shell (a seat that dropped to a
  *  prompt, or an orphan/QA-squat shell occupying the pane). Mirrors the

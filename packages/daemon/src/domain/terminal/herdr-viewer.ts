@@ -14,10 +14,13 @@ import { nativeViewerShellCommand } from "./native-viewer-command.js";
 import { execWindowsJobFile } from "../windows-job-exec.js";
 import { earlierTileAttachment } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
+import { herdrAgent } from "./herdr-adapter.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
-export type ViewerResult = { ok: true; viewer: ViewerMapping; created: boolean }
+/** `script` is the viewer's own attach script, which a restored pane can rerun; `agent` is Herdr's label for the seat's
+ *  runtime when it has one (the script then carries Herdr's `HERDR_AGENT` detection hint, as one-shot tiles do). */
+export type ViewerResult = { ok: true; viewer: ViewerMapping; created: boolean; script: string; resumeArgv: string[]; agent?: "claude" | "codex" | "pi"; rebound?: true }
   | { ok: false; code: string; error: string; phase?: Entry["phase"] };
 export type InspectViewerSeat = (argv: string[]) => Promise<{ sessionId: string; nodeId: string }>;
 export type HerdrViewerRun = (argv: string[]) => Promise<string>;
@@ -28,7 +31,7 @@ export interface ViewerPane { workspace_id: string; pane_id: string; terminal_id
 type Pane = ViewerPane;
 interface Entry {
   cwd: string; label: string; command: string; argv: string[]; readOnly: boolean;
-  phase: "creating" | "created" | "starting"; pane?: Pane; scriptHash?: string;
+  phase: "creating" | "created" | "starting"; pane?: Pane; scriptHash?: string; agent?: "claude" | "codex" | "pi";
 }
 interface Journal { version: 1; entries: Record<string, Entry> }
 const posixRunFile = promisify(execFile);
@@ -136,7 +139,7 @@ function ownedViewerDirectory(entry: Entry, root: string, endpoint: string): str
 }
 function prepareViewerCommand(entry: Entry, root: string, endpoint: string): string {
   const file = path.join(ownedViewerDirectory(entry, root, endpoint), "attach.sh");
-  const source = `exec ${entry.command}\n`;
+  const source = entry.agent ? `exec env HERDR_AGENT=${entry.agent} ${entry.command}\n` : `exec ${entry.command}\n`;
   const hash = createHash("sha256").update(source).digest("hex");
   try { writeFileSync(file, source, { mode: 0o600, flag: "wx" }); }
   catch (error) {
@@ -195,10 +198,17 @@ export class HerdrViewer {
     const result = this.pending.then(() => this.ensureOnce(key, target, false));
     this.pending = result.then(() => {}, () => {}); return result;
   }
+  /** After a Herdr restart: the same pane in the same workspace, the only one in this viewer's private directory, and
+   *  attached to the seat again (its foreground argv verified) is this viewer with a new terminal; its record follows it.
+   *  Anything less is unconfirmed and changes nothing. Never creates, runs or closes a pane. */
+  rebind(key: ViewerKey, target: ComposedPane): Promise<ViewerResult> {
+    const result = this.pending.then(() => this.ensureOnce(key, target, false, async () => true, undefined, true));
+    this.pending = result.then(() => {}, () => {}); return result;
+  }
   private async ownedPanes(entry: Entry): Promise<Pane[]> {
     return findAttributedViewerPanes(this.run, entry.cwd, entry.pane, this.platform);
   }
-  private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
+  private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane, rebind = false): Promise<ViewerResult> {
     let entry: Entry | undefined;
     const unconfirmed = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error, ...(entry ? { phase: entry.phase } : {}) });
     try {
@@ -243,7 +253,8 @@ export class HerdrViewer {
         if (Object.keys(journal.entries).length >= 256) return unconfirmed("This endpoint has 256 retained viewer records; inspect its viewer provenance before adding more.");
         const token = randomUUID();
         const cwd = path.join(this.root, endpoint, token); this.privateDirectory(cwd);
-        entry = { cwd, label: `openrig-viewer-${token}`, command: target.paneCommand, argv: target.attachArgv, readOnly: target.readOnly, phase: "creating" };
+        const agent = herdrAgent(target);
+        entry = { cwd, label: `openrig-viewer-${token}`, command: target.paneCommand, argv: target.attachArgv, readOnly: target.readOnly, phase: "creating", ...(agent ? { agent } : {}) };
         journal.entries[id] = entry; save();
         // No retry here. A timeout is reconciled by enumeration on the next request.
         let raw: string;
@@ -274,19 +285,27 @@ export class HerdrViewer {
         entry.pane = found[0]!; entry.phase = "created"; if (provision) save();
       }
       let current: Pane | null;
+      let rebound = false;
       try { current = pane(body(await this.run(["pane", "get", entry.pane.pane_id])).pane); }
       catch { current = null; } // A missing ID alone never proves absence.
       // pane get reports the shell's live cwd; the recorded IDs survive an rc's cd.
       if (!current || current.pane_id !== entry.pane.pane_id || current.terminal_id !== entry.pane.terminal_id
         || current.workspace_id !== entry.pane.workspace_id) {
-        if (!provision || (await this.ownedPanes(entry)).length !== 0) {
-          return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
+        if (rebind) {
+          const found = await this.ownedPanes(entry);
+          const restored = found.length === 1 && found[0]!.workspace_id === entry.pane.workspace_id && found[0]!.pane_id === entry.pane.pane_id ? found[0]! : null;
+          if (!restored) return unconfirmed("No single restored pane in this viewer's directory; it was not rebound.");
+          current = restored; rebound = true;
+        } else {
+          if (!provision || (await this.ownedPanes(entry)).length !== 0) {
+            return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
+          }
+          // Only complete empty readback retires provenance. Remove the exact owned
+          // script and directory; never provider panes or arbitrary journal paths.
+          retireViewerDirectory(entry, this.root, endpoint);
+          delete journal.entries[id]; save();
+          return { ok: false, code: "viewer_not_provisioned", error: "The old viewer is confirmed absent; ensure again to create a verified replacement." };
         }
-        // Only complete empty readback retires provenance. Remove the exact owned
-        // script and directory; never provider panes or arbitrary journal paths.
-        retireViewerDirectory(entry, this.root, endpoint);
-        delete journal.entries[id]; save();
-        return { ok: false, code: "viewer_not_provisioned", error: "The old viewer is confirmed absent; ensure again to create a verified replacement." };
       }
       if (reopen) return unconfirmed(`Close only the owned Herdr viewer pane ${current.pane_id}, then reopen this view with rig terminal open. The agent's tmux session is preserved; its old client cannot be migrated by changing saved argv alone.`);
       if (entry.phase === "created") {
@@ -327,7 +346,10 @@ export class HerdrViewer {
       const afterBinding = await this.inspect(target.attachArgv);
       if (afterBinding.nodeId !== key.nodeId || afterBinding.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed while provisioning its viewer.");
       if (!verified) return unconfirmed("The viewer process is not confirmed; no pane run was repeated.");
-      return { ok: true, viewer: { workspaceId: current.workspace_id, paneId: current.pane_id, terminalId: current.terminal_id, readOnly: entry.readOnly }, created };
+      if (rebound) { entry.pane = { workspace_id: current.workspace_id, pane_id: current.pane_id, terminal_id: current.terminal_id }; save(); }
+      return { ok: true, viewer: { workspaceId: current.workspace_id, paneId: current.pane_id, terminalId: current.terminal_id, readOnly: entry.readOnly }, created,
+        script: path.join(entry.cwd, "attach.sh"), resumeArgv: this.platform === "win32" ? entry.argv : ["sh", path.join(entry.cwd, "attach.sh")],
+        ...(entry.agent ? { agent: entry.agent } : {}), ...(rebound ? { rebound: true as const } : {}) };
     } catch (error) {
       return unconfirmed(`Viewer effect is unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
     }

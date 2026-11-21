@@ -904,6 +904,14 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
   activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
   so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.
+- **`rig config set daemon.identity_poll_interval_ms <5000-30000>`** slows the seat identity sweep (default 5000),
+  which checks that each seat's pane still runs its agent. It's read at daemon start, so restart the daemon to apply
+  it. A longer interval can delay noticing a stopped seat or a changed pane process, updating its identity verdict and
+  revoking its activity grants, and a seat `rig up` just launched answers expected-identity sends with
+  `expected_identity_unavailable` until a sweep verifies it. The value caps the cadence of sweep attempts (the first
+  scheduled one comes one interval after daemon start), not how stale a verdict can get: a sweep still reading skips
+  the ticks that come due, and a change seen after a sweep began waits for a later one, so verification or revocation
+  can take longer than one interval.
 - **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
   (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
   gets the real request. A write that then times out says its outcome is **unknown**: check its
