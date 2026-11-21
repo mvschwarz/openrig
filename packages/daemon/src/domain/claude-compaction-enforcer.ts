@@ -674,6 +674,8 @@ interface CompactionRecord {
   endedAt?: number;
   /** When the post-restore audit was sent and the attempt reached `done`, so a restart keeps the restore's uptake check. */
   doneAt?: number;
+  /** The compaction was cancelled after `done`, so a restart doesn't resume its uptake check. */
+  uptakeCancelledAt?: number;
   /** Begun after an attempt that ended then: its request goes only to a seat its send reads idle, and a restart before
    *  it goes out keeps the ended attempt's gate (#2682). */
   afterEnded?: number;
@@ -774,7 +776,7 @@ export class ClaudeCompactionEnforcer {
   private readonly stranded = new Map<string, CompactionRecord>();
   /** Attempts that reached `done`, until the seat's RESTORED note appears beside the map or the wait passes. `since` is the
    *  map's own time: only a note written after it counts. */
-  private readonly restoreUptake = new Map<string, { attemptId: string; mapPath: string; since: number; doneAt: number }>();
+  private readonly restoreUptake = new Map<string, { attemptId: string; mapPath: string; since: number; doneAt: number; notifying?: true }>();
   private readonly restoreUptakeWaitMs: number;
   private readonly onRestoreUptakeUnknown?: (unknown: RestoreUptakeUnknown) => Promise<void>;
   /** Seats whose owed restore steps follow a /compact whose outcome is unknown; never replay that command. */
@@ -2027,13 +2029,28 @@ export class ClaudeCompactionEnforcer {
     if (held) this.records.set(session, held); else this.records.delete(session);
   }
 
-  /** Start the uptake check for an attempt that just reached `done`, when its map exists (a --skip-map attempt has none to
-   *  write the note beside). */
+  /** Start the uptake check for an attempt that just reached `done`. Only a map that doesn't exist (a --skip-map attempt
+   *  has none to write the note beside) skips it; a map whose stat fails is still checked, from when it was ready. */
   private watchRestoreUptake(session: string, record: CompactionRecord | undefined): void {
-    if (!record?.doneAt) return;
-    let since: number;
-    try { since = fs.statSync(record.mapPath).mtimeMs; } catch { return; }
+    if (!record?.doneAt || record.uptakeCancelledAt !== undefined) return;
+    let since = record.mapReadyAt ?? 0;
+    try { since = fs.statSync(record.mapPath).mtimeMs; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; }
     this.restoreUptake.set(session, { attemptId: record.attemptId, mapPath: record.mapPath, since, doneAt: record.doneAt });
+  }
+
+  /** A cancel after `done` is written on the completed record, so a restart doesn't bring the check back. */
+  private cancelRestoreUptake(session: string): void {
+    const watch = this.restoreUptake.get(session);
+    if (!watch) return;
+    this.restoreUptake.delete(session);
+    const file = path.join(path.dirname(watch.mapPath), COMPACTION_RECORD_FILE);
+    const record = readCompactionRecord(file);
+    if (record?.attemptId !== watch.attemptId) return;
+    const temporary = `${file}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify({ ...record, uptakeCancelledAt: this.now() })}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } catch { try { fs.rmSync(temporary, { force: true }); } catch { /* nothing to clean */ } }
   }
 
   /** A delivered restore isn't proof the seat took it up. When no RESTORED note newer than the map appears beside it within
@@ -2047,11 +2064,15 @@ export class ClaudeCompactionEnforcer {
       restored = fs.readdirSync(dir).some(name => /^RESTORED-.*\.md$/.test(name) && fs.statSync(path.join(dir, name)).mtimeMs > watch.since);
     } catch { /* an unreadable folder holds no note */ }
     if (restored) { this.restoreUptake.delete(session); return; }
-    if (this.now() - watch.doneAt < this.restoreUptakeWaitMs) return;
-    this.restoreUptake.delete(session);
+    if (this.now() - watch.doneAt < this.restoreUptakeWaitMs || watch.notifying) return;
+    // The check ends once the notice is recorded; a failed one stays for the next poll, and the notice's own id keeps it to one.
+    watch.notifying = true;
     const unknown: RestoreUptakeUnknown = { sessionName: session, attemptId: watch.attemptId, mapPath: watch.mapPath,
       doneAt: new Date(watch.doneAt).toISOString(), waitedMinutes: Math.round(this.restoreUptakeWaitMs / 60_000) };
-    void Promise.resolve().then(() => this.onRestoreUptakeUnknown?.(unknown)).catch(error => {
+    void Promise.resolve().then(() => this.onRestoreUptakeUnknown?.(unknown)).then(() => {
+      if (this.restoreUptake.get(session) === watch) this.restoreUptake.delete(session);
+    }, error => {
+      delete watch.notifying;
       console.warn("[compaction] restore uptake notice failed", { sessionName: session, attemptId: watch.attemptId,
         errorClass: error instanceof Error ? error.name : typeof error });
     });
@@ -2233,7 +2254,8 @@ export class ClaudeCompactionEnforcer {
         // An operator's own request keeps its authority while its watch is kept, as an owed stage does, or a late report
         // would owe nothing when automatic compaction is off.
         if (record.mode === "manual" && this.lateCompactSignal.has(session)) this.setManualStage(session, "audit-sent", undefined, record.operatorInitiated);
-        if (record.doneAt !== undefined && this.now() - record.doneAt < this.restartRecoveryWindowMs) this.watchRestoreUptake(session, record);
+        // Not bounded by the restart window: it sends no input, and the notice's id keeps it to one per attempt.
+        this.watchRestoreUptake(session, record);
       }
       return;
     }
@@ -2373,7 +2395,7 @@ export class ClaudeCompactionEnforcer {
   }
 
   cancelPreparation(session: string): PreparationState | null {
-    this.restoreUptake.delete(session);
+    this.cancelRestoreUptake(session);
     const attempt = this.pendingPreCompactPrep.get(session);
     if (attempt) attempt.cancelled = true;
     const record = this.records.get(session)?.record;

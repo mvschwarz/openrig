@@ -24,7 +24,7 @@ import type { RestoreDeliveryFailure } from "../src/domain/claude-compaction-enf
 import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
@@ -431,16 +431,68 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(f.unknown).not.toHaveBeenCalled();
     });
 
-    it("keeps the check across a daemon restart, from the done record", async () => {
+    // Seven hours is past the six-hour restart window that bounds resuming restore input; this check sends none.
+    it.each([31, 7 * 60])("keeps the check across a daemon restart, from the done record (%i minutes later)", async (minutes) => {
       const home = mkdtempSync(join(tmpdir(), "compaction-uptake-restart-")); fixtureHomes.push(home);
       const f = await toDone({ openrigHome: home, daemonInstance: "before-restart" });
+      const unknown = vi.fn(async () => {});
+      const restarted = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), makeSessionTransport().transport, {
+        openrigHome: home, daemonInstance: "after-restart", now: () => f.doneAt + minutes * 60_000, onRestoreUptakeUnknown: unknown,
+      } as never);
+      await restarted.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+      expect(unknown).toHaveBeenCalledTimes(1);
+      expect(unknown).toHaveBeenCalledWith(expect.objectContaining({ attemptId: f.attemptId, mapPath: f.mapPath }));
+    });
+
+    it("keeps a cancel after done across a daemon restart", async () => {
+      const home = mkdtempSync(join(tmpdir(), "compaction-uptake-cancel-")); fixtureHomes.push(home);
+      const f = await toDone({ openrigHome: home, daemonInstance: "before-restart" });
+      f.enforcer.cancelPreparation(seat);
       const unknown = vi.fn(async () => {});
       const restarted = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), makeSessionTransport().transport, {
         openrigHome: home, daemonInstance: "after-restart", now: () => f.doneAt + 31 * 60_000, onRestoreUptakeUnknown: unknown,
       } as never);
       await restarted.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
-      expect(unknown).toHaveBeenCalledTimes(1);
-      expect(unknown).toHaveBeenCalledWith(expect.objectContaining({ attemptId: f.attemptId, mapPath: f.mapPath }));
+      expect(unknown).not.toHaveBeenCalled();
+    });
+
+    it("keeps the check when the map's stat fails as the attempt reaches done, and gives one notice", async () => {
+      let now = Date.now();
+      const { transport, send } = makeSessionTransport();
+      const unknown = vi.fn(async () => {});
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, now: () => now, onRestoreUptakeUnknown: unknown } as never);
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const { mapPath } = enforcer.getPreparationState(seat)!;
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 2; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      // The map is there, but its folder can't be searched, so its stat fails with EACCES, not ENOENT.
+      chmodSync(dirname(mapPath), 0o000);
+      try {
+        await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        expect(enforcer.getOwedRestore(seat)).toBeNull();
+        const sends = send.mock.calls.length;
+        now += 31 * 60_000;
+        await enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" });
+        await enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+        expect(unknown).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls.length).toBe(sends);
+      } finally { chmodSync(dirname(mapPath), 0o700); }
+    });
+
+    it("tries a notice that failed again on the next poll, and stops once one is recorded", async () => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const unknown = vi.fn(async () => {}).mockRejectedValueOnce(new Error("queue unavailable"));
+        const f = await toDone({ onRestoreUptakeUnknown: unknown });
+        f.advance(31 * 60_000);
+        await f.poll(); await settled();
+        expect(unknown).toHaveBeenCalledTimes(1);
+        expect(warning).toHaveBeenCalledWith("[compaction] restore uptake notice failed", expect.objectContaining({ attemptId: f.attemptId, errorClass: "Error" }));
+        await f.poll(); await settled();
+        await f.poll(); await settled();
+        expect(unknown).toHaveBeenCalledTimes(2);
+      } finally { warning.mockRestore(); }
     });
   });
 
