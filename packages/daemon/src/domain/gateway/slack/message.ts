@@ -436,8 +436,8 @@ function isSafeHttpsUrl(url: string): boolean {
   }
 }
 
-/** #47 — render a non-image https evidenceRef as a plain link instead of a Block Kit
- *  `image` block. The URL arrives pre-validated as `^https://\S+$` from the delivery
+/** Render an HTTPS evidence reference as a link. The URL arrives
+ *  pre-filtered as `^https://\S+$` from the delivery
  *  layer; item-7 hygiene still applies (a secret-bearing URL is refused, never
  *  forwarded), and a URL carrying mrkdwn-breaking `<`, `>`, `|` degrades to escaped
  *  plain text rather than a link. Returns null when there is nothing safe to render. */

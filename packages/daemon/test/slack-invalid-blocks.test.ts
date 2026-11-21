@@ -31,6 +31,36 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
   const stores = () => ({ delivered: new SeenStore(join(home, "delivered")), attempted: new SeenStore(join(home, "attempted")), outboundSeen: new SeenStore(join(home, "seen")) });
   const opts = () => ({ ...stores(), botToken: "synthetic", channel: "C-TEST", sourceLabel: "fixture" });
 
+  it("delivers a four-question decision with private PNG evidence as a link", async () => {
+    const evidenceRef = "https://host.example/shot.png";
+    const humanQuestions = Array.from({ length: 4 }, (_, index) => ({
+      id: `question-${index + 1}`,
+      question: `Decision ${index + 1}?`,
+      options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }],
+    }));
+    const ask = {
+      ...decision,
+      payload: { ...request, qitemId: "q-rejected", evidenceRef, humanQuestions },
+    };
+    const posts: { text: string; blocks: { type: string; elements?: unknown[] }[] }[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const post = JSON.parse(String(init?.body));
+      posts.push(post);
+      return post.blocks.some((block: { type: string }) => block.type === "image")
+        ? reply({ ok: false, error: "invalid_blocks" })
+        : reply({ ok: true, ts: "2.1" });
+    });
+    const onTransportFailed = vi.fn();
+
+    expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(ask)).toEqual({ ok: true });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.text).toContain(evidenceRef);
+    const blocks = posts[0]!.blocks;
+    expect(JSON.stringify(blocks.filter((block) => block.type === "context"))).toContain(evidenceRef);
+    expect(blocks.filter((block) => block.type === "actions").map((block) => block.elements?.length)).toEqual([2, 2, 2, 2]);
+    expect(onTransportFailed).not.toHaveBeenCalled();
+  });
+
   it("keeps the rejection across restart without a post, history scan, or delivered mark", async () => {
     const fetchImpl = vi.fn(async () => reply({ ok: false, error: "invalid_blocks" }));
     const onTransportFailed = vi.fn();
@@ -51,9 +81,12 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
       posts.push(JSON.parse(String(init?.body)));
       return posts.length === 1 ? reply({ ok: false, error: "invalid_blocks" }) : reply({ ok: true, ts: "2.1" });
     });
-    const rejected = { ...decision, payload: { ...decision.payload as object, evidenceRef: "https://example.com/page.png" } };
+    const rejected = {
+      ...decision,
+      payload: { ...decision.payload as object, media: [{ imageUrl: "https://example.com/page.png", altText: "Evidence" }] },
+    };
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl })(rejected)).toMatchObject({ class: "slack-invalid-blocks" });
-    const corrected = { ...rejected, payload: { ...rejected.payload, evidenceRef: "https://example.com/proof.md" } };
+    const corrected = { ...decision, payload: { ...decision.payload as object, evidenceRef: "https://example.com/proof.md" } };
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl })(corrected)).toEqual({ ok: true });
     expect(posts).toHaveLength(2);
     expect(JSON.stringify(posts[0])).toContain('"type":"image"');
