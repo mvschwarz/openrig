@@ -108,6 +108,18 @@ describe("applying an assignment", () => {
     expect(before.restarted).toEqual([]);
   });
 
+  it("an unchanged seat whose restart was checked unsafe isn't restarted when its home switches: it's unknown, with its restart command", async () => {
+    const { d } = deps({});
+    const report = await applyAssignment(plan(CODEX, [
+      change("c1@fleet", { runtime: "codex" }),
+      change("on@fleet", { runtime: "codex", effect: "unchanged", precheck: { safe: false, reasons: ["seat_restart_refused"], message: "pane_unverified: no bound pane" } }),
+    ], { codexHomes: [{ home: "/homes/a", seats: ["c1@fleet", "on@fleet"].map((seat) => ({ seat, rig: "fleet", effect: "would restart" })) }] }), CODEX, d);
+    expect(d.restartPeer).not.toHaveBeenCalled();
+    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "switched"], ["on@fleet", "unknown"]]);
+    expect(report.results[1]!.detail).toBe('/homes/a now uses "team" (switched by c1@fleet), and this seat wasn\'t restarted: its precheck was unsafe (seat_restart_refused): pane_unverified: no bound pane');
+    expect(report.results[1]!.recovery).toBe("rig seat restart on@fleet --keep-conversation");
+  });
+
   it("a peer whose restart on a switched home doesn't confirm is unknown on its own; the home's login is known, so the next peer still restarts", async () => {
     const { d } = deps({}, { "c2@fleet": { ok: true, outcome: "relaunch_failed", message: "no resumed conversation", recoveryCommand: "rig launch fleet dev.c2 --snapshot-id s1" } });
     const report = await applyAssignment(plan(CODEX, [

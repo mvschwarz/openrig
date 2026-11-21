@@ -117,6 +117,25 @@ describe("the assignment plan", () => {
     expect(elsewhere.rows[0]!.continuity).toBe("unsupported in place: the seat runs on /homes/b, and this login is saved in /homes/a");
   });
 
+  it("a seat that's unchanged but restarts with a home this plan switches has its restart checked, and the verdict is in the digest", async () => {
+    const reg = { source: "registry" as const, profileRef: "team", recordedAt: "t", profileSaved: true };
+    const seats = [seat("c1@fleet", { runtime: "codex" }), seat("on@fleet", { runtime: "codex", configured: reg })];
+    const refuse = (s: PlanSeatFacts): Promise<PlanCheck> => Promise.resolve(s.session === "on@fleet"
+      ? { safe: false, reasons: ["seat_restart_refused"], message: "pane_unverified: no bound pane" } : SAFE);
+    const unsafe = plan({ account: CODEX, seats }, vi.fn(refuse));
+    const p = await unsafe.result;
+    expect(unsafe.precheck.mock.calls.map(([s]) => s.session)).toEqual(["c1@fleet", "on@fleet"]);
+    expect(p.rows[1]).toMatchObject({ seat: "on@fleet", effect: "unchanged",
+      precheck: { safe: false, reasons: ["seat_restart_refused"], message: "pane_unverified: no bound pane" } });
+    const safe = await plan({ account: CODEX, seats }).result;
+    expect(safe.rows[1]).toMatchObject({ effect: "unchanged", precheck: { safe: true, reasons: [] } });
+    expect(safe.digest).not.toBe(p.digest);
+    // With nothing switching its home, an unchanged seat restarts with nothing, so it isn't checked.
+    const alone = plan({ account: CODEX, seats: [seat("on@fleet", { runtime: "codex", configured: reg })] });
+    expect((await alone.result).rows[0]).not.toHaveProperty("precheck");
+    expect(alone.precheck).not.toHaveBeenCalled();
+  });
+
   it("a shared Codex home switches once and lists every seat on it, restarting only this rig's", async () => {
     const p = await plan({ account: CODEX, seats: [
       seat("c1@fleet", { runtime: "codex" }),

@@ -267,8 +267,12 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
     const base = { seat: seat.session, runtime: seat.runtime, current: describeConfigured(seat.configured), activity: seat.activity,
       ...(seat.lastResult ? { lastResult: seat.lastResult } : {}) };
     if (d.effect !== "change") {
-      rows.push({ ...base, effect: d.effect, ...(d.override ? { override: d.override } : {}), ...(d.notes ? { notes: d.notes } : {}),
-        ...(d.asApplied ? { asApplied: true as const } : {}) });
+      // A seat on a home this plan switches restarts with it, so its restart is checked here too, and the verdict is part of
+      // the digest: one that can't restart shows now, not as an unknown after the home has switched.
+      const restarts = d.effect === "unchanged" && onSwitching(seat) ? await check(seat) : null;
+      rows.push({ ...base, effect: d.effect, ...(d.override ? { override: d.override } : {}),
+        ...(restarts ? { precheck: restarts.safe ? { safe: true, reasons: [] } : { safe: false, reasons: restarts.reasons, ...(restarts.message ? { message: restarts.message } : {}) } } : {}),
+        ...(d.notes ? { notes: d.notes } : {}), ...(d.asApplied ? { asApplied: true as const } : {}) });
       continue;
     }
     const verdict = await check(seat);

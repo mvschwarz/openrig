@@ -1087,6 +1087,11 @@ that machine. Only the command and its output cross the connection.`);
         console.log(row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
           : `${row.seat}: unchanged, already on ${plan.account.label}`);
         if (row.asApplied) for (const note of row.notes ?? []) console.log(`  ${note}`);
+        // A seat that restarts with its switched home: its restart was checked.
+        if (row.precheck && !row.precheck.safe) {
+          console.log(`  precheck UNSAFE: ${row.precheck.reasons.join(", ")}`);
+          if (row.precheck.message) console.log(`  ${row.precheck.message}`);
+        }
       }
       else if (row.effect === "kept_override") console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`);
       else {
