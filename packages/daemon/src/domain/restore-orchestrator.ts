@@ -736,6 +736,8 @@ export class RestoreOrchestrator {
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
+    /** Cold start only: park if the snapshot occupant is not the seat's current session (R2). */
+    requireCurrentOccupant?: boolean;
   }): Promise<NarrowLaunchResult> {
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
   }
@@ -750,6 +752,7 @@ export class RestoreOrchestrator {
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
+    requireCurrentOccupant?: boolean;
     namedAgent?: boolean;
     nonTargetMode: "unchanged" | "detach_and_hold";
   }): Promise<NarrowLaunchResult> {
@@ -913,7 +916,7 @@ export class RestoreOrchestrator {
       const planEntry = { node: liveChoice ? { ...node, cwd: liveChoice.cwd, model: liveChoice.model,
         effort: currentEffort?.effective ?? null, effortChoice: currentEffort?.choice ?? null } : node };
       const result = await this.restoreNodeWithCompensation(
-        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry }, subsetWarnings,
+        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry, requireCurrentOccupant: opts.requireCurrentOccupant }, subsetWarnings,
       );
       launched.push(result);
     }
@@ -1279,7 +1282,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean; requireCurrentOccupant?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1339,6 +1342,19 @@ export class RestoreOrchestrator {
     }
 
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    // R2 (#2829 review): a stale snapshot must never silently replace the seat's current
+    // conversation. If the snapshot's occupant is not the agent's latest session, park for a
+    // decision (an explicit history selection or --fresh deliberately overrides this).
+    if (opts?.requireCurrentOccupant && occupantResolution.kind === "resolved" && !selectedHistory && !freshRequested) {
+      const latestLive = this.sessionRegistry.getSessionsForRig(rigId)
+        .filter(row => row.nodeId === nodeId)
+        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+      if (latestLive && latestLive.id !== occupantResolution.session.id) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: `The snapshot's occupant is no longer ${node.logicalId}'s current session. No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          ...notStarted };
+      }
+    }
     const carried = opts?.resumePeriodicCarry && !selectedHistory && !freshRequested
       && occupantResolution.kind === "none" && liveNode?.id === nodeId
       ? data.periodicResumeSourcesByNode?.[nodeId] : undefined;
@@ -1352,6 +1368,35 @@ export class RestoreOrchestrator {
       if (!periodicCarryIsCurrent(this.db, this.sessionRegistry.getSessionsForRig(rigId), rigId, nodeId, carried, liveNode?.runtime, node.runtime)) {
         return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
           error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
+      }
+    }
+    // R2b/C (#2829 review): the same protection for a snapshot that has no occupant for
+    // the seat. Two ways a cold start would silently replace a conversation the seat had:
+    //   R2b — the seat started after the snapshot was taken, so a live session is newer
+    //   than everything the snapshot records; and
+    //   C — the snapshot explicitly recorded the occupant absent but retained the seat's
+    //   conversation history under resume_if_possible with no token, which the
+    //   resume-history guard skips. Both park for a decision instead of fresh-launching;
+    //   explicit history selection and --fresh deliberately override. An eligible selected
+    //   carry is validated above and resumes below, so both parks give way to it
+    //   (round 4: C must not park a valid periodic carry).
+    if (opts?.requireCurrentOccupant && occupantResolution.kind === "none" && !selectedHistory
+      && !freshRequested && !carried) {
+      const seatSessions = data.sessions.filter(row => row.nodeId === nodeId);
+      const latestLive = this.sessionRegistry.getSessionsForRig(rigId)
+        .filter(row => row.nodeId === nodeId)
+        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+      const newestSnapshotId = seatSessions.reduce<string | null>((newest, row) => !newest || row.id > newest ? row.id : newest, null);
+      const ranAfterSnapshot = latestLive !== null && (newestSnapshotId === null || latestLive.id > newestSnapshotId);
+      const newestSnapshotRow = seatSessions.reduce<(typeof seatSessions)[number] | null>((newest, row) => !newest || row.id > newest.id ? row : newest, null);
+      const retainedResumeHistory = newestSnapshotRow?.restorePolicy === "resume_if_possible";
+      if (ranAfterSnapshot || retainedResumeHistory) {
+        const why = ranAfterSnapshot
+          ? `The seat has a session newer than the snapshot's, and the snapshot records no occupant for it.`
+          : `The snapshot records no active occupant for the seat but retains its conversation history under resume_if_possible.`;
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: `${why} No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          ...notStarted };
       }
     }
     const resumeSession = occupantResolution.kind === "resolved" ? occupantResolution.session : carried ?? null;

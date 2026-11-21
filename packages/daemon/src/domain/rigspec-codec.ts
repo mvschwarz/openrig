@@ -149,6 +149,8 @@ export class RigSpecCodec {
         p["continuity_policy"] = cp;
       }
       if (pod.startup) p["startup"] = serializeStartupBlock(pod.startup);
+      // #2829 slice 1: the pod-level cold-start default round-trips too.
+      if (pod.coldStart !== undefined) p["cold_start"] = pod.coldStart;
 
       p["members"] = pod.members.map((m) => {
         const member: Record<string, unknown> = {
@@ -197,6 +199,8 @@ export class RigSpecCodec {
         if (m.starterRef) {
           member["starter_ref"] = { name: m.starterRef.name };
         }
+        // #2829 slice 1: the cold-start opt-in round-trips with the rest of the member.
+        if (m.coldStart !== undefined) member["cold_start"] = m.coldStart;
         return member;
       });
 
