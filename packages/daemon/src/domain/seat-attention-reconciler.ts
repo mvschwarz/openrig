@@ -209,13 +209,17 @@ export async function rebindAndVerifyPaneIdentity(input: {
     // The adapter returns null after a read failure. Only the pane listing above proves absence.
     if (pid === null) return unavailable(unreadablePid);
     command = await input.tmux.getPaneCommand(pane.id);
-    if (command === null) return unavailable(`foreground command of tmux pane '${printable(pane.id)}' could not be read`);
+    // Runner-backed seats use their own readiness evidence. For them the pane
+    // command can contradict the expected state, but its absence is no signal.
+    if (command === null && (input.runtime === "claude-code" || input.runtime === "codex" || input.runtime === "terminal")) {
+      return unavailable(`foreground command of tmux pane '${printable(pane.id)}' could not be read`);
+    }
     observedAt = now();
   } catch (error) {
     return unavailable(error);
   }
   let runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
-  const normalizedCommand = command.trim().toLowerCase();
+  const normalizedCommand = command?.trim().toLowerCase() ?? "";
   let lineageMatch: ProcessRow | null = null;
   const expectedResumeToken = input.expectedResumeToken ?? null;
   const strictNativeLineage = input.requireExactResumeLineage === true
@@ -351,14 +355,14 @@ export async function rebindAndVerifyPaneIdentity(input: {
         ok: false,
         reason: "identity_unverified",
         detail: failedCheck
-          ? `tmux pane '${printable(pane.id)}' (foreground command '${printable(command)}') did not pass the process check for runtime '${input.runtime}': ${failedCheck}`
-          : `tmux pane '${printable(pane.id)}' foreground command '${printable(command)}' does not positively identify runtime '${input.runtime}'`,
+          ? `tmux pane '${printable(pane.id)}' (foreground command '${printable(command ?? "unknown")}') did not pass the process check for runtime '${input.runtime}': ${failedCheck}`
+          : `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' does not positively identify runtime '${input.runtime}'`,
       };
     }
     return {
       ok: false,
       reason: "identity_unverified",
-      detail: `tmux pane '${printable(pane.id)}' foreground command '${printable(command)}' contradicts runtime '${input.runtime ?? "unknown"}'`,
+      detail: `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' contradicts runtime '${input.runtime ?? "unknown"}'`,
     };
   }
   return { ok: true, pane: pane.id, pid, command,

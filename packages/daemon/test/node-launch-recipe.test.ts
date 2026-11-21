@@ -648,6 +648,7 @@ describe("a restore reports the stored pool block of a model seat", () => {
     const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
