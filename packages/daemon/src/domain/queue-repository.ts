@@ -863,6 +863,11 @@ function queryLinkedSuccessor(db: Database.Database, sourceQitemId: string, targ
 /** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
 let successorScope: { db: Database.Database; covers: (source: string, target: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
 
+/** How far before its oldest named source createLinkedSuccessorLookup still reads a seat's chained rows: a clock step. */
+const SUCCESSOR_CLOCK_SLACK_MS = 24 * 3_600_000;
+/** How old that source may be for the seat arm to read by creation time rather than by the seats' whole history. */
+const SUCCESSOR_RECENT_BOUND_MS = 7 * 24 * 3_600_000;
+
 /** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
  *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
  *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
@@ -871,8 +876,10 @@ let successorScope: { db: Database.Database; covers: (source: string, target: st
  *  not the source itself. The index covers the targets each source's own row names (its closure_target, each
  *  comma-separated part of it, and its handed_off_to), the ones the sweep and the row's handoff advisory ask about, so the
  *  chain_of_record arm reads only successors whose id or destination is one of them, through the primary key and the
- *  destination index, instead of every row's chain. Any other source or target keeps the per-row query, so every answer is
- *  the per-row query's. For a covered source and target, a snapshot from its first has() until invalidate(): the caller
+ *  destination index, instead of every row's chain. A seat's chained rows are read only from a day before the oldest
+ *  named source: no writer chains a row that didn't exist yet, though a caller's own chainOfRecord on create could.
+ *  Any other source or target keeps the per-row query, so every answer is the per-row query's. For a covered source and
+ *  target, a snapshot from its first has() until invalidate(): the caller
  *  invalidates it whenever other code could have run. Any other target is read as it is now. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn for a
  *  covered source and target. builtMs() is how long the build of the index as it is now took (0 while it is not built),
  *  so a caller can tell when rebuilding after each invalidate() costs more than it saves. */
@@ -892,23 +899,36 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
     const targetsOf: Index["targetsOf"] = new Map();
     const ids = JSON.stringify([...sources]);
     runSyncSite("queue.linked_successors.build", () => {
-      const named = db.prepare(`SELECT qitem_id, closure_target, handed_off_to FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))`)
-        .all(ids) as Array<{ qitem_id: string; closure_target: string | null; handed_off_to: string | null }>;
+      const named = db.prepare(`SELECT qitem_id, closure_target, handed_off_to, ts_created FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))`)
+        .all(ids) as Array<{ qitem_id: string; closure_target: string | null; handed_off_to: string | null; ts_created: string }>;
       for (const r of named) {
         const own = new Set<string>();
         for (const target of [r.closure_target, ...(r.closure_target ?? "").split(",").map((part) => part.trim()), r.handed_off_to]) if (target) own.add(target);
         targetsOf.set(r.qitem_id, own);
       }
       const targets = JSON.stringify([...new Set([...targetsOf.values()].flatMap((own) => [...own]))]);
+      // A seat target's chain arm reads only rows created since the oldest named source, less a clock step: every writer
+      // stamps ts_created at insert and chains rows that already exist. While that range is recent, it's read through
+      // idx_queue_items_created (`+` keeps the planner off the destination index, which holds each seat's whole history);
+      // an older or unreadable bound reads the seats through the destination index, as before.
+      let oldest = Infinity;
+      for (const r of named) oldest = Math.min(oldest, Date.parse(r.ts_created));
+      const since = Number.isFinite(oldest) ? new Date(oldest - SUCCESSOR_CLOCK_SLACK_MS).toISOString() : "";
+      const recent = since !== "" && Date.now() - oldest <= SUCCESSOR_RECENT_BOUND_MS;
       const rows = db.prepare(
         `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
           WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
          UNION
          SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
-          WHERE (s.qitem_id IN (SELECT value FROM json_each(?)) OR s.destination_session IN (SELECT value FROM json_each(?)))
+          WHERE s.qitem_id IN (SELECT value FROM json_each(?))
+            AND s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
+            AND j.value IN (SELECT value FROM json_each(?))
+         UNION
+         SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
+          WHERE ${recent ? "+" : ""}s.destination_session IN (SELECT value FROM json_each(?)) AND s.ts_created >= ?
             AND s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
             AND j.value IN (SELECT value FROM json_each(?))`,
-      ).all(ids, targets, targets, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+      ).all(ids, targets, ids, targets, since, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
       for (const r of rows) {
         const list = bySource.get(r.source);
         const entry = { qitemId: r.qitem_id, destination: r.destination_session };

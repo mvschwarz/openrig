@@ -14,11 +14,11 @@ let db: Database.Database;
 let repo: QueueRepository;
 const at = "2026-10-09T10:00:00.000Z";
 
-function row(id: string, o: { state?: string; tags?: string | null; updated?: string; destination?: string | null;
+function row(id: string, o: { state?: string; tags?: string | null; updated?: string; created?: string; destination?: string | null;
   handedOffFrom?: string | null; chain?: string | null; closureReason?: string | null; closureTarget?: string | null; handedOffTo?: string | null } = {}) {
   db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body,
       handed_off_from,chain_of_record,closure_reason,closure_target,handed_off_to)
-    VALUES (?, ?, ?, 'sender@r', ?, ?, ?, 'body', ?, ?, ?, ?, ?)`).run(id, at, o.updated ?? at, o.destination === undefined ? "worker@r" : o.destination,
+    VALUES (?, ?, ?, 'sender@r', ?, ?, ?, 'body', ?, ?, ?, ?, ?)`).run(id, o.created ?? at, o.updated ?? at, o.destination === undefined ? "worker@r" : o.destination,
     o.state ?? "done", o.tags === undefined ? "[]" : o.tags, o.handedOffFrom ?? null, o.chain ?? null, o.closureReason ?? null, o.closureTarget ?? null,
     o.handedOffTo ?? null);
 }
@@ -144,9 +144,45 @@ describe("createLinkedSuccessorLookup: the linked successors of a set of sources
     }
     // The successors' read and the read of the targets the sources name.
     expect(build).toHaveLength(2);
-    const chainPlan = (db.prepare(`EXPLAIN QUERY PLAN ${build.find((sql) => sql.includes("json_each(s.chain_of_record) j"))!}`).all("[]", "[]", "[]", "[]") as Array<{ detail: string }>)
+    const chainPlan = (db.prepare(`EXPLAIN QUERY PLAN ${build.find((sql) => sql.includes("json_each(s.chain_of_record) j"))!}`).all("[]", "[]", "[]", "[]", "", "[]") as Array<{ detail: string }>)
       .map((step) => step.detail);
+    // This source is weeks old, so its seats are read through the destination index, as before.
     expect(chainPlan).toContain("SEARCH s USING INDEX idx_queue_items_destination_state (destination_session=?)");
+  });
+
+  it("reads a seat's chained rows by creation time while its oldest source is recent, never through the seat's whole history", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T11:00:00.000Z"));
+    try {
+      row("src-1", { closureTarget: "desk@r" });
+      for (let i = 0; i < 40; i++) row(`d-old-${i}`, { chain: JSON.stringify([`other-${i}`]), destination: "desk@r", created: "2026-09-01T00:00:00.000Z" });
+      row("s-c", { chain: JSON.stringify(["src-1"]), destination: "desk@r" });
+      const statements: string[] = [];
+      const prepare = db.prepare;
+      db.prepare = ((sql: string) => { statements.push(sql); return prepare.call(db, sql); }) as typeof db.prepare;
+      let found = false;
+      try { found = createLinkedSuccessorLookup(db, ["src-1"]).has("src-1", "desk@r"); } finally { db.prepare = prepare; }
+      expect(found).toBe(true);
+      expect(hasLinkedSuccessor(db, "src-1", "desk@r")).toBe(true);
+      const sql = statements.find((text) => text.includes("json_each(s.chain_of_record) j"))!;
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all("[]", "[]", "[]", "[]", "2026-10-08T10:00:00.000Z", "[]") as Array<{ detail: string }>)
+        .map((step) => step.detail);
+      // Each seat's older history (the 40 rows above) is outside the range read; its target-id arm keeps the primary key.
+      expect(plan).toContain("SEARCH s USING INDEX idx_queue_items_created (ts_created>?)");
+      expect(plan).not.toContain("SEARCH s USING INDEX idx_queue_items_destination_state (destination_session=?)");
+      expect(plan.filter((detail) => /^SCAN (s|queue_items)\b/.test(detail))).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("reads a seat's chained rows from a day before its oldest source, and none created earlier", () => {
+    row("src-1", { closureTarget: "seat-a@r, seat-b@r" });
+    row("s-slack", { chain: JSON.stringify(["src-1"]), destination: "seat-a@r", created: "2026-10-08T22:00:00.000Z" }); // a clock step back
+    row("s-early", { chain: JSON.stringify(["src-1"]), destination: "seat-b@r", created: "2026-10-07T09:00:00.000Z" }); // made before its source
+    const lookup = createLinkedSuccessorLookup(db, ["src-1"]);
+    expect(lookup.has("src-1", "seat-a@r")).toBe(true);
+    // Only a caller's own chainOfRecord can name a row before it exists; the per-row query still reads it.
+    expect(lookup.has("src-1", "seat-b@r")).toBe(false);
+    expect(hasLinkedSuccessor(db, "src-1", "seat-b@r")).toBe(true);
   });
 
   it("is a snapshot until invalidated, for the targets its sources name; any other target is read as it is now", () => {
