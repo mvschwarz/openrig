@@ -18,7 +18,10 @@ vi.mock("node:child_process", async (importOriginal) => {
         stdout: null, stderr: null, stdin: null, pid: undefined,
         kill: () => { emfile.kills += 1; return false; },
       });
-      process.nextTick(() => child.emit("error", Object.assign(new Error("spawn rig EMFILE"), { code: "EMFILE", errno: -24, syscall: "spawn rig" })));
+      process.nextTick(() => {
+        child.emit("error", Object.assign(new Error("spawn rig EMFILE"), { code: "EMFILE", errno: -24, syscall: "spawn rig" }));
+        child.emit("close", -24, null);   // as Node does after a spawn error
+      });
       return child;
     },
   };
