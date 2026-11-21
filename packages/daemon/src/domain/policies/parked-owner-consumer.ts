@@ -513,6 +513,20 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           e.entry.escalationFailure = { episodeKey: e.episodeKey, failure: (error as { code?: string }).code ?? (error instanceof Error ? error.name : typeof error) };
         }
       }
+      // The notices ran after the block's B1 recheck: a reminder chosen in the block names only rows still open and
+      // outside recovery custody now, or it doesn't go (the next pass builds it from the rows as they are).
+      if (escalations.length > 0 && evaluation.action === "send") {
+        const named = Array.isArray(evaluation.notes?.["obligations"]) ? evaluation.notes["obligations"] as string[] : [];
+        const open = new Set(deps.rows.listOpenIds(evaluation.target.session));
+        const live = named.filter((id) => open.has(id));
+        const owned = deps.rows.recoveryOwnedAmong?.(live) ?? new Set(live.filter((id) => deps.rows.recoveryOwnsWake?.(id)));
+        if (live.length < named.length || live.some((id) => owned.has(id))) {
+          const prior = Array.isArray(evaluation.notes?.["skippedSeats"]) ? evaluation.notes["skippedSeats"] as unknown[] : [];
+          return { action: "skip", reason: "all-parked-owners-deferred",
+            notes: { episodeClosures: evaluation.notes?.["episodeClosures"] ?? [],
+              skippedSeats: [...prior, { seat: evaluation.target.session, why: "obligation-closed-between-derive-and-wake" }] } };
+        }
+      }
       return evaluation;
     },
   };

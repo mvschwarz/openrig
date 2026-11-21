@@ -774,6 +774,32 @@ describe("a delivered reminder whose rows stay unclaimed reaches someone who can
     expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(1);
   });
 
+  it("doesn't send another seat a reminder naming a row that closed while the notice was going out", async () => {
+    const other = "qitem-z-0c1d2e3f";
+    const store = new RowStore();
+    store.openIds = (dest) => (dest === SEAT2 ? [other] : ROW_IDS);
+    const history: WatchdogHistoryEntry[] = [];
+    let now = Date.parse("2026-10-11T00:00:00.000Z");
+    const told: Escalation[] = [];
+    const evaluate = (seats: ParkedSeatDiagnosisView[], escalate: (input: Escalation) => Promise<string[]>) =>
+      makeParkedOwnerConsumerPolicy({ ...makeDeps(seats, store, history), now: () => now,
+        escalateUnclaimed: async (input) => { told.push(input); return escalate(input); } }).evaluate(makeJob());
+    const first = await evaluate([unclaimedSeat()], async () => [SEAT2]);
+    history.unshift(sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: String(first.notes?.["primaryRow"]) }));
+    await evaluate([parkedSeat({ parked: false })], async () => [SEAT2]);
+    now += 16 * 60_000;
+    // SEAT2 was the last one sent to, so this pass reads SEAT (the notice) before SEAT2 (a reminder).
+    history.unshift({ ...sentHistory({ episodeKey: "k-other", primaryRow: other }), deliveryTargetSession: SEAT2, evaluationNotes: {} });
+    const seat2 = parkedSeat({ sessionName: SEAT2, obligations: { items: [{ qitemId: other, state: "pending", summary: null }], held: [] } });
+    const result = await evaluate([unclaimedSeat(), seat2], async () => {
+      store.openIds = (dest) => (dest === SEAT2 ? [] : ROW_IDS);   // SEAT2's row closes meanwhile
+      return [SEAT2];
+    });
+    expect(told).toHaveLength(1);
+    expect(result.action).toBe("skip");
+    expect(result.notes?.["skippedSeats"]).toEqual(expect.arrayContaining([{ seat: SEAT2, why: "obligation-closed-between-derive-and-wake" }]));
+  });
+
   it("doesn't repeat the escalation on a later tick", async () => {
     const { store, told, advance, wake, resume } = harness();
     await wake();
