@@ -164,14 +164,15 @@ describe("RestoreOrchestrator", () => {
     });
   }
 
-  it.each([false, true])("Claude restores the same conversation after fragment refresh (source invalid=%s)", async invalid => {
+  it.each(["readable source", "unreadable source", "unresolved selection"] as const)(
+    "Claude restores the same conversation with %s", async mode => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-claude-fragments-"));
     try {
       const target = path.join(cwd, ".mcp.json");
       const source = path.join(cwd, "fragment.json");
       const previous = '{ "owner_value": "kept" }\n';
       fs.writeFileSync(target, previous);
-      fs.writeFileSync(source, invalid ? "[]" : '{"mcpServers":{"spec-mcp":{"command":"fixture"}}}');
+      fs.writeFileSync(source, mode === "unreadable source" ? "[]" : '{"mcpServers":{"spec-mcp":{"command":"fixture"}}}');
       const snapshot = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd }],
         edges: [], resumeType: "claude_id", resumeToken: "same-conversation",
@@ -186,7 +187,7 @@ describe("RestoreOrchestrator", () => {
       });
       const result = await createOrchestrator({
         tmux, claude, listProcesses: nativeLineage("claude-code", "same-conversation"),
-        resolveClaudeFragments: async () => ({ ok: true, entries: [{
+        resolveClaudeFragments: async () => mode === "unresolved selection" ? { ok: false, reason: mode } : ({ ok: true, entries: [{
           category: "runtime_resource", resourceType: "claude_mcp_fragment", onRestore: "follow_source",
           effectiveId: "spec-mcp", sourceSpec: "fixture", sourcePath: cwd, resourcePath: "fragment.json", absolutePath: source,
           classification: "safe_projection",
@@ -194,14 +195,60 @@ describe("RestoreOrchestrator", () => {
       }).restore(snapshot.id, { adapters: { "claude-code": adapter } });
       expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "resumed" }] } });
       expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "same-conversation"]);
-      if (invalid) {
+      if (mode !== "readable source") {
         expect(fs.readFileSync(target, "utf8")).toBe(previous);
-        expect(result.ok && result.result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("a source was not a readable JSON object")]));
+        const reason = mode === "unreadable source" ? "a source was not a readable JSON object" : "Claude fragment selection couldn't be resolved";
+        expect(result.ok && result.result.warnings).toContainEqual(expect.stringContaining(reason));
       } else {
         expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({
           owner_value: "kept", mcpServers: { "spec-mcp": { command: "fixture" } },
         });
       }
+    } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it("uses today's Claude fragments when an explicitly fresh seat also restores a checkpoint", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-fresh-claude-fragments-"));
+    try {
+      const target = path.join(cwd, ".mcp.json");
+      const previousSource = path.join(cwd, "saved.json");
+      const currentSource = path.join(cwd, "current.json");
+      fs.writeFileSync(previousSource, '{"mcpServers":{"example":{"command":"saved"}}}');
+      fs.writeFileSync(currentSource, '{"mcpServers":{"example":{"command":"current"}}}');
+      const saved = {
+        category: "runtime_resource", resourceType: "claude_mcp_fragment", effectiveId: "saved",
+        sourceSpec: "fixture", sourcePath: cwd, resourcePath: "saved.json", absolutePath: previousSource,
+      } as const;
+      const snapshot = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd }],
+        edges: [], resumeType: "claude_id", resumeToken: "old-conversation", withCheckpoint: "worker",
+      });
+      const worker = snapshot.data.nodes.find(node => node.logicalId === "worker");
+      if (!worker) throw new Error("Expected the worker in the snapshot");
+      updateSnapshotData(snapshot, data => {
+        data.nodeStartupContext = { [worker.id]: {
+          runtime: "claude-code", projectionEntries: [saved], resolvedStartupFiles: [], startupActions: [],
+        } };
+      });
+      const tmux = mockTmux();
+      const claude = mockClaudeResume();
+      const adapter = new ClaudeCodeAdapter({
+        tmux, fsOps: {
+          readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync,
+          exists: fs.existsSync, mkdirp: dir => fs.mkdirSync(dir, { recursive: true }), copyFile: fs.copyFileSync,
+        },
+      });
+      vi.spyOn(adapter, "deliverStartup").mockResolvedValue({ delivered: 0, failed: [] });
+      vi.spyOn(adapter, "checkReady").mockResolvedValue({ ready: true });
+      const result = await createOrchestrator({
+        tmux, claude,
+        resolveClaudeFragments: async () => ({ ok: true, entries: [{
+          ...saved, effectiveId: "current", resourcePath: "current.json", absolutePath: currentSource, classification: "safe_projection",
+        }] }),
+      }).restore(snapshot.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["worker"] });
+      expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "rebuilt" }] } });
+      expect(claude.resume).not.toHaveBeenCalled();
+      expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({ mcpServers: { example: { command: "current" } } });
     } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
   });
 

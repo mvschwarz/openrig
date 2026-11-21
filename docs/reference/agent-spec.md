@@ -398,10 +398,13 @@ with `runtime: claude-code`, and select it in the profile's `uses.runtime_resour
 A native restore (including an existing rig started from a snapshot) applies the opted-in
 fragments from today's agent spec before Claude resumes its conversation. An explicit fresh
 launch of an existing seat reads today's selection of both fragment types, including fragments
-with no restore opt-in.
-The saved launch recipe supplies the spec location and profile.
+with no restore opt-in. It applies the usual merge even when the user has changed the file,
+and records each write. The saved launch recipe supplies the spec location and profile.
+If the seat has no recipe, a fresh launch tries its saved fragments and warns about unreadable
+sources. If the current selection can't be resolved, OpenRig warns and continues the launch.
 
-OpenRig leaves a target with local JSON edits intact and reports the skipped fragments.
+During the opt-in refresh before resume, OpenRig leaves a target with local JSON edits intact
+and reports the skipped fragments.
 For a file without a write record, the first refresh can add missing values and can keep
 matching ones. If the refresh would replace an existing value, it leaves the file as it is.
 An unreadable source or target, or a failed replacement, is reported and an otherwise-valid

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import { createHash } from "node:crypto";
 import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { reconcileSkillLoadout, resolvePluginSkills } from "../src/domain/skill-catalog.js";
 import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
@@ -133,7 +134,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       tmuxAdapter: tmux,
       sleep: async () => undefined,
       resolveClaudeFragments: async (rigId, nodeId) => resolveClaudeFragments?.(rigId, nodeId)
-        ?? { ok: false, reason: "no fixture recipe", missingRecipe: true },
+        ?? { ok: true, entries: [] },
     });
     invalidations = [];
     activitySwaps = [];
@@ -162,10 +163,12 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   afterEach(() => db.close());
 
-  it.each([false, true])("loads today's Claude fragment selection on a fresh launch (restore opt-in=%s)", async follows => {
+  it.each([false, true])("merges today's Claude fragments on a fresh launch (restore opt-in=%s)", async follows => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-claude-fragments-"));
     try {
-      const seat = seedSeat({ clean: true });
+      const seat = seedSeat({ clean: true, cwd: root });
+      const hashes = new Map<string, string>();
+      useRealClaudeProjection(hashes);
       const { podInstantiator } = createTestApp(db, {
         podInstantiatorFsOps: { exists: fs.existsSync, readFile: file => fs.readFileSync(file, "utf8") },
       });
@@ -176,7 +179,14 @@ describe("SeatLifecycleService.launchFresh", () => {
         ] }],
       } };
       db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), seat.node.id);
-      fs.writeFileSync(path.join(root, "today.json"), "{}");
+      const settings = path.join(root, ".claude", "settings.local.json");
+      const mcp = path.join(root, ".mcp.json");
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      hashes.set(settings, createHash("sha256").update('{"env":{"FLAG":"old"}}').digest("hex"));
+      fs.writeFileSync(settings, '{"env":{"FLAG":"old"},"permissions":{"allow":["Bash(npm test)"]}}');
+      fs.writeFileSync(mcp, '{"mcpServers":{"example":{"command":"old"}}}');
+      fs.writeFileSync(path.join(root, "today.json"), '{"mcpServers":{"example":{"command":"new"}}}');
+      fs.writeFileSync(path.join(root, "settings.json"), '{"env":{"FLAG":"new"}}');
       fs.writeFileSync(path.join(root, "agent.yaml"), `name: impl
 version: "1.0"
 resources:
@@ -185,13 +195,16 @@ resources:
       path: today.json
       runtime: claude-code
       type: claude_mcp_fragment
+${follows ? "      on_restore: follow_source\n" : ""}    - id: settings
+      path: settings.json
+      runtime: claude-code
+      type: claude_settings_fragment
 ${follows ? "      on_restore: follow_source\n" : ""}profiles:
   default:
     uses:
-      runtime_resources: [today]
+      runtime_resources: [today, settings]
 `);
       const saved = [
-        startupEntry("guidance", "live-guidance"),
         { ...startupEntry("guidance", "yesterday"), category: "runtime_resource", resourceType: "claude_mcp_fragment" },
       ];
       db.prepare("UPDATE node_startup_context SET projection_entries_json = ? WHERE node_id = ?")
@@ -199,7 +212,11 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
 
       const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "apply changed fragment selection" });
       expect(result.ok).toBe(true);
-      expect(projectedPlan?.entries.map(entry => entry.effectiveId)).toEqual(["live-guidance", "today"]);
+      expect(JSON.parse(fs.readFileSync(mcp, "utf8"))).toEqual({ mcpServers: { example: { command: "new" } } });
+      expect(JSON.parse(fs.readFileSync(settings, "utf8"))).toEqual({
+        env: { FLAG: "new" }, permissions: { allow: ["Bash(npm test)"] },
+      });
+      expect(hashes.get(mcp)).toBe(createHash("sha256").update('{"mcpServers":{"example":{"command":"new"}}}').digest("hex"));
       const context = service.readStartupContext(seat.node.id, root);
       expect(context.ok && context.context.plan.entries).toEqual(expect.arrayContaining([
         expect.objectContaining({ effectiveId: "today", absolutePath: path.join(root, "today.json"),
@@ -207,6 +224,43 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
       ]));
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
+
+  it.each(["no launch recipe", "unresolved selection"] as const)("warns and keeps launching with %s", async mode => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-claude-fragment-fallback-"));
+    try {
+      const seat = seedSeat({ clean: true, cwd: root });
+      useRealClaudeProjection();
+      const target = path.join(root, ".mcp.json");
+      const previous = '{ "owner_value": "kept" }\n';
+      fs.writeFileSync(target, previous);
+      const entries = mode === "no launch recipe" ? [{
+        ...startupEntry("guidance", "missing-mcp"), category: "runtime_resource", resourceType: "claude_mcp_fragment",
+        absolutePath: path.join(root, "missing.json"),
+      }] : [];
+      db.prepare("UPDATE node_startup_context SET projection_entries_json = ? WHERE node_id = ?")
+        .run(JSON.stringify(entries), seat.node.id);
+      resolveClaudeFragments = async () => mode === "no launch recipe"
+        ? { ok: false, reason: mode, missingRecipe: true }
+        : { ok: false, reason: mode };
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "refresh Claude fragments" });
+      expect(result.ok).toBe(true);
+      expect(result.warnings ?? []).toContainEqual(expect.stringContaining("Claude fragment selection couldn't be resolved"));
+      if (mode === "no launch recipe") {
+        expect(result.warnings).toContainEqual(expect.stringMatching(/saved Claude fragment source .* was not a readable JSON object/));
+      }
+      expect(fs.readFileSync(target, "utf8")).toBe(previous);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  function useRealClaudeProjection(hashes = new Map<string, string>()): void {
+    const real = new ClaudeCodeAdapter({ tmux, fsOps: {
+      readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync,
+      exists: fs.existsSync, mkdirp: dir => fs.mkdirSync(dir, { recursive: true }), copyFile: fs.copyFileSync,
+    }, readProjectionHash: target => hashes.get(target) ?? null,
+    recordProjection: (target, content) => hashes.set(target, createHash("sha256").update(content).digest("hex")) });
+    adapter.project = (plan, binding) => real.project(plan, binding);
+  }
 
   it.each([
     { runtime: "terminal" as const, fail: false },
@@ -452,12 +506,12 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
     expect(deriveRehydrateSessionIdByNode(history, [seat.node.id], readFreshOccupantRelations(db, seat.rig.id))[seat.node.id]).toBeNull();
   });
 
-  function seedSeat(opts?: { clean?: boolean; adopted?: boolean; model?: string; withContext?: boolean; runtime?: "claude-code" | "codex" | "terminal" }) {
+  function seedSeat(opts?: { clean?: boolean; adopted?: boolean; model?: string; cwd?: string; withContext?: boolean; runtime?: "claude-code" | "codex" | "terminal" }) {
     const runtime = opts?.runtime ?? "claude-code";
     const rig = rigRepo.createRig("fresh-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", {
       runtime,
-      cwd: "/project",
+      cwd: opts?.cwd ?? "/project",
       model: opts?.model ?? "claude-current",
     });
     const sessionName = "dev-impl@fresh-rig";
@@ -1653,6 +1707,7 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
   // outside daemon/specs and user resources are projected exactly as stored.
   it("#261 projects shipped-spec resources from the running install and leaves plugin/user entries untouched", async () => {
     const seat = seedSeat({ clean: true });
+    resolveClaudeFragments = async () => ({ ok: false, reason: "no launch recipe for this older seat", missingRecipe: true });
     const oldSpecs = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
     const runningSpecs = path.resolve(import.meta.dirname, "../specs");
     const entry = (over: Record<string, string>) => ({ category: "runtime_resource", effectiveId: "x", sourceSpec: "shared", resourcePath: "r", ...over });

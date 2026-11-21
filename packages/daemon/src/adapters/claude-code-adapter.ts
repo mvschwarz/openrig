@@ -16,12 +16,12 @@ import type {
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
-import { isClaudeFragmentEntry, type ClaudeFragmentEntry, type ProjectionPlan, type ProjectionEntry } from "../domain/projection-planner.js";
+import type { ClaudeFragmentEntry, ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
-import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
@@ -215,10 +215,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const warnings: string[] = [];
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
-    const followedTypes = new Set(plan.entries.filter(isClaudeFragmentEntry)
-      .filter(entry => plan.protectClaudeFragments || entry.onRestore === "follow_source").map(entry => entry.resourceType));
-    const following: ClaudeFragmentEntry[] = [];
-
     for (const entry of plan.entries) {
       try {
         if (entry.classification === "no_op") {
@@ -229,11 +225,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           skipped.push(entry.effectiveId);
           continue;
         }
-        if (isClaudeFragmentEntry(entry) && followedTypes.has(entry.resourceType)) {
-          following.push(entry);
-          continue;
-        }
-        const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused);
+        const didProject = this.projectEntry(entry, binding, warnings, plan.skipUnavailableClaudeFragmentSources);
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -243,13 +235,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         failed.push({ effectiveId: entry.effectiveId, error: (err as Error).message });
       }
     }
-    if (following.length > 0) {
-      const refresh = this.refreshRuntimeFragments(following, binding);
-      projected.push(...refresh.projected);
-      skipped.push(...refresh.skipped);
-      warnings.push(...(refresh.warnings ?? []));
-    }
-
     // Activity-hook reconciliation is driven from this ALWAYS-RUN seam (not a
     // per-entry projection): a profile that REMOVES the resource emits no entry,
     // so the strip/disable branch must fire off the plan's ABSENCE — not off an
@@ -296,9 +281,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (group.length === 0) continue;
       const ids = group.map(entry => entry.effectiveId);
       const target = claudeFragmentTarget(binding.cwd, type);
-      const keep = (why: string) => {
+      const keep = (why: string, nextStep = "") => {
         skipped.push(...ids);
-        warnings.push(`Claude fragments ${ids.join(", ")} were skipped for ${target}: ${why}. The file was left intact.`);
+        warnings.push(`Claude fragments ${ids.join(", ")} were skipped for ${target}: ${why}. The file was left intact.${nextStep}`);
       };
       if (insideMissingFolder(target, binding.cwd, this.folderPresent)) {
         keep("the seat's working folder is missing");
@@ -325,6 +310,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const merged = fragments.reduce(mergeJsonObjects, existing);
       const before = fragmentRecordContent(type, existing);
       const after = fragmentRecordContent(type, merged);
+      if (previous !== null && before === after) {
+        projected.push(...ids);
+        continue;
+      }
       let lastHash: string | null;
       try {
         lastHash = this.readProjectionHash(target);
@@ -332,28 +321,21 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         keep("the last projection record couldn't be read");
         continue;
       }
-      const needsWrite = before !== after || previous === null;
       const edited = lastHash !== null && (previous === null || lastHash !== hashContent(before));
-      if (!needsWrite && edited) {
-        // The fragment already matches. Keep the earlier record so this edit still protects a later update.
-        projected.push(...ids);
-        continue;
-      }
       if (edited) {
         keep("local edits differ from the last OpenRig projection");
         continue;
       }
       if (lastHash === null && !keepsExistingJson(existing, merged)) {
-        keep("OpenRig has no write record and the refresh would replace existing values");
+        keep("OpenRig has no write record and the refresh would replace existing values",
+          " Review the target and source. To apply the spec values, start the seat fresh.");
         continue;
       }
       try {
-        if (needsWrite) {
-          this.fs.mkdirp(nodePath.dirname(target));
-          const content = JSON.stringify(merged, null, 2);
-          if (this.fs.replaceFragment) this.fs.replaceFragment(target, content, previous, binding.cwd);
-          else this.fs.writeFile(target, content);
-        }
+        this.fs.mkdirp(nodePath.dirname(target));
+        const content = JSON.stringify(merged, null, 2);
+        if (this.fs.replaceFragment) this.fs.replaceFragment(target, content, previous, binding.cwd);
+        else this.fs.writeFile(target, content);
       } catch {
         keep("the replacement file couldn't be written safely");
         continue;
@@ -1054,7 +1036,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
   private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
 
-  private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
+  private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[], skipUnavailableFragmentSource = false): boolean {
+    const { cwd, claudeManagedBlockFile: managedBlockFile = DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, seatSkillsRoot, seatSkillsRefused } = binding;
     // A seat folder this machine doesn't have isn't recreated to project into it (insideMissingFolder). A skill in the
     // seat's own skill storage lies outside it and still goes. Activity hooks are reconciled (and reported) by project().
     if (!(entry.category === "runtime_resource" && entry.resourceType === "claude_activity_hooks")) {
@@ -1066,7 +1049,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
     }
     // A skipped fragment is reported skipped; it never falls through to the generic extensions copy.
-    const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings) : false;
+    const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings, skipUnavailableFragmentSource) : false;
     if (handled) return handled === true;
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
@@ -1195,11 +1178,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** true when applied, "skipped" when handled but not applied, false when this isn't a resource it handles. */
-  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[]): boolean | "skipped" {
+  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[], skipUnavailableFragmentSource: boolean): boolean | "skipped" {
     switch (entry.resourceType) {
       case "claude_settings_fragment":
       case "claude_mcp_fragment":
-        return this.mergeJsonFragment(entry.absolutePath, claudeFragmentTarget(cwd, entry.resourceType), entry.resourceType, warnings) || "skipped";
+        return this.mergeJsonFragment(entry.absolutePath, claudeFragmentTarget(cwd, entry.resourceType), entry.resourceType,
+          warnings, skipUnavailableFragmentSource) || "skipped";
       case "claude_activity_hooks":
         // Handled (no generic .claude/extensions copy): the relay asset is
         // delivered + the settings hooks reconciled by reconcileClaudeActivityHooks
@@ -1213,8 +1197,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** Merge a JSON fragment into a project file. An existing target that can't be read, or isn't a JSON object (it
    *  doesn't parse, or it holds an array or a single value), belongs to its owner: it's left as it is, nothing is
    *  merged, and a warning says so. Returns whether the fragment was applied. */
-  private mergeJsonFragment(sourcePath: string, targetPath: string, type: ClaudeJsonFragmentType, warnings: string[]): boolean {
-    const fragment = this.readJsonObjectStrict(sourcePath);
+  private mergeJsonFragment(sourcePath: string, targetPath: string, type: ClaudeJsonFragmentType, warnings: string[], skipUnavailableSource: boolean): boolean {
+    let fragment: Record<string, unknown>;
+    try {
+      fragment = this.readJsonObjectStrict(sourcePath);
+    } catch (error) {
+      if (!skipUnavailableSource) throw error;
+      warnings.push(`Kept ${targetPath} as it is. The saved Claude fragment source at ${sourcePath} was not a readable JSON object.`);
+      return false;
+    }
     // The reasons are fixed text: a parser message can quote the file's content.
     const leave = (reason: string) => {
       warnings.push(`Left ${targetPath} as it is: ${reason}. The fragment ${sourcePath} wasn't applied; once the file is fixed, the next fresh launch applies it (resuming or restoring the session doesn't).`);
@@ -1610,6 +1601,7 @@ export function replaceClaudeFragment(path: string, content: string, previous: s
         || (current ? fs.readFileSync(target, "utf8") : null) !== previous) {
       throw new Error("Fragment target changed before replacement");
     }
+    // The check and rename are separate operations. An external edit between them can be overwritten.
     fs.renameSync(temporary, target);
   } catch (error) {
     try { fs.rmSync(temporary, { force: true }); } catch { /* The original error explains why the refresh failed. */ }

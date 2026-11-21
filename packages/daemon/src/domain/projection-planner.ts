@@ -55,8 +55,8 @@ export interface ProjectionPlan {
   runtime: string;
   cwd: string;
   entries: ProjectionEntry[];
-  /** On an explicit refresh, guard all selected Claude fragment targets against edits. */
-  protectClaudeFragments?: boolean;
+  /** An older seat without a launch recipe can still apply its readable saved Claude fragments. */
+  skipUnavailableClaudeFragmentSources?: boolean;
   startup: StartupBlock;
   conflicts: ProjectionEntry[];
   noOps: ProjectionEntry[];

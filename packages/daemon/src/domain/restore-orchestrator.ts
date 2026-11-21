@@ -2133,9 +2133,7 @@ export class RestoreOrchestrator {
       ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
     if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
       if (this.resolveClaudeFragments && activityAdapter?.refreshRuntimeFragments && !activityAdapter.environment) {
-        const savedFollowing = startupCtx?.projectionEntries.filter(entry => entry.category === "runtime_resource"
-          && entry.onRestore === "follow_source") ?? [];
-        const today = await this.resolveClaudeFragments(rigId, node.id).catch(() => ({ ok: false as const }));
+        const today = await this.resolveClaudeFragments(rigId, launchResult.session.nodeId).catch(() => ({ ok: false as const }));
         if (today.ok) {
           const following = today.entries.filter(entry => entry.onRestore === "follow_source");
           if (following.length) {
@@ -2146,8 +2144,8 @@ export class RestoreOrchestrator {
               warnings?.push(`Restore: Claude fragments ${following.map(entry => entry.effectiveId).join(", ")} could not be refreshed.`);
             }
           }
-        } else if (savedFollowing.length) {
-          warnings?.push(`Restore: Claude fragments ${savedFollowing.map(entry => entry.effectiveId).join(", ")} were skipped because today's selection couldn't be resolved.`);
+        } else {
+          warnings?.push("Restore: Today's Claude fragment selection couldn't be resolved. Check the seat's agent spec and launch recipe before the next restore.");
         }
       }
       // The saved hooks resource ships under the install's specs: read it from the running install, as replay does.
@@ -2586,7 +2584,7 @@ export class RestoreOrchestrator {
               resolvedStartupFiles: filteredFiles,
               startupActions: sourceActions,
               isRestore: replayAsRestore,
-              refreshClaudeFragments: !replayAsRestore && !replayContained,
+              refreshClaudeFragments: !resumeRequested && (freshRequested || !replayAsRestore),
               ...(replaySkip ? { replaySkip } : {}),
               preserveStartupContext: replayContained,
               skipHarnessLaunch: !shouldLaunchHarness,

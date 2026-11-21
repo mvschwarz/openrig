@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeCodeAdapter, replaceClaudeFragment } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
-import type { ProjectionPlan } from "../src/domain/projection-planner.js";
+import { isClaudeFragmentEntry, type ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -209,60 +209,73 @@ describe("Claude runtime fragments that follow their sources", () => {
   ] as const) {
     it(`${target.rel} refreshes its source, and keeps a later operator edit`, async () => {
       const s = seat(target, '{ "owner_note": "keep me" }');
-      s.plan.entries[0]!.onRestore = "follow_source";
+      const entries = s.plan.entries.filter(isClaudeFragmentEntry);
       await sequence(s);
       fs.writeFileSync(s.fragmentPath, JSON.stringify(next));
-      expect(await s.adapter.project(s.plan, s.binding)).toMatchObject({ projected: ["spec-fragment"], failed: [] });
+      expect(s.adapter.refreshRuntimeFragments(entries, s.binding)).toMatchObject({ projected: ["spec-fragment"], failed: [] });
       expect(JSON.parse(s.read()!)).toMatchObject({ owner_note: "keep me", ...next });
 
       const edited = '{ "owner_note": "operator edit" }\n';
       fs.writeFileSync(s.targetPath, edited);
-      const result = await s.adapter.project(s.plan, s.binding);
+      const result = s.adapter.refreshRuntimeFragments(entries, s.binding);
       expect(result).toMatchObject({ skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("local edits")] });
       expect(s.read()).toBe(edited);
     });
 
     it(`${target.rel} leaves the old projection intact when a following source is invalid`, async () => {
       const s = seat(target, null);
-      s.plan.entries[0]!.onRestore = "follow_source";
+      const entries = s.plan.entries.filter(isClaudeFragmentEntry);
       await s.adapter.project(s.plan, s.binding);
       const before = s.read();
       fs.writeFileSync(s.fragmentPath, "[]");
-      const result = await s.adapter.project(s.plan, s.binding);
+      const result = s.adapter.refreshRuntimeFragments(entries, s.binding);
       expect(result).toMatchObject({ skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("source")] });
       expect(s.read()).toBe(before);
     });
   }
 
-  it("keeps an edit protected after a start that needs no fragment update", async () => {
+  it("keeps an edit protected after a refresh that needs no fragment update", async () => {
     const s = seat(TARGETS[1], null);
-    s.plan.entries[0]!.onRestore = "follow_source";
+    const entries = s.plan.entries.filter(isClaudeFragmentEntry);
     await s.adapter.project(s.plan, s.binding);
     const edited = JSON.stringify({ ...TARGETS[1].fragment, owner_note: "editor addition" });
     fs.writeFileSync(s.targetPath, edited);
-    expect((await s.adapter.project(s.plan, s.binding)).warnings).toBeUndefined();
+    expect(s.adapter.refreshRuntimeFragments(entries, s.binding).warnings).toBeUndefined();
     fs.writeFileSync(s.fragmentPath, '{"mcpServers":{"spec-server":{"command":"changed"}}}');
-    expect((await s.adapter.project(s.plan, s.binding)).skipped).toEqual(["spec-fragment"]);
+    expect(s.adapter.refreshRuntimeFragments(entries, s.binding).skipped).toEqual(["spec-fragment"]);
     expect(s.read()).toBe(edited);
   });
 
-  it("keeps an unrecorded MCP value and reports why a conflicting selection was skipped", async () => {
+  it("keeps an unrecorded MCP value and tells the user how to apply a conflicting selection", () => {
     const current = '{ "mcpServers": { "spec-server": { "command": "owner-command" } } }\n';
     const s = seat(TARGETS[1], current);
-    s.plan.entries[0]!.onRestore = "follow_source";
-    expect(await s.adapter.project(s.plan, s.binding)).toMatchObject({
+    const result = s.adapter.refreshRuntimeFragments(s.plan.entries.filter(isClaudeFragmentEntry), s.binding);
+    expect(result).toMatchObject({
+      skipped: ["spec-fragment"], failed: [], warnings: [expect.stringMatching(/no write record.*start the seat fresh/)],
+    });
+    expect(s.read()).toBe(current);
+  });
+
+  it("keeps an unrecorded MCP value protected after a refresh that writes nothing", () => {
+    const current = '{ "mcpServers": { "spec-server": { "command": "owner-command" } } }\n';
+    const s = seat(TARGETS[1], current, "{}");
+    const entries = s.plan.entries.filter(isClaudeFragmentEntry);
+    expect(s.adapter.refreshRuntimeFragments(entries, s.binding).warnings).toBeUndefined();
+    expect(s.read()).toBe(current);
+
+    fs.writeFileSync(s.fragmentPath, '{"mcpServers":{"spec-server":{"command":"spec-command"}}}');
+    expect(s.adapter.refreshRuntimeFragments(entries, s.binding)).toMatchObject({
       skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("no write record")],
     });
     expect(s.read()).toBe(current);
   });
 
-  it("leaves a linked MCP target intact when the opted-in projection cannot replace it", async () => {
+  it("leaves a linked MCP target intact when the opted-in projection cannot replace it", () => {
     const s = seat(TARGETS[1], null);
     const linked = nodePath.join(nodePath.dirname(s.cwd), "shared-mcp.json");
     fs.writeFileSync(linked, "{}");
     fs.symlinkSync(linked, s.targetPath);
-    s.plan.entries[0]!.onRestore = "follow_source";
-    expect(await s.adapter.project(s.plan, s.binding)).toMatchObject({
+    expect(s.adapter.refreshRuntimeFragments(s.plan.entries.filter(isClaudeFragmentEntry), s.binding)).toMatchObject({
       skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("couldn't be written safely")],
     });
     expect(fs.readFileSync(linked, "utf8")).toBe("{}");

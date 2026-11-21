@@ -470,7 +470,7 @@ export class StartupOrchestrator {
     } else if (input.refreshClaudeFragments && input.adapter.runtime === "claude-code" && !input.adapter.environment && this.resolveClaudeFragments) {
       const saved = input.plan.entries.filter(isClaudeFragmentEntry);
       const otherEntries = input.plan.entries.filter(entry => !isClaudeFragmentEntry(entry));
-      const current: Awaited<ReturnType<ResolveClaudeFragments>> = await this.resolveClaudeFragments(input.rigId, input.nodeId)
+      const current: Awaited<ReturnType<ResolveClaudeFragments>> = await this.resolveClaudeFragments(input.rigId, input.binding.nodeId)
         .catch(() => ({ ok: false as const, reason: "could not resolve today's selection" }));
       if (current.ok) {
         const entries = [...otherEntries, ...current.entries];
@@ -479,11 +479,19 @@ export class StartupOrchestrator {
             warnings.push(`Claude fragment ${entry.effectiveId} is no longer selected. Previously merged values were left in place.`);
           }
         }
-        projectionPlan = { ...input.plan, entries, protectClaudeFragments: true };
+        projectionPlan = { ...input.plan, entries };
         input = { ...input, plan: projectionPlan };
-      } else if (saved.length > 0 && (!current.missingRecipe || saved.some(entry => entry.onRestore === "follow_source"))) {
-        projectionPlan = { ...input.plan, entries: otherEntries };
-        warnings.push(`Claude fragments ${saved.map(entry => entry.effectiveId).join(", ")} were skipped because today's selection couldn't be resolved.`);
+      } else {
+        const warning = "Today's Claude fragment selection couldn't be resolved.";
+        if (current.missingRecipe && saved.length > 0) {
+          warnings.push(`${warning} This seat has no launch recipe. Trying its saved Claude fragments.`);
+          projectionPlan = { ...input.plan, skipUnavailableClaudeFragmentSources: true };
+        } else {
+          if (saved.length > 0) {
+            projectionPlan = { ...input.plan, entries: otherEntries };
+          }
+          warnings.push(`${warning} Check the seat's agent spec and launch recipe before launching again.`);
+        }
       }
     }
     let projectionResult: ProjectionResult;
