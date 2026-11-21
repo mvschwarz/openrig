@@ -939,14 +939,61 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(res.status).toBe(401);
     });
 
-    it("#3512: a malformed --person is refused when added, and a stored one makes the token file unreadable", async () => {
+    it("#3512: token add rejects a malformed --person", async () => {
       const tokenFile = path.join(home, "mcp-http-tokens.json");
       await expect(addGrant(tokenFile, { name: "bad", seat: "assistant@team-a", rigs: [], roots: [], workspace: false, owner: false, person: "Not An Id" }))
         .rejects.toThrow(/--person/);
-      fs.writeFileSync(tokenFile, JSON.stringify({ principals: [{ name: "x", tokenSha256: "0", seat: "assistant@team-a", rigs: [], roots: [],
-        workspace: false, owner: false, person: "Bad Id", createdAt: "2026-11-19T00:00:00.000Z" }] }));
-      const { readGrants } = await import("../src/mcp-http.js");
-      expect(() => readGrants(tokenFile)).toThrow(/malformed/);
+    });
+
+    async function mixedFileGrants(corruptBeforeStart: boolean, invalidPerson: unknown) {
+      seat("team-a", "assistant");
+      seat("team-a", "other-assistant");
+      const tokenFile = path.join(home, "mcp-http-tokens.json");
+      const grant = { rigs: ["team-a"], roots: ["proof"], workspace: true, owner: false, person: PERSON };
+      const affected = await addGrant(tokenFile, { ...grant, name: "affected", seat: "assistant@team-a" });
+      const other = await addGrant(tokenFile, { ...grant, name: "other", seat: "other-assistant@team-a" });
+      const damageBinding = () => {
+        const file = JSON.parse(fs.readFileSync(tokenFile, "utf8")) as { principals: Array<Record<string, unknown>> };
+        file.principals.find(entry => entry.name === "affected")!.person = invalidPerson;
+        fs.writeFileSync(tokenFile, JSON.stringify(file));
+      };
+      if (corruptBeforeStart) damageBinding();
+      const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+      closers.push(() => served.close());
+      if (!corruptBeforeStart) damageBinding();
+      return { url: served.url, affected, other };
+    }
+
+    it("#3512: starts with an unusable person binding and keeps the affected grant's ordinary access", async () => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { url, affected } = await mixedFileGrants(true, "Invalid Person");
+        const asSeat = await connect(url, affected);
+        const tools = await asSeat.tools();
+        expect(tools).toEqual(expect.arrayContaining(["rig_queue_create", "rig_artifact_read", "rig_context_get"]));
+        expect(tools.filter(tool => tool.startsWith("rig_question_"))).toEqual([]);
+        seat("team-a", "lead");
+        const sent = await asSeat("rig_queue_create", { qitemId: "qitem-malformed-person-file",
+          destination: "lead@team-a", body: "Keep using the grant" });
+        expect(sent.isError).toBe(false);
+        expect(repo.getById("qitem-malformed-person-file")).toMatchObject({ sourceSession: "assistant@team-a" });
+        fs.writeFileSync(path.join(shared, "result.md"), "fixture artifact");
+        expect((await asSeat("rig_artifact_read", { root: "proof", path: "result.md" })).text).toContain("fixture artifact");
+        expect(log).toHaveBeenCalledWith(expect.stringMatching(/affected.*unusable person.*rig_question_/));
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("#3512: a bad person field on a live reload leaves the other grant and its person tools available", async () => {
+      register(PERSON, true);
+      const { url, other } = await mixedFileGrants(false, { invalid: true });
+      const asOther = await connect(url, other);
+      expect(await asOther.tools()).toEqual(expect.arrayContaining(["rig_question_list", "rig_question_answer", "rig_queue_create"]));
+      const item = await ask(`${PERSON}@external`);
+      expect((await asOther("rig_question_list")).structured.items).toEqual(
+        expect.arrayContaining([expect.objectContaining({ qitemId: item.qitemId })]),
+      );
     });
 
     it("answers several questions in one call, and records the person's own words exactly", async () => {
