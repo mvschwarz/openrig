@@ -2635,6 +2635,40 @@ state: 2-named
         db.close();
       }
     });
+
+    // #3395, spec section 5, "Stored": the retry launches from the seat's stored settings (its fragment can't carry
+    // `pool`), so it reads the stored pool block from the node, as the first start does.
+    it("A first-start retry of a seat reports its stored pool block that can't be used once in its warnings, and the retry still launches.", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: "." };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        // Stored as a re-apply writes a block that can't be used: as authored.
+        expect(rigRepo.setNodePool(worker.id, { raw: { max: -1 } })).toBe(true);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        const stored = "dev.worker pool.max: must be a whole number of 0 or more; pool not used";
+        expect(JSON.stringify(retried).split(stored).length - 1, JSON.stringify(retried)).toBe(1);
+        expect(rigRepo.getNodePool(worker.id)).toEqual({ raw: { max: -1 }, error: expect.any(String) });
+      } finally {
+        db.close();
+      }
+    });
   });
 
   describe("launch_wrapper lifecycle and retention", () => {
