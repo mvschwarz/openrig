@@ -649,6 +649,12 @@ Between off (always interrupt) and hold (full quiet):
                   as held on the row (the open rows already are the reminder);
                   other notices are held. A cold row wakes nobody: a person or
                   the seat's next turn picks it up.
+
+For a Claude seat you type in, the opt-in hook bridge can deliver ordinary messages
+at a turn boundary without typing into its input box; it takes effect at the next
+launch or restore. See rig seat set-hook-bridge --help and:
+https://github.com/mvschwarz/openrig/blob/main/docs/reference/seat-delivery.md#claude-hook-bridge-opt-in
+
 What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and

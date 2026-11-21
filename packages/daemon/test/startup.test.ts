@@ -28,6 +28,7 @@ import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { OPENRIG_HOME } from "../src/openrig-compat.js";
+import * as codexActivityRelay from "../src/adapters/codex-activity-relay.js";
 
 const startupDnsFixture = vi.hoisted(() => ({
   discoveredNames: [] as string[],
@@ -866,7 +867,7 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
     }
   });
 
-  it("GAP-7 shares one custom absolute CODEX_HOME between production session env and adapter config writes", async () => {
+  it.each([false, true])("GAP-7 shares one custom absolute CODEX_HOME and provisions hooks when relay staging fails: %s", async (stagingFails) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-gap7-custom-"));
     const daemonHome = path.join(root, "daemon-home");
     const codexHome = path.join(root, "daemon-codex");
@@ -876,6 +877,8 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
     process.env.HOME = daemonHome;
     process.env.CODEX_HOME = codexHome;
     let result: Awaited<ReturnType<typeof createDaemon>> | undefined;
+    const stage = stagingFails ? vi.spyOn(codexActivityRelay, "stageCodexActivityRelay").mockImplementation(() => { throw new Error("fixture staging failure"); }) : undefined;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
       result = await createDaemon({
@@ -893,7 +896,17 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
       const configPath = path.join(codexHome, "config.toml");
       expect(fs.readFileSync(configPath, "utf8")).toContain(`[projects."${workspace}"]`);
       expect(fs.existsSync(path.join(daemonHome, ".codex", "config.toml"))).toBe(false);
+      const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+      if (!(adapter instanceof CodexRuntimeAdapter)) throw new Error("expected the production Codex adapter");
+      adapter.ensureCodexActivityHooks();
+      const shippedRelay = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
+      const relay = stagingFails ? shippedRelay : path.join(OPENRIG_HOME, "runtime/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
+      expect(fs.readFileSync(configPath, "utf8")).toContain(`node "${relay}"`);
+      expect(fs.readFileSync(relay)).toEqual(fs.readFileSync(shippedRelay));
+      if (stagingFails) expect(warning).toHaveBeenCalledWith(expect.stringContaining("using the shipped relay"), expect.any(Error));
     } finally {
+      stage?.mockRestore();
+      warning.mockRestore();
       result?.db.close();
       restoreEnv(saved);
       fs.rmSync(root, { recursive: true, force: true });

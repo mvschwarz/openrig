@@ -3,7 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_LIMIT_WARNING, tmuxServerStartCommand } from "../src/tmux-server-start.js";
+import { startsServerOnly, TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_LIMIT_WARNING, TMUX_SERVER_NO_SESSION_BUS,
+  TMUX_SERVER_SESSION_BUS, tmuxServerStartCommand } from "../src/tmux-server-start.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { execArgvCommand, execTmuxCommand } from "../src/adapters/tmux-exec.js";
 
 const shell = (script: string, args: string[] = []) => spawnSync("/bin/sh", ["-c", script, "nofile-test", ...args], { encoding: "utf8", timeout: 10_000 });
 let tmux = false;
@@ -79,6 +82,89 @@ describe.skipIf(process.platform === "win32")("tmux server creation limit", () =
       expect(query("display-message", "-p", "#{pid}").trim()).toBe(pid);
       expect(query("list-sessions", "-F", "#{session_name}")).toContain("owned");
     } finally {
+      try { query("kill-server"); } catch { /* Only this test's exact private socket. */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// #3253: a systemd-enabled tmux moves each new pane into a tmux-spawn-*.scope through its server's session bus. Only the
+// server process OpenRig starts goes without one; the panes get the starting process's value back.
+describe.skipIf(process.platform === "win32")("tmux server start without a session bus (#3253)", () => {
+  it("knows a bare server start from a tmux command that takes -D", () => {
+    for (const cmd of ["tmux -D </dev/null >/dev/null 2>&1 &", "tmux -f /dev/null -S '/a b/s' -D </dev/null &", "tmux -L x -D",
+      `tmux -S '/tmp/it'"'"'s dir/s' -D </dev/null >/dev/null 2>&1 &`]) {
+      expect(startsServerOnly(cmd), cmd).toBe(true);
+    }
+    for (const cmd of ["tmux select-pane -D", "tmux resize-pane -D 2", "tmux -S /s attach-session -D -t x",
+      "tmux new-session -d", "tmux start-server ; source-file f", "systemd-run --user --scope -- tmux -D", "tmux -S -D new-session"]) {
+      expect(startsServerOnly(cmd), cmd).toBe(false);
+    }
+  });
+
+  it("reaches a server started in the background by the shell", () => {
+    // Without the variable in the starting environment: a bare assignment would then not reach the server.
+    const env = { ...process.env };
+    delete env.DBUS_SESSION_BUS_ADDRESS;
+    const result = spawnSync("/bin/sh", ["-c", TMUX_SERVER_LIMIT_PREFIX + TMUX_SERVER_NO_SESSION_BUS +
+      'exec /bin/sh -c \'printf %s "${DBUS_SESSION_BUS_ADDRESS-unset}"\' &\nwait'], { encoding: "utf8", timeout: 10_000, env });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(TMUX_SERVER_SESSION_BUS);
+  });
+
+  it("is the unknown disabled: transport, marked as OpenRig's own, the same in every daemon process", () => {
+    expect(TMUX_SERVER_SESSION_BUS).toBe("disabled:openrig=tmux-server");
+  });
+
+  it.skipIf(!tmux || process.platform !== "linux")("a daemon that starts again gives the bus back to a server still holding OpenRig's address, and only to that", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "or-nobus-restart-"));
+    const socket = join(dir, "socket");
+    const query = (...args: string[]) => execFileSync("tmux", ["-S", socket, ...args], { encoding: "utf8", timeout: 5000 });
+    const global = () => query("show-environment", "-g").split("\n").find(v => /^-?DBUS_SESSION_BUS_ADDRESS(=|$)/.test(v));
+    const adapter = () => new TmuxAdapter(execTmuxCommand, undefined, execArgvCommand, ["-f", "/dev/null", "-S", socket]);
+    vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/openrig-3253-bus");
+    vi.stubEnv("MANAGERPID", undefined);
+    try {
+      expect(await adapter().startServer()).toEqual({ ok: true });
+      // The daemon stopped before it gave the bus back: the server, which outlives it, still holds OpenRig's address.
+      query("set-environment", "-g", "DBUS_SESSION_BUS_ADDRESS", TMUX_SERVER_SESSION_BUS);
+      expect(await adapter().startServer()).toEqual({ ok: true });
+      expect(global()).toBe("DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/openrig-3253-bus");
+      // A plain disabled: (a person's own) is left as it is by a daemon that starts again.
+      query("set-environment", "-g", "DBUS_SESSION_BUS_ADDRESS", "disabled:");
+      expect(await adapter().startServer()).toEqual({ ok: true });
+      expect(global()).toBe("DBUS_SESSION_BUS_ADDRESS=disabled:");
+    } finally {
+      vi.unstubAllEnvs();
+      try { query("kill-server"); } catch { /* Only this test's exact private socket. */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!tmux || process.platform !== "linux").each([
+    ["startServer, a session bus address", "start", "unix:path=/nonexistent/openrig-3253-bus"],
+    ["startServer, no session bus address", "start", undefined],
+    ["a launch that finds no server", "launch", "unix:path=/nonexistent/openrig-3253-bus"],
+    ["a probe session that finds no server", "probe", "unix:path=/nonexistent/openrig-3253-bus"],
+  ])("a server it starts has no bus in its own process, and its global environment keeps the daemon's (%s)", async (_, how, bus) => {
+    const dir = mkdtempSync(join(tmpdir(), "or-nobus-"));
+    const socket = join(dir, "socket");
+    const query = (...args: string[]) => execFileSync("tmux", ["-S", socket, ...args], { encoding: "utf8", timeout: 5000 });
+    vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", bus);
+    vi.stubEnv("MANAGERPID", undefined);
+    try {
+      const adapter = new TmuxAdapter(execTmuxCommand, undefined, execArgvCommand, ["-f", "/dev/null", "-S", socket]);
+      if (how === "start") expect(await adapter.startServer()).toEqual({ ok: true });
+      else if (how === "launch") expect(await adapter.createSession("nobus", dir, { OPENRIG_NODE_ID: "nobus" })).toMatchObject({ ok: true });
+      else expect(await adapter.createProbeSession("openrig-nobus-probe")).toEqual({ ok: true });
+      const pid = query("display-message", "-p", "#{pid}").trim();
+      const own = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").find(v => v.startsWith("DBUS_SESSION_BUS_ADDRESS="));
+      expect(own).toBe(`DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}`);
+      const global = query("show-environment", "-g").split("\n").find(v => /^-?DBUS_SESSION_BUS_ADDRESS(=|$)/.test(v));
+      if (bus === undefined) expect(global ?? "").not.toMatch(/^DBUS_SESSION_BUS_ADDRESS=/);
+      else expect(global).toBe(`DBUS_SESSION_BUS_ADDRESS=${bus}`);
+    } finally {
+      vi.unstubAllEnvs();
       try { query("kill-server"); } catch { /* Only this test's exact private socket. */ }
       rmSync(dir, { recursive: true, force: true });
     }

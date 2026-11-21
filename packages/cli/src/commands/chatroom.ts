@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, type DaemonResponse } from "../client.js";
+import { daemonFetch } from "../daemon-transport.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -212,7 +213,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       const url = `${client.baseUrl}/api/rigs/${encodeURIComponent(rigId)}/chat/watch`;
       try {
         await client.assertLocalOwner();
-        const res = await fetch(url, {
+        const res = await daemonFetch(client.baseUrl)(url, {
           headers: { Accept: "text/event-stream" },
         });
 

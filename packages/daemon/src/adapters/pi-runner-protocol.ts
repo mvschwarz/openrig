@@ -82,6 +82,8 @@ export interface PiRunnerState {
    *  request reads uncertain instead of falling back to an older completion. */
   pendingCompaction?: { readonly attemptId: string; readonly requestedAt: string };
   ready: boolean;
+  /** This live runner's read-only recovery endpoint; absent on older runners. */
+  recovery?: { port: number; pid: number; childPid: number };
   /** Launch-attempt scope (guard fold, code-review):
    *  the adapter mints a launchId per attempt, pre-writes a pending sidecar
    *  carrying it, and passes --launch-id to the runner; the runner stamps it

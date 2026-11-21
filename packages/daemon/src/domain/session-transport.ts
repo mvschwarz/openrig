@@ -2281,6 +2281,10 @@ export interface SendResult {
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
+  /** Context, not a status: when this send started, the seat's main session had a permission or elicitation request,
+   *  made after its latest activity report, that OpenRig hadn't seen settled. It never says a dialog is open (a hook or
+   *  host can decide one with nothing shown), and the send's own result is unchanged by it. */
+  inputRequest?: { observedAt: string; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
@@ -2803,9 +2807,24 @@ export class SessionTransport {
     this.compactionObserver = observer;
   }
 
+  /** The time of a permission or elicitation request the seat's main session made after its latest activity report and
+   *  that nothing has settled, else null. An unreadable record reads as none: it never changes a send. */
+  private unsettledInputRequestAt(sessionName: string): string | null {
+    try {
+      const nodeId = this.getSessionMeta(sessionName).nodeId;
+      const at = nodeId ? this.agentActivityStore?.getUnsettledInputRequestForNode?.(nodeId, sessionName) ?? null : null;
+      if (!at) return null;
+      const latest = this.agentActivityStore?.getLatestForNode({ sessionName, now: this.now(), order: "source" });
+      return latest?.eventAt && Date.parse(at) <= Date.parse(latest.eventAt) ? null : at;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
-   * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
+   * send, or had an unsettled permission or elicitation request newer than its latest activity report, add a notice
+   * saying so. Each notice is context beside the send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
@@ -2819,7 +2838,11 @@ export class SessionTransport {
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
-    const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    // A prompt answer or a bare Enter is aimed at the prompt itself.
+    const requestAt = opts?.dangerouslyInteract || opts?.submitOnly ? null : this.unsettledInputRequestAt(sessionName);
+    const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    const result = requestAt ? { ...sent, inputRequest: { observedAt: requestAt,
+      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : sent;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";

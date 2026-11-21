@@ -47,6 +47,40 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
   }
 }
 
+const CODEX_DATABASE = /\/(?:logs|state)_\d+\.sqlite$/;
+
+/** How the Linux reader lists a process's fd links; tests inject one. */
+export interface ProcFdReader {
+  readdir(dir: string): Promise<string[]>;
+  readlink(link: string): Promise<string>;
+}
+const procFds: ProcFdReader = { readdir: dir => fs.promises.readdir(dir), readlink: link => fs.promises.readlink(link) };
+
+/** The one directory whose Codex logs or state databases `pid` holds open: Linux's /proc fd links, else lsof. Codex 0.162.1
+ *  opens both in its sqlite_home. Undefined when there's none or several; throws when the OS can't say. */
+export async function defaultOpenCodexDatabaseHomeByPid(pid: number,
+  fds: ProcFdReader | undefined = process.platform === "linux" ? procFds : undefined): Promise<string | undefined> {
+  let files: string[];
+  if (fds) {
+    const fdDir = `/proc/${pid}/fd`;
+    files = [];
+    for (const fd of await fds.readdir(fdDir)) {
+      // An fd closed since the listing reads ENOENT. Any other failure leaves the list incomplete, so it isn't one home.
+      try { files.push(await fds.readlink(nodePath.join(fdDir, fd))); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  } else {
+    const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-Fn"], { timeout: 1000, maxBuffer: 1024 * 1024 });
+    files = stdout.split("\n").filter(line => line.startsWith("n")).map(line => line.slice(1));
+  }
+  const homes = new Set(files.filter(file => CODEX_DATABASE.test(file)).map(file => nodePath.dirname(file)));
+  return homes.size === 1 ? [...homes][0] : undefined;
+}
+
+function sameDirectory(a: string, b: string): boolean {
+  try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return nodePath.resolve(a) === nodePath.resolve(b); }
+}
+
 export function readCodexThreadIdFromCandidateHomes(
   pid: number,
   candidateHomes: Array<string | undefined>,
@@ -114,6 +148,8 @@ export class CodexThreadIdResolver {
       /** Explicit provider root; never search another home's logs on a miss. */
       codexHome?: string;
       resolveHomeDirByPid?: ResolveHomeDirByPid;
+      /** The directory of the Codex databases a process holds open (tests); default: the OS's open-file list. */
+      openDatabaseHomeByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
       readFromLogs?: (pid: number, homeDir: string, report?: CodexCaptureReporter, startSecond?: StartSecondRows) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
@@ -131,11 +167,33 @@ export class CodexThreadIdResolver {
     } = {},
   ) {}
 
-  /** The home of the positive PID/start-time log read, carried with its thread. No second home search. */
-  async resolveWithHome(pid: number, identity: string): Promise<{ thread?: string; codexHome?: string }> {
+  /** The home of the positive PID/start-time log read, carried with its thread. With `followOpenDatabases` (a verified
+   *  native process), once the explicit home is shown to hold none of this process's rows, it reads the one home whose
+   *  Codex databases this process holds open, as the OS reports it, with the same gate: a process relaunched under another
+   *  CODEX_HOME, or with its own sqlite_home, logs there; that read too must find and read every logs and state database.
+   *  Ambiguous, unjoined or unreadable proof, an incomplete discovery, or no explicit home (whose search doesn't record
+   *  discovery) stays unknown. Never a search of other homes. */
+  async resolveWithHome(pid: number, identity: string, followOpenDatabases = false): Promise<{ thread?: string; codexHome?: string }> {
     let codexHome: string | undefined;
-    const thread = await this.resolveWithDiagnostics(pid, identity, undefined, "exclude", home => { codexHome = home; });
-    return thread ? { thread, codexHome } : {};
+    const misses: CodexCaptureDiagnostic[] = [];
+    const thread = await this.resolveWithDiagnostics(pid, identity, miss => misses.push(miss), "exclude", home => { codexHome = home; });
+    if (thread) return { thread, codexHome };
+    if (!followOpenDatabases || !this.opts.codexHome || misses[0]?.reason !== "no_log_row") return {};
+    // Absence is established by the same home read again with discovery and readability recorded (the first may be incremental).
+    const declared = await this.resolveWithReadability(pid, identity);
+    if (declared.thread || declared.reason !== "no_log_row" || !declared.fullyReadable) return {};
+    const open = await this.openDatabaseHome(pid);
+    if (!open || sameDirectory(open, this.opts.codexHome)) return {};
+    // A lone joined conversation isn't the one when a database there went unread or unfound: it could hold another.
+    const readability: Readability = { complete: true, unreadable: false };
+    const opened = readCodexThreadIdFromLogs(pid, "", undefined, lstartToMinTs(identity), open, undefined, "exclude", readability);
+    return opened && readability.complete ? { thread: opened, codexHome: open } : {};
+  }
+
+  /** The one directory whose Codex logs or state databases `pid` holds open, or undefined when there's none, several,
+   *  or the OS can't say. */
+  async openDatabaseHome(pid: number): Promise<string | undefined> {
+    try { return await (this.opts.openDatabaseHomeByPid ?? defaultOpenCodexDatabaseHomeByPid)(pid); } catch { return undefined; }
   }
 
   /**

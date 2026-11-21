@@ -158,11 +158,13 @@ describe.skipIf(!nativeAvailable)("tmux shell and argv transports against a real
     expect(shell.calls).toBeGreaterThan(15);
     expect(shell.files).toEqual(Array(shell.calls).fill("/bin/sh"));
     expect(argv.commands).toHaveLength(argv.calls);
-    // Both createSession attempts issue start-server ; source-file for their private config.
+    // Elsewhere, both createSession attempts issue start-server ; source-file for their private config. On Linux they
+    // run on the running server first (#3253), so with the anchor's server up neither starts one: no start-server.
     // Only those clients' child shells raise their soft limit;
     // the executable and original arguments follow the fixed script as positional parameters.
     const creating = argv.commands.filter((command) => command.args.includes("start-server"));
-    expect(creating).toHaveLength(2);
+    expect(creating).toHaveLength(process.platform === "linux" ? 0 : 2);
+    expect(argv.commands.filter((command) => command.args.includes("source-file"))).toHaveLength(2);
     for (const command of argv.commands) {
       if (creating.includes(command)) {
         expect(command.file).toBe("/bin/sh");

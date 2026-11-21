@@ -43,6 +43,26 @@ describe("ProcessCensus", () => {
     expect(list).toHaveBeenCalledTimes(3);
   });
 
+  it.each(["succeeds", "fails"])("keeps the forced census when an older identity recheck %s late", async outcome => {
+    let finishEarlier!: () => void;
+    const newerRows = [{ pid: 2, ppid: 1, command: "omp" }];
+    const list = vi.fn(async () => newerRows).mockImplementationOnce(() => new Promise((resolve, reject) => {
+      finishEarlier = () => outcome === "succeeds" ? resolve(ROWS) : reject(new Error("earlier census failed"));
+    }));
+    const census = new ProcessCensus({ list, now: () => 0 });
+    const earlier = census.listFresh();
+    await Promise.resolve();
+    expect(list).toHaveBeenCalledTimes(1);
+    const forced = census.list({ fresh: true });
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(await forced).toBe(newerRows);
+    finishEarlier();
+    if (outcome === "succeeds") expect(await earlier).toBe(ROWS);
+    else await expect(earlier).rejects.toThrow("earlier census failed");
+    expect(await census.list()).toBe(newerRows);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
   it("a FAILED enumeration rejects every coalesced caller, caches nothing, and the next call retries", async () => {
     let calls = 0;
     const list = vi.fn(async () => {

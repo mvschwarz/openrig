@@ -8,6 +8,7 @@ import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
+import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
@@ -1763,7 +1764,9 @@ export class SeatLifecycleService {
     ).all(node.id) as Array<{ id: string }>).map((row) => row.id);
     const retiringGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
-    const viewWarnings: string[] = [];
+    // #3395: a fresh launch of an existing seat starts from its stored settings: a stored pool block that can't be used
+    // is reported once, from the node.
+    const viewWarnings: string[] = [...storedPoolAdvisories(node.logicalId, this.rigRepo.getNodePool(node.id))];
     let canonicalProbe = await this.probeLiveness(
       canonicalSessionName,
       "fresh launch refuses rather than overwrite a possibly-live canonical session",

@@ -39,37 +39,42 @@ export class ProcessCensus {
     this.now = opts.now ?? Date.now;
   }
 
-  async list(): Promise<ProcessRow[]> {
-    if (this.lastRows && this.now() - this.lastAt <= this.freshnessMs) {
-      return this.lastRows;
+  /** `fresh`: start an enumeration now even when one is cached or running, for a caller that must see the table after
+   *  something it awaited; later callers share it. */
+  async list(opts: { fresh?: boolean } = {}): Promise<ProcessRow[]> {
+    if (!opts.fresh) {
+      if (this.lastRows && this.now() - this.lastAt <= this.freshnessMs) {
+        return this.lastRows;
+      }
+      if (this.inFlight) return this.inFlight;
     }
-    return this.enumerate();
-  }
-
-  /** Recheck identity with an enumeration started after this call. An earlier in-flight ps might
-   * have sampled the process before our final pane lookup. Concurrent waiters share the next ps. */
-  async listFresh(): Promise<ProcessRow[]> {
-    try { await this.inFlight; } catch { /* This earlier enumeration cannot satisfy the recheck. */ }
-    return this.enumerate();
-  }
-
-  private enumerate(): Promise<ProcessRow[]> {
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.listFn().then(
+    const run: Promise<ProcessRow[]> = this.listFn().then(
       (rows) => {
-        this.lastRows = rows;
-        this.lastAt = this.now();
-        this.inFlight = null;
+        // An enumeration a fresh one replaced still answers its own callers, but doesn't overwrite the newer one.
+        if (this.inFlight === run) {
+          this.lastRows = rows;
+          this.lastAt = this.now();
+          this.inFlight = null;
+        }
         return rows;
       },
       (err) => {
-        // A failed identity recheck invalidates the earlier snapshot as well.
-        this.lastRows = null;
-        this.inFlight = null;
+        // Only the latest enumeration can invalidate the cached rows.
+        if (this.inFlight === run) {
+          this.lastRows = null;
+          this.inFlight = null;
+        }
         throw err;
       },
     );
-    return this.inFlight;
+    this.inFlight = run;
+    return run;
+  }
+
+  /** Concurrent identity rechecks can share a census started after their final pane lookup. */
+  async listFresh(): Promise<ProcessRow[]> {
+    try { await this.inFlight; } catch { /* The earlier enumeration cannot satisfy this recheck. */ }
+    return this.inFlight ?? this.list({ fresh: true });
   }
 
   /** A CYCLE-SCOPED lister: at most one census underneath for the closure's
