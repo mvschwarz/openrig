@@ -197,6 +197,47 @@ describe("seat-pool planner: sizing", () => {
     expect(full.reason).toBe("max_reached");
   });
 
+  it("a pool full at max with every live agent occupied and rows waiting reports max_reached, with the same target and no add", () => {
+    const busy = () => agent({ openRows: 1, idleAtPrompt: false, idleSince: null });
+    const full = plan(spec({ max: 2 }), state({ agents: [busy(), busy()], pending: rows(3) }));
+    expect(full.reason).toBe("max_reached");
+    expect(full.intents).toEqual([]);
+    expect(full.target).toBe(2);
+    expect(full.current).toBe(2);
+    // The unclamped demand R (3) + O (2) is kept apart from the clamped target.
+    expect(full.counts).toMatchObject({ occupied: 2, unplaced: 3, wanted: 5 });
+    // With room under max, the same facts still scale up as before.
+    nextSlot = 1;
+    const roomy = plan(spec({ max: 5 }), state({ agents: [busy(), busy()], pending: rows(3) }));
+    expect(roomy.reason).toBe("scale_up");
+    expect(roomy.intents).toEqual([{ kind: "add", count: 3 }]);
+    expect(roomy.target).toBe(5);
+    expect(roomy.counts.wanted).toBe(5);
+    // Full at max with no row waiting stays steady, and under drain: true the reason stays draining.
+    nextSlot = 1;
+    expect(plan(spec({ max: 2 }), state({ agents: [busy(), busy()] })).reason).toBe("steady");
+    nextSlot = 1;
+    expect(plan(spec({ max: 2, drain: true }), state({ agents: [busy(), busy()], pending: rows(3) })).reason).toBe("draining");
+  });
+
+  it("two free agents at max take two of three waiting rows, and the same plan reports max_reached for the row left waiting", () => {
+    const [s1, s2] = [agent(), agent()];
+    const result = plan(spec({ max: 2 }), state({ agents: [s1!, s2!], pending: rows(3) }));
+    expect(ofKind(result.intents, "dispatch").map((intent) => intent.slotNumber)).toEqual([s1!.slotNumber, s2!.slotNumber]);
+    expect(ofKind(result.intents, "add")).toEqual([]);
+    expect(result.reason).toBe("max_reached");
+    expect(result.counts).toMatchObject({ occupied: 2, unplaced: 1, wanted: 3 });
+    expect(result.target).toBe(2);
+    // Inside the cooldown the moves and the reason are the same: a move is not a step.
+    const cooling = plan(spec({ max: 2 }), state({ agents: [s1!, s2!], pending: rows(3), lastStepAt: ago(10) }));
+    expect(ofKind(cooling.intents, "dispatch")).toHaveLength(2);
+    expect(cooling.reason).toBe("max_reached");
+    // With max lowered below current, the reason stays scale_down though rows wait.
+    nextSlot = 1;
+    const busy = [1, 2, 3].map(() => agent({ openRows: 1, idleAtPrompt: false, idleSince: null }));
+    expect(plan(spec({ max: 2 }), state({ agents: busy, pending: rows(3) })).reason).toBe("scale_down");
+  });
+
   it("an agent with only a held message gives the same target as one with an open row, with no unread term and no +1", () => {
     const withRow = plan(spec({ max: 9 }), state({ agents: [agent({ openRows: 1 })], pending: rows(2) }));
     const withHeld = plan(spec({ max: 9 }), state({ agents: [agent({ heldCount: 1 })], pending: rows(2) }));
