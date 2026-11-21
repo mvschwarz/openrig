@@ -2933,6 +2933,51 @@ describe("queue routes", () => {
       expect(await workProject("bob@r")).toEqual({ error: `${catalog} projects must each declare string id and root values` });
     });
 
+    it("lists the selected project's missions under its declared missions root, beside workspace.root's", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-project-missions-")));
+      const catalog = path.join(temporaryWorkspace, "workspace.yaml");
+      const configured = path.join(temporaryWorkspace, "missions");
+      const alpha = path.join(temporaryWorkspace, "alpha");
+      fs.mkdirSync(path.join(configured, "local"), { recursive: true });
+      fs.writeFileSync(path.join(configured, "local", "SPEC.md"), "---\nintent: a workspace mission\n---\n");
+      // The project declares its own missions root; a folder with no SPEC.md isn't a mission.
+      for (const mission of ["m2", "m1"]) {
+        fs.mkdirSync(path.join(alpha, "work-items", mission), { recursive: true });
+        fs.writeFileSync(path.join(alpha, "work-items", mission, "SPEC.md"), `---\nintent: ${mission}\n---\n`);
+      }
+      fs.mkdirSync(path.join(alpha, "work-items", "notes"), { recursive: true });
+      fs.writeFileSync(path.join(alpha, "project.yaml"), "id: alpha\nmissions:\n  root: work-items\n");
+      // A healthy catalog project has its own source file (SPEC.md or README.md); without one its missions root reads as unavailable.
+      fs.writeFileSync(path.join(alpha, "SPEC.md"), "---\nid: alpha\n---\n# Alpha\n");
+      app = buildApp({
+        eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog
+          : key === "workspace.slices_root" ? configured : temporaryWorkspace }) },
+      });
+      const candidatesFor = async () => ((await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as {
+        workProject?: unknown;
+        workCandidates: { missionsRoot: string | null; missionsOnHost: string[]; projectMissions?: unknown };
+      });
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n");
+      const selected = await candidatesFor();
+      expect(selected.workProject).toEqual({ id: "alpha", root: alpha, selectedBy: "single" });
+      // The configured listing is unchanged; the selected project's own missions ride beside it for the refocus trace.
+      expect(selected.workCandidates.missionsRoot).toBe(configured);
+      expect(selected.workCandidates.missionsOnHost).toEqual(["local"]);
+      expect(selected.workCandidates.projectMissions).toEqual({
+        project: "alpha", missionsRoot: path.join(alpha, "work-items"), names: ["m1", "m2"], truncated: false,
+      });
+
+      // No single project selected: nothing is added, and the configured listing stands alone.
+      fs.mkdirSync(path.join(temporaryWorkspace, "beta"));
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      const unselected = await candidatesFor();
+      expect(unselected.workProject).toEqual({ error: expect.stringContaining("multiple projects are declared") });
+      expect(unselected.workCandidates.missionsOnHost).toEqual(["local"]);
+      expect(unselected.workCandidates).not.toHaveProperty("projectMissions");
+    });
+
     it("selects the seat's project from its recorded working folder (#3320)", async () => {
       temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-work-cwd-")));
       const catalog = path.join(temporaryWorkspace, "workspace.yaml");
