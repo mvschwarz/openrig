@@ -204,6 +204,60 @@ describe("#2702: a runtime switch's staged successor keeps its own id through a 
   });
 });
 
+// #3633: Claude Code runs short headless helpers of its own (`claude -p`, such as a conversation summary on Haiku) inside
+// an interactive Claude Code seat. Same runtime, own `<session id>.jsonl` transcript, so #2702's checks let them through.
+// Claude Code runs them with CLAUDE_CODE_ENTRYPOINT=sdk-cli and the seat's own Claude as `cli` (Claude Code 2.1.330).
+const helperSession = "f37f643b-0000-4000-8000-000000000003";
+const claudeHelper = (hook_event_name: string, extra: Payload = {}): HookRun => ({ claudeHook: true, stdin: {
+  hook_event_name, session_id: helperSession, transcript_path: `/home/u/.claude/projects/-work-repo/${helperSession}.jsonl`,
+  cwd: "/work/repo", permission_mode: "default", ...extra } });
+const asHelper = (env: Env): Env => ({ ...env, CLAUDE_CODE_ENTRYPOINT: "sdk-cli" });
+const asInteractive = (env: Env): Env => ({ ...env, CLAUDE_CODE_ENTRYPOINT: "cli" });
+
+describe("#3633: a headless Claude Code helper inside a Claude Code seat isn't the seat", () => {
+  it("the seat keeps resuming its own conversation after the helper's SessionStart, and nothing is posted for it", async () => {
+    const s = seat("claude-code");
+    const identities = s.identityEvents();
+    const replies = await s.hook(claudeHelper("SessionStart", { source: "startup" }), asHelper(s.seatEnv));
+    expect(replies).toEqual([]);
+    expect(s.token()).toEqual({ resume_type: "claude_id", resume_token: claudeConversation });
+    expect(s.identityEvents()).toBe(identities);
+  });
+
+  it("the seat stays working through the helper's whole run, and its own Stop still ends the turn", async () => {
+    const s = seat("claude-code");
+    await s.hook(claude("UserPromptSubmit"), asInteractive(s.seatEnv));
+    expect(s.activity()).toBe("working");
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) {
+      await s.hook(claudeHelper(event, event === "SessionStart" ? { source: "startup" } : {}), asHelper(s.seatEnv));
+    }
+    expect(s.activity()).toBe("working");
+    await s.hook(claude("Stop"), asInteractive(s.seatEnv));
+    expect(s.activity()).toBe("idle-at-prompt");
+  });
+
+  it("a runtime switch's staged Claude successor keeps its own id through its helper's SessionStart", async () => {
+    const s = seat("codex");
+    const successorEnv = s.stageSwitch("claude-code");
+    await s.hook(claude("SessionStart", { source: "startup" }), asInteractive(successorEnv));
+    expect(s.successorToken()).toBe(claudeConversation);
+    await s.hook(claudeHelper("SessionStart", { source: "startup" }), asHelper(successorEnv));
+    expect(s.successorToken()).toBe(claudeConversation);
+  });
+
+  it.each([
+    ["its own interactive Claude (entrypoint cli)", (env: Env) => asInteractive(env)],
+    ["an older Claude Code that sets no entrypoint", (env: Env) => env],
+  ])("the seat's /clear from %s still moves its resume target", async (_label, withEntrypoint) => {
+    const s = seat("claude-code");
+    const cleared = "5f0c2d11-0000-4000-8000-000000000004";
+    const replies = await s.hook(claude("SessionStart", { source: "clear", session_id: cleared,
+      transcript_path: `/home/u/.claude/projects/-work-repo/${cleared}.jsonl` }), withEntrypoint(s.seatEnv));
+    expect(replies[1]).toMatchObject({ ok: true, tokenPersisted: true });
+    expect(s.token()).toEqual({ resume_type: "claude_id", resume_token: cleared });
+  });
+});
+
 describe("#2702: the relay names the conversation on every activity and identity report", () => {
   const env: Env = { OPENRIG_SESSION_NAME: "dev-a@rig-a", OPENRIG_RUNTIME: "claude-code" };
   it.each([
