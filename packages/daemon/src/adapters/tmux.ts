@@ -1398,9 +1398,15 @@ export class TmuxAdapter {
   /** #3315: told what each classified probe of this adapter's server showed (reachable, or the no-server/socket
    *  diagnostic). The daemon records only changes (terminal-server-reachability.ts); an observer error never changes
    *  the probe's own result. */
-  serverObserver?: (observation: TerminalServerObservation) => void;
-  private noteServer(observation: TerminalServerObservation): void {
-    try { this.serverObserver?.(observation); } catch { /* reporting only */ }
+  serverObserver?: (observation: TerminalServerObservation, startedIn?: number) => void;
+  /** #3315: the epoch of this adapter's server record, read when a classified probe starts and handed back with its
+   *  observation, so a probe that finishes after a newer loss or return can't overwrite it. */
+  serverEpoch?: () => number;
+  private readServerEpoch(): number | undefined {
+    try { return this.serverEpoch?.(); } catch { return undefined; }
+  }
+  private noteServer(observation: TerminalServerObservation, startedIn?: number): void {
+    try { this.serverObserver?.(observation, startedIn); } catch { /* reporting only */ }
   }
 
   private inputGuard?: SeatDeliveryGuard;
@@ -1733,17 +1739,18 @@ export class TmuxAdapter {
   }
 
   async listSessions(): Promise<TmuxSession[]> {
+    const startedIn = this.readServerEpoch();
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
-      this.noteServer({ reachable: true });
+      this.noteServer({ reachable: true }, startedIn);
       return parseLines(output, parseSessionLine);
     } catch (err) {
       // Classified from what tmux reported (its stderr when the exec kept it), as probeSession does: the wrapper's
       // "Command failed:" line and stdout never decide it. Unknown and permission errors still throw the original.
       const error = tmuxReportedError(err);
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
-        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) }, startedIn);
         return [];
       }
       throw err;
@@ -1803,6 +1810,7 @@ export class TmuxAdapter {
    *   fail closed rather than treating a probe failure as an answer.
    */
   async probeSession(name: string): Promise<SessionProbe> {
+    const startedIn = this.readServerEpoch();
     try {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
@@ -1810,16 +1818,16 @@ export class TmuxAdapter {
       const target = `=${name}`; // canonical session name, never a prefix lookup
       await this.run(["tmux", "has-session", "-t", target],
         `tmux has-session -t ${shellQuote(target)}`);
-      this.noteServer({ reachable: true });
+      this.noteServer({ reachable: true }, startedIn);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
       if (isSessionAbsenceError(error)) {
-        this.noteServer({ reachable: true }); // the server answered: the session is what is missing
+        this.noteServer({ reachable: true }, startedIn); // the server answered: the session is what is missing
         return { state: "absent" };
       }
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
-        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) }, startedIn);
         return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;
