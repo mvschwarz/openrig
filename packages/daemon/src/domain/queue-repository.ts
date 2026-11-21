@@ -940,7 +940,7 @@ function detectQueueColumn(db: Database.Database, columnName: string): boolean {
   }
 }
 
-function detectTable(db: Database.Database, tableName: string): boolean {
+export function detectTable(db: Database.Database, tableName: string): boolean {
   try {
     return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName);
   } catch {
