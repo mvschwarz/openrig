@@ -58,6 +58,8 @@ import type {
   RestoreSnapshotSelection,
   NodeStartupSnapshot,
   RestoreExcludedNode,
+  RestoreKeptDownNode,
+  RestoreValidationBlocker,
   NodeInventoryEntry,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
@@ -116,6 +118,7 @@ import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 import { seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode, type SeatLaunchAdditions } from "./seat-launch-additions.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { SeatPoolSlotsRepository } from "./seat-pool-slots.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -480,7 +483,30 @@ export class RestoreOrchestrator {
       // detached is not "running" in one warning and "detached" in the other (the maintainer's 3rd review of #3250).
       // The sessions the classification above already found stale are named detached, the status this restore gives them.
       const observed = this.observeConversationRecords(rigId, snapshot.data, opts?.freshLogicalIds, currentRuntimes, classification.stale);
-      const validation = validatePreRestore(snapshot.data, {
+      // #3395: a seat pool agent the pool drained stays down. Restore doesn't start it and names it in `keptDown`, outside
+      // the node results, so the rig's result is the rest of the rig's. Restore launches a seat by its logical id, so the
+      // match is by logical id: a snapshot that saved the seat under an earlier node id still keeps it down.
+      // The pool read runs on every restore, pool or not: a seat whose read fails is restored as an ordinary seat and named
+      // in a warning, so that read alone doesn't fail the restore. Every other read here still fails it.
+      const slots = new SeatPoolSlotsRepository(this.db);
+      const drainedByLogicalId = new Map<string, string>();
+      const poolUnknown: string[] = [];
+      let poolReadError = "";
+      for (const current of this.rigRepo.getRig(rigId)?.nodes ?? []) {
+        let drained: boolean;
+        try {
+          drained = slots.isDrainedPoolNode(current.id);
+        } catch (err) {
+          poolUnknown.push(current.logicalId);
+          poolReadError = err instanceof Error ? err.message : String(err);
+          continue;
+        }
+        if (drained) drainedByLogicalId.set(current.logicalId, current.id);
+      }
+      const poolWarnings = poolUnknown.length === 0 ? [] : [`Restore: the seat pool read failed for ${poolUnknown.join(", ")} `
+        + `(${poolReadError}); restore treats ${poolUnknown.length === 1 ? "it" : "them"} as ordinary seats.`];
+      const drainedLogicalIds = [...drainedByLogicalId.keys()];
+      const checked = validatePreRestore(snapshot.data, {
         fsOps: opts?.fsOps,
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
@@ -490,8 +516,18 @@ export class RestoreOrchestrator {
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
         ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
         currentStatuses: observed.currentStatuses,
-        attachedLogicalIds: observed.attachedLogicalIds,
+        // A kept-down agent is not among the seats this restore resumes; it is compared as an agent outside it.
+        attachedLogicalIds: [...observed.attachedLogicalIds, ...drainedLogicalIds],
       });
+      // A seat this restore keeps down doesn't block the restore: its blocker is a caveat, as for any seat restore leaves.
+      const drainedSaved = new Set(snapshot.data.nodes.filter((node) => drainedByLogicalId.has(node.logicalId)).map((node) => node.id));
+      const keptBlocker = (blocker: RestoreValidationBlocker) =>
+        (!!blocker.nodeId && drainedSaved.has(blocker.nodeId)) || (!!blocker.logicalId && drainedByLogicalId.has(blocker.logicalId));
+      const validation = {
+        blockers: checked.blockers.filter((blocker) => !keptBlocker(blocker)),
+        warnings: [...poolWarnings, ...checked.warnings, ...checked.blockers.filter(keptBlocker).map((blocker) =>
+          `${blocker.code}: ${blocker.message} (restore keeps ${blocker.logicalId ?? "this drained pool agent"} down, so this doesn't block a restore)`)],
+      };
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:
       // one claimed with rig bind or rig attach after the rig's topology was recorded, or one added or claimed after this
@@ -504,13 +540,25 @@ export class RestoreOrchestrator {
       const intendedLiveIds = new Set(liveNodes.filter(current => topology.intendedRoster.some(intended => intended.logicalId === current.logicalId))
         .map(current => current.id));
       const narrowedRoster = snapshot.data.topologyRoster?.source === "operator_explicit";
-      const excludedNodes: RestoreExcludedNode[] = [
+      // A kept-down agent this restore would otherwise name as skipped is kept down the same way.
+      const skippedDrained = (excluded: RestoreExcludedNode) =>
+        excluded.reason === "current_seat_not_in_intended_roster" && drainedByLogicalId.get(excluded.logicalId) === excluded.nodeId;
+      const notIntended: RestoreExcludedNode[] = [
         ...topology.excludedNodes.map((excluded) => !narrowedRoster && liveNodeIds.has(excluded.nodeId)
           ? { ...excluded, reason: "current_seat_not_in_intended_roster" as const } : excluded),
         ...(narrowedRoster ? [] : liveNodes.filter((current) => !snapshotNodeIds.has(current.id) && !intendedLiveIds.has(current.id)).map((current) => ({
           nodeId: current.id, logicalId: current.logicalId, reason: "current_seat_not_in_intended_roster" as const,
         }))),
       ];
+      const excludedNodes = notIntended.filter((excluded) => !skippedDrained(excluded));
+      const planned = this.computeRestorePlan(snapshot.data).filter(entry => !replacements.length || selectedIds.has(entry.node.id));
+      const keptDownIds = new Set([
+        ...notIntended.filter(skippedDrained).map((excluded) => excluded.nodeId),
+        ...planned.flatMap((entry) => drainedByLogicalId.get(entry.node.logicalId) ?? []),
+      ]);
+      const keptDown: RestoreKeptDownNode[] = liveNodes.filter((current) => keptDownIds.has(current.id))
+        .map((current) => ({ nodeId: current.id, logicalId: current.logicalId, reason: "drained pool agent, not started" }));
+      const withKeptDown = keptDown.length > 0 ? { keptDown } : {};
       const skippedSeats = excludedNodes.filter((excluded) => excluded.reason === "current_seat_not_in_intended_roster");
       // A required startup file that is missing holds only its own seat. That seat isn't launched, because it would start
       // without its startup content; it's reported failed with the reason, and the rest of the rig restores. Any other
@@ -523,9 +571,12 @@ export class RestoreOrchestrator {
         const reason = `${blocker.message} ${blocker.remediation}`;
         heldForStartup.set(blocker.nodeId, heldForStartup.has(blocker.nodeId) ? `${heldForStartup.get(blocker.nodeId)} ${reason}` : reason);
       }
-      const planIds = this.computeRestorePlan(snapshot.data).filter(entry => !replacements.length || selectedIds.has(entry.node.id)).map(entry => entry.node.id);
+      const planIds = planned.filter(entry => !drainedByLogicalId.has(entry.node.logicalId)).map(entry => entry.node.id);
       const rigWide = validation.blockers.some((blocker) => !SEAT_STARTUP_BLOCKERS.has(blocker.code) || !blocker.nodeId);
-      if (rigWide || planIds.every((id) => heldForStartup.has(id))) {
+      // A selection whose every seat is kept down has nothing to launch: not a validation failure, but a restore that
+      // keeps them down (below). A rig-wide blocker still fails it first.
+      const nothingToLaunch = planIds.length === 0 && keptDown.length > 0;
+      if (rigWide || (!nothingToLaunch && planIds.every((id) => heldForStartup.has(id)))) {
         const result: RestoreResult = {
           snapshotId,
           preRestoreSnapshotId: null,
@@ -536,6 +587,7 @@ export class RestoreOrchestrator {
           snapshotSelection,
           intendedRoster: topology.intendedRoster,
           excludedNodes,
+          ...withKeptDown,
         };
         return {
           ok: false,
@@ -594,6 +646,7 @@ export class RestoreOrchestrator {
                 snapshotSelection,
                 intendedRoster: topology.intendedRoster,
                 excludedNodes,
+                ...withKeptDown,
               },
             });
             return { ok: false, code: "service_boot_failed", message: `Service boot failed before agent restore: ${bootResult.error}` };
@@ -609,10 +662,12 @@ export class RestoreOrchestrator {
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [...validation.warnings];
       const heldLogicalIds = snapshot.data.nodes.filter((node) => heldForStartup.has(node.id)).map((node) => node.logicalId);
-      restoreWarnings.push(...this.conversationPartners(rigId, snapshot.data, observed, opts?.freshLogicalIds, currentRuntimes, heldLogicalIds));
+      restoreWarnings.push(...this.conversationPartners(rigId, snapshot.data, observed, opts?.freshLogicalIds, currentRuntimes,
+        [...heldLogicalIds, ...drainedLogicalIds]));
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
       else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
+        if (drainedByLogicalId.has(entry.node.logicalId)) continue;
         const held = heldForStartup.get(entry.node.id);
         if (held) {
           nodeResults.push({ nodeId: entry.node.id, logicalId: entry.node.logicalId, status: "failed", error: `Not launched: ${held}` });
@@ -629,7 +684,14 @@ export class RestoreOrchestrator {
       for (const skipped of skippedSeats) {
         restoreWarnings.push(`Restore: ${skipped.logicalId} was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.`);
       }
-      const rolledUp = rollupRestoreRigResult(nodeResults);
+      // Nothing launched because every selected seat is kept down: the rig is as the pool wants it, not a failed restore
+      // (the empty rollup is `failed`).
+      if (nothingToLaunch) {
+        restoreWarnings.push(`Restore: nothing to launch: ${keptDown.map((kept) => kept.logicalId).join(", ")} `
+          + `${keptDown.length === 1 ? "is a drained seat pool agent" : "are drained seat pool agents"}, kept down until the pool brings `
+          + `${keptDown.length === 1 ? "it" : "them"} back.`);
+      }
+      const rolledUp = nothingToLaunch ? "fully_restored" : rollupRestoreRigResult(nodeResults);
       const restoreResult: RestoreResult = {
         snapshotId,
         preRestoreSnapshotId: preRestoreSnapshot.id,
@@ -639,6 +701,7 @@ export class RestoreOrchestrator {
         snapshotSelection,
         intendedRoster: topology.intendedRoster,
         excludedNodes,
+        ...withKeptDown,
       };
       const notice = await this.noticeBareShells(rigId, `restore attempt ${attemptId}`, nodeResults, restoreWarnings);
       if (notice) restoreResult.harnessNotStarted = notice;
