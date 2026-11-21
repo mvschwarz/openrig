@@ -16,12 +16,12 @@
 
 import type { SlackEvent } from "./inbound.js";
 import type { ThreadSeatMap } from "./thread-seat-map.js";
-import { OPENRIG_SENDER } from "../../../lib/pane-envelope.js";
+import { isOpenRigSender } from "../../../lib/pane-envelope.js";
 
-/** OpenRig's own machinery (the daemon, or a `@system` actor): it posts, such as a wake escalation's alert, but no seat
- *  behind it reads a reply. */
+/** OpenRig's own machinery (the daemon, a subsystem actor such as `system:health`, or a `@system` actor): it posts, such
+ *  as a wake escalation's or a health finding's alert, but no seat behind it reads a reply. */
 function isOpenRigMachinery(seat: string): boolean {
-  return seat === OPENRIG_SENDER || seat.endsWith("@system");
+  return isOpenRigSender(seat) || seat.endsWith("@system");
 }
 
 /** Who reads a person's reply in a thread recorded for `seat` in `channel`. A thread OpenRig's machinery posted goes where

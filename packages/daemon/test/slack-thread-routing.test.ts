@@ -263,6 +263,7 @@ describe("a reply in a thread OpenRig's own machinery posted reaches a seat that
     const map = new ThreadSeatMap(mapDb(), clock);
     map.open({ threadTs: "T-ALERT", channel: "C-OPS", human: "mike@external", seat: "daemon@kernel", conversationId: "q-alert" });
     map.open({ threadTs: "T-SWEEP", channel: "C-OPS", human: "mike@external", seat: "stuck-sweep@system", conversationId: "q-sweep" });
+    map.open({ threadTs: "T-HEALTH", channel: "C-OPS", human: "mike@external", seat: "system:health", conversationId: "q-health" });
     map.open({ threadTs: "T-SEAT", channel: "C-OPS", human: "mike@external", seat: "dev-driver@v-openrig-build", conversationId: "q-seat" });
     map.recordPart({ messageTs: "P-ALERT", channel: "C-OPS", threadTs: "T-SEAT", seat: "daemon@kernel", conversationId: "q-alert" });
     const asked: (string | undefined)[] = [];
@@ -288,11 +289,12 @@ describe("a reply in a thread OpenRig's own machinery posted reaches a seat that
     expect(route(reply("T-ALERT")).destination).toBe("orch-lead@v-openrig-build");
   });
 
-  it("a closed alert root and a @system actor's root route the same way", () => {
+  it("a closed alert root, a @system actor's root and a subsystem actor's (system:health) root route the same way", () => {
     const { map, route } = setup("operator-agent@kernel");
     map.close("T-ALERT", "C-OPS");
     expect(route(reply("T-ALERT"))).toMatchObject({ destination: "operator-agent@kernel", routeClass: "closed-thread" });
     expect(route(reply("T-SWEEP"))).toMatchObject({ destination: "operator-agent@kernel", correlationQitemId: "q-sweep" });
+    expect(route(reply("T-HEALTH"))).toMatchObject({ destination: "operator-agent@kernel", correlationQitemId: "q-health" });
   });
 
   it("a reaction on an alert posted into another seat's thread reaches the channel's reader", () => {
