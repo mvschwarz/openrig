@@ -1083,7 +1083,12 @@ export function makePromptKindReader(deps: {
   };
 }
 
-/** The production prompt read for a refused destination. The activity oracle answers first; when it has no
+/** The oracle's pane check of a Codex seat's permission requests; null or absent when it tracks none. */
+export type CodexPermissionStateRead =
+  (nodeId: string, raisedAt: string | null | undefined, after?: string) => "blocked" | "clear" | "unknown" | null | undefined;
+
+/** The production prompt read for a refused destination. For a Codex request the oracle tracks, its pane check answers;
+ *  otherwise the activity oracle answers first; when it has no
  *  evidence, the ladder reads the same retained runtime hook the send gate refused on, so a held wake still
  *  escalates after the activity service is rebuilt, or when the oracle does not yet trust the hook source
  *  (Codex's). A generation-valid hook observed after the refusal that means work started, the turn ended,
@@ -1092,15 +1097,24 @@ export function makePromptStateReader(deps: {
   db: Database.Database;
   getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "needsInputEvidence"> | null | undefined;
   getLatestHook?: (sessionName: string, runtime: string | null) => AgentActivity | null | undefined;
+  /** The oracle's pane check of a Codex seat's permission requests (`SeatActivityService.codexPermissionState`). */
+  getCodexPermissionState?: CodexPermissionStateRead;
 }): (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown" {
   return (destination, refusedAt) => {
     const nodeId = resolveSessionNodeId(deps.db, destination);
-    const verdict = classifyPromptAfterRefusal(nodeId ? deps.getSeatState?.(nodeId) : null, refusedAt);
-    if (verdict !== "unknown" || !nodeId) return verdict;
+    if (!nodeId) return "unknown";
     const node = deps.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
     const runtime = node?.runtime ?? null;
     const hook = deps.getLatestHook?.(destination, runtime);
-    if (latestHookWaitsOnPerson(hook, runtime) || latestHookPermissionPending(hook, runtime)) return "blocked";
+    // A Codex request hook alone shows no prompt: an auto-approved request draws none, and the next hook is usually the
+    // turn's Stop. The oracle reads the pane for a request it tracks, and that answers first, so its grace holds on every
+    // path; only when it tracks none (the service rebuilt) does the hook hold, as before.
+    const permissionPending = latestHookPermissionPending(hook, runtime);
+    const checked = permissionPending ? deps.getCodexPermissionState?.(nodeId, hook!.eventAt, refusedAt) : null;
+    if (checked) return checked;
+    const verdict = classifyPromptAfterRefusal(deps.getSeatState?.(nodeId), refusedAt);
+    if (verdict !== "unknown") return verdict;
+    if (latestHookWaitsOnPerson(hook, runtime) || permissionPending) return "blocked";
     if (
       (runtime === "codex" || runtime === "claude-code") && hook?.rawEvent === "PermissionPromptCleared" &&
       hook.evidenceSource === "runtime_hook" &&
@@ -1124,6 +1138,8 @@ export function makePermissionPromptReader(deps: {
   getLatestHook: (destination: string, runtime: string | null) => AgentActivity | null | undefined;
   /** When the occupant's current prompt started (AgentActivityStore.findPermissionPromptStart). */
   getPromptStart?: (destination: string, generation: string) => string | null | undefined;
+  /** The oracle's pane check of a Codex seat's permission requests, read as the refusal path reads it. */
+  getCodexPermissionState?: CodexPermissionStateRead;
   log?: (line: string) => void;
 }): (destination?: string) => PermissionPromptObservation[] {
   return (onlyDestination) => (deps.db.prepare(`SELECT n.id AS nodeId, s.session_name AS destination, n.runtime
@@ -1141,8 +1157,11 @@ export function makePermissionPromptReader(deps: {
       const retainedState = current ? latestHookState(hook, runtime) : "unknown";
       const permission = hook?.rawSubtype === "permission_prompt" || hook?.rawEvent === "PermissionPromptConfirmed"
         || runtime === "claude-code" && hook?.rawEvent === "PermissionRequest";
+      const permissionPending = current && latestHookPermissionPending(hook, runtime);
+      const checked = permissionPending ? deps.getCodexPermissionState?.(nodeId, hook!.eventAt) : null;
       const state = !current ? "unknown"
-        : retainedState === "needs_input" && permission || latestHookPermissionPending(hook, runtime) ? "blocked"
+        : checked ? checked
+        : retainedState === "needs_input" && permission || permissionPending ? "blocked"
         : hook?.rawEvent === "PermissionPromptCleared" || retainedState === "running" || retainedState === "idle" ? "clear" : "unknown";
       let prompt: string | null | undefined;
       if (state === "blocked" && hook?.generation) {

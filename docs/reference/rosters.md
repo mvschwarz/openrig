@@ -131,9 +131,10 @@ the daemon names no single lead (no `delegates_to` root, several, or one with no
 rig declares it, `rig_team` shows that entry as `lead: { session, logicalId, declared: true, team }`, with the note
 "`<team>`'s entry point: send work for that team here. It doesn't manage this network or its other participants." If
 some rosters couldn't be read, the note adds that another entry point may be declared. A lead the daemon names always
-stays the lead. With several declarations there's no lead, and the note names them. It's context only: nothing
-escalates or routes to a declared lead. A value that isn't a plain name is dropped, `lead_of_problem` says why, and the
-roster still loads.
+stays the lead. With several declarations there's no lead, and the note names them. The same seat declaring the same
+team in more than one roster, under either of its names, counts once; one seat declaring two teams counts as several.
+It's context only: nothing escalates or routes to a declared lead. A value that isn't a plain name is dropped,
+`lead_of_problem` says why, and the roster still loads.
 
 The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
 rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
