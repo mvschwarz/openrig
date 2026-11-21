@@ -15,6 +15,7 @@ import { launchStatusRunning } from "./launch.js";
 import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import type { RemoteOpResult } from "../remote-host-ops.js";
 import { formatThreePart, type ThreePartRejection } from "./workflow-errors.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
@@ -862,8 +863,17 @@ wait expires, check rig ps before deciding what to do next.
  *  partial error bodies. */
 export function formatRemoteUpFailure(
   hostId: string,
-  result: { error?: string; data?: unknown },
+  result: Pick<RemoteOpResult, "error" | "data" | "outcomeUnknown">,
 ): string[] {
+  if (result.outcomeUnknown) {
+    const lines = [
+      `The outcome of rig up on host ${hostId} is unknown. The daemon may still be processing the request.`,
+      "The missing response gives no evidence of failure or rollback.",
+      `Check the current state with rig ps --host ${hostId} before retrying.`,
+    ];
+    if (result.error) lines.push(result.error);
+    return lines;
+  }
   const lines = [`Error on host ${hostId}${result.error ? `: ${result.error}` : ""}`];
   const payload = result.data !== null && typeof result.data === "object" && !Array.isArray(result.data)
     ? result.data as Record<string, unknown>

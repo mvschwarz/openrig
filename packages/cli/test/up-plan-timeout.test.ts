@@ -140,4 +140,17 @@ describe("rig up --plan and the daemon's time to answer", () => {
       remote.result = undefined;
     }
   });
+
+  it("a remote apply timeout tells the operator to check the same host before retrying", async () => {
+    remote.result = REMOTE_TIMEOUT;
+    try {
+      const { logs, exitCode } = await runUp(["/tmp/rig.yaml", "--host", "vps-a"], vi.fn());
+      expect(logs.join("\n")).toContain("The outcome of rig up on host vps-a is unknown");
+      expect(logs.join("\n")).toContain("rig ps --host vps-a");
+      expect(logs.join("\n")).toContain("before retrying");
+      expect(exitCode).toBe(1);
+    } finally {
+      remote.result = undefined;
+    }
+  });
 });
