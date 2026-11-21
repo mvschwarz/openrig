@@ -1867,7 +1867,9 @@ export function readCurrentSeatActivity(sources: {
 
 /** A seat's activity as rig ps shows it, capture-free: the hook and the cached pane reading, with the cached terminal
  *  motion lifting idle or unknown to running (capturelessSeatActivity), and the same placeholder for a seat with
- *  neither. The provider plan and apply read it for each seat. */
+ *  neither. The provider plan and apply read it for each seat. One rig ps step isn't applied: rig ps reads an idle seat
+ *  as unknown when the identity reconciler's verdict says its tmux couldn't be reached (unseenIdleIsUnknown); here such
+ *  a seat still reads idle. */
 export function readSeatActivityAsRigPs(sources: {
   hooks: Pick<AgentActivityStore, "getLatestForNode">;
   structural: { getStructuralActivity(sessionName: string): StructuralObservation | null };

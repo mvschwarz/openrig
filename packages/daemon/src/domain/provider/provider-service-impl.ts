@@ -270,7 +270,8 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   /** #3625 slice 3: the plan again, and if its digest is the one the person saw, each seat through the existing switch.
-   *  One apply per rig at a time; the assignment is stored when it starts, and each result as it lands. */
+   *  One apply per rig at a time; the assignment is stored with the first seat that's on the account or may be (switched,
+   *  pending successor, unknown, or already on it), and each result as it lands. */
   async applyAssignment(input: AssignmentApplyRequest, tools: AssignmentApplyTools): Promise<AssignmentApplyResult> {
     // The rig is held before the plan is computed again: its prechecks wait, and an apply that ran meanwhile would leave
     // this one comparing the reviewed digest with seats read before that apply changed them.
