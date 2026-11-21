@@ -37,6 +37,18 @@ Assistants that run on your machine can reach OpenRig's MCP server locally. Many
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
 - **`rig_whoami`** answers the seat its grant names, though the member has no session.
 
+To wait for one task's answer in the same read, call `rig_queue_show` with its `qitemId` and optional `waitSeconds`
+(an integer from 0 to 50). Omitted or zero keeps today's immediate read. A positive wait holds only while that item
+is `pending` or `in-progress`; a claim, progress note or another item's change does not finish it. It returns at once
+when the item leaves those states, including `blocked`, `done`, `handed-off`, `failed`, `denied` or `canceled`.
+State, closure reason, resolution, transitions and any visible successor keep their usual meaning; no successor is
+automatically followed. At the bound the current item returns with an additive top-level
+`waited: { outcome: "timeout", seconds: <requested bound> }`. A timeout is not an answer or completed work.
+Cancellation or a disconnected HTTP call releases the wait without changing the durable task. The read uses the
+same grant scope as an immediate read; another member's private task is still refused. Keep the caller's MCP timeout
+above the requested bound (the usual SDK default is 60 seconds); only this daemon call gets a longer timeout, not
+ordinary requests. `GET /api/queue/:qitemId?waitSeconds=<bound>` offers the same wait to daemon API callers.
+
 ## Asking a person while keeping the work
 
 When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
@@ -56,7 +68,7 @@ member, so it checks its rows again.
 
 The server tells the member this in its MCP instructions. The text is versioned, so you can check which version a tool received:
 
-> Member workflow (member-workflow/v2). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
+> Member workflow (member-workflow/v3). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. An item titled "Checked on …" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself. Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
 
 ## Ring it when work lands
 
@@ -113,7 +125,8 @@ These facts stay separate on the row:
     member itself. A notice to a creator lists only that creator's rows: when another creator's row joins, the notice moves to
     the next recipient. It says whether the member has read its own pending inbox recently: a check-in, never a receipt or a
     claim. A member with a declared route (a delegation parent or `escalates_to`) gets one finding per unclaimed row at that
-    route instead.
+    route instead. A finding is a diagnostic about its row, not a second assignment: read the row and act on it. Closing the
+    finding alone doesn't complete the row, and the sweep closes the finding itself once the row is no longer stuck.
   - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
   - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.

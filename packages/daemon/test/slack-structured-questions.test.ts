@@ -23,7 +23,7 @@ import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { DeadLetterStore, InboundReceiptStore, SeenStore } from "../src/domain/gateway/slack/state-store.js";
-import { formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
+import { chosenAnswers, formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
 
 const human = "human-founder@external";
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: human, connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
@@ -420,6 +420,23 @@ describe("structured human questions (#193)", () => {
         recordedIdentity: { provenance: "gateway:slack:v1", principal: registry.entities[0]!.entityId } })]);
     });
 
+    const closes = () => repo.transitionLog.listForQitem(decisionId).filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+
+    it("answer trail: a typed Slack answer's close records the mapped person", async () => {
+      await typeReply("Use Postgres and ship this week");
+      expect(repo.getById(decisionId)?.state).toBe("done");
+      expect(closes()).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+    });
+
+    it("answer trail: a completed Slack click set's close records the mapped person", async () => {
+      await click("db", "pg");
+      await click("ship", "yes");
+      expect(repo.getById(decisionId)?.state).toBe("done");
+      expect(closes()).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+    });
+
     it("posts the buttons, records each click, and resolves back to the seat once every question is answered", async () => {
       expect(JSON.stringify(posts[0]?.blocks)).toContain("or-opt:pg");
 
@@ -787,5 +804,21 @@ describe("a click reply with nothing to post it", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// C8: what a settled card names, in question order: a clicked option's label (its id if the label is gone), null for a
+// typed reply, nothing for an unanswered question or an inherited key.
+describe("chosenAnswers", () => {
+  const asked = [
+    { id: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres" }, { id: "lite", label: "SQLite" }] },
+    { id: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+    { id: "constructor", question: "Owner?", options: [{ id: "me", label: "Me" }, { id: "you", label: "You" }] },
+  ];
+  it("labels clicks, marks a typed reply, and skips the unanswered", () => {
+    const typed = { kind: "typed-reply" as const, text: "Not yet", placement: "first-unanswered" as const, unansweredCount: 1 };
+    expect(chosenAnswers(asked, { ship: "yes", db: "pg" })).toEqual(["Postgres", "Yes"]);
+    expect(chosenAnswers(asked, { db: "gone", ship: typed })).toEqual(["gone", null]);
+    expect(chosenAnswers(asked, {})).toEqual([]);
   });
 });

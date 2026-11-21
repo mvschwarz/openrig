@@ -297,6 +297,84 @@ CLI.
 
 Copy both and maintain them as your own.
 
+## An example: agy
+
+[`community-harness-examples/agy/`](community-harness-examples/agy/) has two presets for the Antigravity CLI (`agy`).
+Neither is a Google-supported integration.
+- **`agy.yaml` is the default:** a runner over `agy acp`, on Gemini API-key auth.
+- **`agy-plain.yaml` is the fallback:** agy's own terminal UI, read from the screen.
+- **Both use the same key handling:** `"modelProvider": "gemini"` in the seat's agy home, and a key file read into agy's
+  environment. Google's [Authenticate page](https://antigravity.google/docs/install/) ("Using a Gemini API key") says the
+  key variable alone has no effect, and that agy won't start with that setting and no key.
+- **Choose data sharing yourself, for either preset.** In both checks, a fresh agy home's first start of agy's own terminal
+  UI showed a "Terms & Data Use" screen with data sharing already checked. The choice isn't in `settings.json`, so start
+  agy once in the seat's agy home and make it before the seat uses that home.
+
+### The runner: `agy.yaml` and `openrig-agy-runner.mjs`
+
+- **What one run checked,** with agy 1.5.13, a Gemini API key and Gemini 4 Neon High, on OpenRig 0.7.20:
+  - idle and working;
+  - the model line in `rig ps`, `gemini-4-neon-high`, reported by the runner;
+  - a same-conversation resume: the same `nativeRef` before and after, and agy recalled a word given before the restart;
+  - permissions through OpenRig. With no registered person, OpenRig permits each of agy's requests (`allow_once`), so its
+    shell commands run unattended, with `GEMINI_API_KEY` in their environment. Register a person to answer them;
+  - a queue wake, typed in within seconds.
+
+  It didn't rerun the plain preset, `rig acp serve`, or a missing-conversation refusal through a full restore.
+- **Auth, by name:**
+  - **The setting:** in the seat's agy home, `.gemini/antigravity-cli/settings.json` sets `"modelProvider": "gemini"`.
+  - **The key:** the runner reads it from the file `--key-file` names, and sets `GEMINI_API_KEY` in agy's environment
+    only. It never goes in the runner's arguments, its output or the preset.
+  - **The limit:** agy's shell tools inherit `GEMINI_API_KEY`.
+- **Pin the model.** On API-key auth, agy's default is Gemini 3.1 Pro (Low). After the conversation opens, the runner
+  sends `session/set_model` with `--model`, then reports that model. `rig acp run -- agy acp` can't pin a model, so it runs
+  agy's default.
+- **When agy carries on by itself,** after a background task finishes, it sends output or a permission request with no
+  prompt open. The runner treats that as a turn the agent started:
+  - the seat reads working while agy talks, and idle after 20 seconds of quiet;
+  - the permission request goes through OpenRig.
+
+  In the check, this also fired once right after a resume, harmlessly.
+- **The credential:** the runner holds the launch's activity credential and makes the reports, and agy and its tools
+  don't receive it. As with any runner, the credential identifies the reporting launch, not an independently verified
+  native conversation or model.
+- **Resume** uses `session/resume` only, because agy's `session/load` of an unknown id succeeds silently. A conversation
+  that won't reopen is reported missing only when every page of agy's own list was read and none names it. That treats
+  agy's list as complete, which agy doesn't document. Any other failure leaves the resume unconfirmed, and nothing new
+  starts.
+- **Its base:** it's adapted from an earlier version of the [dsh example runner](#an-example-runner-dsh). It takes input
+  typed into the pane and doesn't use the runner channel.
+- **Quote each `limits:` item in your copy.** An unquoted item containing `: ` is read as a mapping, not text, and
+  OpenRig refuses the preset with "limits must be a list of non-empty strings".
+
+### The fallback: `agy-plain.yaml` and `openrig-agy-launch`
+
+The plain preset runs agy's own terminal UI and doesn't use `agy acp`. It was checked twice, with agy 1.5.13 and Gemini 4
+Neon: once on an agy sign-in, and once on a Gemini API key on OpenRig 0.7.20, where a queue wake and a same-conversation
+resume worked.
+- **The key and the model:** `--key-file` and `--model` work as the runner's do. On an agy sign-in, leave them out and
+  don't set `modelProvider`.
+- **A fresh launch spends one small model turn.** agy allocates a conversation id only at its first prompt. So the
+  launcher runs one headless turn (`agy -p "Reply with exactly: ready" --output-format json`), reads `conversation_id`
+  from its JSON, reports it, then opens that conversation with `agy --conversation <id>`. On a key, that turn measured
+  about 8.9k input tokens, about $0.03 at Gemini 4 Neon's list price, once per fresh launch (one launch measured). A
+  resume runs no such turn.
+- **The resume check:** `agy --conversation <unknown id>` doesn't fail; it starts a new conversation without refusing.
+  So on a resume the launcher checks that `conversations/<id>.db` exists in the seat's agy home. When it doesn't, the
+  launcher reports `error: "missing"` and starts nothing. That check was run on the launcher directly, not through an
+  OpenRig restore.
+- **Setup goes in the preset's `command`.** The seat's pane gets only the daemon's minimal environment. So the preset
+  passes the seat's agy home, the agy executable and the folder holding `rig` as the launcher's arguments (`--agy-home`,
+  `--agy`, `--rig-path`), and agy must be reachable from the pane.
+- **Let agy run `rig`, mostly:** agy asks before each shell command. `permissions.allow: ["command(rig)"]` in
+  `.gemini/antigravity-cli/settings.json` under the seat's agy home covers a lone `rig …` command only. Anything with `;`,
+  `&&`, `|` or a redirect still prompts, even when every part is allowed, and agy chains commands often. So a person stays
+  needed at the pane; OpenRig relays no approvals here.
+- **What OpenRig reads:** activity comes from the screen only. In both checks the seat read `working` at rest and at
+  agy's prompt, and the model reads unknown.
+
+Copy what you use and maintain it as your own.
+
 ## An example: Pi's terminal UI
 
 [`community-harness-examples/pi-tui/`](community-harness-examples/pi-tui/) has a preset and a small launcher that run Pi's

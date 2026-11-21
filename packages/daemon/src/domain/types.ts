@@ -224,7 +224,7 @@ export type RigEvent =
   // failed/attention_required restoreOutcome to operator_recovered after
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
-  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: import("./runtime-recovery.js").RecoveryEvidence | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
@@ -1785,7 +1785,11 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
+  // "pi_usage_entries" is Pi's OWN persisted usage (fed by the runner's posted
+  // entries) — kept distinct from "runner_reported" because the token
+  // threshold's reader treats runner_reported rows as non-samples, and `rig ps`
+  // renders the two labels differently.
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "pi_usage_entries" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;
