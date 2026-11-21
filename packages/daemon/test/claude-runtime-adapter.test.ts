@@ -415,7 +415,7 @@ describe("launchHarness — the seat name is one shell argument", () => {
     : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-1" } } : {};
   const kinds = ["fresh", "resume", "fork"];
 
-  it.each(kinds.flatMap((kind) => ["my seat", "it's", "a;b", "$(echo injected)"].map((name) => [kind, name])))(
+  it.each(kinds.flatMap((kind) => ["my seat", "it's", "a;b", "$(echo hi)"].map((name) => [kind, name])))(
     "%s launch keeps the name %j after --name as one argument", async (kind, name) => {
       const tmux = mockTmux();
       await adapterWith(tmux).launchHarness(makeBinding(), { name: name!, ...launch(kind!) });
