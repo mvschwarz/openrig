@@ -163,7 +163,7 @@ interface RouteCase {
   physicalWriter?: string;
   reportAlias?: boolean;
   wakeExpected?: boolean;
-  selfParent?: boolean;
+  resolvedParent?: string;
   unreadable?: boolean;
   expected: string;
   detail?: string;
@@ -171,25 +171,27 @@ interface RouteCase {
 const humanAddress = "alice@external";
 const routes: RouteCase[] = [
   { name: "actual delegation parent precedes the configured agent", parent: true, chosen: "receiver@notice", receiverStatus: "running", expected: "owner@notice" },
+  { name: "idle parent remains owner", parent: true, parentStatus: "idle", expected: "owner@notice" },
   { name: "stopped parent stays ahead of the configured agent", parent: true, parentStatus: "exited", chosen: "receiver@notice", receiverStatus: "running", expected: "owner@notice", detail: "recorded state stopped (exited)" },
-  { name: "self parent falls through to the configured agent", selfParent: true, chosen: "receiver@notice", receiverStatus: "running", expected: "receiver@notice" },
-  { name: "configured running agent", chosen: "receiver@notice", receiverStatus: "running", expected: "receiver@notice", detail: "recorded as running" },
-  { name: "configured idle agent", chosen: "receiver@notice", receiverStatus: "idle", expected: "receiver@notice", detail: "recorded as idle" },
-  { name: "configured stopped agent remains owner", chosen: "receiver@notice", receiverStatus: "exited", kernelStatus: "running", expected: "receiver@notice", detail: "answers wait for it" },
-  { name: "configured missing agent remains owner", chosen: "receiver@notice", kernelStatus: "running", expected: "receiver@notice", detail: "no seat by that name", wakeExpected: false },
-  { name: "configured unknown agent remains owner", chosen: "receiver@notice", receiverStatus: "unknown", expected: "receiver@notice", detail: "recorded as unknown" },
-  { name: "unreadable telemetry does not abandon the configured agent", chosen: "receiver@notice", receiverStatus: "unknown", unreadable: true, expected: "receiver@notice", detail: "seat couldn't be read" },
-  { name: "kernel default", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "the kernel operator" },
-  { name: "stopped kernel stays owner", kernelStatus: "exited", expected: KERNEL_OPERATOR_SESSION, detail: "answers wait for it" },
-  { name: "self receiving agent uses independent kernel", chosen: "writer@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "is the seat this notice is about" },
-  { name: "self receiving agent with no kernel reaches the person", chosen: "writer@notice", expected: humanAddress },
-  { name: "logical receiver alias cannot recover its own physical seat", chosen: "writer@notice", physicalWriter: "r42-original", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "is the seat this notice is about" },
-  { name: "physical receiver spelling cannot recover its own logical seat", chosen: "original@notice", physicalWriter: "original@notice", reportAlias: true, kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "is the seat this notice is about" },
-  { name: "registered person alias gets the human-safe fallback", chosen: "alice@notice", expected: humanAddress },
-  { name: "registered person alias is not an independent agent when the kernel exists", chosen: "alice@notice", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "resolves to a registered person" },
-  { name: "absent receiver rig falls through to the kernel", chosen: "receiver@not-created", kernelStatus: "running", expected: KERNEL_OPERATOR_SESSION, detail: "cannot hold this notice in its destination rig" },
-  { name: "absent receiver rig without kernel reaches the person", chosen: "receiver@not-created", expected: humanAddress },
-  { name: "no independent agent reaches the person, never an unrelated running seat", expected: humanAddress },
+  { name: "unknown parent remains owner", parent: true, parentStatus: "unknown", expected: "owner@notice" },
+  { name: "missing parent seat keeps its eligible address", resolvedParent: "owner@notice", expected: "owner@notice", wakeExpected: false },
+  { name: "self parent goes to the person despite configured agents", resolvedParent: "writer@notice", chosen: "receiver@notice", receiverStatus: "running", kernelStatus: "running", expected: humanAddress, detail: "is the seat this notice is about" },
+  { name: "logical parent alias cannot recover its own physical seat", resolvedParent: "writer@notice", physicalWriter: "r42-original", kernelStatus: "running", expected: humanAddress, detail: "is the seat this notice is about" },
+  { name: "physical parent spelling cannot recover its own logical seat", resolvedParent: "original@notice", physicalWriter: "original@notice", reportAlias: true, kernelStatus: "running", expected: humanAddress, detail: "is the seat this notice is about" },
+  { name: "registered person parent alias gets human-safe content", resolvedParent: "alice@notice", kernelStatus: "running", expected: humanAddress, detail: "resolves to a registered person" },
+  { name: "ineligible parent rig goes to the person despite configured agents", resolvedParent: "owner@not-created", chosen: "receiver@notice", receiverStatus: "running", kernelStatus: "running", expected: humanAddress, detail: "cannot hold this notice in its destination rig" },
+  { name: "parentless with a configured running agent goes to the person", chosen: "receiver@notice", receiverStatus: "running", expected: humanAddress },
+  { name: "parentless with a configured idle agent goes to the person", chosen: "receiver@notice", receiverStatus: "idle", expected: humanAddress },
+  { name: "parentless with a configured stopped agent goes to the person", chosen: "receiver@notice", receiverStatus: "exited", kernelStatus: "running", expected: humanAddress },
+  { name: "parentless with a configured missing agent goes to the person", chosen: "receiver@notice", kernelStatus: "running", expected: humanAddress },
+  { name: "parentless with a configured unknown agent goes to the person", chosen: "receiver@notice", receiverStatus: "unknown", expected: humanAddress },
+  { name: "unreadable receiver telemetry does not change the person fallback", chosen: "receiver@notice", receiverStatus: "unknown", unreadable: true, expected: humanAddress },
+  { name: "parentless with a running kernel goes to the person", kernelStatus: "running", expected: humanAddress },
+  { name: "parentless with a stopped kernel goes to the person", kernelStatus: "exited", expected: humanAddress },
+  { name: "self receiving agent is not consulted", chosen: "writer@notice", kernelStatus: "running", expected: humanAddress },
+  { name: "registered person receiver alias stays on the human route", chosen: "alice@notice", kernelStatus: "running", expected: humanAddress },
+  { name: "absent receiver rig is not consulted", chosen: "receiver@not-created", kernelStatus: "running", expected: humanAddress },
+  { name: "no parent goes to the person, never an unrelated running seat", expected: humanAddress },
 ];
 
 describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind) => {
@@ -213,7 +215,7 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
       const failedSession = route.reportAlias ? "writer@notice" : route.physicalWriter ?? "writer@notice";
       if (route.receiverStatus) seat("receiver", route.receiverStatus);
       if (route.parent) { const owner = seat("owner", route.parentStatus ?? "running"); rigs.addEdge(rig.id, owner.id, writer.id, "delegates_to"); }
-      if (route.selfParent) vi.spyOn(queueOwner, "defaultResolveOrchestrator").mockReturnValue("writer@notice");
+      if (route.resolvedParent) vi.spyOn(queueOwner, "defaultResolveOrchestrator").mockReturnValue(route.resolvedParent);
       if (route.kernelStatus) {
         const row = sessions.registerSession(rigs.addNode(rigs.createRig("kernel").id, "operator-agent", { runtime: "claude-code" }).id, KERNEL_OPERATOR_SESSION);
         sessions.updateBinding(row.nodeId, { tmuxSession: KERNEL_OPERATOR_SESSION });
@@ -251,15 +253,16 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
       if (route.expected === humanAddress) {
         expect(send).not.toHaveBeenCalled();
         expect(row.evidenceRef).toBeNull();
-        expect(row.body).toContain("No independent recovery agent could be resolved");
+        expect(row.body).toContain("No eligible independent delegating parent could be resolved");
         expect(row.body).not.toContain("/private/");
       } else {
         expect(send).toHaveBeenCalledTimes(route.wakeExpected === false ? 0 : 1);
         if (route.wakeExpected !== false) expect(send.mock.calls[0]![0]).toBe(route.expected);
         else expect(row.lastNudgeResult).toContain("unroutable");
         expect(row.evidenceRef).toBe(kind === "restore" ? restore.mapPath : prep.statePath);
-        if (route.detail) expect(row.body).toContain(route.detail);
+
       }
+      if (route.detail) expect(row.body).toContain(route.detail);
       // A new repository/changed configuration does not reroute or wake an existing notice.
       vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: "unrelated@notice" });
       const restarted = new QueueRepository(db, new EventBus(db), { validateRig,
@@ -269,6 +272,14 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
       expect(restarted.list({ limit: 20 })).toHaveLength(1);
       if (route.expected === humanAddress) expect(JSON.stringify(restarted.listTransitions(id))).not.toContain("/private/");
       else expect(send).toHaveBeenCalledTimes(route.wakeExpected === false ? 0 : 1);
+      if (kind === "restore") {
+        await reportRestoreDeliveryFailure(db, restarted, { ...restore, lastDelivery: { ...restore.lastDelivery,
+          stage: "compliance_prompt", ok: true, reason: "delivered", failures: 0 } }, { completed: true });
+        expect(restarted.getById(id)).toMatchObject({ state: "done", destinationSession: route.expected });
+        await report(restarted, true);
+        expect(restarted.getById(id)).toMatchObject({ state: "pending", destinationSession: route.expected });
+        expect(restarted.list({ limit: 20 })).toHaveLength(1);
+      }
       await restarted.update({ qitemId: id, actorSession: route.expected, state: "done", closureReason: "no-follow-on" });
       await report(restarted, true);
       expect(restarted.getById(id)?.state).toBe("done");
