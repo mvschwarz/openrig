@@ -124,6 +124,23 @@ function removeSentinel(payload, env = process.env) {
   if (p) { try { fs.unlinkSync(p); } catch { /* best-effort cleanup */ } }
 }
 
+// The PreCompact hook's background packet build, read from the job it recorded on the sentinel and the result its
+// finisher writes. Null when the sentinel records no job (a hook from before the background build).
+function packetJobState(job) {
+  if (!job || typeof job !== "object" || typeof job.resultPath !== "string") return null;
+  let result = null;
+  try { result = JSON.parse(fs.readFileSync(job.resultPath, "utf8")); } catch { /* no result yet */ }
+  if (result && result.jobId === job.jobId && result.ok === false) {
+    return `OpenRig compaction restore: the restore packet build failed: ${String(result.reason || "unknown error").slice(0, 500)}. Fall back to the JSONL restore (claude-compaction-restore skill).`;
+  }
+  if (result && result.jobId === job.jobId) return null;
+  let running = false;
+  if (Number.isInteger(job.pid)) { try { process.kill(job.pid, 0); running = true; } catch { running = false; } }
+  return running
+    ? `OpenRig compaction restore: the restore packet is still being built (started ${job.startedAt || "at the PreCompact hook"}); its marker appears when it's done, and a later prompt delivers it. Until then, restore from your restore map, or fall back to the JSONL restore (claude-compaction-restore skill).`
+    : "OpenRig compaction restore: the restore packet build ended without a packet or a recorded failure. Fall back to the JSONL restore (claude-compaction-restore skill).";
+}
+
 function writeMarker(marker) {
   fs.writeFileSync(marker.filePath, `${JSON.stringify(marker.data, null, 2)}\n`, "utf8");
 }
@@ -212,9 +229,8 @@ async function main() {
     // pollutes the additionalContext stdout.
     const sentinel = findSentinel(payload);
     if (sentinel && premiseMatches(sentinel.data, payload)) {
-      process.stderr.write(
-        "OpenRig compaction restore: a restore packet was EXPECTED for this session but its marker is missing or unresolvable — the PreCompact write may have failed. Fall back to the JSONL restore (claude-compaction-restore skill).\n",
-      );
+      process.stderr.write(`${packetJobState(sentinel.data.packetJob)
+        ?? "OpenRig compaction restore: a restore packet was EXPECTED for this session but its marker is missing or unresolvable — the PreCompact write may have failed. Fall back to the JSONL restore (claude-compaction-restore skill)."}\n`);
     }
     return;
   }

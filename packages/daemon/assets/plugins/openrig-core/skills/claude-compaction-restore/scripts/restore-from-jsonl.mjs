@@ -31,6 +31,7 @@ function parseArgs(argv) {
     out: DEFAULT_OUT,
     cwd: process.cwd(),
     json: false,
+    untilByte: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -39,6 +40,8 @@ function parseArgs(argv) {
     else if (arg === "--out") args.out = argv[++i];
     else if (arg === "--cwd") args.cwd = argv[++i];
     else if (arg === "--json") args.json = true;
+    // Read only the first N bytes: the transcript as it was when the PreCompact hook ran, before compaction appends to it.
+    else if (arg === "--until-byte") args.untilByte = Number(argv[++i]);
     else if (!arg.startsWith("-") && !args.jsonl) args.jsonl = arg;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -48,8 +51,9 @@ function parseArgs(argv) {
 
 // The transcript is read a line at a time: a long-lived seat's JSONL runs to gigabytes, past the longest string Node can
 // make (about 512 MB), so the whole file is never read into one string.
-async function* readJsonLines(file) {
-  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+async function* readJsonLines(file, untilByte = null) {
+  const bounded = Number.isInteger(untilByte) && untilByte > 0 ? { end: untilByte - 1 } : {};
+  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", ...bounded }), crlfDelay: Infinity });
   let index = 0;
   for await (const line of lines) {
     if (!line) continue;
@@ -276,7 +280,7 @@ function discoverDocs(cwd) {
   return [...docs].sort();
 }
 
-async function analyze(jsonlPath, cwd, staging) {
+async function analyze(jsonlPath, cwd, staging, untilByte = null) {
   const registry = createRegistry();
   const transcript = createTextSink(path.join(staging, "transcript.txt"));
   const narrative = createTextSink(path.join(staging, "transcript-narrative.txt")); // R4: message-turns only (assistant/user text), no tool bodies
@@ -285,7 +289,7 @@ async function analyze(jsonlPath, cwd, staging) {
   let sessionId = null;
   let records = 0;
 
-  for await (const record of readJsonLines(jsonlPath)) {
+  for await (const record of readJsonLines(jsonlPath, untilByte)) {
     records += 1;
     registry.tick();
     if (record.sessionId || record.session_id) sessionId = record.sessionId ?? record.session_id;
@@ -504,7 +508,7 @@ async function main() {
   let summary;
   let outputPaths;
   try {
-    summary = await analyze(jsonlPath, cwd, staging);
+    summary = await analyze(jsonlPath, cwd, staging, args.untilByte);
     outputPaths = writeOutputs(summary, outRoot, staging);
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });

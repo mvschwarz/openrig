@@ -2,7 +2,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const skillRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -13,10 +14,11 @@ const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 // same injected clock + sessionId no longer collide on the same `${sessionId}-${stamp}`
 // dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = /tmp.
 const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
-// After 25 s by default, spawnSync asks the restore script to stop (SIGTERM), inside this hook's 30 s timeout
-// (hooks/claude.json), and the manual-route note below is written once the script has exited. That's a request, not a
-// deadline: a script slow to exit, or blocked, can run past the hook's 30 s, and then the note is lost.
-// OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS sets another positive value (tests shorten it); it isn't capped at the default.
+// The packet is built by a detached copy of this hook (--finish), so a large transcript can take as long as it needs. The
+// hook waits for it for 25 s by default, inside its own 30 s timeout (hooks/claude.json): a packet ready by then is
+// reported as before; otherwise the hook says the packet is still being built, and the finisher writes the pending
+// restore marker when it's done, or records why it failed. OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS sets another positive
+// wait (tests shorten it); it isn't capped at the default.
 const timeoutOverride = Number(process.env.OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS);
 const restoreTimeoutMs = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 25_000;
 const defaultRestoreInstruction =
@@ -252,6 +254,69 @@ function runsForThisSeatsProject(env = process.env) {
 // A Claude started elsewhere inside this seat is not the seat: no packet, no marker.
 if (!runsForThisSeatsProject()) process.exit(0);
 
+function restoreText(outputDir) {
+  return `Pre-compaction restore seed packet prepared at ${outputDir}. This hook output is informational. After compaction, OpenRig may send a later normal user message asking you to restore from this packet; treat that later normal user message as the action request. The restore protocol is: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json" yourself when needed, read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then reply with "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
+}
+
+function failureText(reason) {
+  return `Claude compaction restore packet generation failed: ${reason}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
+}
+
+// The packet build's job and result, one pair per seat: the hook writes the job, the finisher writes the result. The
+// sentinel records the job (its id, the finisher's pid, the result path) so the bridge can tell building from failed.
+function packetJobPaths(input) {
+  const base = path.join(getOpenRigHome(), "compaction", "packet-jobs", sessionKey(input));
+  return { jobPath: `${base}.job.json`, resultPath: `${base}.result.json` };
+}
+
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  fs.renameSync(tmp, file);
+}
+
+function readResult(resultPath, jobId) {
+  try {
+    const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+    return result.jobId === jobId ? result : null;
+  } catch { return null; }
+}
+
+function recordPacketJob(input, packetJob) {
+  const p = path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.expected.json`);
+  try {
+    const sentinel = JSON.parse(fs.readFileSync(p, "utf8"));
+    fs.writeFileSync(p, `${JSON.stringify({ ...sentinel, packetJob }, null, 2)}\n`, "utf8");
+  } catch { /* the sentinel is written first; without it the bridge stays as it was */ }
+}
+
+// --finish <job>: the detached packet build. It has no time limit; it writes the marker the normal way when the packet is
+// made, and its result either way.
+function runFinisher(jobPath) {
+  const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+  const result = spawnSync(process.execPath, job.args, { encoding: "utf8" });
+  let outcome;
+  if (result.status === 0) {
+    try {
+      const parsed = JSON.parse(result.stdout);
+      const markerPath = writePendingRestoreMarker(job.input, parsed, restoreText(parsed.outputDir), job.customMessage);
+      outcome = { ok: true, outputDir: parsed.outputDir, markerPath };
+    } catch (error) {
+      outcome = { ok: false, reason: error.message };
+    }
+  } else {
+    outcome = { ok: false, reason: (result.error?.message || result.stderr || result.stdout || "unknown error").trim() };
+  }
+  writeJsonAtomic(job.resultPath, { jobId: job.jobId, ...outcome, endedAt: nowIso() });
+  fs.rmSync(jobPath, { force: true });
+}
+
+if (process.argv[2] === "--finish") {
+  try { runFinisher(process.argv[3]); } catch { /* the bridge reports a finisher that ended without a result */ }
+  process.exit(0);
+}
+
 try {
   // Slice 51-01 RIDER (leak-visibility, review-r1 escalation): OPENRIG_TEST_CLOCK_NOW is
   // read by nowIso() to make createdAt deterministic in tests — but a LEAKED var in a
@@ -266,30 +331,44 @@ try {
   const args = [restoreScript, "--out", outRoot, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.transcript_path && input.transcript_path.endsWith(".jsonl") && fs.existsSync(input.transcript_path)) {
-    args.push(input.transcript_path);
+    // The transcript as it stands now: compaction appends to it once this hook returns, and the packet is of what came
+    // before.
+    args.push("--until-byte", String(fs.statSync(input.transcript_path).size), input.transcript_path);
   }
 
   const customMessage = readClaudeCompactionMessage();
 
-  const result = spawnSync(process.execPath, args, { encoding: "utf8", timeout: restoreTimeoutMs });
-  if (result.status !== 0) {
-    const reason = result.error?.code === "ETIMEDOUT"
-      ? `asked to stop after ${restoreTimeoutMs / 1000} s, to try to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer)`
-      : (result.stderr || result.stdout || "unknown error").trim();
-    const baseFailure = `Claude compaction restore packet generation failed: ${reason}. After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.`;
+  const { jobPath, resultPath } = packetJobPaths(input);
+  const jobId = randomUUID();
+  writeJsonAtomic(jobPath, { jobId, input, args, customMessage, resultPath });
+  const finisher = spawn(process.execPath, [fileURLToPath(import.meta.url), "--finish", jobPath], { detached: true, stdio: "ignore" });
+  finisher.unref();
+  const startedAt = nowIso();
+  recordPacketJob(input, { jobId, pid: finisher.pid ?? null, resultPath, startedAt });
+
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + restoreTimeoutMs;
+  let result = readResult(resultPath, jobId);
+  while (!result && Date.now() < deadline) {
+    Atomics.wait(sleeper, 0, 0, Math.min(100, Math.max(1, deadline - Date.now())));
+    result = readResult(resultPath, jobId);
+  }
+
+  if (!result) {
+    const markerPath = pendingMarkerPath(input);
     emit({
       continue: true,
-      systemMessage: buildSystemMessage(baseFailure, customMessage),
+      systemMessage: buildSystemMessage(`Claude compaction restore packet is still being built: the transcript takes longer than the PreCompact hook's ${restoreTimeoutMs / 1000}-second wait. A background process (pid ${finisher.pid ?? "unknown"}, started ${startedAt}) finishes it and then writes the pending restore marker at ${markerPath}, which the restore picks up. If no marker appears, load the claude-compaction-restore skill and run restore-from-jsonl manually.`, customMessage),
     });
     process.exit(0);
   }
-
-  const parsed = JSON.parse(result.stdout);
-  const baseRestore = `Pre-compaction restore seed packet prepared at ${parsed.outputDir}. This hook output is informational. After compaction, OpenRig may send a later normal user message asking you to restore from this packet; treat that later normal user message as the action request. The restore protocol is: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json" yourself when needed, read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then reply with "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
-  const markerPath = writePendingRestoreMarker(input, parsed, baseRestore, customMessage);
+  if (!result.ok) {
+    emit({ continue: true, systemMessage: buildSystemMessage(failureText(result.reason), customMessage) });
+    process.exit(0);
+  }
   emit({
     continue: true,
-    systemMessage: buildSystemMessage(`${baseRestore} OpenRig also wrote a pending restore marker at ${markerPath}.`, customMessage),
+    systemMessage: buildSystemMessage(`${restoreText(result.outputDir)} OpenRig also wrote a pending restore marker at ${result.markerPath}.`, customMessage),
   });
 } catch (error) {
   emit({
