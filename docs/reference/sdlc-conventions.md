@@ -150,19 +150,23 @@ older than 90 days as `provisional`.
 
 A slice's frontmatter may also carry `status:`. `GET /api/slices` reports the
 bucket each word falls in as the slice's `status`, and its
-`?filter=all|active|done|blocked` filters on that bucket:
+`?filter=all|active|done|closed|blocked` filters on that bucket:
 
 | `status:` word | Bucket |
 | --- | --- |
 | `active`, `in-flight`, `ratified` | `active` |
 | `draft`, `draft-pending-orch-ratification`, `placeholder` | `draft` |
 | `done`, `shipped`, `promoted`, `closed` | `done` |
+| `closed-wontfix`, `closed-deferred`, `closed-superseded`, `closed-stale` | `closed` |
 | `blocked`, `parked-with-evidence` | `blocked` |
 
 Words are matched ignoring case. Any other word is matched by what it contains:
 `done`, `ship` or `close` makes it `done`; `block` or `park`, `blocked`; `draft`
 or `pending`, `draft`. A word that matches none of these counts as `active`, so a
-slice marked `complete` counts as `active`. A slice with no `status:` counts as
+slice marked `complete` counts as `active`, and so does one marked a bare `wontfix`,
+`deferred`, `superseded` or `stale`: only the `closed-<reason>` words that
+`rig scope slice close` writes read as `closed` (a slice moved to `closed/` with one
+of them used to read `done`). A slice with no `status:` counts as
 `draft`.
 
 `rig view show execution` shows the slice's own `status:` word (from its
@@ -201,11 +205,29 @@ commit. Evidence capture (`proof add`), policy acceptance, higher outcome
 judgment and publication are distinct. This optional component does not select
 Part B or add a mandatory review gate.
 
-A judgment binds the slice's path, the item's text and the policy. Moving or
-renaming a slice (`rig scope slice move`, or by hand) reopens its judged items:
+A judgment binds the slice's path, the item's text and the policy. A policy edit
+that keeps the judging actor listed and `everyJudge` unchanged, such as adding a
+judge, leaves the judgment current; removing its actor or toggling `everyJudge`
+does not. A judgment recorded by an earlier release doesn't carry the
+`everyJudge` it was recorded under, so any policy edit still reopens it. Moving or
+renaming a slice (`rig scope slice move`, default moving `rig scope slice close`,
+or by hand) reopens its judged items:
 `rig proof show` reports each as `unknown`, and each needs a new judgment on its
-current revision. `rig scope audit` checks structure only and never reads proof
-readiness, so a passing audit doesn't mean the proof still stands.
+current revision. Opt-in `rig scope slice close <slice> --in-place --reason delivered`
+(or `--in-place --reason <wontfix|deferred|superseded|stale>` for non-delivery
+exits) updates status in place under `<mission>/slices/<slice>` (and writes the same
+status to a `status:` that the slice indexer reads in `PROGRESS.md` frontmatter).
+It then reads the status back the way the slice indexer does; if the indexer does
+not read the new status (for example a duplicate, nested or commented `status:`
+line), it restores the files it changed and refuses with one message naming the
+file. If a restore itself fails, the message keeps the mismatch, lists every failed
+restore, and says the slice's files and `mission.yaml` may be partly changed, so
+inspect them before closing again. It does not move the folder, so recorded judgments stay applicable while the item
+text, policy and cited evidence bytes are unchanged (judgments citing files
+updated by closure, such as `SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`,
+reopen to `unknown`), and parent mission status is never automatically marked
+delivered. `rig scope slice close` and `rig scope audit` do not evaluate proof
+readiness, so check `rig proof show` for current applicability.
 
 The project readiness that `rig proof show --project` reports counts only
 missions whose `mission.yaml` carries `metadata.status: active` or
@@ -228,6 +250,25 @@ renders (a missing Intent or Delivered source shows a muted "—", missing
 mini-requirements show "Not compliant · mini-requirements not authored";
 nothing is invented) —
 but it does not carry its weight in review.
+
+### A2.1. Missions that break down another scope
+
+A mission can link to the mission or slice whose work it breaks down. Use
+`rig scope mission create <name> --parent <dot-id>` when creating it, or
+`rig scope mission parent <mission> <dot-id>` to set the link later. Use
+`rig scope mission parent <mission> --clear` to remove it. The target must
+resolve uniquely within the project's missions root. Cycles and unresolved
+ancestors are warnings and are reported by scope audit. A mission without an
+authored ID can still have a parent; reverse views show its ID as unknown. When
+creating a mission with a duplicate ID and a parent, the command warns with the
+existing path because references to that ID are ambiguous.
+The link is `metadata.parent` in `mission.yaml`, or `parent` in the node
+frontmatter for a legacy mission without a manifest. It does not change
+folder layout, slice membership, or the meaning of `depends-on`.
+
+Mission and slice show surfaces expose the link in both directions; scope
+audit reports dangling links and active children of completed slices. The
+refocus trace follows the logical parent to show the outcome's intent.
 
 ## A3. Honesty rails (public surfaces + cited hashes)
 

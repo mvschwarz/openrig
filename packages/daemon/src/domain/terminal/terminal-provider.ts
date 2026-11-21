@@ -69,6 +69,8 @@ export interface ViewDescriptor { kind: "following" | "fixed"; name: string }
 
 export interface ComposedView {
   id: string;
+  /** Human rig name for display; identity and reuse remain bound to id. */
+  rigName?: string;
   /** Explicit daemon server for local viewer creation as well as its attached seats. */
   localTmuxServer?: readonly string[];
   task?: TaskMembership;

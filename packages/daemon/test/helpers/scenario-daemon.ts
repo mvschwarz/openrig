@@ -16,6 +16,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
+import { DAEMON_START_COMMAND_TIMEOUT_MS } from "../../src/daemon-shutdown.js";
 import { assertNoForeignDaemon, type HermeticScaffold } from "./hermetic-env.js";
 
 export interface RigResult {
@@ -65,7 +66,7 @@ export interface SpawnScenarioDaemonOptions {
   rigBin: string;
   /** Override the port (default: an ephemeral free port). */
   port?: number;
-  /** Per-invocation timeout for `rig` subprocesses (ms). */
+  /** Per-invocation timeout for `rig` subprocesses (ms). The start itself gets the product's own start budget. */
   timeoutMs?: number;
 }
 
@@ -139,12 +140,15 @@ export async function spawnScenarioDaemon(
 
   // The single start path — reused by initial spawn AND by restart, so a restart
   // re-spawns through EXACTLY the same forced-local/scratch/fail-closed guarantees.
+  // `rig daemon start` waits for its daemon's readiness for up to its own budget (DAEMON_START_COMMAND_TIMEOUT_MS, as the
+  // TUI's start uses). Cutting it off at the per-invocation timeout reported a slow but healthy start as a failure, and
+  // left its daemon child running.
   const startProc = async () => {
     const start = await runRig(
       ["daemon", "start", "--port", String(port), "--db", db, "--no-kernel"],
       scaffold.env,
       rigBin,
-      timeoutMs,
+      DAEMON_START_COMMAND_TIMEOUT_MS,
     );
     if (start.code !== 0) {
       throw new Error(

@@ -483,6 +483,23 @@ describe("rig provider status — usage windows", () => {
     ].join("\n"));
   });
 
+  it("a Claude seat's own token or API key renders as its configured credential, with the next-launch note", async () => {
+    const note = "the seat's own credential file, read when it next launches; not proof the running process uses it, and the label is the operator's name for it";
+    model = { ...MODEL, seatAccounts: [
+      { seatSession: "dev-build@r", rigName: "r", runtime: "claude-code",
+        configured: { source: "claude_token", label: "team-a", note }, allowance: { linked: false, reason: "r" } },
+      { seatSession: "dev-ci@r", rigName: "r", runtime: "claude-code",
+        configured: { source: "claude_token", label: "ci-key", kind: "api-key", note }, allowance: { linked: false, reason: "r" } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "  dev-build@r  claude-code  configured: token team-a (the seat's own credential file) · allowance not linked",
+      `    ${note}`,
+    ].join("\n"));
+    expect(out).toContain("  dev-ci@r  claude-code  configured: API key ci-key (the seat's own credential file) · allowance not linked");
+    expect(out).not.toContain("configured: unknown");
+  });
+
   it("no seatAccounts key (switch off): no SEATS section", async () => {
     model = { ...MODEL, usage: [READING] };
     expect((await run(["status"], port)).out).not.toContain("SEATS");

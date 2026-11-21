@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
-import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { PiRuntimeAdapter, type PiRuntimeAdapterDeps } from "../src/adapters/pi-runtime-adapter.js";
 import { PiCommunityRuntimeAdapter } from "../src/adapters/pi-community-runtime-adapter.js";
 import { withCommunityHarnesses, seatAdapter, withCommunityHarnessResolver } from "../src/adapters/community-harness-runtime-adapter.js";
 import { piSeatPaths, buildPendingRunnerState } from "../src/adapters/pi-runner-protocol.js";
@@ -15,8 +15,9 @@ import { AgentActivityStore, isRunnerExit } from "../src/domain/agent-activity-s
 import { communityHarnessStopsRestore } from "../src/domain/community-harness-presets.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 import type { RigEvent } from "../src/domain/types.js";
+import type { RunnerGrantIssuer } from "../src/domain/runner-grant-launch.js";
 
-function makeFixture() {
+function makeFixture(deps: Partial<PiRuntimeAdapterDeps> = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi-community-test-"));
   const presetsDir = join(root, "community-harnesses");
   const stateRoot = join(root, "state", "pi");
@@ -51,6 +52,7 @@ function makeFixture() {
     trustPosture: "no-approve",
     sleep: async () => {},
     newLaunchId: () => "test-launch-id-1",
+    ...deps,
   });
 
   return {
@@ -66,6 +68,34 @@ function makeFixture() {
 }
 
 describe("PiCommunityRuntimeAdapter", () => {
+  it("issues exactly one hosted2 grant per actual custom fresh/exact-resume launch", async () => {
+    let attempt = 0;
+    const finish = vi.fn(async (_ok: boolean) => {}), dispatched = vi.fn();
+    const runnerGrants = vi.fn<RunnerGrantIssuer>(async (_binding, runtime, runId, runner) => {
+      expect([runtime, runner]).toEqual(["custom-rpc", 2]);
+      return { grantId: runId, generation: "generation", wrap: (command: string) => command, dispatched, finish };
+    });
+    const f = makeFixture({ runnerGrants, newLaunchId: () => `attempt-${++attempt}` });
+    try {
+      const preset = { name: "custom-rpc", command: "custom-rpc", protocol: "pi-rpc", runner: false } as never;
+      const adapter = PiCommunityRuntimeAdapter.fromPiAdapter(f.piAdapter, "custom-rpc", preset);
+      const seat = "custom@rig", paths = piSeatPaths(f.stateRoot, seat), token = join(paths.sessionsDir, "native.jsonl");
+      f.tmux.sendShellCommand.mockImplementation(async () => {
+        f.files[paths.runnerStatePath] = JSON.stringify({ ready: true, launchId: `attempt-${attempt}`, sessionFile: token, updatedAt: "t" });
+        f.files[token] = "history";
+        return { ok: true, code: "ok" };
+      });
+      const binding = { nodeId: "custom-node", tmuxSession: seat, tmuxPane: "%1", cwd: "/work" } as NodeBinding;
+      expect(await adapter.launchHarness(binding, { name: seat })).toMatchObject({ ok: true, resumeType: "community:custom-rpc" });
+      expect(await adapter.launchHarness(binding, { name: seat, resumeToken: token })).toMatchObject({ ok: true, resumeToken: token });
+      expect(runnerGrants.mock.calls.map(call => [call[1], call[2], call[3]])).toEqual([
+        ["custom-rpc", "attempt-1", 2], ["custom-rpc", "attempt-2", 2],
+      ]);
+      expect(dispatched).toHaveBeenCalledTimes(2);
+      expect(finish.mock.calls).toEqual([[true], [true]]);
+    } finally { f.cleanup(); }
+  });
+
   it("resolves through withCommunityHarnesses when protocol: pi-rpc is declared", () => {
     const f = makeFixture();
     try {

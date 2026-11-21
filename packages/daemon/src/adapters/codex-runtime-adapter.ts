@@ -27,6 +27,7 @@ import type { CodexProfileProbeResult } from "../domain/codex-profile-preflight.
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { observeCodexSandbox, type AppliedLaunchObservation } from "../domain/permission-drift.js";
+import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import {
   defaultResolveHomeDirByPid,
   CodexThreadIdResolver,
@@ -133,6 +134,9 @@ export interface CodexAdapterFsOps {
   /** Apply permission bits to a file (for mode-preserving projection). Optional: no-op if absent. */
   chmod?(path: string, mode: number): void;
   homedir?: string;
+  /** Whether a folder is there (cwd-resolution's folderPresent), to leave a missing seat folder uncreated. Optional: a
+   *  folder reads as present if absent. */
+  folderPresent?(path: string): boolean;
 }
 
 /** #1524 (b): what Codex's own records say about one process's conversation: its thread id, or why none was read
@@ -197,8 +201,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   private resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
   private resolveHooksEnabled?: () => Promise<boolean>;
-  // OPR.0.4.1.10 FR-B — absolute path to the daemon's own shipped activity-relay.cjs,
-  // resolved by startup from import.meta.dirname. Used by ensureCodexActivityHooks
+  // OPR.0.4.1.10 FR-B — absolute path to the daemon's own staged activity-relay.cjs,
+  // resolved by startup under OPENRIG_HOME. Used by ensureCodexActivityHooks
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
   // version-matched to the running daemon (NOT ${PLUGIN_ROOT}, NOT a per-cwd copy).
   private activityRelayPath?: string;
@@ -660,7 +664,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // clean config on EVERY path a fresh Codex process reads config (launch/adopt/reconcile)
     // — without a blanket native trust keystroke. If native identity/hash semantics
     // change, the remaining review is surfaced for a decision. Idempotent
-    // + non-clobbering; only touches our 4 keys. See applyCodexActivityHookTrust for the RTFM.
+    // + non-clobbering; only touches our four hooks' source aliases. See applyCodexActivityHookTrust below.
     const trusted = this.applyCodexActivityHookTrust(withHooks, configPath, relay);
     if (trusted !== withHooks) {
       this.fs.mkdirp(nodePath.dirname(configPath));
@@ -684,7 +688,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const command = `node "${relay}"`;
-    const keySource = codexHookSourcePath(hooksPath);
+    const keySources = codexHookSourcePaths(hooksPath);
     const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
@@ -694,7 +698,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     if (!expected) return;
-    const inlineSource = codexHookSourcePath(configPath);
+    const inlineSources = codexHookSourcePaths(configPath);
+    const beforeState = codexHookStateOf(before);
     let config = stripped;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groups = document.hooks[event] ?? [];
@@ -702,15 +707,19 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const groupIndex = found < 0 ? groups.length : found;
       groups[groupIndex] = openRigActivityGroup(command);
       document.hooks[event] = groups;
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
-      config = upsertCodexHookTrust(config, key, hash);
-      // A person's disable of OpenRig's inline hook moves with it; an existing choice at the new key is kept as it is.
+      const label = CODEX_HOOK_EVENT_KEY_LABEL[event];
       const inlineIndex = openRigInlineGroupIndex(before, event);
-      const disabled = inlineIndex >= 0
-        && codexHookStateOf(before)[`${inlineSource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:${inlineIndex}:0`]?.enabled === false;
-      if (disabled) config = upsertCodexHookDisabled(config, key);
+      const disabled = keySources.some(source => beforeState[`${source}:${label}:${groupIndex}:0`]?.enabled === false)
+        || (inlineIndex >= 0 && inlineSources.some(source => beforeState[`${source}:${label}:${inlineIndex}:0`]?.enabled === false));
       const state = ((expected.hooks ??= {}).state ??= {});
-      state[key] = { ...state[key], trusted_hash: hash, ...(disabled ? { enabled: false } : {}) };
+      for (const keySource of keySources) {
+        const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
+        config = upsertCodexHookTrust(config, key, hash);
+        // A disable can fill an absent choice, never replace an explicit enable at another spelling.
+        const carryDisable = disabled && state[key]?.enabled === undefined;
+        if (carryDisable) config = upsertCodexHookDisabled(config, key);
+        state[key] = { ...state[key], trusted_hash: hash, ...(carryDisable ? { enabled: false } : {}) };
+      }
     }
     // The line writers must give exactly the planned fields in valid TOML (they don't read every TOML spelling);
     // otherwise neither file changes, and OpenRig's old inline block, if any, stays working.
@@ -730,13 +739,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * OPR.0.4.3.33 — compute + splice Codex's `[hooks.state."<key>"] trusted_hash` for our 4
-   * authored activity hooks into `content`. Codex 0.167.2 resolves the source folder but
-   * keeps the file name, including a linked file, as returned by app-server hooks/list. The command
+   * authored activity hooks into `content`. Keep the supplied, resolved-folder and resolved-file
+   * spellings compatible without choosing one native identity for every Codex release. The command
    * string is the value Codex deserializes from our TOML literal `'node "<relay>"'` — i.e.
    * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Timeout=5, matcher/status None.
    */
   private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
-    const keySource = codexHookSourcePath(configPath);
+    const keySources = codexHookSourcePaths(configPath);
+    const state = codexHookStateOf(parseToml(content));
     const command = `node "${relay}"`;
     // upsertCodexActivityHooks has just written our marked block. Codex keys by the
     // group's position among this event's groups, not its position inside our block.
@@ -751,8 +761,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groupIndex = begin >= 0 ? parsed.hooks?.[event]?.length ?? 0 : openRigInlineGroupIndex(parsed, event);
       if (groupIndex < 0) continue;
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
-      next = upsertCodexHookTrust(next, key, hash);
+      const label = CODEX_HOOK_EVENT_KEY_LABEL[event];
+      const disabled = keySources.some(source => state[`${source}:${label}:${groupIndex}:0`]?.enabled === false);
+      for (const keySource of keySources) {
+        const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
+        next = upsertCodexHookTrust(next, key, hash);
+        if (disabled && state[key]?.enabled === undefined) next = upsertCodexHookDisabled(next, key);
+      }
     }
     return next;
   }
@@ -779,7 +794,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       try {
         const original = this.fs.readFile(hooksPath);
         const document = parseCodexHooksJson(original);
-        const keySource = codexHookSourcePath(hooksPath);
+        const keySources = codexHookSourcePaths(hooksPath);
         let config = updated ?? "";
         const expected = parseToml(config) as { hooks?: { state?: CodexHookState } };
         for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
@@ -787,10 +802,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           if (!groups) continue;
           const kept = groups.flatMap((group, index) => isOpenRigActivityGroup(group) ? [] : [index]);
           if (kept.length === groups.length) continue;
-          const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
-          const newIndexOf = (index: number) => { const at = kept.indexOf(index); return at < 0 ? null : at; };
-          config = rekeyCodexHookStateText(config, prefix, newIndexOf);
-          if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+          const newIndexOf = (index: number) => {
+            if (index >= groups.length) return index; // Stale or unfamiliar state is not one of the groups we removed.
+            const at = kept.indexOf(index);
+            return at < 0 ? null : at;
+          };
+          for (const keySource of keySources) {
+            const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
+            config = rekeyCodexHookStateText(config, prefix, newIndexOf);
+            if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+          }
           if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
           else delete document.hooks[event];
         }
@@ -880,6 +901,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
             // OPR.0.7.0.13: never write through a link out of the seat's storage.
             const refusal = binding.seatSkillsRoot ? binding.seatSkillsRefused ?? seatSkillWriteRefusal(binding.seatSkillsRoot, skillTarget) : undefined;
             if (refusal) { warnings.push(`skill_install: ${refusal}`); continue; }
+            if (insideMissingFolder(targetDir, binding.cwd, this.folderPresent)) { warnings.push(`${file.path}: not written, because ${binding.cwd} doesn't exist on this machine`); continue; }
             this.fs.mkdirp(targetDir);
             this.fs.writeFile(skillTarget, content);
             if (binding.seatSkillsRoot) recordSeatSkillWrite(binding.seatSkillsRoot, skillTarget, file.absolutePath, content);
@@ -1192,7 +1214,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
     const queueStateDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
-      ? "" : teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
+      ? "" : teamWorkspaceArg || this.prepareQueueStateAddDirArg(name);
     // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
     // (its cwd, the launch PATH), applied to fresh, fork and resume.
     const daemonSupport = this.detectDaemonSupport ? await (own ? this.detectDaemonSupport(binding.cwd, own) : this.detectDaemonSupport(binding.cwd)) : undefined;
@@ -1226,11 +1248,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       : this.launchCommand(cmd, this.homeFor(binding));
   }
 
-  private buildQueueStateAddDirArg(sessionName: string): string {
+  private prepareQueueStateAddDirArg(sessionName: string): string {
     const sharedDocsRoot = process.env.OPENRIG_SHARED_DOCS_ROOT?.trim()
       || nodePath.join(this.fs.homedir ?? os.homedir(), ".openrig", "shared-docs");
     const root = codexQueueStateRoot(sessionName, sharedDocsRoot);
-    return root ? ` --add-dir ${shellQuote(root)}` : "";
+    if (!root) return "";
+    try {
+      // Named profiles skip the team-default workspace preparation, but Codex still
+      // needs its generated pod-state root to exist before it can use --add-dir.
+      this.fs.mkdirp(root);
+      return ` --add-dir ${shellQuote(root)}`;
+    } catch (error) {
+      console.warn(`[openrig] Codex pod state not added (${root}): ${error instanceof Error ? error.message : String(error)}`);
+      return "";
+    }
   }
 
   /**
@@ -1456,6 +1487,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.provisionWorkspaceTrust(binding.cwd ?? null, this.homeFor(binding));
   }
 
+  /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
+  private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
+
   /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
   private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string,
     home?: string, binding?: NodeBinding): boolean {
@@ -1490,6 +1524,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? (dest: string, src: string, content: string) => recordSeatSkillWrite(seatSkillsRoot, dest, src, content)
       : () => {};
 
+    if (insideMissingFolder(targetDir, cwd, this.folderPresent)) {
+      warnings.push(`${entry.effectiveId}: not written, because ${cwd} doesn't exist on this machine`);
+      return false;
+    }
     this.fs.mkdirp(targetDir);
     let isDir = false;
     if (this.fs.listFiles) {
@@ -1631,6 +1669,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const targetPath = nodePath.join(cwd, "AGENTS.md");
     const queued = binding?.guidanceLaunchInstructions && binding.tmuxSession ? this.launchInstructions.get(binding.tmuxSession) : undefined;
     if (!queued || blockId === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID || isPerSeatRoleGuidance(blockId, sourcePath)) {
+      // A seat folder this machine doesn't have isn't recreated to hold it (insideMissingFolder). Guidance queued for the
+      // launch below still goes with it.
+      if (insideMissingFolder(targetPath, cwd, this.folderPresent)) {
+        warnings.push(`${blockId}: not written, because ${cwd} doesn't exist on this machine`);
+        return false;
+      }
       return this.mergeGuidance(targetPath, blockId, content, warnings, sourcePath);
     }
     if (blockId === "openrig-start.md") queued.delete("using-openrig.md");
@@ -2278,16 +2322,21 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string,
     return `${prefix}${header}\n${trustLine}\n`;
   }
 
+  const topLevel = lineStartsAtDocumentLevel(content);
   let nextSectionIndex = lines.length;
   for (let i = headerIndex + 1; i < lines.length; i++) {
-    if (lines[i]!.trim().startsWith("[")) {
+    if (topLevel[i] && lines[i]!.trim().startsWith("[")) {
       nextSectionIndex = i;
       break;
     }
   }
 
+  // Declaration keys may be quoted. Keep owned-plugin content-approval handling unchanged.
+  const matchesField = (line: string) => field === "trusted_hash"
+    ? /^(?:trusted_hash|"trusted_hash"|'trusted_hash')\s*=/.test(line.trim())
+    : line.trim().startsWith(field);
   const hashIndex = lines.findIndex(
-    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith(field),
+    (line, index) => index > headerIndex && index < nextSectionIndex && topLevel[index] && matchesField(line),
   );
   if (hashIndex >= 0) {
     lines[hashIndex] = trustLine;
@@ -2491,10 +2540,12 @@ function tomlSections(text: string, current?: string): TomlSection[] {
   return sections;
 }
 
-function codexHookSourcePath(file: string): string {
-  // Resolve a linked home folder, but retain a linked config.toml/hooks.json file's own name.
-  try { return nodePath.join(fs.realpathSync.native(nodePath.dirname(file)), nodePath.basename(file)); }
-  catch { return file; } // The folder may not exist yet, including with an injected filesystem.
+function codexHookSourcePaths(file: string): string[] {
+  // Only our existing activity hooks get compatibility aliases; no person's hook or plugin is approved here.
+  const sources = new Set([file]);
+  try { sources.add(nodePath.join(fs.realpathSync.native(nodePath.dirname(file)), nodePath.basename(file))); } catch { /* folder may not exist yet */ }
+  try { sources.add(fs.realpathSync.native(file)); } catch { /* file may not exist yet */ }
+  return [...sources];
 }
 
 /** A hooks.json document as Codex reads it: `hooks` maps each event to matcher groups, each with a `hooks` list. */
@@ -2613,9 +2664,11 @@ function upsertCodexHookDisabled(content: string, key: string): string {
   const lines = content.split("\n");
   const at = findTomlTable(lines, path);
   if (at < 0) return tomlDefines(content, path) ? content : `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
+  const topLevel = lineStartsAtDocumentLevel(content);
   let end = lines.length;
-  for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
-  const enabledAt = lines.findIndex((line, i) => i > at && i < end && /^\s*enabled\s*=/.test(line));
+  for (let i = at + 1; i < lines.length; i++) if (topLevel[i] && lines[i]!.trim().startsWith("[")) { end = i; break; }
+  const enabledAt = lines.findIndex((line, i) => i > at && i < end && topLevel[i]
+    && /^(?:enabled|"enabled"|'enabled')\s*=/.test(line.trim()));
   if (enabledAt >= 0) lines[enabledAt] = "enabled = false";
   else lines.splice(at + 1, 0, "enabled = false");
   return lines.join("\n");
@@ -2628,7 +2681,7 @@ function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: 
     const tail = key.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
     if (!tail) { next[key] = value; continue; }
     const index = newIndexOf(Number(tail[1]));
-    if (index !== null) next[`${prefix}${index}:${tail[2]}`] = value;
+    if (index !== null) next[index === Number(tail[1]) ? key : `${prefix}${index}:${tail[2]}`] = value;
   }
   return next;
 }
@@ -2650,6 +2703,7 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
       if (tail) {
         const index = newIndexOf(Number(tail[1]));
         if (index === null) { dropping = true; continue; }
+        if (index === Number(tail[1])) { out.push(line); continue; }
         out.push(`[hooks.state.${JSON.stringify(`${prefix}${index}:${tail[2]}`)}]`);
         continue;
       }

@@ -14,9 +14,10 @@ export interface HarnessNotStartedReport {
   warnings: string[];
 }
 
-/** The seat's newest session name: the shell this attempt registered for it. */
+/** The seat's newest session name: the shell this attempt registered for it. Picked by id, as node inventory picks a
+ *  seat's current session: ids are monotonic, and created_at is the clock's, to the second. */
 function seatSession(db: Database.Database, nodeId: string): string | null {
-  const row = db.prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+  const row = db.prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
     .get(nodeId) as { session_name: string } | undefined;
   return row?.session_name ?? null;
 }

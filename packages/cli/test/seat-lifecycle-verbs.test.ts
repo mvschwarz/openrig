@@ -357,6 +357,42 @@ describe("rig seat set-model", () => {
   });
 });
 
+describe("rig seat set-statusline-throttle (#3416 item 3)", () => {
+  const seat = { logicalId: "dev.impl", rigName: "seat-rig" };
+
+  it("posts the seconds and reason to /api/seat/set-statusline-throttle/<seat> and prints the saved throttle", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat, from: null, to: 30, changed: true,
+      effect: "Saved: the seat's status line runs the context collector at most once every 30 s from its next launch, resume or restore." } }, calls);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev-impl@seat-rig", "--seconds", "30", "--reason", "many seats"]);
+    });
+    expect(calls[0]!.path).toBe("/api/seat/set-statusline-throttle/dev-impl%40seat-rig");
+    expect(calls[0]!.body).toEqual({ seconds: 30, reason: "many seats" });
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("Status line throttle for dev.impl@seat-rig: at most once every 30 s.");
+  });
+
+  it("--clear posts clear; a value that isn't whole digits goes to the daemon as invalid; one of the two is required", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat, from: 30, to: null, changed: true, effect: "Cleared." } }, calls);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev.impl", "--clear", "--reason", "back"]);
+    });
+    expect(calls[0]!.body).toEqual({ clear: true, reason: "back" });
+    expect(logs.join("\n")).toContain("no throttle");
+    await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev.impl", "--seconds", "3e1", "--reason", "x"]);
+    });
+    expect(calls[1]!.body).toEqual({ seconds: Number.NaN, reason: "x" }); // sent as JSON null, which the daemon refuses
+    const neither = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev.impl", "--reason", "x"]);
+    });
+    expect(neither.exitCode).toBe(1);
+    expect(calls).toHaveLength(2);
+  });
+});
+
 describe("rig seat set-effort", () => {
   const seat = { logicalId: "dev.impl", rigName: "seat-rig" };
 
@@ -589,6 +625,28 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     expect(text).toContain("Remaining step: Codex is waiting for a hook review decision");
   });
 
+  it("#3253: says, by the restart's outcome, that it went on without the seat's process limit, or that whether it runs under it is unknown", async () => {
+    const restart = async (data: Record<string, unknown>) => (await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x"]).then(() => undefined))).logs.join("\n");
+    const notApplied = { state: "not_applied", kind: "setup", requested: { tasksMax: 256 }, retryable: false,
+      reason: "a restart in place respawns a bare pane without the seat's environment" };
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: notApplied })).toContain(
+      "Process limits: tasks_max 256: requested, not applied; the restart went on without it (setup: a restart in place respawns a bare pane " +
+      "without the seat's environment). The request stays stored, and a fresh launch applies it.");
+    expect(await restart({ ...report("not_started"), processLimits: notApplied }))
+      .toContain("nothing was restarted, so the seat keeps the process it had; a restart would go on without it (setup:");
+    expect(await restart({ ...report("incomplete"), processLimits: { ...notApplied, kind: "unverified", retryable: true, ageSeconds: 12 } }))
+      .toContain("the restart did not finish; what it started runs without it (unverified: a restart in place respawns a bare pane without " +
+        "the seat's environment, observed 12s ago; this may be temporary)");
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: { state: "unknown", kind: "unverified", retryable: true,
+      requested: { tasksMax: 256 }, reason: "the scope start was not confirmed" } })).toContain(
+      "Process limits: tasks_max 256: unknown (unverified: the scope start was not confirmed; this may be temporary); whether the restarted " +
+      "seat runs under the limit can't be told, and nothing was run a second time.");
+    expect(await restart(report("restarted_account_unverified"))).not.toContain("Process limits");
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: { ...notApplied, requested: { memoryMax: 1073741824 } } }))
+      .toContain("Process limits: memory_max 1G: requested, not applied; the restart went on without it (setup:");
+  });
+
   it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const missing = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
@@ -672,4 +730,24 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
       expect(output.exitCode).toBe(1);
     }
   });
+});
+
+
+it("set-input-route posts the explicit seat choice and validates unsupported routes locally", async () => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const deps = makeDeps({ status: 200, data: { inputRoute: "typed" } }, calls);
+  await captureLogs(() => makeCommand(deps).parseAsync(["seat", "set-input-route", "dev@rig", "--route", "typed", "--reason", "use pane", "--json"], { from: "user" }));
+  expect(calls).toEqual([{ path: "/api/seat/set-input-route/dev%40rig", body: { route: "typed", reason: "use pane" } }]);
+  calls.length = 0;
+  const result = await captureLogs(() => makeCommand(deps).parseAsync(["seat", "set-input-route", "dev@rig", "--route", "automatic", "--reason", "no"], { from: "user" }));
+  expect(result.exitCode).toBe(1);
+  expect(calls).toEqual([]);
+});
+
+
+it("seat cancel posts an immutable explicit native target and request ID without a status re-resolution", async () => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const deps = makeDeps({ status: 202, data: { receipt: { stage: "pending" } } }, calls);
+  await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "cancel", "dev@rig", "--run-id", "run-E", "--native-turn-id", "epoch-E", "--request-id", "cancel-one", "--json"]));
+  expect(calls).toEqual([{ path: "/api/seat/command/dev%40rig", body: { type: "cancel", requestId: "cancel-one", target: { runId: "run-E", nativeTurnId: "epoch-E" } } }]);
 });

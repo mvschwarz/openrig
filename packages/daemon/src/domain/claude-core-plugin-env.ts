@@ -1,8 +1,9 @@
 import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import type { SeatEnv } from "./seat-env.js";
+import { homePluginPath } from "./builtin-startup-files.js";
 
 // What a Claude seat needs so it loads the vendored openrig-core plugin (its refocus, compaction-restore and
 // activity hooks). Claude reads CLAUDE_CODE_PLUGIN_DIRS, a colon-separated list, so this has to be the vendored copy
@@ -37,13 +38,18 @@ function canonical(path: string): string {
   try { return realpathSync(absolute); } catch { return absolute; }
 }
 
-/** The resolved plugin locations in a node's persisted startup context (what the profile resolver selected for it). */
-export function pluginPathsOf(entries: ReadonlyArray<{ category: string; absolutePath: string }>): string[] {
-  return entries.filter((entry) => entry.category === "plugin").map((entry) => entry.absolutePath);
+/** The resolved plugin locations in a node's persisted startup context (what the profile resolver selected for it). A
+ *  plugin selected under the OpenRig home (`openrig-home:`) is read in `openrigHome`, the running home by default, so a
+ *  home that moved still names its own plugins. */
+export function pluginPathsOf(
+  entries: ReadonlyArray<{ category: string; absolutePath: string; resourcePath?: string | null; sourcePath?: string | null }>,
+  openrigHome?: string,
+): string[] {
+  return entries.filter((entry) => entry.category === "plugin").map((entry) => homePluginPath(entry, openrigHome));
 }
 
 /** The plugin locations the node's last launch resolved, or undefined when none were saved (or they can't be read). */
-export function persistedPluginPaths(db: Database.Database, nodeId: string): string[] | undefined {
+export function persistedPluginPaths(db: Database.Database, nodeId: string, openrigHome?: string): string[] | undefined {
   try {
     const row = db.prepare("SELECT projection_entries_json FROM node_startup_context WHERE node_id = ?")
       .get(nodeId) as { projection_entries_json: string } | undefined;
@@ -51,7 +57,7 @@ export function persistedPluginPaths(db: Database.Database, nodeId: string): str
     const entries = JSON.parse(row.projection_entries_json) as unknown;
     return Array.isArray(entries) ? pluginPathsOf(entries.filter((e): e is { category: string; absolutePath: string } =>
       typeof e === "object" && e !== null && typeof (e as { category?: unknown }).category === "string"
-      && typeof (e as { absolutePath?: unknown }).absolutePath === "string")) : undefined;
+      && typeof (e as { absolutePath?: unknown }).absolutePath === "string"), openrigHome) : undefined;
   } catch {
     return undefined;
   }
@@ -77,7 +83,7 @@ export function seatCorePluginDir(
   if (node.runtime !== "claude-code") return undefined;
   const dir = vendoredCorePluginDir(pluginsDir);
   if (!dir) return undefined;
-  const paths = selectedPaths ?? persistedPluginPaths(db, node.id) ?? [];
+  const paths = selectedPaths ?? persistedPluginPaths(db, node.id, pluginsDir ? dirname(pluginsDir) : undefined) ?? [];
   return selectedCorePluginDir(paths, pluginsDir);
 }
 
@@ -98,7 +104,7 @@ export function seatCodexCorePluginDir(
   if (node.runtime !== "codex") return undefined;
   const dir = vendoredCorePluginDir(pluginsDir);
   if (!dir) return undefined;
-  return selectedCorePluginDir(selectedPaths ?? persistedPluginPaths(db, node.id) ?? [], pluginsDir);
+  return selectedCorePluginDir(selectedPaths ?? persistedPluginPaths(db, node.id, pluginsDir ? dirname(pluginsDir) : undefined) ?? [], pluginsDir);
 }
 
 /** The seat's declared env with the vendored plugin added after any list the seat declared itself. */

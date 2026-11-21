@@ -1,7 +1,39 @@
 import { describe, it, expect, vi } from "vitest";
-import { runWake, type WakeRunner } from "../src/ask-wake.js";
+import { defaultWakeRunner, runWake, type WakeRunner } from "../src/ask-wake.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("runWake — L3 headless one-shot wake", () => {
+  it.each([["claude", false], ["claude", true], ["codex", false], ["codex", true]] as const)(
+    "the actual %s child keeps legacy hooks but no bound run authority (bound=%s)", async (runtime, bound) => {
+      const dir = mkdtempSync(join(tmpdir(), "wake-child-authority-"));
+      const secret = bound ? "scoped-fixture-secret" : "legacy-hook";
+      const script = `#!${process.execPath}
+console.log(JSON.stringify({runPresent:process.env.OPENRIG_RUN_ID!==undefined,tokenPresent:process.env.OPENRIG_ACTIVITY_HOOK_TOKEN!==undefined,
+  legacyToken:process.env.OPENRIG_ACTIVITY_HOOK_TOKEN==="legacy-hook",node:process.env.OPENRIG_NODE_ID,seat:process.env.OPENRIG_SESSION_NAME,
+  url:process.env.OPENRIG_URL,generation:process.env.OPENRIG_OCCUPANT_GENERATION,provider:process.env.ANTHROPIC_API_KEY,args:process.argv.slice(2)}));
+`;
+      try {
+        writeFileSync(join(dir, runtime), script, { mode: 0o755 });
+        vi.stubEnv("PATH", `${dir}:${process.env.PATH}`);
+        vi.stubEnv("OPENRIG_RUN_ID", bound ? "actual-run" : undefined);
+        vi.stubEnv("OPENRIG_ACTIVITY_HOOK_TOKEN", secret);
+        vi.stubEnv("OPENRIG_NODE_ID", "wake-node"); vi.stubEnv("OPENRIG_SESSION_NAME", "wake@rig");
+        vi.stubEnv("OPENRIG_URL", "http://fixture.test"); vi.stubEnv("OPENRIG_OCCUPANT_GENERATION", "generation");
+        vi.stubEnv("ANTHROPIC_API_KEY", "fixture-provider");
+        const outcome = await runWake({ runner: defaultWakeRunner }, { runtime, token: "history-token", question: "literal question", timeoutMs: 5000 });
+        expect(outcome.failed).toBeUndefined();
+        expect(JSON.parse(outcome.answer!)).toEqual({ runPresent: false, tokenPresent: !bound, legacyToken: !bound,
+          node: "wake-node", seat: "wake@rig", url: "http://fixture.test", generation: "generation", provider: "fixture-provider",
+          args: runtime === "claude" ? ["-p", "--resume", "history-token", "Answer directly and concisely, with no preamble. Question: literal question"]
+            : ["exec", "resume", "history-token", "Answer directly and concisely, with no preamble. Question: literal question"] });
+        expect(JSON.stringify(outcome)).not.toContain("scoped-fixture-secret");
+        expect(JSON.stringify(outcome)).not.toContain("actual-run");
+        expect(process.env.OPENRIG_ACTIVITY_HOOK_TOKEN).toBe(secret);
+        expect(process.env.OPENRIG_RUN_ID).toBe(bound ? "actual-run" : undefined);
+      } finally { vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); }
+    });
   it("wakes a claude session by raw token, one-shot, and returns the captured answer", async () => {
     const runner: WakeRunner = vi.fn(async () => ({ stdout: "the deploy decision was X", stderr: "", code: 0, timedOut: false }));
     const out = await runWake(

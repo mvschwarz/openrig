@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./terminal-viewer-guard": { "types": "./dist/terminal-viewer-guard-surface.d.ts", "import": "./dist/terminal-viewer-guard-surface.js" },
     "./tmux-server-start": { "types": "./dist/tmux-server-start-surface.d.ts", "import": "./dist/tmux-server-start-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
     "./router-line": { "types": "./dist/router-line-surface.d.ts", "import": "./dist/router-line-surface.js" },
@@ -16,6 +17,7 @@
     "./stream-classifier": { "types": "./dist/stream-classifier-surface.d.ts", "import": "./dist/stream-classifier-surface.js" },
     "./attention": { "types": "./dist/attention-surface.d.ts", "import": "./dist/attention-surface.js" },
     "./project-catalog": { "types": "./dist/project-catalog-surface.d.ts", "import": "./dist/project-catalog-surface.js" },
+    "./mission-parent": { "types": "./dist/mission-parent-surface.d.ts", "import": "./dist/mission-parent-surface.js" },
     "./daemon-shutdown": {
       "types": "./dist/daemon-shutdown.d.ts",
       "import": "./dist/daemon-shutdown.js"
@@ -135,6 +137,6 @@
     "vitest": "4.1.12"
   },
   "engines": {
-    "node": "^22 || ^24"
+    "node": "^22.14.0 || ^24"
   }
 }

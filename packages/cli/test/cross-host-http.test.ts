@@ -191,6 +191,25 @@ describe("resolveCrossHostTarget (§4 sugar + precedence)", () => {
 // ---------------------------------------------------------------------------
 
 describe("send --host (http branch)", () => {
+  it.each([false, true])("HTTP native receipts retain request IDs, uncertainty and verification limits (json=%s)", async json => {
+    for (const state of ["pending", "submitted", "rejected", "unknown", "reconciled", "erased"]) {
+      process.exitCode = undefined; captured.stdoutLines = []; captured.stderrLines = [];
+      const unknown = ["unknown", "reconciled", "erased"].includes(state);
+      const receipt = { requestId: "native-remote", stage: unknown ? "completed" : state,
+        ...(state === "unknown" ? { result: { submissionUnknown: true } } : {}),
+        ...(state === "reconciled" ? { reconciliation: "receiver_state_lost" } : {}), ...(state === "erased" ? { erasedAt: "2026-11-16" } : {}) };
+      const h = mockClient(() => ({ status: state === "rejected" ? 409 : 200, data: { ok: state !== "rejected", runnerReceipt: receipt } }));
+      await sendCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "native@r", "make test", "--verify", ...(json ? ["--json"] : [])], { from: "user" });
+      expect(h.calls).toHaveLength(1);
+      if (json) expect(JSON.parse(captured.stdoutLines[0]!).result.data).toMatchObject({ runnerReceipt: receipt, verified: false });
+      else {
+        expect(captured.stdoutLines.join("\n")).not.toContain("Sent to");
+        expect(captured.stdoutLines.join("\n")).toContain("request native-remote");
+        expect(captured.stdoutLines.join("\n")).toContain("Verified: no (native receipt)");
+      }
+      expect(process.exitCode).toBe(unknown || state === "rejected" ? 1 : undefined);
+    }
+  });
   it.each(["\r", "\x1b", "\t", " "])("preserves explicit byte payload and interaction options over HTTP (%#)", async text => {
     const h = mockClient(() => ({ status: 200, data: { ok: true, promptInteraction: "unverified" } }));
     await sendCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", text,
@@ -681,6 +700,14 @@ describe("transcript --host (net-new, CLI-direct GET)", () => {
 // ---------------------------------------------------------------------------
 
 describe("broadcast --host (net-new, CLI-direct POST)", () => {
+  it.each([false, true])("HTTP broadcast unknown native custody has the same failing exit in either encoding (json=%s)", async json => {
+    const h = mockClient(() => ({ status: 200, data: { total: 1, sent: 0, failed: 0, indeterminateNative: 1,
+      results: [{ ok: true, sessionName: "native@r", runnerReceipt: { requestId: "unknown", stage: "completed", reconciliation: "receiver_state_lost" } }] } }));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "message", ...(json ? ["--json"] : [])], { from: "user" });
+    expect(process.exitCode).toBe(1);
+    if (json) expect(JSON.parse(captured.stdoutLines[0]!).result.data.indeterminateNative).toBe(1);
+    else expect(captured.stdoutLines.join("\n")).toContain("native effect unknown");
+  });
   it("http host: POSTs the LOCAL body verbatim; per-target results print verbatim; clean fan-out exits 0", async () => {
     const h = mockClient(() => ({
       status: 200,

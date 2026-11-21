@@ -38,7 +38,7 @@ describe("S03 policy permissions compatibility", () => {
     expect(policy.commands.some(c => c.name() === "work")).toBe(false);
     const select = seatCommand().commands.find(c => c.name() === "set-permissions")!;
     expect(select.description()).toContain("future managed launches");
-    expect(select.options.map(o => o.long)).toEqual(["--mode", "--rules", "--codex-permissions", "--codex-profile", "--reason", "--operator", "--json"]);
+    expect(select.options.map(o => o.long)).toEqual(["--mode", "--rules", "--auto-mode", "--clear-auto-mode", "--codex-permissions", "--codex-profile", "--reason", "--operator", "--json"]);
   });
   it("posts a Codex envelope from its JSON file, or a profile with time for its native check, one choice at a time", async () => {
     const posts: unknown[][] = [];
@@ -56,6 +56,31 @@ describe("S03 policy permissions compatibility", () => {
     const both = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--codex-profile", "lease", "--mode", "floor", "--reason", "x"]);
     expect(both.exit).toBe(1); expect(both.errors.join(" ")).toContain("Choose exactly one of");
     expect(posts).toHaveLength(2);
+  });
+  it("posts an auto mode block from its JSON file, null to clear it, and prints the daemon's warnings", async () => {
+    const posts: unknown[][] = [];
+    const advisories = ['claude_auto_mode.soft_deny: without "$defaults", this list replaces Claude\'s built-in soft_deny entries'];
+    const deps = { lifecycleDeps: {
+      readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 7433, db: "inert.sqlite", startedAt: "2026-09-27T00:00:00Z" }) : null,
+      exists: (p: string) => p === STATE_FILE, isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+    }, clientFactory: () => ({ post: async (...a: unknown[]) => { posts.push(a); return { status: 200, data: { ok: true, changed: true, advisories, effect: "Next launch." } }; } }) };
+    const file = join(mkdtempSync(join(tmpdir(), "auto-mode-")), "auto-mode.json");
+    const block = { soft_deny: ["Only this"] };
+    writeFileSync(file, JSON.stringify(block));
+    const set = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--auto-mode", file, "--reason", "team"]);
+    expect(set.logs).toEqual(["Claude auto mode block recorded and audited.", `Warning: ${advisories[0]}`, "Next launch."]);
+    const cleared = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--clear-auto-mode", "--reason", "back"]);
+    expect(cleared.logs[0]).toBe("Claude auto mode block cleared and audited.");
+    const nullFile = join(mkdtempSync(join(tmpdir(), "auto-mode-")), "null.json");
+    writeFileSync(nullFile, "null");
+    const clearedByFile = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--auto-mode", nullFile, "--reason", "file"]);
+    expect(clearedByFile.logs[0]).toBe("Claude auto mode block cleared and audited.");
+    expect(posts.map(p => p[1])).toEqual([{ autoMode: block, reason: "team" }, { autoMode: null, reason: "back" }, { autoMode: null, reason: "file" }]);
+    const both = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--clear-auto-mode", "--auto-mode", file, "--reason", "x"]);
+    expect(both.exit).toBe(1); expect(both.errors.join(" ")).toContain("Choose exactly one of");
+    const unreadable = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--auto-mode", join(tmpdir(), "missing-auto-mode.json"), "--reason", "x"]);
+    expect(unreadable.exit).toBe(1); expect(unreadable.errors.join(" ")).toContain("autoMode mapping");
+    expect(posts).toHaveLength(3);
   });
   it("seat command posts one explicit selection and preserves refusal JSON/exit", async () => {
     const posts: unknown[] = []; const response = { ok: false, code: "permission_selection_refused", message: "native options unavailable" };

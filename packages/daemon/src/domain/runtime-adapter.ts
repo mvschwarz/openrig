@@ -28,6 +28,8 @@ export interface NodeBinding extends Binding {
   accountHome?: string | null;
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** The seat's Claude `autoMode` block, read live; composed into the launch's one --settings value. */
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   launchWrapper?: readonly string[];
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
@@ -272,6 +274,9 @@ export interface RuntimeAdapter {
   /** #3039: the guidance block ids the last launch in this tmux session sent as developer instructions, once (the record is
    *  cleared when read, and when a later projection carries guidance). Undefined when that launch sent none or the adapter doesn't carry any. */
   launchGuidanceSent?(tmuxSession: string): string[] | undefined;
+
+  /** Prove operator recovery without submitting a prompt or launching a replacement. */
+  verifyRecovery?(input: import("./runtime-recovery.js").RecoveryVerificationInput): Promise<import("./runtime-recovery.js").RecoveryVerificationResult>;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

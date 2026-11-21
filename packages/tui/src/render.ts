@@ -1,4 +1,5 @@
 import { helpScreen } from "./commands/help.js";
+import { replaceControlCharacters, stripTerminalEscapes, terminalSafeText } from "./terminal-safe-text.js";
 import { commandFocusVisible } from "./motion.js";
 import { attentionLines } from "./attention/attention-model.js";
 import { fileLines, externalLines, fileTargetForPath, referenceLines, referenceAction } from "./reading.js";
@@ -34,10 +35,10 @@ import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { hostLabel, hostReachabilityLabel } from "./topology/host-label.js";
 import { connectedAssistantLines } from "./connected-assistants.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
-import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
+import { columnIndex, columns, explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
-import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, sliceWhole, wrapDetailLines } from "./detail.js";
+import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, SeatEffortRead, ViewState } from "./types.js";
 
@@ -54,17 +55,21 @@ interface ContentLine {
   sticky?: { group: string; text?: string };
 }
 
-function pad(text: string | number | null | undefined, width: number): string {
+/** `text` in exactly `width` columns; a wide character that doesn't fit before the ellipsis leaves a space. */
+function fit(text: string | number | null | undefined, width: number, align: Align): string {
   const t = String(text ?? "");
-  if (t.length <= width) return t + " ".repeat(width - t.length);
   // never hard-clip mid-word: any truncation reads as an ellipsis (glance honesty)
-  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padEnd(width);
+  const shown = columns(t) <= width ? t : t.slice(0, columnIndex(t, Math.max(width - 1, 0))) + "…";
+  const fill = " ".repeat(Math.max(width - columns(shown), 0));
+  return align === "right" ? fill + shown : shown + fill;
+}
+
+function pad(text: string | number | null | undefined, width: number): string {
+  return fit(text, width, "left");
 }
 
 function padLeft(text: string | number | null | undefined, width: number): string {
-  const t = String(text ?? "");
-  if (t.length <= width) return " ".repeat(width - t.length) + t;
-  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padStart(width);
+  return fit(text, width, "right");
 }
 
 type Align = "left" | "right";
@@ -420,6 +425,9 @@ function agentDetailLines(
           // effort report is this host's read — a remote seat has none here.
           ...(localSeat ? wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth) : []),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
+          ...(localSeat && (agent.canRun ?? !agent.live)
+            ? [fieldLine({ label: "action", value: "run ▸", link: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: agent.name } })]
+            : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
           ...(localSeat
             ? [fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } })]
@@ -480,6 +488,7 @@ function agentDetailLines(
         ],
         lines: [
           fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
+          ...(agent.runtime === "claude-code" ? wrapDetailValue("configured account", `${agent.configuredAccount ?? "unknown"} (not verified sign-in)`, contentWidth) : []),
         ],
       },
       {
@@ -1064,7 +1073,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     // Keep the explicit desktop action above the rig's grid: the whole rig, or on a pod's page that pod.
     lines.push(podFilter
       ? fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${podFilter}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${podFilter}` } })
-      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
+      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.id ?? rig.name}` } }));
     const healthScope = { kind: "rig" as const, rigId: rig.id ?? rig.name, rigName: rig.name, local: host === snap.hosts[0] };
     if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, healthScope, contentWidth)];
     if (state.viewTab === "recent") {
@@ -1490,6 +1499,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 export interface RenderOptions {
   /** Independent endpoint chosen for a standalone TUI after a collision. */
   controlSocketPath?: string;
+  /** No control socket could be bound this session; the status bar says so. */
+  controlSocketUnavailable?: boolean;
   /** First visit: preserve the prior frame with its original label and no effect targets. */
   previousPage?: { state: ViewState; snapshot: FleetSnapshot };
   startup?: StartupState;
@@ -1597,11 +1608,12 @@ function truncateSegs(
   for (const s of segs) {
     if (used >= width) break;
     const room = width - used;
-    if (s.text.length <= room) {
+    const w = columns(s.text);
+    if (w <= room) {
       out.push(s);
-      used += s.text.length;
+      used += w;
     } else {
-      out.push({ ...s, text: s.text.slice(0, room) });
+      out.push({ ...s, text: s.text.slice(0, columnIndex(s.text, room)) });
       break;
     }
   }
@@ -1739,8 +1751,10 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
     // the per-cell bg on the segs (mock affordance), so the content marker slot
     // stays blank — no "›" chevron (the native affordance the mock overrides).
     const citem = visiblePulse[i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (row) {
       pushExplorerTargets(hitMap, row, explorerDisplay[explorerIndex] ?? row.label, y, explW);
       explorerRows.push({ ...row, y });
@@ -1864,9 +1878,11 @@ function crashCartShell(
     const y = lines.length + 1;
     const left = pad(leftRows[i] ?? "", explW);
     const citem = content[scroll + i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
     if (citem?.action) hitMap.push({ y, x1: explW + 2, x2: cols, action: citem.action });
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
   lines.push(paneRule(cols, explW, "bottom"));
@@ -1892,18 +1908,54 @@ export function drawableSize(columns: number | undefined, rows: number | undefin
   return size.cols > 0 && size.rows > 0 ? size : null;
 }
 
+/** Credentials out of text headed for the screen: URL userinfo and Bearer tokens. */
+function redactCredentials(text: string): string {
+  return text
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+}
+
+/**
+ * Detail text that is both cleaned and redacted, in the order that keeps the redaction effective.
+ *
+ * Escape sequences go first, before any redaction. Redacting a URL inside an OSC payload can delete the
+ * sequence's own introducer — the credential pattern happily matches across `\x9d`, or across the bytes
+ * that follow `\x1b]` — and then the stripper no longer recognises the sequence and its tail survives as
+ * literal text. Consuming the sequence whole is what makes its payload leave with it.
+ *
+ * Then redaction, then control replacement, then redaction again. Redacting after the escapes are gone
+ * catches a credential a sequence was interrupting (`https:<CSI>//user:...`) and a Bearer token the
+ * sequence split. The pass after control replacement catches one a control byte split, since that byte
+ * becomes a space the credential pattern cannot cross.
+ */
+function redactedDetailText(text: string): string {
+  return redactCredentials(
+    replaceControlCharacters(redactCredentials(stripTerminalEscapes(text))),
+  );
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const screen = state.palette
     ? helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32)
     : renderBody(state, snap, options, inputLine);
   if (options.controlSocketPath && screen.lines.length) {
     const row = screen.lines.length - 1;
-    const socketPath = options.controlSocketPath.replace(/[\x00-\x1f\x7f]/g, " ");
+    // The row shows the path with terminal control cleaned out, and the copy action keeps the bound
+    // path itself: main.ts recognises this action by `value === socket.path`, so rewriting the value
+    // here would hand the click to whichever screen is underneath. The copy sink cleans the bytes it
+    // prints, so the shown text and the copied text still agree.
+    const shownPath = terminalSafeText(options.controlSocketPath);
     const label = "socket: [copy]";
     const cols = options.cols ?? 120;
-    screen.lines[row] = pad(`${label} ${socketPath} · ${screen.lines[row]!.trimEnd()}`, cols);
-    // The status stays compact; its copy target retains the actual bound path.
+    screen.lines[row] = pad(`${label} ${shownPath} · ${screen.lines[row]!.trimEnd()}`, cols);
     screen.hitMap.unshift({ y: row + 1, x1: 1, x2: Math.min(cols, label.length), action: { type: "print-for-copy", label: "Control socket", value: options.controlSocketPath } });
+    if (screen.segRows) delete screen.segRows[row + 1];
+  } else if (options.controlSocketUnavailable && screen.lines.length) {
+    // Said here rather than only in a notice: a notice is replaced as soon as work is chosen, and this
+    // is a fact about the session that stays true. Short on purpose, so it fits a narrow status bar.
+    const row = screen.lines.length - 1;
+    const cols = options.cols ?? 120;
+    screen.lines[row] = pad(`socket: unavailable · ${screen.lines[row]!.trimEnd()}`, cols);
     if (screen.segRows) delete screen.segRows[row + 1];
   }
   const commandReady = !state.palette && !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");
@@ -1926,8 +1978,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   if (options.startup?.open) {
     const startup = options.startup;
     const content = wrapContentLines(startupLines(startup).map((line) => ({ ...line,
-      text: line.text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f]/g, " ")
-        .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@").replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]"),
+      text: redactedDetailText(line.text),
     })), Math.max(1, cols - explW - 2));
     const selected = content.findIndex((line) => line.action?.type === "startup" && line.action.key === `select:${startup.local?.selected ?? startup.selected}`);
     const scroll = startup.local && !startup.local.result.entries ? startup.local.scroll : startup.expanded ? startup.scroll : Math.max(0, selected - Math.max(1, rows - 12));
@@ -1952,11 +2003,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     });
   }
   if (options.unavailable) {
-    const detail = options.unavailable
-      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-      .replace(/[\x00-\x1f\x7f]/g, " ")
-      .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-      .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+    const detail = redactedDetailText(options.unavailable);
     const summary = /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|better-sqlite3/i.test(detail)
       ? "The installed native module cannot load in this runtime. Repair the installation prerequisite, then retry."
       : "Startup state could not be read. Retry after resolving the reported prerequisite.";
@@ -2105,11 +2152,12 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     let contentMarker = selectedAction ? "›" : " ";
     let rowSegs = item?.segs;
     if (selectedZone) {
-      if (selectedZone.start > 0) {
-        contentText = `${contentText.slice(0, selectedZone.start - 1)}›${contentText.slice(selectedZone.start)}`;
+      const before = selectedZone.start > 0 ? columnIndex(contentText, selectedZone.start - 1) : -1;
+      if (contentText[before] === " ") {
+        contentText = `${contentText.slice(0, before)}›${contentText.slice(before + 1)}`;
         // R2 HIGH-3: a segs row's paint source must carry the SAME splice the
         // plain text carries, or stylization erases the keyboard focus marker
-        if (rowSegs) rowSegs = spliceMarkerIntoSegs(rowSegs, selectedZone.start - 1);
+        if (rowSegs) rowSegs = spliceMarkerIntoSegs(rowSegs, before);
       } else contentMarker = "›";
     }
     lines.push(pad(fullReading ? `${contentMarker}${contentText}` : `${left}┃${contentMarker}${contentText}`, cols));

@@ -279,6 +279,28 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
     expect(lockedOf(readmePath)).toBeUndefined();
   });
 
+  it("B14: CRLF frontmatter does not make an empty SPEC approvable", () => {
+    const content = "---\r\nid: OPR.X.19\r\nstatus: intent\r\n---\r\n\r\n# Spec\r\n";
+    fs.writeFileSync(readmePath, content);
+    expect(approveErrCode(() => service().approve(specInput))).toBe("plan_lock_contentless");
+    expect(fs.readFileSync(readmePath, "utf8")).toBe(content);
+    expect(auditBrowse.query({ scopeId: "OPR.X.19" }).rows).toHaveLength(0);
+  });
+
+  it("B14: a spaced frontmatter closer does not make an empty LF SPEC approvable", () => {
+    const content = "---\nid: OPR.X.19\n--- \n\n# Spec\n";
+    fs.writeFileSync(readmePath, content);
+    expect(approveErrCode(() => service().approve(specInput))).toBe("plan_lock_contentless");
+    expect(fs.readFileSync(readmePath, "utf8")).toBe(content);
+    expect(auditBrowse.query({ scopeId: "OPR.X.19" }).rows).toHaveLength(0);
+  });
+
+  it("B14: prose before a later horizontal rule is retained after a spaced closer", () => {
+    fs.writeFileSync(readmePath, "---\nid: OPR.X.19\n--- \n\n# Spec\n\nAuthored intent.\n\n---\n");
+    expect(() => service().approve(specInput)).not.toThrow();
+    expect(frontmatterOf(readmePath)["approved-spec-by"]).toBe(specInput.actorSession);
+  });
+
   it("B14: untouched-scaffold SPEC singleton REFUSES (headings, comments, bracket placeholders are not authored content)", () => {
     fs.writeFileSync(
       readmePath,

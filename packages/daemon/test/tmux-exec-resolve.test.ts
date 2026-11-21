@@ -61,6 +61,20 @@ describe.skipIf(process.platform === "win32")("tmux binary resolution", { timeou
     expect(await execArgvCommand(["tmux", "-V"])).toBe("run-b -V\n");
   });
 
+  it("does not pass dynamic run-grant variables to production tmux clients", async () => {
+    const fakeTmuxDir = dir("grant-env");
+    fs.writeFileSync(path.join(fakeTmuxDir, "tmux"), [
+      "#!/bin/sh",
+      'if [ "${OPENRIG_RUN_GRANT_SYNTHETIC+x}" = x ]; then printf present; else printf absent; fi',
+      "",
+    ].join("\n"), { mode: 0o755 });
+    vi.stubEnv("OPENRIG_RUN_GRANT_SYNTHETIC", "synthetic-only");
+    vi.stubEnv("PATH", `${fakeTmuxDir}:/usr/bin:/bin`);
+
+    const clientVisibility = [await execCommand("tmux -V"), await execArgvCommand(["tmux", "-V"])];
+    expect(clientVisibility).toEqual(["absent", "absent"]);
+  });
+
   it("falls back to the shell when the cached binary has gone, and the shell finds the next one", async () => {
     const a = dir("gone-a", "exec"), b = dir("gone-b", "exec");
     vi.stubEnv("PATH", `${a}:${b}`);

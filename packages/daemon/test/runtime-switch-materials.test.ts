@@ -11,6 +11,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { planRuntimeSwitchMaterials, type SwitchRuntime } from "../src/domain/runtime-switch-materials.js";
 import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { seatSkillsPointerStartupFile } from "../src/domain/rigspec-instantiator.js";
+import { runningBuiltinAssetsRoot } from "../src/domain/builtin-startup-files.js";
 import type { ParsedStartupContext } from "../src/domain/seat-lifecycle-service.js";
 import type { Node } from "../src/domain/types.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -171,6 +172,25 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
     expect(materials.firstTurn).toMatch(/The implementer's role/);
     // A switch doesn't run startup slash commands; the preview names them.
     expect(materials.notRun).toEqual(["/rename impl"]);
+  });
+
+  // #261 for a switch: OpenRig's own saved files are read from the running install, as launch and restore read them. A
+  // seat saved by another install (an older version, or one under a home that moved) gets this install's files, and its
+  // saved seat-skills pointer isn't delivered beside the current one.
+  it("saved OpenRig files from another install are read from the running install", () => {
+    const node = seat("codex");
+    const old = "/old/lib/node_modules/@openrig/cli/daemon/assets";
+    const saved = savedContext(node, "codex");
+    saved.resolvedStartupFiles = saved.resolvedStartupFiles.map((file) => file.ownerRoot === seatSkillsPointerStartupFile().ownerRoot
+      ? { ...file, absolutePath: nodePath.join(old, "guidance", "openrig-seat-skills.md"), ownerRoot: old } : file);
+    saved.resolvedStartupFiles.push({ path: "CULTURE-default.md", absolutePath: nodePath.join(old, "guidance", "CULTURE-default.md"), ownerRoot: old,
+      deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"] });
+    const materials = planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig", runtime: "claude-code", explicit: {},
+      saved, openrigHome: home, resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+    const paths = materials.files.map((file) => file.absolutePath);
+    expect(paths.filter((path) => path.startsWith(old))).toEqual([]);
+    expect(paths).toContain(nodePath.join(runningBuiltinAssetsRoot(), "guidance", "CULTURE-default.md"));
+    expect(paths.filter((path) => path === seatSkillsPointerStartupFile().absolutePath)).toHaveLength(1);
   });
 
   it("to Codex, the successor reads the Codex seat's own skill catalog", () => {

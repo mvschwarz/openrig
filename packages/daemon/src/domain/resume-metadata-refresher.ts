@@ -292,26 +292,14 @@ export class ResumeMetadataRefresher {
       const input = { target, tmux: this.tmuxAdapter, listProcesses: opts?.listProcesses ?? this.listClaudeProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (!first) return undefined;
-      const started = Date.parse(first.process.startedAt ?? "");
-      if (!Number.isFinite(started)) return undefined;
       const seatHome = nodeId ? this.seatHome?.(nodeId, "claude-code") : undefined;
       const configDir = nodePath.resolve(opts?.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
-      const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
-      const fd = fs.openSync(file, "r");
-      let record: { name?: unknown; sessionId?: unknown };
-      try {
-        const stat = fs.fstatSync(fd);
-        // A leftover file for a reused PID is not current-process evidence.
-        if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
-        record = JSON.parse(fs.readFileSync(fd, "utf8"));
-      } finally { fs.closeSync(fd); }
-      // name is Claude's conversation title, not the OpenRig seat. PID, birth time and the second observation bind it.
-      const valid = validateResumeToken("claude-code", record.sessionId);
-      if (!valid.ok) return undefined;
+      const token = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt });
+      if (!token) return undefined;
       const final = await observeClaudePaneRuntime(input);
       if (final?.fingerprint !== first.fingerprint) return undefined;
       // A pane moved to another session mid-capture shows that session's process, so membership is read again last.
-      return (await this.tmuxAdapter.listPanes(sessionName, true)).some(pane => pane.id === target) ? valid.token : undefined;
+      return (await this.tmuxAdapter.listPanes(sessionName, true)).some(pane => pane.id === target) ? token : undefined;
     } catch { return undefined; }
   }
 
@@ -571,22 +559,21 @@ function resolveProbeCwd(cwd: string | null | undefined, homeDir: string): strin
 
 /** The conversation a Claude process holds now, from Claude's own `<configDir>/sessions/<pid>.json` (read only): its
  *  session id when the file is a regular file of at most 64 KiB written after the process started (a leftover for a
- *  reused PID is not evidence) and names the seat's session; else undefined. /clear rotates it without replacing the
- *  process, so the launch argv can't tell it. Callers bracket it with two equal process observations. */
-export function readClaudePidSessionId(input: { configDir: string; pid: number; startedAt: string | null | undefined; sessionName: string }): string | undefined {
+ *  reused PID is not evidence); else undefined. The name is a conversation title, not a seat identity. /clear rotates
+ *  the id without replacing the process, so the launch argv can't tell it. Callers bracket it with equal process observations. */
+export function readClaudePidSessionId(input: { configDir: string; pid: number; startedAt: string | null | undefined }): string | undefined {
   try {
     const started = Date.parse(input.startedAt ?? "");
     if (!Number.isFinite(started)) return undefined;
     const file = nodePath.join(input.configDir, "sessions", `${input.pid}.json`);
     const fd = fs.openSync(file, "r");
-    let record: { name?: unknown; sessionId?: unknown };
+    let record: { sessionId?: unknown };
     try {
       const stat = fs.fstatSync(fd);
       if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
       record = JSON.parse(fs.readFileSync(fd, "utf8"));
     } finally { fs.closeSync(fd); }
-    if (record?.name !== input.sessionName) return undefined;
-    const valid = validateResumeToken("claude-code", record.sessionId);
+    const valid = validateResumeToken("claude-code", record?.sessionId);
     return valid.ok ? valid.token : undefined;
   } catch { return undefined; }
 }

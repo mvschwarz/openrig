@@ -63,6 +63,8 @@ export interface EnvelopeMeta {
   replyToQitem?: string;
   /** Twin of pane-envelope's field (#2895 (a)): false ⇒ the reply line names no `rig send`. ABSENT or true ⇒ today's hint. */
   senderReachable?: boolean;
+  /** Twin of pane-envelope's field (#3268): false ⇒ an @external sender the queue would refuse gets no reply command. */
+  senderRegistered?: boolean;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -111,7 +113,9 @@ export function wrapSendBody(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   const reply = senderLabel.endsWith("@external")
-    ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
+    ? meta?.senderRegistered === false
+      ? `↩ No reply route: ${senderLabel} isn't a registered person (rig gateway human list lists who's registered).`
+      : `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : personAddress === UNATTRIBUTED_PERSON
       ? `↩ ${senderLabel} names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).`
     : isHumanSeatSessionRef(personAddress)
@@ -558,17 +562,24 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         throw err;
       }
 
-      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran.
-      const compactionNotice = (res.data["managedCompaction"] as { notice?: unknown } | undefined)?.notice;
-      const printCompactionNotice = (write: (line: string) => void) => { if (typeof compactionNotice === "string") write(`Notice: ${compactionNotice}`); };
+      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran, or had an
+      // unsettled permission or elicitation request.
+      const notices = [res.data["managedCompaction"], res.data["inputRequest"]]
+        .map(context => (context as { notice?: unknown } | undefined)?.notice).filter((notice): notice is string => typeof notice === "string");
+      const printContextNotices = (write: (line: string) => void) => { for (const notice of notices) write(`Notice: ${notice}`); };
       if (!opts.json) printDestinationStatus(res.data, console.error);
       if (res.data["outcome"] === "retained") {
         console.log(opts.json ? JSON.stringify(res.data) : `Retained, not delivered to ${session}. ${String(res.data["warning"] ?? "")}`);
-        if (!opts.json) printCompactionNotice(console.log);
+        if (!opts.json) printContextNotices(console.log);
         return;
       }
 
       if (printRecordedSend(res.data, session, Boolean(opts.json), Boolean(opts.verify))) return;
+      if (printNativeSend(res.data, session, Boolean(opts.json), Boolean(opts.verify))) {
+        if (!opts.json) printContextNotices(console.log);
+        if (res.status >= 400) process.exitCode = 1;
+        return; // Native custody never invokes the terminal-pane verifier or its remedial Enter.
+      }
 
       // S3 wave-1 fix (r2 F2): effect classification runs BEFORE any output
       // encoding or routing, so the human and JSON encoders render the same
@@ -597,7 +608,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       if (res.status >= 400) {
         const error = res.data["error"] as string | undefined;
         console.error(error ?? `Send failed (HTTP ${res.status})`);
-        printCompactionNotice(console.error);
+        printContextNotices(console.error);
         // MH-4 §4 loud-failure hint: the target was 3-part-shaped but its
         // suffix matched no registered host — name the near-miss.
         if (crossHostHint) console.error(`hint: ${crossHostHint}`);
@@ -607,7 +618,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 
       console.log(`Sent to ${session}`);
       if (res.data["envelopeOmitted"]) console.log(exactTextNote(session));
-      printCompactionNotice(console.log);
+      printContextNotices(console.log);
       // OPR.0.4.3.28 correction — an `unknown`-telemetry send now PROCEEDS with a non-blocking
       // advisory (was a fail-closed refusal). Surface it on the human output, not only in --json.
       const advisory = res.data["warning"] as string | undefined;
@@ -970,10 +981,13 @@ async function runHttpHostSend(
     action: `Check the target before any resend: rig capture ${session} --host ${host.id}. ${UNCONFIRMED_SEND_GUIDANCE}`,
   };
 
+  const remoteData = (result.data ?? {}) as Record<string, unknown>;
+  const native = remoteData["runnerReceipt"] as NativeSendReceipt | undefined;
+  if (native && (nativeEffectUnknown(native) || native.stage === "rejected")) process.exitCode = 1;
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
-      result: shown,
+      result: native ? { ...shown, data: { ...remoteData, verified: false } } : shown,
       ...(unconfirmed ? { error: { fact: result.error, ...unconfirmedGuidance } } : {}),
       // S3 wave-1 fix (r2 F2): the origin host cannot run the pane-effect
       // check on a remote seat — say so, never imply effect verification.
@@ -986,6 +1000,12 @@ async function runHttpHostSend(
 
   printExistingInput((result.data as Record<string, unknown> | undefined)?.["existingInput"], console.error);
   printDestinationStatus((result.data ?? {}) as Record<string, unknown>, console.error);
+  if (native) {
+    console.log(`[via host=${host.id} (${hostDisplayTarget(host)})]`);
+    printNativeSend(remoteData, session, false, Boolean(opts.verify));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
   if (!result.ok) {
     emitRemoteHttpFailure(host.id, hostDisplayTarget(host), shown, false, hint);
     if (unconfirmed) {
@@ -1028,6 +1048,27 @@ async function runHttpHostSend(
 function printDestinationStatus(data: Record<string, unknown>, print: (line: string) => void): void {
   const status = data["destinationStatus"] as { message?: unknown } | undefined;
   if (typeof status?.message === "string") print(`Destination status: ${status.message}`);
+}
+
+interface NativeSendReceipt {
+  requestId?: string; stage?: string; reconciliation?: string; erasedAt?: string; result?: { submissionUnknown?: boolean };
+}
+
+function nativeEffectUnknown(receipt: NativeSendReceipt): boolean {
+  return !!(receipt.reconciliation || receipt.erasedAt || receipt.result?.submissionUnknown);
+}
+
+function printNativeSend(data: Record<string, unknown>, session: string, json: boolean, verify: boolean): boolean {
+  const receipt = data["runnerReceipt"] as NativeSendReceipt | undefined;
+  if (!receipt) return false;
+  const unknown = nativeEffectUnknown(receipt);
+  if (json) console.log(JSON.stringify({ ...data, verified: false }));
+  else {
+    console.log(`Native input receipt for ${session}: ${unknown ? "effect unknown" : receipt.stage ?? "unavailable"}; request ${receipt.requestId ?? "unknown"}`);
+    if (verify) console.log("Verified: no (native receipt)");
+  }
+  if (unknown || receipt.stage === "rejected") process.exitCode = 1;
+  return true;
 }
 
 function printRecordedSend(data: Record<string, unknown>, session: string, json: boolean, verify: boolean): boolean {
@@ -1128,7 +1169,7 @@ async function runFanOutSend(params: {
   let effects: Array<{ sessionName: string; effect: EffectCheck }> | undefined;
   if (opts.verify && res.status < 400) {
     effects = [];
-    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string; promptInteraction?: unknown }> | undefined) ?? []).filter((r) => r.ok && r.outcome !== "retained" && r.sessionName);
+    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string; runnerReceipt?: NativeSendReceipt; promptInteraction?: unknown }> | undefined) ?? []).filter((r) => r.ok && r.outcome !== "retained" && !r.runnerReceipt && r.sessionName);
     for (const r of okRecipients) {
       effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message), undefined, r.promptInteraction, opts.dangerouslyInteract) });
     }
@@ -1140,7 +1181,7 @@ async function runFanOutSend(params: {
   if (opts.json) {
     // Round-2 F1: ONE verdict per recipient — a staged-unresolved recipient's
     // row is not a delivery claim in any encoding.
-    const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? [];
+    const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string; sent?: boolean; runnerReceipt?: NativeSendReceipt }> | undefined) ?? [];
     const encodedResults = rawResults.map((r) =>
       effectUnresolved(effectBySeat.get(r.sessionName))
         ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "delivery unconfirmed; inspect the recipient after the guarded submit attempt" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
@@ -1149,11 +1190,11 @@ async function runFanOutSend(params: {
     // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from
     // the classified encoded outcomes, never the raw transport counts — a
     // staged-unresolved recipient is not sent/delivered in any field.
-    const encodedSent = encodedResults.filter((r) => r.ok && r.outcome !== "retained").length;
+    const encodedSent = encodedResults.filter((r) => r.ok && (r.runnerReceipt ? r.sent === true : r.outcome !== "retained")).length;
     console.log(JSON.stringify(effects
       ? { ...res.data, results: encodedResults, sent: encodedSent, failed: encodedResults.filter(r => !r.ok).length, retained: encodedResults.filter(r => r.outcome === "retained").length, effectChecks: effects }
       : res.data));
-    if (res.status >= 400 || rawResults.some((r) => !r.ok)) process.exitCode = 1;
+    if (res.status >= 400 || (res.data["indeterminateNative"] as number) > 0 || rawResults.some((r) => !r.ok || r.runnerReceipt && nativeEffectUnknown(r.runnerReceipt))) process.exitCode = 1;
     if (unresolvedCount > 0) process.exitCode = 1;
     return;
   }
@@ -1166,12 +1207,13 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; runnerReceipt?: NativeSendReceipt; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; inputRequest?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
   // Context beside a recipient's own result: its own advisory (such as unreadable input), and whether
   // it was in a managed compaction or restore when the send ran.
   const printNotice = (r: (typeof results)[number]) => {
     if (r.warning) console.log(`${r.sessionName}: Advisory: ${r.warning}`);
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
+    if (typeof r.inputRequest?.notice === "string") console.log(`Notice: ${r.inputRequest.notice}`);
   };
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
   // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —
@@ -1179,6 +1221,7 @@ async function runFanOutSend(params: {
   for (const r of results) {
     printExistingInput(r.existingInput, line => console.error(`${r.sessionName}: ${line}`));
     if (r.outcome === "retained") { console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`); printNotice(r); continue; }
+    if (printNativeSend(r as unknown as Record<string, unknown>, r.sessionName, false, Boolean(opts.verify))) { printNotice(r); continue; }
     if (!r.ok) {
       console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
       printNotice(r);
@@ -1202,7 +1245,7 @@ async function runFanOutSend(params: {
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);
-  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}${heldSuffix(results)}`);
+  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}${heldSuffix(results)}${data["pendingNative"] ? `; ${data["pendingNative"]} native pending` : ""}${data["indeterminateNative"] ? `; ${data["indeterminateNative"]} native effect unknown` : ""}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const fanoutAdvisory = data["warning"] as string | undefined;
@@ -1210,7 +1253,7 @@ async function runFanOutSend(params: {
     console.log(`Advisory: ${fanoutAdvisory}`);
   }
   if (unresolvedCount > 0) process.exitCode = 1;
-  if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
+  if ((data["failed"] as number) > 0 || (data["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }
 }

@@ -7,7 +7,9 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
+import { compareConversations, describeSharedConversation, describeUnavailable, holdsRecordedConversation } from "./shared-conversation.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -129,6 +131,8 @@ export interface StartupContextProjectionEntry {
   category?: string | null;
   sourcePath?: string | null;
   resourceType?: string | null;
+  /** The resource as the spec named it; a plugin selected under the OpenRig home reads `openrig-home:<path>`. */
+  resourcePath?: string | null;
 }
 
 export interface QueueStoreProbeResult {
@@ -328,6 +332,7 @@ export class RestoreCheckService {
       ]);
     }
 
+    const allRigs = rigs;
     if (opts.rig) {
       rigs = rigs.filter((r) => r.name === opts.rig);
       if (rigs.length === 0) {
@@ -445,6 +450,10 @@ export class RestoreCheckService {
       rigRollupInputs.push({ rig, nodes, checks: rigChecks, preconditionError });
     }
 
+    if (!opts.recoveryOnly) {
+      checks.push(...this.checkSharedConversations(rigRollupInputs, allRigs));
+    }
+
     const rigRollups = rigRollupInputs.map((input) => this.buildRigRollup(input));
     for (const rollup of rigRollups) {
       const latestSnapshot = restoreInputsByRig.get(rollup.rigId) ?? this.inspectLatestSnapshot(rollup.rigId);
@@ -499,6 +508,12 @@ export class RestoreCheckService {
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
         currentCodexProfiles: Object.fromEntries(inventory.filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        // the shared-conversation report names the seats a restore would resume by their current record, as it names
+        // every other agent (the maintainer's review of #3250)
+        currentStatuses: Object.fromEntries(inventory.map((current) => [current.logicalId, current.sessionStatus ?? null])),
+        // a seat kept attached to an external CLI is not launched by restore: it is not one of the seats it resumes
+        attachedLogicalIds: inventory.filter((current) => seatProcessOwner(resolveSeatKind(current.attachmentType)) === "external")
+          .map((current) => current.logicalId),
       });
       // The membership restore itself uses: the snapshot's roster, or a pre-roster snapshot's own nodes.
       const roster = new Set(resolveSnapshotRestoreTopology(input.snapshot.data).intendedRoster.map((entry) => entry.nodeId));
@@ -1097,7 +1112,7 @@ export class RestoreCheckService {
       )),
       projectionEntries: probe.projectionEntries.map((entry) => (
         typeof entry.sourcePath === "string"
-          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath }, undefined, this.deps.exists)
+          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath }, undefined, this.deps.exists, this.deps.stateDir)
           : entry
       )),
     };
@@ -1299,15 +1314,17 @@ export class RestoreCheckService {
   }
 
   private requiredClaudeActivityHookEvents(): string[] {
-    // PermissionRequest is an optional diagnostic. Older same-version plugin/settings bytes
+    // PermissionRequest and the elicitation pair are optional observations. Older same-version plugin/settings bytes
     // remain authoritative until normal release/projection; retain all prior readiness duties.
-    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => event !== "PermissionRequest");
+    const optional = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => !optional.has(event));
   }
 
   private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {
+    // A plugin selected under the OpenRig home is read in this instance's home, as restore will launch it.
     const dir = selectedCorePluginDir(pluginPathsOf(entries.map(entry => ({
-      category: entry.category ?? "", absolutePath: entry.absolutePath,
-    }))), this.deps.stateDir ? join(this.deps.stateDir, "plugins") : undefined);
+      category: entry.category ?? "", absolutePath: entry.absolutePath, resourcePath: entry.resourcePath, sourcePath: entry.sourcePath,
+    })), this.deps.stateDir), this.deps.stateDir ? join(this.deps.stateDir, "plugins") : undefined);
     if (!dir) return null;
     try {
       const manifest: unknown = JSON.parse(this.deps.readFile(join(dir, ".claude-plugin", "plugin.json")));
@@ -1724,6 +1741,59 @@ export class RestoreCheckService {
       return `${actions.length} ${pluralize(actions.length, "rig")} can be recovered by known OpenRig command; ${blocked.length} ${pluralize(blocked.length, "rig")} blocked; ${unknown.length} unknown.`;
     }
     return `${blocked.length} ${pluralize(blocked.length, "rig")} blocked; ${actions.length} actionable; ${unknown.length} unknown.`;
+  }
+
+  /**
+   * #3218 item 3: agents with the same recorded conversation (running, whatever their policy, or not running and
+   * resumable), each named with its recorded status as it is ("unknown" when there is none),
+   * named on each evaluated agent with the others (also those of a rig left out by --rig). A caveat with no remediation:
+   * restore is not refused, no agent is stopped and none is picked. A rig whose agents cannot be read, or an agent whose saved resume
+   * data is not readable, is named as an unavailable comparison.
+   */
+  private checkSharedConversations(inputs: RigRollupInput[], allRigs: Array<{ rigId: string; name: string }>): CheckEntry[] {
+    const label = (node: NodeInventoryEntry) => node.canonicalSessionName ?? `${node.logicalId}@${node.rigName}`;
+    const evaluated = new Set(inputs.map((input) => input.rig.rigId));
+    const seats: Array<{ node: NodeInventoryEntry; input?: RigRollupInput }> = [];
+    const out: CheckEntry[] = [];
+    for (const input of inputs) {
+      for (const node of input.nodes) if (holdsRecordedConversation(node)) seats.push({ node, input });
+    }
+    for (const rig of allRigs) {
+      if (evaluated.has(rig.rigId)) continue;
+      let nodes: NodeInventoryEntry[];
+      try {
+        nodes = this.deps.getNodeInventory(rig.rigId);
+      } catch (err) {
+        out.push({
+          check: `rig.${rig.name}.shared-conversation`,
+          status: "yellow",
+          evidence: `The shared-conversation comparison with ${rig.name}'s agents is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+          remediation: "",
+        });
+        continue;
+      }
+      for (const node of nodes) if (holdsRecordedConversation(node)) seats.push({ node });
+    }
+    const { groups, unavailable } = compareConversations(seats.map(({ node }) => ({
+      seat: label(node),
+      state: node.sessionStatus ?? "unknown",
+      resumeType: node.resumeType,
+      resumeToken: node.resumeToken,
+    })));
+    const emit = (node: NodeInventoryEntry, input: RigRollupInput | undefined, evidence: string) => {
+      const check: CheckEntry = { check: `seat.${node.canonicalSessionName ?? node.logicalId}.shared-conversation`, status: "yellow", evidence, remediation: "" };
+      input?.checks.push(check);
+      out.push(check);
+    };
+    for (const group of groups) {
+      for (const { node, input } of seats) {
+        if (input && group.seats.some((entry) => entry.seat === label(node))) emit(node, input, describeSharedConversation(group));
+      }
+    }
+    for (const { node, input } of seats) {
+      if (unavailable.includes(label(node))) emit(node, input, describeUnavailable([label(node)]));
+    }
+    return out;
   }
 
   private buildRigRollup(input: RigRollupInput): RigRestoreRollup {

@@ -17,6 +17,7 @@ import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
+import { Reconciler } from "../src/domain/reconciler.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -62,6 +63,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let service: SeatLifecycleService;
   let listProcesses: NativeProcessLister;
   let readProcesses: () => Promise<ProcessTableRow[]>;
+  let hiddenPids: number[];
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -135,6 +137,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
       startedAt: "Sat Jan  1 12:00:00 2000" }];
     readProcesses = async () => [];
+    hiddenPids = [];
     runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
     service = new SeatLifecycleService({
       db,
@@ -144,6 +147,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       tmuxAdapter: tmux,
       listProcesses: () => listProcesses(),
       readProcesses: () => readProcesses(),
+      readProcessCensus: async () => ({ rows: await readProcesses(), permissionHiddenPids: hiddenPids }),
       nodeLauncher,
       startupOrchestrator,
       runtimeAdapters,
@@ -175,6 +179,29 @@ describe("SeatLifecycleService.launchFresh", () => {
     const seat = seedSeat({ clean: true });
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
     expect(result.warnings?.some(warning => warning.includes("open terminal clients"))).not.toBe(true);
+  });
+
+  // #3395, spec section 5, "Stored": a fresh launch of an existing seat starts from its stored settings, so it reads the
+  // stored pool block from the node.
+  it("A fresh launch of an existing model seat (rig seat launch --fresh) reports its stored pool block that can't be used once in the launch warnings, and the seat starts as it would without the block", async () => {
+    const advisory = "dev.impl pool.max: must be a whole number of 0 or more; pool not used";
+    const seat = seedSeat();
+    // Stored as a re-apply writes a block that can't be used: as authored.
+    expect(rigRepo.setNodePool(seat.node.id, { raw: { max: -1 } })).toBe(true);
+    const pooled = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(pooled.ok, JSON.stringify(pooled)).toBe(true);
+    expect(pooled.warnings?.filter(w => w === advisory)).toHaveLength(1);
+    expect(JSON.stringify(pooled).split(advisory).length - 1).toBe(1);
+    const started = (result: typeof pooled) => ({ ok: result.ok, sessionName: "sessionName" in result ? result.sessionName : null,
+      model: "model" in result ? result.model : null,
+      seat: (({ lifecycleState, occupantLifecycle, startupStatus }) => ({ lifecycleState, occupantLifecycle, startupStatus }))(getNodeInventory(db, seat.rig.id)[0]!) });
+    const withBlock = started(pooled);
+
+    // The same seat, its node storing no block: it starts the same way and says nothing about a pool.
+    expect(rigRepo.setNodePool(seat.node.id, null)).toBe(true);
+    const plain = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(JSON.stringify(plain)).not.toContain("pool not used");
+    expect(started(plain)).toEqual(withBlock);
   });
 
   it("#2426: a fresh launch names what became of OpenRig's earlier copies of openrig-core's skills, a kept edited one included", async () => {
@@ -589,6 +616,23 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
+  // #3076: queue-only refuses no lifecycle work, so the plan names no typing-protection blocker there, as execution
+  // under lifecycle() doesn't; an explicit hold and urgent-only still do.
+  it.each([
+    [{ desired: true, effective: true, desiredLevel: "queue-only", effectiveLevel: "queue-only" }, false],
+    [{ desired: true, effective: true }, true],
+    [{ desired: true, effective: true, desiredLevel: "urgent-only", effectiveLevel: "urgent-only" }, true],
+    [{ desired: true, effective: false, desiredLevel: "queue-only" }, false],
+  ])("the plan's typing-protection blocker follows lifecycle's rule (%j: %s)", async (preference, blocked) => {
+    const seat = seedSeat({ clean: true });
+    const lifecycle = vi.fn();
+    Object.defineProperty(tmux, "deliveryGuard", { value: { preference: () => preference, lifecycle } });
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true }) as { blockers?: Array<{ code: string }> };
+    expect((result.blockers ?? []).some(b => b.code === "typing_guard_enabled")).toBe(blocked);
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("uses a captured sibling snapshot if the rig disappears during asynchronous observation", async () => {
     const seat = seedSeat({ clean: true });
     vi.mocked(tmux.probeSession).mockImplementation(async () => {
@@ -663,6 +707,169 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(await service.launchFresh({ seatRef: adoptedName, fresh: true, stop: true, reason: "x" }))
       .toMatchObject({ ok: false, code: "claimed_session" });
     expect(alive.has(adoptedName)).toBe(true);
+  });
+
+  describe("#3318 rehearsal: a pane its failed start left as a shell", () => {
+    const idleShell = () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242, executableName: "zsh", command: "-zsh", argv: ["-zsh"],
+      startedAt: "Sat Jan  1 12:00:00 2000" }];
+    const markFailedStart = (seat: ReturnType<typeof seedSeat>, marker: { stage: "readiness_check" | "harness_not_started"; readinessCode?: string }) => {
+      sessionRegistry.updateStartupStatus(seat.session!.id, marker.stage === "harness_not_started" ? "attention_required" : "failed");
+      eventBus.emit({ type: "node.startup_failed", rigId: seat.rig.id, nodeId: seat.node.id, sessionId: seat.session!.id,
+        error: "Readiness timeout after 30s — harness did not become interactive: The probe pane returned to a shell instead of staying inside the runtime.",
+        stage: marker.stage, ...(marker.readinessCode ? { readinessCode: marker.readinessCode } : {}) });
+    };
+
+    it.each([
+      { marker: { stage: "readiness_check" as const, readinessCode: "returned_to_shell" }, by: "a launch whose readiness saw it return to a shell" },
+      { marker: { stage: "harness_not_started" as const }, by: "restore's bare-shell marker" },
+    ])("replaces it without --stop, in the preview and the launch: $by", async ({ marker }) => {
+      const seat = seedSeat();
+      markFailedStart(seat, marker);
+      listProcesses = async () => idleShell();
+      const plan = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+      expect(plan).toMatchObject({ ok: true, launchable: true, stopRequired: false, wouldStop: true, blockers: [] });
+      expect((plan as { warnings: string[] }).warnings).toContain(
+        "The seat's pane holds only a shell (its harness never started or returned to the shell), so a fresh launch replaces it without --stop.");
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "replace the shell" });
+      expect(result.ok).toBe(true);
+      expect(killed).toEqual([seat.sessionName]);
+      expect(result.warnings).toContain(
+        "The seat's pane holds only a shell (its harness never started or returned to the shell), so a fresh launch replaces it without --stop.");
+    });
+
+    it("still needs --stop when a harness runs in that shell now", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      listProcesses = async () => [{ ...idleShell()[0]!, tpgid: 5000 },
+        { pid: 5000, ppid: 4242, pgid: 5000, tpgid: 5000, executableName: "claude", command: "claude", argv: ["claude"], startedAt: "Sat Jan  1 12:01:00 2000" }];
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+
+    // r1 F1: the shell keeps the foreground while a harness started from it runs in the background or is suspended.
+    it.each([
+      { shape: "a background Claude", child: { executableName: "claude", command: "claude", argv: ["claude"] } },
+      { shape: "a suspended Codex", child: { executableName: "codex", command: "codex resume", argv: ["codex", "resume"] } },
+      { shape: "any other background job", child: { executableName: "sleep", command: "sleep 600", argv: ["sleep", "600"] } },
+    ])("still needs --stop when the shell has $shape under it", async ({ child }) => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      listProcesses = async () => [...idleShell(),
+        { pid: 5000, ppid: 4242, pgid: 5000, tpgid: 4242, startedAt: "Sat Jan  1 12:01:00 2000", ...child }];
+      expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true }))
+        .toMatchObject({ launchable: false, stopRequired: true, blockers: [expect.objectContaining({ code: "session_live" })] });
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+
+    // r1 F2: what changes while the pane is observed after the first proof is caught before the stop.
+    it.each([
+      { change: "a harness starts in the pane", during: () => { listProcesses = async () => [...idleShell(),
+        { pid: 5000, ppid: 4242, pgid: 5000, tpgid: 4242, executableName: "claude", command: "claude", argv: ["claude"], startedAt: "Sat Jan  1 12:01:00 2000" }]; } },
+      { change: "a later start reaches ready", during: (seat: ReturnType<typeof seedSeat>) => {
+        eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id }); } },
+    ])("still needs --stop when $change during the pane observation after the first proof", async ({ during }) => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      let emptySamples = 0;
+      let samplesBeforeObservation = -1;
+      listProcesses = async () => { emptySamples++; return idleShell(); };
+      (tmux.listPanes as ReturnType<typeof vi.fn>).mockImplementationOnce(async (name: string) => {
+        samplesBeforeObservation = emptySamples;
+        during(seat);
+        return [{ id: livePanes.get(name)!, index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+      });
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" });
+      expect(samplesBeforeObservation).toBe(2); // the first proof had seen an empty shell twice
+      expect(result).toMatchObject({ ok: false, code: "session_live" });
+      expect((result as { guidance?: string }).guidance).toContain("no longer holds only a failed start's shell");
+      expect(killed).toEqual([]);
+    });
+
+    it("with the delivery guard, a startup event that arrives inside the stop refuses at its effect", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      listProcesses = async () => idleShell();
+      Object.defineProperty(tmux, "deliveryGuard", { value: {
+        ownsLifecycle: () => true, checkInput: () => undefined, preference: () => ({ desired: false, effective: false }) } });
+      tmux.killSession = vi.fn(async (name: string, beforeEffect?: () => void | Promise<void>): Promise<TmuxResult> => {
+        eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id });
+        try { await beforeEffect?.(); } catch (error) {
+          return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: (error as Error).message } as TmuxResult;
+        }
+        killed.push(name);
+        return { ok: true };
+      }) as TmuxAdapter["killSession"];
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" });
+      expect(result).toMatchObject({ ok: false, code: "selection_changed" });
+      expect((result as { message: string }).message).toContain("arrived before the stop");
+      expect(tmux.killSession).toHaveBeenCalledWith(seat.sessionName, expect.any(Function));
+      expect(killed).toEqual([]);
+    });
+
+    it("still needs --stop when the readiness failure wasn't a return to a shell", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "awaiting_runtime" });
+      listProcesses = async () => idleShell();
+      expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true }))
+        .toMatchObject({ launchable: false, stopRequired: true, blockers: [expect.objectContaining({ code: "session_live" })] });
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+
+    it("still needs --stop when a later start of that session reached ready", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id });
+      listProcesses = async () => idleShell();
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+  });
+
+  it("#3253: an explicit fresh --stop whose process limit can't be applied refuses before anything is stopped", async () => {
+    const live = seedSeat();
+    const plan = vi.fn(async () => ({ state: "not_applied" as const, kind: "unverified" as const, retryable: true,
+      reason: "asking the systemd user manager timed out", requested: { tasksMax: 256 } }));
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: typeof plan }).seatProcessLimitsRecoveryPlan = plan;
+    const result = await service.launchFresh({ seatRef: live.sessionName, fresh: true, stop: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true,
+      processLimits: { kind: "unverified", reason: "asking the systemd user manager timed out", requested: { tasksMax: 256 } },
+      message: expect.stringMatching(/^Nothing was stopped or cleaned: .*timed out.*retry/) });
+    expect(plan).toHaveBeenCalledWith(live.node.id);
+    expect(killed).toEqual([]);
+    expect(alive.has(live.sessionName)).toBe(true);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("#3253: an explicit fresh of a stopped seat refuses before clean or supersede", async () => {
+    const stopped = seedSeat();
+    sessionRegistry.updateStatus(stopped.session!.id, "exited");
+    alive.delete(stopped.sessionName);
+    livePanes.delete(stopped.sessionName);
+    const plan = vi.fn(async () => ({ state: "not_applied" as const, kind: "setup" as const, retryable: false,
+      reason: "this daemon gives seats no launch environment", requested: { tasksMax: 256 } }));
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: typeof plan }).seatProcessLimitsRecoveryPlan = plan;
+    const before = db.serialize();
+    const result = await service.launchFresh({ seatRef: stopped.sessionName, fresh: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_setup", retryable: false,
+      processLimits: { kind: "setup", reason: "this daemon gives seats no launch environment" } });
+    expect(result).not.toHaveProperty("processLimits.state");
+    expect(db.serialize()).toEqual(before);
+    expect(sessionRegistry.getBindingForNode(stopped.node.id)).not.toBeNull();
+    expect(tmux.probeSession).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("#3253: a launch refused for its limit after the plan passed keeps its process_limits code", async () => {
+    const seat = seedSeat({ clean: true });
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: () => Promise<null> }).seatProcessLimitsRecoveryPlan = async () => null;
+    const problem = { kind: "unverified" as const, reason: "the seat's scope start was not confirmed in time", requested: { tasksMax: 256 } };
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: false as const, code: "process_limits_unverified",
+      message: "not started", retryable: true, processLimits: problem });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", message: "not started", retryable: true,
+      processLimits: problem });
   });
 
   it("checks historical occupants before stopping the current managed seat", async () => {
@@ -945,6 +1152,137 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(server).toEqual({ up: true, starts: 1 });
       expect(tmux.createSession).toHaveBeenCalledTimes(1);
       expect(killed).toEqual([]);
+    });
+
+    // A host restart ends tmux with every seat in it. The daemon's boot reconcile then marks the managed sessions
+    // detached (the server isn't there and nothing recorded is running) and keeps their bindings. Nothing was
+    // stopped on purpose, so the first fresh launch after boot meets "no server running" on a managed, detached row.
+    // The identity sweep observes a session after it was created: evidence at or after the session's created_at.
+    const afterHostRestart = async (stillRunning: boolean, opts?: { noEvidence?: boolean; observedAt?: Date }) => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+      const seen = opts?.observedAt ?? new Date();
+      if (!opts?.noEvidence) new SeatIdentityStore(db).upsert({
+        nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%old", observedPid: 6161, observedPanePid: 6160, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: seat.sessionName, observedAt: seen.toISOString(),
+      });
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+      const before = new Date(seen.getTime() - 10 * 60_000);
+      readProcesses = async () => stillRunning ? [processRow(6160, 1, before, "zsh")] : [];
+      const boot = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux,
+        readProcesses: () => readProcesses() }).reconcile(seat.rig.id);
+      return { seat, server, boot };
+    };
+
+    it("reopens the server for a managed seat the boot reconcile detached after a host restart", async () => {
+      const { seat, server, boot } = await afterHostRestart(false);
+      expect(boot.detached).toBe(1);
+      expect(sessionRegistry.getBindingForNode(seat.node.id)).not.toBeNull();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      if (!result.ok) return;
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
+      expect(result.supersededSessionIds).toContain(seat.session!.id);
+    });
+
+    it.each([
+      { name: "the process table can't be read", noEvidence: false,
+        rows: async (): Promise<ProcessTableRow[]> => { throw new Error("ps failed"); } },
+      { name: "no process evidence was recorded for the session", noEvidence: true, rows: async () => [] as ProcessTableRow[] },
+    ])("keeps refusing a detached managed seat when $name (its end isn't proven)", async ({ noEvidence, rows }) => {
+      const { seat } = await afterHostRestart(false, { noEvidence });
+      readProcesses = rows;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("no proof its recorded process ended") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing a detached managed seat whose recorded process is hidden from the daemon (EPERM/EACCES)", async () => {
+      const { seat } = await afterHostRestart(false);
+      hiddenPids = [6160];
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("hidden from this daemon") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing when the only process evidence is older than the detached session (an earlier occupant's)", async () => {
+      const { seat } = await afterHostRestart(false, { observedAt: new Date(Date.now() - 60 * 60_000) });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("since this session began") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing when a replacement is recorded while the census runs (it may have started after the census began)", async () => {
+      const { seat } = await afterHostRestart(false);
+      // A poll records a replacement during the census; it started after the census began, so the census can't list it.
+      let censuses = 0;
+      readProcesses = async () => {
+        censuses++;
+        new SeatIdentityStore(db).upsert({
+          nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+          evidence: { registeredPane: "%new", observedPid: 7171, observedPanePid: 7170, observedCommand: "claude", matchedLayer: 1 },
+          sessionName: seat.sessionName, observedAt: new Date().toISOString(),
+        });
+        return [];
+      };
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("recorded while the process table was read") });
+      expect(censuses).toBe(1);
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing a running managed seat's fresh launch while its socket is lost", async () => {
+      const { seat, boot } = await afterHostRestart(true);
+      expect(boot.detached).toBe(0);   // the reconcile kept it: its recorded process still runs
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("keeps refusing a detached managed seat whose recorded process still runs behind a lost socket", async () => {
+      const { seat } = await afterHostRestart(false);
+      const before = new Date(observed.getTime() - 10 * 60_000);
+      readProcesses = async () => [processRow(6160, 1, before, "zsh")];
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("last ran as process 6160, which is still running") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
     });
 
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {

@@ -8,6 +8,12 @@
 # (2026.10.22).
 set -eu
 
+# Managed run authority belongs to the parent runner, never this native TUI or its probes.
+# Keep legacy hook-only environments unchanged.
+if [ "${OPENRIG_RUN_ID+x}" = x ]; then
+  unset OPENRIG_RUN_ID OPENRIG_ACTIVITY_HOOK_TOKEN
+fi
+
 producer="openrig-cursor-launch 2"
 cursor="${OPENRIG_CURSOR_AGENT:-cursor-agent}"
 

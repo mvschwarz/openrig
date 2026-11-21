@@ -326,10 +326,14 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if (filterErr) return c.json({ error: filterErr }, 400);
     const model = await svc.getReadModel();
     const providerOf = new Map(model.accounts.map((a) => [a.accountId, a.provider]));
+    // A seat's provider is its runtime's; a row without one (an older collector) falls back to its account's.
+    const seatProvider = (b: (typeof model.bindings)[number]) =>
+      b.runtime === "claude-code" ? "claude" : b.runtime === "codex" ? "codex"
+        : b.runtime === undefined && b.accountId !== null ? providerOf.get(b.accountId) : undefined;
     const bindings = model.bindings.filter(
       (b) =>
         (account === undefined || b.accountId === account) &&
-        (provider === undefined || (b.accountId !== null && providerOf.get(b.accountId) === provider)),
+        (provider === undefined || seatProvider(b) === provider),
     );
     return c.json({ bindings }, 200);
   });

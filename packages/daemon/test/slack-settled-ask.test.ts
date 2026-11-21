@@ -8,7 +8,9 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
+import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
@@ -24,6 +26,7 @@ type Message = { channel: string; ts: string; text: string; blocks: Array<Record
 describe("posted asks follow settlement outside Slack", () => {
   let home: string;
   let db: ReturnType<typeof createDb>;
+  let bus: EventBus;
   let repo: QueueRepository;
   let wire: ReturnType<typeof buildSlackGatewayWire>;
   let messages: Message[];
@@ -73,7 +76,8 @@ describe("posted asks follow settlement outside Slack", () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "slack-settled-"));
     db = createDb(); migrate(db, ALL_MIGRATIONS);
-    repo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry });
+    bus = new EventBus(db);
+    repo = new QueueRepository(db, bus, { loadHumanRegistry: () => registry });
     const secrets = join(home, "fake.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-ASKS", secretsEnvFile: secrets }, home);
@@ -82,11 +86,11 @@ describe("posted asks follow settlement outside Slack", () => {
   });
   afterEach(() => { wire.stop(); vi.useRealTimers(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
-  async function postAsk(detail?: string) {
+  async function postAsk(detail?: string, recommendedLabel?: string) {
     const before = postCount;
     const item = await repo.create({ sourceSession: "author@rig", destinationSession: human,
       summary: "Ship the change?", body: "Original **brief** with its evidence.", humanDetail: detail,
-      humanQuestions: [{ id: "ship", question: "Ship now?", options: [{ id: "yes", label: "Ship" }, { id: "hold", label: "Hold" }] }], nudge: false });
+      humanQuestions: [{ id: "ship", question: "Ship now?", options: [{ id: "yes", label: recommendedLabel ?? "Ship", ...(recommendedLabel ? { recommended: true } : {}) }, { id: "hold", label: "Hold" }] }], nudge: false });
     const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
     expect(alert?.qitemId).toBe(item.qitemId);
     expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
@@ -109,7 +113,7 @@ describe("posted asks follow settlement outside Slack", () => {
     const edited = updates[0]!;
     expect(edited).toMatchObject({ channel: original.channel, ts: original.ts });
     expect(edited.text).toContain(state === "done" ? "Done" : "Canceled");
-    expect(edited.text).toContain("superseded");
+    expect(edited.text).not.toContain("superseded");
     expect(edited.text).toContain(closed.ts);
     expect(edited.text).toContain("author@rig");
     expect(edited.text).toContain("Handled in the pane after the merge.");
@@ -124,6 +128,16 @@ describe("posted asks follow settlement outside Slack", () => {
     wire.stop(); start();
     await new Promise((r) => setTimeout(r, 25));
     expect(updates).toHaveLength(1);
+    expect(postCount).toBe(1);
+  });
+
+  it("labels a done denial as Denied while retaining its stored closure reason", async () => {
+    const item = await postAsk();
+    repo.update({ qitemId: item.qitemId, actorSession: human, state: "done", closureReason: "denied" });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(String(updates[0]!.text).split("\n")[0]).toMatch(/^Denied · /);
+    expect(repo.getById(item.qitemId)).toMatchObject({ state: "done", closureReason: "denied" });
+    expect((updates[0]!.blocks as Array<Record<string, unknown>>).some((b) => b.type === "actions")).toBe(false);
     expect(postCount).toBe(1);
   });
 
@@ -163,8 +177,168 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
     await vi.waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0]!.text).toContain("Answered");
+    expect(String(updates[0]!.text).split("\n")[0]).not.toContain("no-follow-on");
     expect(updates[0]!.text).toContain(`by ${human}`);
     expect(postCount).toBe(1);
+  });
+
+  // C8 (0.7.18, 0.7.19): a person scanning the channel sees what was chosen on the settled card itself.
+  it("names the clicked option on the settled card, and only says a typed reply was given for one", async () => {
+    const clicked = await postAsk();
+    expect(repo.recordHumanAnswer({ qitemId: clicked.qitemId, actorSession: human, questionId: "ship", optionId: "hold" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    // As the click handler continues a complete set: its formatted answers resolve the ask.
+    expect(repo.resolveDirectHumanReply({ qitemId: clicked.qitemId, actorSession: human, decision: "Ship now?: Hold" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const chose = String(updates[0]!.text).split("\n")[0]!;
+    expect(chose.split(" · ")[0]).toBe("Answered: Hold");
+    expect(chose).toContain(`by ${human}`);
+
+    const typed = await postAsk();
+    expect(repo.resolveDirectHumanReply({ qitemId: typed.qitemId, actorSession: human, decision: "Hold it until Friday" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    const replied = String(updates[1]!.text).split("\n")[0]!;
+    expect(replied.split(" · ")[0]).toBe("Answered with a typed reply");
+    expect(replied).not.toContain("Hold it until Friday");
+
+    // Each card's status is stable: a restart re-reads both and edits neither again.
+    wire.stop(); start();
+    await new Promise((r) => setTimeout(r, 25));
+    expect(updates).toHaveLength(2);
+    expect(postCount).toBe(2);
+  });
+
+  // C8: a chosen label reaches the settled status as the question card renders it, secrets redacted.
+  it("redacts a secret-shaped chosen label in the settled status, in its text and its block, and keeps an ordinary one", async () => {
+    const label = "Ship with xoxb-EXAMPLE-label";
+    const statusOf = (update: Record<string, unknown>) => {
+      const [status] = update.blocks as Array<{ block_id?: string; elements?: Array<{ text?: string }> }>;
+      expect(status?.block_id).toBe("or-settled");
+      return { text: String(update.text).split("\n")[0]!.split(" · ")[0], block: String(status?.elements?.[0]?.text).split(" · ")[0] };
+    };
+    const secret = await postAsk(undefined, label);
+    expect(repo.recordHumanAnswer({ qitemId: secret.qitemId, actorSession: human, questionId: "ship", optionId: "yes" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: secret.qitemId, actorSession: human, decision: `Ship now?: ${label}` })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(statusOf(updates[0]!)).toEqual({ text: "Answered: Ship with [redacted-secret]", block: "Answered: Ship with [redacted-secret]" });
+    expect(JSON.stringify(updates[0])).not.toContain("xoxb-EXAMPLE-label");
+
+    const ordinary = await postAsk();
+    expect(repo.recordHumanAnswer({ qitemId: ordinary.qitemId, actorSession: human, questionId: "ship", optionId: "hold" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: ordinary.qitemId, actorSession: human, decision: "Ship now?: Hold" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    expect(statusOf(updates[1]!)).toEqual({ text: "Answered: Hold", block: "Answered: Hold" });
+  });
+
+  it("shows a chosen label's *, _ and ~ literally on the settled status line", async () => {
+    const label = "Blue *B20* _fast_ ~old~";
+    const item = await postAsk(undefined, label);
+    expect(repo.recordHumanAnswer({ qitemId: item.qitemId, actorSession: human, questionId: "ship", optionId: "yes" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: `Ship now?: ${label}` })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const [status] = updates[0]!.blocks as Array<{ block_id?: string; elements?: Array<{ type?: string; text?: string }> }>;
+    expect(status?.block_id).toBe("or-settled");
+    expect(status?.elements).toHaveLength(1);
+    expect(status?.elements?.[0]?.type).toBe("plain_text");
+    expect(String(status?.elements?.[0]?.text).split(" · ")[0]).toBe(`Answered: ${label}`);
+  });
+
+  // C8 on a re-park: each park is its own question, and the item keeps one set of answers, so a card names only what its
+  // own park recorded. The decision is asked of the person and parked on them by its asker; Slack resumes it.
+  describe("a decision parked on the person again", () => {
+    const status = (index: number) => String(messages[index]!.text).split("\n")[0]!.split(" · ")[0];
+    async function parkOnPerson(qitemId: string) {
+      const ts = `${postCount + 1}.000001`;
+      repo.update({ qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, transitionNote: "Need the person's answer." });
+      const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
+      expect(alert?.qitemId).toBe(qitemId);
+      expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
+      await vi.waitFor(() => expect(repo.currentHumanRequiredEpisode(qitemId)?.receipt?.messageTs).toBe(ts));
+      return ts;
+    }
+    const resume = (input: { qitemId: string; decision: string; messageTs: string; typedReply?: boolean }) =>
+      makeHumanReplyResolver(repo, new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo,
+        actionLog: new MissionControlActionLog(db) }))({ ...input, actorSession: human });
+    async function click(qitemId: string, optionId: "yes" | "hold", posted: string) {
+      const clickedTs = posted.replace(/\.\d+$/, ".5");
+      expect(repo.recordHumanAnswer({ qitemId, actorSession: human, questionId: "ship", optionId, clickedTs }))
+        .toMatchObject({ status: "recorded", complete: true });
+      // As the click handler continues a complete set: its formatted answers resolve the park.
+      const decision = `Ship now?: ${optionId === "yes" ? "Ship" : "Hold"}`;
+      await expect(resume({ qitemId, decision, messageTs: clickedTs })).resolves.toBe("resolved");
+    }
+    const words = async (qitemId: string, posted: string) =>
+      expect(resume({ qitemId, decision: "Hold it until Friday", messageTs: posted.replace(/\.\d+$/, ".5"), typedReply: true }))
+        .resolves.toBe("resolved");
+    // A pass makes two edits (four Slack calls; the burst cell above), and the first park's already used them. A restart
+    // starts the next pass now instead of in 15 seconds; a card's status is the same whichever pass edits it.
+    const nextPass = () => { wire.stop(); start(); };
+    async function stable() {
+      const before = updates.length;
+      wire.stop(); start();
+      await new Promise((r) => setTimeout(r, 25));
+      expect(updates).toHaveLength(before);
+    }
+
+    it("names the re-park's click on its own card and leaves the earlier park's card at Answered", async () => {
+      const { qitemId } = await postAsk();
+      await click(qitemId, "yes", await parkOnPerson(qitemId));
+      await vi.waitFor(() => expect(status(1)).toBe("Answered: Ship"));
+      await click(qitemId, "hold", await parkOnPerson(qitemId));
+      nextPass();
+      await vi.waitFor(() => expect(status(2)).toBe("Answered: Hold"));
+      await vi.waitFor(() => expect(status(1)).toBe("Answered"));
+      await stable();
+      expect(status(1)).toBe("Answered");
+    });
+
+    it("names nothing on a re-park answered in words, though the earlier park's click is still on record", async () => {
+      const { qitemId } = await postAsk();
+      await click(qitemId, "yes", await parkOnPerson(qitemId));
+      await vi.waitFor(() => expect(status(1)).toBe("Answered: Ship"));
+      await words(qitemId, await parkOnPerson(qitemId));
+      // The words found no unanswered question, so the earlier park's click stays in the item's answers.
+      expect(repo.getById(qitemId)?.humanAnswers).toEqual({ ship: "yes" });
+      nextPass();
+      await vi.waitFor(() => expect(status(2)).toBe("Answered"));
+      await vi.waitFor(() => expect(status(1)).toBe("Answered"));
+      await stable();
+      expect(status(2)).toBe("Answered");
+    });
+
+    it("says a first park was answered in words, and a re-park's click then names only the re-park", async () => {
+      const { qitemId } = await postAsk();
+      await words(qitemId, await parkOnPerson(qitemId));
+      await vi.waitFor(() => expect(status(1)).toBe("Answered with a typed reply"));
+      await click(qitemId, "hold", await parkOnPerson(qitemId));
+      nextPass();
+      await vi.waitFor(() => expect(status(2)).toBe("Answered: Hold"));
+      await vi.waitFor(() => expect(status(1)).toBe("Answered"));
+      await stable();
+      expect(status(1)).toBe("Answered");
+    });
+  });
+
+  it.each(["Ship", "Ship (recommended)", "Ship (Recommended)"])("keeps the recommendation once when %s becomes settled history", async (label) => {
+    const item = await postAsk(undefined, label);
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const sections = (updates[0]!.blocks as Array<Record<string, unknown>>).filter((b) => b.type === "section");
+    expect(JSON.stringify(sections).match(/\(recommended\)/gi)).toHaveLength(1);
+    expect(repo.getById(item.qitemId)?.closureReason).toBe("no-follow-on");
+  });
+
+  it("keeps a button label literal when it becomes settled history", async () => {
+    const label = "Deploy *literal* _build_id_";
+    const item = await postAsk(undefined, label);
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.blocks).toContainEqual({
+      type: "section", text: { type: "plain_text", text: `• ${label} (recommended)\n• Hold` },
+    });
   });
 
   it("retains a refused private-channel read without claiming the edit, then recovers on restart", async () => {
@@ -484,7 +658,7 @@ describe("posted asks follow settlement outside Slack", () => {
     await vi.waitFor(() => expect(updates).toHaveLength(1));
   });
 
-  it("shows a later close's new reason after the same direct ask was reopened", async () => {
+  it("shows a later close's explanation after the same direct ask was reopened", async () => {
     const item = await postAsk();
     wire.stop(); vi.useFakeTimers();
     repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on", transitionNote: "Initial completion." });
@@ -497,7 +671,9 @@ describe("posted asks follow settlement outside Slack", () => {
     repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "superseded", transitionNote: "The later work replaced this ask." });
     await vi.advanceTimersByTimeAsync(0);
     expect(updates).toHaveLength(3);
-    expect(messages[0]!.text).toMatch(/^Done · superseded/);
+    expect(messages[0]!.text).toMatch(/^Done · \d{4}-/);
+    expect(String(messages[0]!.text).split("\n")[0]).not.toContain("superseded");
+    expect(repo.getById(item.qitemId)?.closureReason).toBe("superseded");
     expect(messages[0]!.text).toContain("The later work replaced this ask.");
     expect(postCount).toBe(1);
   });

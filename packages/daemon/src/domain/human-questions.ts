@@ -105,6 +105,16 @@ export function formatHumanAnswers(questions: readonly HumanQuestion[], answers:
   });
 }
 
+/** What was chosen, in question order: a button choice's option label, or null for a typed reply (a settled card names
+ *  the choice; the typed words stay in the thread). Empty when nothing is recorded. */
+export function chosenAnswers(questions: readonly HumanQuestion[], answers: HumanAnswers): Array<string | null> {
+  return questions.flatMap((q) => {
+    const answer = ownAnswer(answers, q.id);
+    if (answer == null) return [];
+    return [typeof answer === "string" ? q.options.find((o) => o.id === answer)?.label ?? answer : null];
+  });
+}
+
 /** The questions still waiting for an answer. */
 export function unansweredQuestions(questions: readonly HumanQuestion[], answers: HumanAnswers): HumanQuestion[] {
   return questions.filter((q) => ownAnswer(answers, q.id) == null);

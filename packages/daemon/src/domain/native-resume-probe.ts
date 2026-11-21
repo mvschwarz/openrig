@@ -39,6 +39,11 @@ export interface ProbeShellReadyInput {
   paneContent: string | null;
 }
 
+/** Comparison outcome between the current occupant generation's recorded launch observation and current resume flags:
+ *  - `recorded_match`: recorded sandbox and non-null approval match current flags, with no unrecorded `workspace-write` envelope options.
+ *  - `recorded_difference`: recorded sandbox or approval differs from current resume flags.
+ *  - `recorded_uncertain`: recorded launch matches as far as observed, or saved posture is empty, while unrecorded approval or unrecorded `workspace-write` envelope options (`writable_roots`, `network_access`, `exclude_*`) prevent proving a full match.
+ *  - `no_recorded_launch`: no observed Codex sandbox launch record exists for the current occupant generation. */
 export type CodexResumeLabelStatus =
   | "recorded_match"
   | "recorded_difference"
@@ -220,6 +225,19 @@ export function buildCodexResumeDisplay(
     && recordedApproval !== null
     && recordedApproval === currentApproval
   ) {
+    // observeCodexEnvelope records only sandbox type and approval_policy, not sandbox_workspace_write.* options
+    // (writable_roots, network_access, exclude_tmpdir_env_var, exclude_slash_tmp), so workspace-write envelopes retain
+    // conservative uncertainty rather than claiming unrecorded workspace flags matched.
+    if (permissions?.sandbox === "workspace-write") {
+      return {
+        command,
+        status: "recorded_uncertain",
+        label: composeCodexResumeLabel(
+          "workspace-write options from current settings (not recorded at launch)",
+          hasLaunchWrapper,
+        ),
+      };
+    }
     return {
       command,
       status: "recorded_match",

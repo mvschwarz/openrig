@@ -267,7 +267,10 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
   });
 
   it("covers recorded match, recorded uncertainty, recorded difference, and no-recorded-launch cases across sandbox and approval combinations in buildCodexResumeDisplay / buildNativeResumeDisplay", () => {
-    // 1. Recorded match: requires a positively recorded non-null approval matching current settings (full_bypass and all three envelope approvals).
+    // 1. Recorded match vs workspace-write unrecorded-options uncertainty:
+    //    full_bypass and read-only envelopes have no unrecorded workspace options, so matching sandbox + non-null
+    //    approval proves recorded_match (label: null); workspace-write envelopes retain explicit uncertainty because
+    //    observeCodexEnvelope does not record sandbox_workspace_write.* options.
     expect(
       buildCodexResumeDisplay("tok-2", {
         resolvedPosture: "full_bypass",
@@ -275,7 +278,23 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
       }),
     ).toMatchObject({ status: "recorded_match", label: null });
 
-    for (const perms of [workspaceEnvelope, readOnlyOnRequestEnvelope, workspaceUntrustedEnvelope]) {
+    for (const [perms, expectedStatus, expectedLabel] of [
+      [
+        readOnlyOnRequestEnvelope,
+        "recorded_match",
+        null,
+      ],
+      [
+        workspaceEnvelope,
+        "recorded_uncertain",
+        "workspace-write options from current settings (not recorded at launch)",
+      ],
+      [
+        workspaceUntrustedEnvelope,
+        "recorded_uncertain",
+        "workspace-write options from current settings (not recorded at launch)",
+      ],
+    ] as const) {
       const obs = observeCodexEnvelope(codexMemberEnvelope(perms));
       expect(obs.approvalPolicy).toBe(perms.approval);
       const display = buildNativeResumeDisplay("codex", "tok-env", null, null, false, null, {
@@ -283,8 +302,8 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
         recordedLaunch: obs,
       });
       expect(display).toMatchObject({
-        status: "recorded_match",
-        label: null,
+        status: expectedStatus,
+        label: expectedLabel,
       });
       expect(display?.command).toContain(`-s ${perms.sandbox} -a ${perms.approval}`);
     }
@@ -1269,7 +1288,8 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       ),
     ).toBe(true);
 
-    // 4. Known complete workspace-write + untrusted record matching current settings stays silent (label: null).
+    // 4. Unchanged workspace-write + untrusted envelope still retains workspace-options uncertainty because
+    //    observeCodexEnvelope does not record sandbox_workspace_write.*, whereas read-only + on-request stays silent.
     const matchNode = rigRepo.addNode(rig.id, "dev.known-match", {
       runtime: "codex",
       cwd: "/work/match",
@@ -1284,8 +1304,24 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       ),
     ).toBe(true);
 
+    const roMatchNode = rigRepo.addNode(rig.id, "dev.known-ro-match", {
+      runtime: "codex",
+      cwd: "/work/ro-match",
+      codexPermissions: readOnlyOnRequestEnvelope,
+    });
+    const sRoMatch = registry.registerSession(roMatchNode.id, "dev-known-ro-match@j01-rig");
+    registry.updateResumeToken(sRoMatch.id, "codex_id", "tok-j01-ro-match", "hook");
+    expect(
+      observations.recordGeneration(
+        registry.currentOccupantTenure(roMatchNode.id)!.generationUuid,
+        observeCodexEnvelope(codexMemberEnvelope(readOnlyOnRequestEnvelope)),
+      ),
+    ).toBe(true);
+
     const expectedUncertainLabel =
       "launched with -s workspace-write (approval unrecorded); a resume now uses -s workspace-write";
+    const expectedWorkspaceOptionsLabel =
+      "workspace-write options from current settings (not recorded at launch)";
 
     const single = getNodeInventory(db, rig.id);
     const bySet = getNodeInventoryForRigs(db, new Set([rig.id])).get(rig.id);
@@ -1326,9 +1362,18 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     expect(matchEntry.resumeCommand).toBe(
       `codex -s workspace-write -a untrusted -c 'sandbox_workspace_write.writable_roots=[]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' -c 'sandbox_workspace_write.exclude_slash_tmp=false' ${UPDATE_OFF} resume 'tok-j01-match'`,
     );
-    expect(matchEntry.resumeCommandLabel).toBeNull();
-    expect(matchDetail.resumeCommandLabel).toBeNull();
+    expect(matchEntry.resumeCommandLabel).toBe(expectedWorkspaceOptionsLabel);
+    expect(matchDetail.resumeCommandLabel).toBe(expectedWorkspaceOptionsLabel);
+    expect(matchDetail.recoveryGuidance?.notes).toContain(expectedWorkspaceOptionsLabel);
     expect(matchDetail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
+
+    const roMatchEntry = byLogicalId.get("dev.known-ro-match")!;
+    const roMatchDetail = getNodeDetail(db, rig.id, "dev.known-ro-match")!;
+    expect(roMatchEntry.resumeCommand).toBe(`codex -s read-only -a on-request ${UPDATE_OFF} resume 'tok-j01-ro-match'`);
+    expect(roMatchEntry.resumeCommandLabel).toBeNull();
+    expect(roMatchDetail.resumeCommandLabel).toBeNull();
+    expect(roMatchDetail.recoveryGuidance?.notes).not.toContain(expectedWorkspaceOptionsLabel);
+    expect(roMatchDetail.recoveryGuidance?.notes.some((n) => n.startsWith("launched with "))).toBe(false);
   });
 
   it("M2: preserves public main RestoreOrchestrator.resolveRestorePosture pass-through and lazy lookup order across unknown strings, empty strings, and custom-node fallback while normalizing only for display", async () => {
@@ -2361,5 +2406,290 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("retains uncertainty for unrecorded workspace-write envelope options across network_access and writable_roots changes, unchanged envelopes, wrapper composition, and shared inventory/detail consumers while keeping read-only and full_bypass matches and explicit sandbox/approval differences intact", async () => {
+    const wrapper = ["mtn", "sandbox", "exec", "--"] as const;
+    const recordedWorkspaceLaunch = observeCodexEnvelope(codexMemberEnvelope(workspaceEnvelope));
+    const recordedReadOnlyLaunch = observeCodexEnvelope(codexMemberEnvelope(readOnlyOnRequestEnvelope));
+    const recordedFullBypassLaunch = observeCodexSandbox("-s danger-full-access -a never");
+
+    // 1. Table of display variations against recorded launches (expected command/status/label specified independently).
+    const displayCases: ReadonlyArray<{
+      name: string;
+      input: Parameters<typeof buildCodexResumeDisplay>[1];
+      expectedCommand: string;
+      expectedStatus: "recorded_match" | "recorded_uncertain" | "recorded_difference";
+      expectedLabel: string | null;
+    }> = [
+      {
+        name: "network_access changed (false -> true) with unchanged workspace-write + never",
+        input: {
+          codexPermissions: { ...workspaceEnvelope, network_access: true },
+          recordedLaunch: recordedWorkspaceLaunch,
+        },
+        expectedCommand:
+          `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_uncertain",
+        expectedLabel: "workspace-write options from current settings (not recorded at launch)",
+      },
+      {
+        name: "writable_roots changed (['/lease/shared'] -> ['/lease/shared', '/lease/extra']) with unchanged workspace-write + never",
+        input: {
+          codexPermissions: { ...workspaceEnvelope, writable_roots: ["/lease/shared", "/lease/extra"] },
+          recordedLaunch: recordedWorkspaceLaunch,
+        },
+        expectedCommand:
+          `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared","/lease/extra"]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_uncertain",
+        expectedLabel: "workspace-write options from current settings (not recorded at launch)",
+      },
+      {
+        name: "exclude_tmpdir_env_var / exclude_slash_tmp changed with unchanged workspace-write + never",
+        input: {
+          codexPermissions: { ...workspaceEnvelope, exclude_tmpdir_env_var: true, exclude_slash_tmp: false },
+          recordedLaunch: recordedWorkspaceLaunch,
+        },
+        expectedCommand:
+          `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' -c 'sandbox_workspace_write.exclude_slash_tmp=false' ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_uncertain",
+        expectedLabel: "workspace-write options from current settings (not recorded at launch)",
+      },
+      {
+        name: "control: unchanged workspace-write envelope still cannot prove historical workspace sub-options",
+        input: {
+          codexPermissions: workspaceEnvelope,
+          recordedLaunch: recordedWorkspaceLaunch,
+        },
+        expectedCommand:
+          `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_uncertain",
+        expectedLabel: "workspace-write options from current settings (not recorded at launch)",
+      },
+      {
+        name: "control: workspace-write envelope composes launch_wrapper omission suffix",
+        input: {
+          codexPermissions: { ...workspaceEnvelope, network_access: true },
+          recordedLaunch: recordedWorkspaceLaunch,
+          launchWrapper: wrapper,
+        },
+        expectedCommand:
+          `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_uncertain",
+        expectedLabel:
+          "workspace-write options from current settings (not recorded at launch); omits launch_wrapper (managed resume uses the wrapper)",
+      },
+      {
+        name: "control: explicit approval difference on workspace-write envelope still reports recorded_difference",
+        input: {
+          codexPermissions: { ...workspaceEnvelope, approval: "untrusted", network_access: true },
+          recordedLaunch: recordedWorkspaceLaunch,
+        },
+        expectedCommand:
+          `codex -s workspace-write -a untrusted -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_difference",
+        expectedLabel: "launched with -s workspace-write -a never; a resume now uses -s workspace-write -a untrusted",
+      },
+      {
+        name: "control: explicit sandbox difference from workspace-write to read-only still reports recorded_difference",
+        input: {
+          codexPermissions: readOnlyOnRequestEnvelope,
+          recordedLaunch: recordedWorkspaceLaunch,
+        },
+        expectedCommand: `codex -s read-only -a on-request ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_difference",
+        expectedLabel: "launched with -s workspace-write -a never; a resume now uses -s read-only -a on-request",
+      },
+      {
+        name: "control: unaffected read-only envelope without workspace options stays recorded_match / null",
+        input: {
+          codexPermissions: readOnlyOnRequestEnvelope,
+          recordedLaunch: recordedReadOnlyLaunch,
+        },
+        expectedCommand: `codex -s read-only -a on-request ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_match",
+        expectedLabel: null,
+      },
+      {
+        name: "control: unaffected read-only envelope with launch_wrapper emits only wrapper omission",
+        input: {
+          codexPermissions: readOnlyOnRequestEnvelope,
+          recordedLaunch: recordedReadOnlyLaunch,
+          launchWrapper: wrapper,
+        },
+        expectedCommand: `codex -s read-only -a on-request ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_match",
+        expectedLabel: "omits launch_wrapper (managed resume uses the wrapper)",
+      },
+      {
+        name: "control: unaffected full_bypass posture stays recorded_match / null",
+        input: {
+          resolvedPosture: "full_bypass",
+          recordedLaunch: recordedFullBypassLaunch,
+        },
+        expectedCommand: `codex -s danger-full-access -a never ${UPDATE_OFF} resume 'tok-ws-opt'`,
+        expectedStatus: "recorded_match",
+        expectedLabel: null,
+      },
+    ];
+
+    for (const tc of displayCases) {
+      expect(buildCodexResumeDisplay("tok-ws-opt", tc.input), tc.name).toEqual({
+        command: tc.expectedCommand,
+        status: tc.expectedStatus,
+        label: tc.expectedLabel,
+      });
+      expect(
+        buildNativeResumeDisplay("codex", "tok-ws-opt", null, null, false, null, tc.input),
+        `${tc.name} (buildNativeResumeDisplay)`,
+      ).toEqual({
+        command: tc.expectedCommand,
+        status: tc.expectedStatus,
+        label: tc.expectedLabel,
+      });
+      expect(
+        buildNativeResumeCommand("codex", "tok-ws-opt", null, null, false, null, tc.input),
+        `${tc.name} (command bytes)`,
+      ).toBe(tc.expectedCommand);
+    }
+
+    // 2. End-to-end DB + CodexRuntimeAdapter launch + SeatLifecycleService.setPermissions across shared consumers.
+    const restoreOrchestrator = createRestoreOrchestrator();
+    const rig = rigRepo.createRig("ws-opt-rig");
+
+    const liveNode = rigRepo.addNode(rig.id, "dev.ws-live", {
+      runtime: "codex",
+      cwd: "/work/ws-live",
+      codexPermissions: workspaceEnvelope,
+    });
+    const sLive = registry.registerSession(liveNode.id, "dev-ws-live@ws-opt-rig");
+    registry.updateResumeToken(sLive.id, "codex_id", "tok-ws-live", "hook");
+
+    const adapter = new CodexRuntimeAdapter({
+      tmux: makeMockTmux(),
+      fsOps: inertFsOps(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = permStore.apply(
+      {
+        id: "b-ws-live",
+        nodeId: liveNode.id,
+        tmuxSession: "dev-ws-live@ws-opt-rig",
+        tmuxWindow: null,
+        tmuxPane: null,
+        cmuxWorkspace: null,
+        cmuxSurface: null,
+        updatedAt: "",
+        cwd: "/work/ws-live",
+        launchPosture: "floor",
+      },
+      "codex",
+    );
+    const launched = await adapter.launchHarness(binding, { name: "dev-ws-live@ws-opt-rig" });
+    expect(launched.ok).toBe(true);
+    const applied = (launched as { appliedLaunch?: AppliedLaunchObservation }).appliedLaunch!;
+    expect(applied).toMatchObject({ state: "observed", value: "workspace-write", approvalPolicy: "never" });
+    const liveGen = registry.currentOccupantTenure(liveNode.id)!.generationUuid;
+    expect(observations.recordGeneration(liveGen, applied)).toBe(true);
+
+    const wrappedNode = rigRepo.addNode(rig.id, "dev.ws-wrapped", {
+      runtime: "codex",
+      cwd: "/work/ws-wrapped",
+      codexPermissions: workspaceEnvelope,
+      launchWrapper: [...wrapper],
+    });
+    const sWrapped = registry.registerSession(wrappedNode.id, "dev-ws-wrapped@ws-opt-rig");
+    registry.updateResumeToken(sWrapped.id, "codex_id", "tok-ws-wrapped", "hook");
+    observations.recordGeneration(registry.currentOccupantTenure(wrappedNode.id)!.generationUuid, recordedWorkspaceLaunch);
+
+    const tokenlessNode = rigRepo.addNode(rig.id, "dev.ws-tokenless", {
+      runtime: "codex",
+      cwd: "/work/ws-tokenless",
+      codexPermissions: workspaceEnvelope,
+    });
+    registry.registerSession(tokenlessNode.id, "dev-ws-tokenless@ws-opt-rig");
+    observations.recordGeneration(registry.currentOccupantTenure(tokenlessNode.id)!.generationUuid, recordedWorkspaceLaunch);
+
+    const roNode = rigRepo.addNode(rig.id, "dev.ro-control", {
+      runtime: "codex",
+      cwd: "/work/ro-control",
+      codexPermissions: readOnlyOnRequestEnvelope,
+    });
+    const sRo = registry.registerSession(roNode.id, "dev-ro-control@ws-opt-rig");
+    registry.updateResumeToken(sRo.id, "codex_id", "tok-ro-control", "hook");
+    observations.recordGeneration(registry.currentOccupantTenure(roNode.id)!.generationUuid, recordedReadOnlyLaunch);
+
+    // Mutate ONLY network_access on dev.ws-live and dev.ws-tokenless, then also writable_roots on dev.ws-wrapped,
+    // keeping current occupant generations intact (setPermissions records future_launches_only).
+    await lifecycle.setPermissions({
+      seatRef: "dev-ws-live@ws-opt-rig",
+      codexPermissions: { ...workspaceEnvelope, network_access: true },
+      actor: "op@ws-opt-rig",
+      reason: "Enable network access for next resume",
+    });
+    await lifecycle.setPermissions({
+      seatRef: "dev-ws-wrapped@ws-opt-rig",
+      codexPermissions: { ...workspaceEnvelope, writable_roots: ["/lease/shared", "/lease/extra"] },
+      actor: "op@ws-opt-rig",
+      reason: "Add writable root for next resume",
+    });
+    await lifecycle.setPermissions({
+      seatRef: "dev-ws-tokenless@ws-opt-rig",
+      codexPermissions: { ...workspaceEnvelope, network_access: true },
+      actor: "op@ws-opt-rig",
+      reason: "Enable network access on tokenless seat",
+    });
+    expect(registry.currentOccupantTenure(liveNode.id)?.generationUuid).toBe(liveGen);
+
+    const single = getNodeInventory(db, rig.id);
+    expect(getNodeInventoryForRigs(db, new Set([rig.id])).get(rig.id)).toEqual(single);
+    expect(getNodeInventoryForAllRigs(db).get(rig.id)).toEqual(single);
+    const byLogical = new Map(single.map((e) => [e.logicalId, e]));
+
+    const expectedLiveCmd =
+      `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-live'`;
+    const liveEntry = byLogical.get("dev.ws-live")!;
+    const liveDetail = getNodeDetail(db, rig.id, "dev.ws-live")!;
+    expect(liveEntry.resumeCommand).toBe(expectedLiveCmd);
+    expect(liveEntry.resumeCommand).toBe(
+      await runRealRestoreResolvedResume(restoreOrchestrator, liveNode.id, rig.id, "tok-ws-live"),
+    );
+    expect(liveEntry.resumeCommandLabel).toBe("workspace-write options from current settings (not recorded at launch)");
+    expect(liveDetail.resumeCommand).toBe(expectedLiveCmd);
+    expect(liveDetail.resumeCommandLabel).toBe("workspace-write options from current settings (not recorded at launch)");
+    expect(liveDetail.recoveryGuidance?.commands[0]).toBe(expectedLiveCmd);
+    expect(liveDetail.recoveryGuidance?.notes).toContain(
+      "workspace-write options from current settings (not recorded at launch)",
+    );
+
+    const expectedWrappedCmd =
+      `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared","/lease/extra"]' -c 'sandbox_workspace_write.network_access=false' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume 'tok-ws-wrapped'`;
+    const expectedWrappedLabel =
+      "workspace-write options from current settings (not recorded at launch); omits launch_wrapper (managed resume uses the wrapper)";
+    const wrappedEntry = byLogical.get("dev.ws-wrapped")!;
+    const wrappedDetail = getNodeDetail(db, rig.id, "dev.ws-wrapped")!;
+    expect(wrappedEntry.resumeCommand).toBe(expectedWrappedCmd);
+    expect(wrappedEntry.resumeCommandLabel).toBe(expectedWrappedLabel);
+    expect(wrappedDetail.resumeCommandLabel).toBe(expectedWrappedLabel);
+    expect(wrappedDetail.recoveryGuidance?.notes).toContain(expectedWrappedLabel);
+
+    const tokenlessEntry = byLogical.get("dev.ws-tokenless")!;
+    const tokenlessDetail = getNodeDetail(db, rig.id, "dev.ws-tokenless")!;
+    expect(tokenlessEntry.resumeCommand).toBeNull();
+    expect(tokenlessEntry.resumeCommandLabel).toBeNull();
+    expect(tokenlessDetail.recoveryGuidance?.commands).toEqual([
+      "cd /work/ws-tokenless",
+      `codex -s workspace-write -a never -c 'sandbox_workspace_write.writable_roots=["/lease/shared"]' -c 'sandbox_workspace_write.network_access=true' -c 'sandbox_workspace_write.exclude_tmpdir_env_var=false' -c 'sandbox_workspace_write.exclude_slash_tmp=true' ${UPDATE_OFF} resume --last`,
+    ]);
+    expect(tokenlessDetail.recoveryGuidance?.notes).toContain(
+      "workspace-write options from current settings (not recorded at launch)",
+    );
+
+    const roEntry = byLogical.get("dev.ro-control")!;
+    const roDetail = getNodeDetail(db, rig.id, "dev.ro-control")!;
+    expect(roEntry.resumeCommand).toBe(`codex -s read-only -a on-request ${UPDATE_OFF} resume 'tok-ro-control'`);
+    expect(roEntry.resumeCommandLabel).toBeNull();
+    expect(roDetail.resumeCommandLabel).toBeNull();
   });
 });

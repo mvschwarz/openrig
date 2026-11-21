@@ -200,6 +200,10 @@ describe("Send CLI", () => {
             res.writeHead(failed ? 502 : 200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(failed ? { ok: false, sessionName: parsed.session, error: "paste failed", managedCompaction }
               : { ok: true, sessionName: parsed.session, managedCompaction }));
+          } else if (parsed.session === "request-seat") {
+            const inputRequest = { observedAt: "2026-11-20T03:30:00.000Z", notice: "request-seat's main session made a permission or elicitation request (as recorded). That doesn't establish that a dialog is open." };
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, inputRequest }));
           } else if (parsed.session === "unknown-advisory") {
             // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -270,6 +274,94 @@ describe("Send CLI", () => {
     expect(result.stdout.join("\n")).not.toContain("Sent to");
     if (json) { expect(result.stdout).toHaveLength(1); const encoded = JSON.parse(result.stdout[0]!); expect(remote ? encoded.result.data : encoded).toEqual(data); }
     else { expect(result.stdout.join("\n")).toContain("Recorded, not delivered"); expect(result.stderr.join("\n")).toContain("No live seat"); }
+  });
+
+  it.each([false, true])("native pending and unknown receipts bypass every pane check and remedial Enter (json=%s)", async json => {
+    for (const unknown of [false, true]) {
+      const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+      const receipt = { version: 1, requestId: "native-id", stage: unknown ? "completed" : "pending", ...(unknown ? { result: { completion: "unknown", submissionUnknown: true } } : {}) };
+      const client = { post: async (path: string, body: Record<string, unknown>) => {
+        posts.push({ path, body });
+        return path === "/api/transport/capture" ? { status: 200, data: { content: "❯ make test" } }
+          : { status: 200, data: { ok: true, sessionName: "native@r", verified: false, runnerReceipt: receipt } };
+      } } as unknown as DaemonClient;
+      const result = await captureLogs(() => makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "native@r", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]));
+      expect(posts.filter(post => post.path === "/api/transport/capture" || post.body["submitOnly"])).toEqual([]);
+      expect(result.logs.join("\n")).not.toContain("Sent to");
+      if (json) expect(JSON.parse(result.logs.find(line => line.startsWith("{"))!)).toMatchObject({ runnerReceipt: receipt, verified: false });
+      else expect(result.logs.join("\n")).toContain("Native input receipt");
+      expect(result.exitCode).toBe(unknown ? 1 : undefined);
+    }
+  });
+  it("fanout JSON does not promote pending native custody into a sent count under --verify", async () => {
+    const client = { post: async (path: string) => path === "/api/transport/capture"
+      ? { status: 200, data: { content: "no staged input" } }
+      : { status: 200, data: { total: 1, sent: 0, failed: 0, pendingNative: 1,
+        results: [{ ok: true, sessionName: "native@r", runnerReceipt: { requestId: "pending", stage: "pending" } }] } } } as unknown as DaemonClient;
+    const result = await captureLogs(() => makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+      "node", "rig", "send", "--to", "native@r", "make test", "--verify", "--json",
+    ]));
+    expect(JSON.parse(result.logs[0]!).sent).toBe(0);
+  });
+
+  it.each([[false, false], [true, false], [false, true], [true, true]])("fanout keeps native custody out of pane verification and sent counts (json=%s, verify=%s)", async (json, verify) => {
+    for (const stage of ["pending", "offered", "accepted", "submitted", "completed", "rejected", "unknown", "reconciled", "erased"]) {
+      const unknown = ["unknown", "reconciled", "erased"].includes(stage);
+      const submitted = ["submitted", "completed"].includes(stage);
+      const receipt = { requestId: "native-fanout", stage: unknown ? "completed" : stage,
+        ...(stage === "unknown" ? { result: { submissionUnknown: true } } : {}),
+        ...(stage === "reconciled" ? { reconciliation: "receiver_state_lost" } : {}), ...(stage === "erased" ? { erasedAt: "2026-11-16" } : {}) };
+      const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+      const client = { post: async (path: string, body: Record<string, unknown>) => {
+        calls.push({ path, body });
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body.submitOnly) return { status: 409, data: { sent: false } };
+        return { status: 200, data: { total: 1, sent: submitted ? 1 : 0, failed: stage === "rejected" ? 1 : 0,
+          ...(unknown ? { indeterminateNative: 1 } : submitted || stage === "rejected" ? {} : { pendingNative: 1 }),
+          results: [{ ok: stage !== "rejected", sessionName: "native@r", ...(submitted ? { sent: true } : {}), runnerReceipt: receipt }] } };
+      } } as unknown as DaemonClient;
+      const result = await captureLogs(() => makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "--to", "native@r", "make test", ...(verify ? ["--verify"] : []), ...(json ? ["--json"] : []),
+      ]));
+      expect(calls.map(call => call.path)).toEqual(["/api/transport/broadcast"]);
+      if (json) {
+        const encoded = JSON.parse(result.logs[0]!);
+        expect(encoded.sent).toBe(submitted ? 1 : 0);
+        expect(encoded.results[0]).toMatchObject({ runnerReceipt: receipt });
+        expect(encoded.effectChecks).toEqual(verify ? [] : undefined);
+      } else {
+        expect(result.logs.join("\n")).not.toContain(": sent");
+        expect(result.logs.join("\n")).toContain("request native-fanout");
+        if (!submitted) expect(result.logs.join("\n")).toContain("0/1 delivered");
+      }
+      expect(result.exitCode).toBe(unknown || stage === "rejected" ? 1 : undefined);
+    }
+  });
+
+  it.each([false, true])("mixed fanout verifies only the typed recipient and counts its submission (json=%s)", async json => {
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const client = { post: async (path: string, body: Record<string, unknown>) => {
+      calls.push({ path, body });
+      return path === "/api/transport/capture" ? { status: 200, data: { content: "no staged input" } }
+        : { status: 200, data: { total: 2, sent: 1, failed: 0, pendingNative: 1, results: [
+          { ok: true, sessionName: "native@r", runnerReceipt: { requestId: "pending", stage: "accepted" } },
+          { ok: true, sessionName: "typed@r" },
+        ] } };
+    } } as unknown as DaemonClient;
+    const result = await captureLogs(() => makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+      "node", "rig", "send", "--to", "native@r,typed@r", "make test", "--verify", ...(json ? ["--json"] : []),
+    ]));
+    expect(calls.filter(call => call.path !== "/api/transport/broadcast").map(call => call.body.session)).toEqual(["typed@r"]);
+    expect(calls.some(call => call.body.submitOnly)).toBe(false);
+    if (json) expect(JSON.parse(result.logs[0]!)).toMatchObject({ sent: 1, pendingNative: 1, effectChecks: [{ sessionName: "typed@r" }] });
+    else {
+      expect(result.logs.join("\n")).toContain("request pending");
+      expect(result.logs.join("\n")).toContain("typed@r: sent");
+      expect(result.logs.join("\n")).toContain("1/2 delivered; 1 native pending");
+    }
+    expect(result.exitCode).toBeUndefined();
   });
 
   it("a terminal seat: sends exactText beside the envelope, prints the note, and --verify checks the exact text", async () => {
@@ -729,6 +821,11 @@ describe("Send CLI", () => {
 
   // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
   // human output (not only in --json).
+  it("prints the input-request notice beside the send's own result", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "request-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to request-seat\nNotice: request-seat's main session made a permission or elicitation request (as recorded). That doesn't establish that a dialog is open.");
+  });
+
   it("prints the managed compaction notice beside the send's own result, sent or failed", async () => {
     const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-seat", "hello"]); });
     expect(sent.logs.join("\n")).toContain("Sent to restoring-seat\nNotice: restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished.");

@@ -121,6 +121,10 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     if (posture === "full_bypass" || mode === "bypassPermissions") openRigAdds.notes.push("In bypassPermissions, allow rules do not constrain access; native deny behavior remains subject to the harness's documented exceptions.");
     controls.push(`rig seat set-permissions ${seat} --rules <file.json> --reason "<why>"`);
   }
+  if (runtime === "claude-code") {
+    controls.push(`rig seat set-permissions ${seat} --auto-mode <file.json> --reason "<why>" (this seat's auto mode block)`);
+    if (planned.claudeAutoMode !== undefined) controls.push(`rig seat set-permissions ${seat} --clear-auto-mode --reason "<why>" (clears this seat's block; user and managed settings are unaffected)`);
+  }
   if (envelope) {
     if ("filesystem" in envelope) openRigAdds.notes.push(
       "Invocation-local filesystem policy; OpenRig adds no writable directories or network grant. No shared policy file is written.",

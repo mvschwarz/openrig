@@ -18,6 +18,7 @@ import { resolveDefaultReceiver, type DefaultReceiver } from "../domain/default-
 import type { QueueRepository } from "../domain/queue-repository.js";
 import {
   SETTINGS_VALID_KEYS,
+  isBoundarySettingKey,
   isSettingsValidKey,
   parseFeedHostSubscriptionKey,
   removedContextSettingMessage,
@@ -32,6 +33,26 @@ interface InitWorkspaceBody {
   /** Deprecated compatibility input. Existing files are always preserved. */
   force?: boolean;
   dryRun?: boolean;
+}
+
+/** The event bus surface this route needs; the daemon's bus is wider than this. */
+interface SettingsEventBus {
+  emit?(event: { type: "settings.changed"; key: string; action: "set" | "reset" }): unknown;
+}
+
+/**
+ * Record that a key which decides what this daemon may reach changed over HTTP.
+ *
+ * Stored rather than transient, so a person asking later why the file surface changed has something to
+ * find. Its own try/catch, and called after the write: this reads the database to allocate a sequence
+ * number, and a failure here must not change the response to a write that already happened.
+ */
+function recordSettingsChange(c: { get(key: never): unknown }, key: string, action: "set" | "reset"): void {
+  try {
+    (c.get("eventBus" as never) as SettingsEventBus | undefined)?.emit?.({ type: "settings.changed", key, action });
+  } catch (err) {
+    console.error(`settings.changed for ${key} (${action}) could not be recorded:`, err);
+  }
 }
 
 export function configRoutes(opts: { home?: string } = {}): Hono {
@@ -107,6 +128,9 @@ export function configRoutes(opts: { home?: string } = {}): Hono {
     }
     try {
       store.set(key, body.value);
+      // After the save, never inside its outcome: publishing reads the database to allocate a sequence
+      // number, and a failure there must not turn a write that happened into a 400 the client retries.
+      if (isBoundarySettingKey(key)) recordSettingsChange(c, key, "set");
       return c.json({ ok: true, key, resolved: isDynamic ? store.resolveFeedHostSubscription(key) : store.resolveOne(key as never) });
     } catch (err) {
       return c.json({ error: (err as Error).message }, 400);
@@ -125,6 +149,7 @@ export function configRoutes(opts: { home?: string } = {}): Hono {
     }
     try {
       store.reset(key);
+      if (isBoundarySettingKey(key)) recordSettingsChange(c, key, "reset");
       return c.json({ ok: true, key, resolved: isDynamic ? store.resolveFeedHostSubscription(key) : store.resolveOne(key as never) });
     } catch (err) {
       return c.json({ error: (err as Error).message }, 400);

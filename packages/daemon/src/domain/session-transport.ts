@@ -1,4 +1,5 @@
 import { inputReadDiagnostic, type InputReadDiagnostic } from "./input-read-diagnostic.js";
+import { RunnerChannel, RunnerChannelError } from "./runner-channel.js";
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -38,6 +39,7 @@ import type { RigRepository } from "./rig-repository.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { claudeResumeRotation, sessionCommunityHarnessSelect, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter, TmuxResult } from "../adapters/tmux.js";
+import { tmuxUnsetWindowSizeCommand } from "../adapters/tmux-server.js";
 import { newPinHolder, readPinSizing, recordPin, releasePin, WINDOW_SIZE_PRIOR_OPTION, withWindowPin, type PinRelease } from "../terminal/window-pin.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
@@ -55,6 +57,7 @@ import { hashSentText, type CaptureObserverSink, type CaptureSlot, type Observat
 import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult } from "./runtime-adapter.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
+import type { HookBridge } from "./hook-bridge.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -182,6 +185,16 @@ function enterWithheld(reason: string | undefined): boolean {
  *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
  *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
 export function writtenFact(result: SendResult): WrittenFact {
+  const native = result.runnerReceipt;
+  if (native) {
+    if (native.erasedAt) return "unknown";
+    if (native.reconciliation || native.result?.submissionUnknown) return "uncertain";
+    if (native.stage === "submitted" || native.stage === "completed") return "submitted";
+    if (native.stage === "pending" || native.stage === "rejected") return "none";
+    return "unknown"; // An offer or custody ACK establishes no native submission.
+  }
+  // Queued for the seat's hook bridge: nothing was typed; the result's outcome says it was deposited for the hook.
+  if (result.outcome === "bridged") return "none";
   if (result.ok && result.outcome !== "retained") {
     if (result.submitOnly) return "submit_only";
     return result.promptInteraction === "unverified" ? "text_only" : "submitted";
@@ -1993,7 +2006,22 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
+  /** Internal dedicated native wake, never accepted by the transport HTTP route. */
+  nativeWake?: true;
   expectedIdentity?: ExpectedConversation;
+  /** Internal: a message the seat's hook bridge couldn't deliver, typed under its own outbox id (sent as its committed
+   *  id) with the admission it was queued with, taken back from the bridge under the seat's lease. Never accepted from the
+   *  public transport route. */
+  hookBridgeFallback?: { nodeId: string; reason: string; admission: AdmissionInput | null };
+  /** Internal, evidence only: told why the seat's hook bridge couldn't take this send when it goes to typed delivery
+   *  instead, so the send's delivery record can say so. It asks nothing of the write. */
+  onHookBridgeUnavailable?: (reason: string) => void;
+  /** Internal: this caller can't yet represent a message queued for the seat's hook bridge (the watchdog's receipts
+   *  and accounting read only typed outcomes), so its send is typed. */
+  noHookBridge?: true;
+  /** Internal: an explicit queue notification (a resolve's), which passes a rig's delivery drain as on the typed path;
+   *  the hook bridge then queues it as a direct send, not an automatic one. */
+  drainExempt?: true;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
@@ -2092,6 +2120,24 @@ export interface SendOpts {
   typedExactly?: true;
 }
 
+/** OpenRig's own delivery-evidence observers, added to a send whose caller watches no input effect. They only record
+ *  what a typed write did; they ask nothing of the write, so they don't make a send ineligible for the hook bridge. */
+const evidenceOnlyObservers = new WeakSet<NonNullable<SendOpts["onInputEffect"]>>();
+
+/** Whether the seat's hook bridge may take this send in place of typing it. Only a plain message: the bridge hands text
+ *  to the model at a turn boundary, so it can't run what is checked or done at the moment of writing (a write-time
+ *  check, an input-effect callback, staged or exact text, an idle or draft rule), it can't hold a send to an original
+ *  conversation, and Claude runs a slash command only from typed input. Those, and a caller that can't represent a
+ *  queued message, are typed as today. */
+function bridgeable(text: string, opts?: SendOpts): boolean {
+  if (!opts) return !/^\s*\/[A-Za-z]/.test(text);
+  return !opts.hookBridgeFallback && !opts.noHookBridge && !opts.expectedIdentity && !opts.submitOnly && !opts.dangerouslyInteract
+    && !opts.beforeWrite && (!opts.onInputEffect || evidenceOnlyObservers.has(opts.onInputEffect)) && !opts.postCompactTurnBoundary && !opts.readinessFromPaneOnly && !opts.preserveInput
+    && !opts.allowDraftWhileIdle && !opts.allowUnknownWhileIdle && !opts.typeWithoutChecking && opts.exactText === undefined && !opts.typedExactly
+    && opts.expectedStagedText === undefined && !opts.requireFullStagedText && !opts.onStartupMismatch
+    && !/^\s*\/[A-Za-z]/.test(text);
+}
+
 const CALLER_CANCELLED = "caller_cancelled";
 
 /** The readiness reason's tail when only the retained hook says the seat waits on a person: the pane shows no prompt it
@@ -2149,6 +2195,7 @@ export interface ExistingInput {
 type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
 
 export interface SendResult {
+  runnerReceipt?: import("./outbox-handler.js").RunnerReceipt;
   /** #2429: this delivery first submitted a paste OpenRig had left unsubmitted in the seat's input. */
   ownPasteSubmitted?: true;
   checkedIdentity?: ExpectedConversation;
@@ -2178,7 +2225,8 @@ export interface SendResult {
    *   set on the send_failed / submit_failed returns for vocabulary symmetry;
    *   their `ok:false` + HTTP mapping is unchanged.
    */
-  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained";
+  /** "bridged": queued for the seat's hook bridge, delivered into its context at its next turn boundary (slice 13). */
+  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "bridged";
   outboxIds?: string[];
   delivery?: GuardedDeliverySummary;
   warning?: string;
@@ -2195,6 +2243,10 @@ export interface SendResult {
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
+  /** Context, not a status: when this send started, the seat's main session had a permission or elicitation request,
+   *  made after its latest activity report, that OpenRig hadn't seen settled. It never says a dialog is open (a hook or
+   *  host can decide one with nothing shown), and the send's own result is unchanged by it. */
+  inputRequest?: { observedAt: string; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
@@ -2250,6 +2302,8 @@ export interface CaptureResult {
 }
 
 export interface BroadcastResult {
+  pendingNative?: number;
+  indeterminateNative?: number;
   total: number;
   sent: number;
   retained?: number;
@@ -2262,6 +2316,7 @@ export interface TransportReadinessChecker {
 }
 
 interface SessionTransportDeps {
+  runnerChannel?: RunnerChannel;
   contextUsageStore?: ContextUsageStore;
   db: Database.Database;
   rigRepo: RigRepository;
@@ -2271,6 +2326,8 @@ interface SessionTransportDeps {
   // A positive-picker override requires a working audit sink. Other explicit interaction attempts
   // audit too, but an unavailable sink stays advisory so an already accepted send is not refused.
   eventBus?: EventBus;
+  /** Slice 13: an opted-in Claude seat's hook bridge. Absent, every seat gets typed delivery as before. */
+  hookBridge?: HookBridge;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   waitForIdlePollMs?: number;
@@ -2322,6 +2379,7 @@ interface SessionReconciliationSnapshot {
 }
 
 export class SessionTransport {
+  private readonly runnerChannel?: RunnerChannel;
   private contextUsageStore?: ContextUsageStore;
   readonly db: Database.Database;
   readonly guardedDelivery?: DraftAwareDelivery;
@@ -2330,6 +2388,10 @@ export class SessionTransport {
   private tmuxAdapter: TmuxAdapter;
   private agentActivityStore?: AgentActivityStore;
   private eventBus?: EventBus;
+  private hookBridge?: HookBridge;
+  private queueWakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
+  private hookBridgeSweep: Promise<Array<{ outboxId: string; result: SendResult }>> | null = null;
+  private hookBridgeSweepAgain = false;
   private now: () => Date;
   private sleep: (ms: number) => Promise<void>;
   private waitForIdlePollMs: number;
@@ -2344,6 +2406,7 @@ export class SessionTransport {
   private deliverOverDraft?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
+    this.runnerChannel = deps.runnerChannel;
     this.contextUsageStore = deps.contextUsageStore;
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
@@ -2351,6 +2414,7 @@ export class SessionTransport {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.agentActivityStore = deps.agentActivityStore;
     this.eventBus = deps.eventBus;
+    this.hookBridge = deps.hookBridge;
     this.now = deps.now ?? (() => new Date());
     this.sleep = deps.sleep ?? delay;
     this.waitForIdlePollMs = deps.waitForIdlePollMs ?? 500;
@@ -2369,6 +2433,9 @@ export class SessionTransport {
 
   configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void {
     this.guardedDelivery?.configureWakes(applicable);
+    // The hook bridge checks the same predicate before it queues an automatic wake and before it hands one over.
+    this.queueWakeApplicable = applicable;
+    if (this.hookBridge) this.hookBridge.wakeApplicable = applicable;
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -2702,9 +2769,24 @@ export class SessionTransport {
     this.compactionObserver = observer;
   }
 
+  /** The time of a permission or elicitation request the seat's main session made after its latest activity report and
+   *  that nothing has settled, else null. An unreadable record reads as none: it never changes a send. */
+  private unsettledInputRequestAt(sessionName: string): string | null {
+    try {
+      const nodeId = this.getSessionMeta(sessionName).nodeId;
+      const at = nodeId ? this.agentActivityStore?.getUnsettledInputRequestForNode?.(nodeId, sessionName) ?? null : null;
+      if (!at) return null;
+      const latest = this.agentActivityStore?.getLatestForNode({ sessionName, now: this.now(), order: "source" });
+      return latest?.eventAt && Date.parse(at) <= Date.parse(latest.eventAt) ? null : at;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
-   * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
+   * send, or had an unsettled permission or elicitation request newer than its latest activity report, add a notice
+   * saying so. Each notice is context beside the send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
@@ -2718,7 +2800,11 @@ export class SessionTransport {
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
-    const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    // A prompt answer or a bare Enter is aimed at the prompt itself.
+    const requestAt = opts?.dangerouslyInteract || opts?.submitOnly ? null : this.unsettledInputRequestAt(sessionName);
+    const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    const result = requestAt ? { ...sent, inputRequest: { observedAt: requestAt,
+      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : sent;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";
@@ -2731,12 +2817,16 @@ export class SessionTransport {
     const seat = this.evidenceSeat(sessionName);
     // The text the paste actually wrote (a terminal seat's exact text, a combined wake), not the text asked for.
     let wire: { text: string; at: string } | null = null;
-    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: (phase, written) => {
+    const observer: NonNullable<SendOpts["onInputEffect"]> = (phase, written) => {
       if (phase === "pasted" && written) wire = { text: written.text, at: this.now().toISOString() };
       opts?.onInputEffect?.(phase, written);
-    } } : opts;
+    };
+    // Only the caller's own input-effect callback is a write-time contract; this observer alone isn't (bridgeable).
+    if (!opts?.onInputEffect) evidenceOnlyObservers.add(observer);
+    let bridgeUnavailable: string | null = null;
+    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: observer, onHookBridgeUnavailable: (reason) => { bridgeUnavailable = reason; } } : opts;
     const result = await this.sendMarkingUrgent(sessionName, text, observed);
-    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire, bridgeUnavailable);
     return result;
   }
 
@@ -2757,7 +2847,7 @@ export class SessionTransport {
    *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
    *  unknown. Only an outbox row that exists counts as admitted. */
   private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult,
-    wire: { text: string; at: string } | null): void {
+    wire: { text: string; at: string } | null, bridgeUnavailable: string | null): void {
     if (!this.eventBus || !seat) return;
     try {
       const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
@@ -2772,6 +2862,7 @@ export class SessionTransport {
         admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
         ...wireFingerprint(wire), outcome: readSendOutcome(result, writtenFact(result)),
+        ...(bridgeUnavailable ? { hookBridgeUnavailable: bridgeUnavailable } : {}),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {
@@ -2826,7 +2917,7 @@ export class SessionTransport {
       await resolveExpectedConversation(expected, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
       const result = await this.sendClassifiedInput(sessionName, text, { ...opts, expectedIdentity: expected,
         ...(opts?.committedOutboxIds ? {} : { deliveryId: ids[0] }) });
-      if (result.outcome !== "retained") {
+      if (result.outcome !== "retained" && result.outcome !== "bridged") {
         try {
           for (const id of ids) {
             if (result.ok) {
@@ -2861,10 +2952,177 @@ export class SessionTransport {
     }
   }
 
+  /** Slice 13: type the messages queued for a hook bridge that has no live arm (or, with `nodeId`, every message queued
+   *  for that seat), oldest first, each under its own outbox id through the ordinary send path. The daemon runs this on
+   *  an interval; a send that finds the bridge unavailable runs it for its seat. */
+  async sweepHookBridge(opts: { nodeId?: string } = {}): Promise<Array<{ outboxId: string; result: SendResult }>> {
+    // One sweep at a time: the interval's and a send's share the one running sweep, and a sweep asked for while one runs
+    // runs once after it.
+    if (this.hookBridgeSweep) { this.hookBridgeSweepAgain = true; return this.hookBridgeSweep; }
+    this.hookBridgeSweep = (async () => {
+      const typed: Array<{ outboxId: string; result: SendResult }> = [];
+      do {
+        this.hookBridgeSweepAgain = false;
+        typed.push(...await this.sweepHookBridgeOnce(opts));
+      } while (this.hookBridgeSweepAgain);
+      return typed;
+    })().finally(() => { this.hookBridgeSweep = null; });
+    return this.hookBridgeSweep;
+  }
+
+  private async sweepHookBridgeOnce(opts: { nodeId?: string }): Promise<Array<{ outboxId: string; result: SendResult }>> {
+    const bridge = this.hookBridge;
+    if (!bridge) return [];
+    bridge.reconcileUnacked();
+    const due = bridge.dueForFallback();
+    if (opts.nodeId && !due.some((d) => d.nodeId === opts.nodeId) && !bridge.live(opts.nodeId)) {
+      // By the same rule as the poll and the fallback: what a delivery drain holds stays queued (superseded wakes end).
+      const ids = bridge.queuedForTyping(opts.nodeId);
+      if (ids.length) due.push({ nodeId: opts.nodeId, outboxIds: ids, reason: bridge.unavailable(opts.nodeId) });
+    }
+    const outbox = new OutboxHandler(this.db);
+    const typed: Array<{ outboxId: string; result: SendResult }> = [];
+    for (const { nodeId, outboxIds, reason } of due) {
+      const saved = new Map(bridge.queued(nodeId).map((row) => [row.outboxId, row]));
+      // Oldest first. Each is taken back from the bridge only under the seat's lease, just before it's typed: one the
+      // bridge took first isn't typed, and the seat's loop stops there, so nothing is typed twice and nothing behind it
+      // overtakes it. Each keeps its own delivery contract: its admission, and the occupant it was queued for.
+      for (const outboxId of outboxIds) {
+        const entry = outbox.getById(outboxId);
+        const row = saved.get(outboxId);
+        if (!entry || !row) break;
+        // Its body already carries any urgent line; its admission says how the guard admits it.
+        const result = await this.send(entry.destinationSession, entry.body, { committedOutboxIds: [outboxId],
+          hookBridgeFallback: { nodeId, reason, admission: row.admission }, actorSession: entry.senderSession,
+          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}) });
+        if (result.reason === "hook_bridge_claimed") break;
+        // A drain that began since the selection holds it: untouched, and what's behind it may still go.
+        if (result.reason === "delivery_drain_held") continue;
+        // Its wake no longer applies: ended not delivered at the handback.
+        if (result.reason === "draft_wake_superseded" && result.sent === false) { typed.push({ outboxId, result }); continue; }
+        if (result.reason === "guard_target_changed" && result.sent === false) {
+          bridge.abandon(nodeId, entry.destinationSession, outboxId, "it was queued for an earlier occupant of the seat, which is gone");
+          typed.push({ outboxId, result });
+          continue;
+        }
+        if (result.outcome !== "retained") {
+          outbox.finalizeDelivery(outboxId, result.ok && result.outcome !== "rendered-unconfirmed" ? "delivered"
+            : result.ok || result.inputPhase === "attempted" || result.inputPhase === "written" ? "indeterminate" : "failed");
+        }
+        // Its sender's record (a queue wake's nudge result) reads how it actually ended.
+        bridge.typedEnd(outboxId, result);
+        typed.push({ outboxId, result });
+      }
+    }
+    return typed;
+  }
+
+  /** A hook-bridge fallback takes its row back from the bridge under the seat's lease, just before typing it. Null when
+   *  it may type; otherwise why it doesn't: the row was queued for an occupant who's gone (it isn't typed into the new
+   *  one), or the bridge's waiter took it first. */
+  private takeFromHookBridge(sessionName: string, ids: string[], opts?: SendOpts): SendResult | null {
+    const fallback = opts?.hookBridgeFallback;
+    if (!fallback) return null;
+    const outboxId = ids[0]!;
+    const entry = new OutboxHandler(this.db).getById(outboxId);
+    const target = this.tmuxAdapter.deliveryGuard!.target(sessionName);
+    if (entry?.guardBinding && JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "guard_target_changed", error: "This message was queued for another occupant of the seat; no input written." };
+    }
+    const refused = this.hookBridge?.handbackRefusal(fallback.nodeId, outboxId);
+    if (refused === "drained") {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "delivery_drain_held", error: "The seat's rig is in a delivery drain; this message stays queued until it ends." };
+    }
+    if (refused === "superseded") {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "draft_wake_superseded", error: "The queue wake is no longer applicable; it ended not delivered, and nothing was typed." };
+    }
+    if (!this.hookBridge?.releaseForTyping(fallback.nodeId, sessionName, outboxId, fallback.reason)) {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "hook_bridge_claimed", error: "The seat's hook bridge took this message first; nothing typed." };
+    }
+    return null;
+  }
+
+  sendNativeWake(sessionName: string, question: string, requestId: string, actorSession: string): Promise<SendResult> {
+    return this.send(sessionName, question, { nativeWake: true, deliveryId: requestId, actorSession });
+  }
+
+  private inputRoute(nodeId: string): "typed" | "native" {
+    if (!(this.db.prepare("PRAGMA table_info(nodes)").all() as { name: string }[]).some(column => column.name === "input_route")) return "typed";
+    return (this.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(nodeId) as { input_route: "typed" | "native" } | undefined)?.input_route ?? "typed";
+  }
+
+  private nativeResult(sessionName: string, receipt: import("./outbox-handler.js").RunnerReceipt): SendResult {
+    const rejected = receipt.stage === "rejected";
+    return { ok: !rejected, sessionName, verified: false, outboxIds: receipt.memberIds ?? [receipt.requestId], runnerReceipt: receipt,
+      ...(!receipt.reconciliation && !receipt.result?.submissionUnknown && (receipt.stage === "submitted" || receipt.stage === "completed") ? { sent: true } : rejected ? { sent: false } : {}),
+      reason: receipt.reconciliation ?? `native_${receipt.stage}` };
+  }
+
+  private admitNative(sessionName: string, text: string, opts: SendOpts | undefined, ids: string[]): SendResult {
+    const target = this.tmuxAdapter.deliveryGuard!.target(sessionName);
+    if (!this.runnerChannel) throw new RunnerChannelError("runner_unavailable", "Native channel unavailable; no input offered.");
+    const primary = new OutboxHandler(this.db).getById(ids[0]!);
+    if (primary?.guardBinding && JSON.stringify(primary.guardBinding) !== JSON.stringify(target))
+      throw new DeliveryGuardError("guard_target_changed", "The retained native input belongs to another occupant; no input offered.");
+    opts?.beforeWrite?.();
+    const receipt = this.runnerChannel.admit(target.nodeId, { outboxId: ids[0]!, senderSession: opts?.committedOutboxIds ? primary?.senderSession ?? "unknown" : opts?.actorSession ?? "unknown",
+      destinationSession: sessionName, body: opts?.committedOutboxIds ? primary?.body ?? text : text, kind: opts?.nativeWake ? "wake" : "input", inputRoute: "native", payload: opts?.nativeWake ? { question: text } : { text },
+      ...(ids.length > 1 ? { memberIds: ids } : {}),
+      auditPointer: opts?.auditPointer, identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal });
+    return this.nativeResult(sessionName, receipt);
+  }
+
   private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // Explicit key/editor operations are not native model prompts. Pi's reserved compaction
+    // control keeps its existing guarded editor path; ordinary OpenRig notices still select native.
+    const typedControl = opts?.dangerouslyInteract === true || opts?.submitOnly === true || opts?.typedExactly === true
+      || opts?.openrigNotice === true && /^\/openrig-compact ([\w-]+)$/.test(text) && this.getSessionMeta(sessionName).runtime === "pi";
+    // A bridge handback continues its original typed attempt; a changed preference selects new messages only.
+    const inputRoute = (nodeId: string): "typed" | "native" => typedControl || opts?.hookBridgeFallback ? "typed" : this.inputRoute(nodeId);
+    const history = new OutboxHandler(this.db);
+    const inputId = opts?.committedOutboxIds?.[0] ?? opts?.deliveryId;
+    const primaryId = inputId ? history.runnerPrimary(inputId) : null;
+    const previous = primaryId ? history.runnerReceipt(primaryId) : null;
+    if (primaryId && !previous) return { ok: false, sessionName, reason: "native_receipt_unavailable", error: "Native operation evidence unavailable; no input offered." };
+    if (previous?.erasedAt) return { ok: false, sessionName, reason: "runner_receipt_erased", error: "Native request content was erased; no input offered." };
+    if (previous && typedControl) return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict",
+      error: "This request ID already selects native input; use a new request ID for terminal control." };
+    if (previous) {
+      const entry = history.getById(previous.requestId)!;
+      if (entry.destinationSession !== sessionName || !opts?.committedOutboxIds && entry.senderSession !== (opts?.actorSession ?? "unknown")
+        || (previous.payload.text ?? previous.payload.question) !== text || (opts?.nativeWake ? "wake" : "input") !== previous.kind || opts?.committedOutboxIds && JSON.stringify(previous.memberIds ?? [previous.requestId]) !== JSON.stringify(opts.committedOutboxIds))
+        return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict", error: "This request ID names different input or target." };
+      return this.nativeResult(sessionName, previous);
+    }
+    // Preferences select new requests. Retained IDs keep their recorded route; a legacy unmarked held row is typed.
+    const checkRetainedRoutes = (selected: "typed" | "native", selectedIds: readonly string[]) => {
+      for (const id of selectedIds) {
+        const kind = history.inputKind(id);
+        if (kind && kind !== (opts?.nativeWake ? "wake" : "input"))
+          throw new DeliveryGuardError("delivery_identity_conflict", "This delivery ID selects a different native kind; use a new request ID.");
+        const recorded = history.inputRoute(id);
+        const entry = recorded === null && selected === "native" ? history.getById(id) : null;
+        const saved = recorded ?? (entry && ["retained", "retired"].includes(entry.deliveryState) ? "typed" : null);
+        if (saved && saved !== selected) throw new DeliveryGuardError("delivery_identity_conflict",
+          `This delivery ID selects ${saved} input; use a new request ID to select ${selected} input.`);
+      }
+    };
     const guard = this.tmuxAdapter.deliveryGuard;
-    const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
+    const targetNode = guard?.maybeTarget(sessionName)?.nodeId;
+    if (opts?.nativeWake && (!targetNode || inputRoute(targetNode) !== "native"))
+      return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
+    if (!guard && this.getSessionMeta(sessionName).nodeId && inputRoute(this.getSessionMeta(sessionName).nodeId!) === "native")
+      return { ok: false, sessionName, sent: false, reason: "guard_unavailable", error: "Native admission requires the delivery guard." };
+    const saved = opts?.hookBridgeFallback?.admission;
+    const admission: AdmissionInput = saved ? { source: saved.source, urgent: saved.urgent, override: false }
+      : { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
+      try {
+        const nodeId = this.getSessionMeta(sessionName).nodeId;
+        checkRetainedRoutes(nodeId ? inputRoute(nodeId) : "typed", opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []));
+      } catch (error) {
+        return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
+      }
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       const result = await this.sendUnguarded(sessionName, text, opts);
@@ -2899,7 +3157,7 @@ export class SessionTransport {
       // write. A null return means go through guard.operation exactly as on
       // main (guard held, target unresolvable, or a quick refusal).
       let sendOpts = opts;
-      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle) {
+      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle && inputRoute(guard.target(sessionName).nodeId) !== "native") {
         const pre = await this.preWaitForIdle(sessionName, opts, guard);
         if (pre === null) {
           // Fall through with today's path (in-lease wait / retain / throw).
@@ -2926,10 +3184,74 @@ export class SessionTransport {
           sendOpts = { ...opts, preWaitedIdle: pre.evidence, preWaitBound: pre.bound };
         }
       }
+      let bridgeWarning: string | undefined;
       const result = await guard.operation(sessionName, async () => {
+        const taken = this.takeFromHookBridge(sessionName, ids, opts);
+        if (taken) return taken;
         const members = recheck(false);
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
+        const currentIds = memberOpts?.committedOutboxIds ?? ids;
+        const route = inputRoute(guard.target(sessionName).nodeId);
+        if (memberOpts?.nativeWake && route !== "native")
+          return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
+        checkRetainedRoutes(route, currentIds);
+        if (route === "native") {
+          if (memberOpts?.expectedIdentity) {
+            const original = await resolveExpectedConversation(memberOpts.expectedIdentity, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
+            original.assertCurrent();
+          }
+          if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
+          return this.admitNative(sessionName, memberText, memberOpts, currentIds);
+        }
+        // Slice 13: an occupant launched with its hook bridge gets the message at its next turn boundary, nothing typed.
+        // Admission (hold, the levels) has already decided above. With no live arm, it's typed, with a warning; messages
+        // already queued go first, so a send never overtakes them.
+        const bridge = this.hookBridge;
+        // Only a plain message is bridged (see bridgeable): everything else is typed, where its checks run.
+        if (bridge && bridgeable(memberText, memberOpts)) {
+          const target = guard.target(sessionName);
+          const routed = bridge.routes(target);
+          // Messages already queued that a typed send would take now go first: a new one goes behind them even when
+          // the bridge no longer routes (an opt-out after they were queued).
+          const ahead = bridge.queuedForTyping(target.nodeId).length > 0;
+          if (routed || ahead) {
+            // As the typed path checks before typing: a caller gone while it waited for the lease, and an automatic
+            // wake its queue row no longer wants (an explicit notice isn't subject to it), queue nothing.
+            if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
+            const bridgeIds = memberOpts?.committedOutboxIds ?? ids;
+            if (memberOpts?.queueWake && !memberOpts.drainExempt && this.queueWakeApplicable) {
+              const outbox = new OutboxHandler(this.db);
+              const facts = memberOpts.committedOutboxIds ? bridgeIds.map((id) => outbox.getById(id)).filter((e): e is NonNullable<typeof e> => !!e)
+                : [{ outboxId: bridgeIds[0]!, auditPointer: memberOpts.auditPointer ?? null, destinationSession: sessionName }];
+              let applicable = true;
+              try { applicable = this.queueWakeApplicable(facts); } catch (error) {
+                console.error(`[hook-bridge] ${sessionName}'s queue wake couldn't be read; delivering:`, error);
+              }
+              if (!applicable) return { ok: true, sessionName, outcome: "retained" as const, sent: false, verified: false, inputPhase: "not_reached" as const,
+                reason: "draft_wake_superseded", error: "The queue wake is no longer applicable; nothing was queued or typed.",
+                warning: "Held, not delivered. Retry the current request when the input is free; no saved callback or message is replayed automatically." };
+            }
+            const queueOpts = { ...(memberOpts ?? {}), admission };
+            // A deposit that queued nothing (an id already settled) isn't reported queued: the send goes on as it would
+            // without the bridge.
+            if (routed && bridge.live(target.nodeId)) {
+              const queued = bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds);
+              if (queued) return queued;
+            } else {
+              const reason = routed ? bridge.unavailable(target.nodeId) : "the seat no longer routes through it";
+              const queued = ahead ? bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds) : null;
+              if (queued) {
+                setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
+                return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
+              }
+              if (routed) {
+                bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
+                memberOpts?.onHookBridgeUnavailable?.(reason);
+              }
+            }
+          }
+        }
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
@@ -2940,8 +3262,14 @@ export class SessionTransport {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
+        const taken = this.takeFromHookBridge(sessionName, ids, opts);
+        if (taken) return taken;
         const members = recheck(true);
         if (members) ids = members.outboxIds;
+        const route = inputRoute(target.nodeId);
+        if (opts?.nativeWake && route !== "native")
+          return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
+        checkRetainedRoutes(route, ids);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
@@ -2950,6 +3278,8 @@ export class SessionTransport {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
               identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds, { sameSend: ids });
+            outbox.bindInputRoute({ outboxId: id, senderSession: prior?.senderSession ?? opts?.actorSession ?? "unknown",
+              destinationSession: sessionName, body: prior?.body ?? text }, inputRoute(target.nodeId), opts?.nativeWake ? "wake" : "input");
           }
         })();
         // P2: observed only after the retention above committed; a submit-only
@@ -2969,6 +3299,7 @@ export class SessionTransport {
         }
         return retainedResult();
       }, admission);
+      if (bridgeWarning) result.warning = [bridgeWarning, result.warning].filter(Boolean).join(" ");
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
       }
@@ -4626,8 +4957,12 @@ export class SessionTransport {
       const pin = await withWindowPin(window, async () => {
         const sizing = await readPinSizing(this.tmuxAdapter, window);
         if (!sizing) return "the window's sizing couldn't be read, so it couldn't be given back";
-        if (sizing.live === "manual" && (sizing.prior === "manual" || sizing.holders.length > 0)) {
-          return "the window's size is pinned (its window-size is manual)";
+        if (sizing.live === "manual" && sizing.holders.length > 0) return "the window's size is pinned (its window-size is manual)";
+        // No OpenRig reader holds it: a deliberate fixed size or a pin something else left. Say how to drop it, for a reader
+        // who wants the window to follow its inherited sizing again; it isn't changed here.
+        if (sizing.live === "manual" && sizing.prior === "manual") {
+          return `the window's size is pinned (its own window-size is manual); to drop that setting so the window follows `
+            + `its inherited window-size again, run ${tmuxUnsetWindowSizeCommand(sizing.window)} on the daemon's host`;
         }
         // Still manual here: a pin whose holders are gone (a capture or a web terminal that ended without giving it back).
         // It's taken over, and given back after this read even when the pane is already big enough.
@@ -4794,9 +5129,13 @@ export class SessionTransport {
       results.push(result);
     }
 
+    const indeterminateNative = results.filter(r => r.runnerReceipt && (r.runnerReceipt.reconciliation || r.runnerReceipt.erasedAt || r.runnerReceipt.result?.submissionUnknown)).length;
+    const pendingNative = results.filter(r => r.runnerReceipt && !r.runnerReceipt.reconciliation && !r.runnerReceipt.erasedAt
+      && ["pending", "offered", "accepted"].includes(r.runnerReceipt.stage)).length;
     return {
+      ...(pendingNative ? { pendingNative } : {}), ...(indeterminateNative ? { indeterminateNative } : {}),
       total: results.length,
-      sent: results.filter((r) => r.ok && r.outcome !== "retained").length,
+      sent: results.filter((r) => r.ok && (r.runnerReceipt ? r.sent === true : r.outcome !== "retained")).length,
       retained: results.filter(r => r.outcome === "retained").length,
       failed: results.filter((r) => !r.ok).length,
       results,

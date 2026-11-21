@@ -47,7 +47,7 @@ export function namedTabLabel(page: ComposedPane[]): string {
  */
 export function planTileLabels(view: ComposedView, launchToken: string, prefix = "openrig"): { space: string; pages: string[] } {
   const base = `${prefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
-  const space = view.spaceLabel ?? (view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id);
+  const space = view.spaceLabel ?? (view.id.startsWith("rig:") ? (view.rigName ?? view.id.slice("rig:".length)) : view.id);
   const pages = view.pages.map((page, index) =>
     view.spaceLabel ? namedTabLabel(page) : view.pages.length > 1 ? `${base}/${index + 1}` : base);
   return { space, pages };

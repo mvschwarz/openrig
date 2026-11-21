@@ -10,9 +10,12 @@
 >   runner is qualified beyond that.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
-> - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
->   This credential does not qualify new native input or cancellation behavior.
-> - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
+> - **Current source:** per-launch credentials for managed Pi/OMP, Pi-RPC presets and declared community runners (section 4).
+>   Optional run-bound observations retain receipts and project current runner-reported context/community model facts.
+>   Credentials and reports do not qualify new native input, cancellation or independently verified program identity.
+>   Managed OMP and hosted Pi-RPC additionally implement optional input-only channel delivery; their wake/cancel remain unavailable.
+> - **Unchanged:** Claude Code/Codex raw TUI and historical headless wakes, plain preset interaction, terminal typing,
+>   OMP approval/provider/state policy, and contained execution's legacy activity/lifecycle boundaries.
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
 > - **dsh-seat 0.3.0**, an outside runner for dsh 0.2.1-rc.2 over ACP: launch and first input, useful queue work, a
@@ -129,11 +132,13 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 
 ## 4. Activity: report turn boundaries
 
-Managed hosted Pi, Pi-RPC presets and declared community runners can receive an actual-launch credential in
-`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
-process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
-never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
-credential; knowing a generation or the install token does not supply run authority.
+Managed hosted Pi and OMP, Pi-RPC presets and declared community runners can receive an actual-launch credential in
+`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`.
+It is delivered through tmux's private environment, never as a literal launch argument or launch-result field.
+
+Give the launch credential to the component that reports this launch's activity. That component can be a runner or the harness's own lifecycle hooks. Reports must describe events and observations from the seat and launch they name; a tool command or generated message is not evidence that a turn ended, a permission prompt opened or a model changed. The credential identifies the reporting launch, not an independently verified native conversation or model. Keep credential values out of command arguments, launch records and logs. See the [author guide's trust model](author-contracts.md#trust-model) for the scope of local cooperation and configured isolation.
+
+A report carrying runId still uses the credential bound to that run. Generation, sequence, freshness and lifecycle checks continue to determine which reports apply to the current seat. The existing install-token path remains a separate source of reports; it does not acquire run-bound provenance by naming a run.
 
 Issuing or delivering this optional credential never blocks an otherwise supported launch or restore. If the launch
 anchor, PID, generation or private credential channel is unavailable, the existing unbound install-token path remains;
@@ -141,6 +146,8 @@ that path adds no new run-authority claim and is not attributed to a selected ru
 refused: it is never silently retried with the install token. If native dispatch already occurred before activation
 failed, Core preserves the dispatched outcome and does not replay input; cleanup addresses only that launch's grant.
 Unreadable observations cannot revoke a grant. Confirmed exit/replacement or intentional lifecycle cleanup still can.
+For builtin Pi/OMP, a foreground shell proves exit only after a current-attempt runner sidecar is ready or exited.
+Missing, unreadable, stale or pending launch evidence retains the grant; this limits cleanup, not launch or report admission.
 
 Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
 successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.
@@ -153,6 +160,66 @@ host hooks, contained guest grants and install-token Pi usage keep their legacy 
 current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
+
+The same endpoint accepts an observation-only report from a current run-bound credential:
+
+```json
+{"runId":"<OPENRIG_RUN_ID>","sequence":1,"occurredAt":"2026-11-12T00:00:00Z",
+ "observations":{"model":{"id":"provider/model"},"context":{"usedTokens":1000,"windowTokens":10000}}}
+```
+
+Send this separately from activity and identity posts, without `hookEvent` or `eventFamily`. It records no activity
+or verified identity. Core stores a receipt with the authenticated run/session binding in its existing event log;
+retrying the same observation sequence and payload returns that receipt, while conflicting reuse returns 409.
+Observation ordering is separate from activity/turn ordering. Omitted components keep their own ages; a new run
+cannot inherit an earlier run's reports. Counts without capacity or an explicit percentage remain reported counts,
+not an inferred context occupancy (`availability: unknown`, `reason: window_capacity_unknown`). A valid
+`usedTokens/windowTokens` pair or explicit percentage supplies reported occupancy. The current context reader
+uses accepted events, rechecking run/binding, sequence and the existing ten-minute freshness policy; it never
+revives a runner sample from the context cache. Community model reads use the same current-report boundary.
+Observation model IDs and session references retain Unicode format characters (`\p{Cf}`), including bidi formatting,
+zero-width joiners and non-joiners, where the existing identifier/path format permits. CLI/UI displays escape these
+characters visibly in human CLI model output and UI event previews. These display boundaries use the existing terminal
+JSON escape set: DEL/C1 controls, format characters, line/paragraph separators and default-ignorable code points.
+Stored values, JSON/API payloads and identity
+comparisons retain the original spelling. Observation Pi paths opt into format characters without changing ordinary
+launch/resume validation; their absolute-path, traversal, length and `.jsonl` checks remain.
+Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
+readers retain their evidence paths and labels. Omitted components retain their own sample times.
+An unreadable binding or report is unknown (`binding_unverified`), not evidence of replacement. The grant and
+existing receipt remain intact; retrying after verification recovers the same accepted receipt. A standing that becomes
+unverified during observation admission, including a failed standing read, returns retryable `409 runner_observation_unverified`.
+`runner_observation_unavailable` remains for a positively stale/revoked run or no bound session; invalid reports and
+conflicting sequence reuse retain their existing refusal codes. No refusal revokes credentials or fabricates observed state.
+
+Report changed components rather than repeating unchanged high-rate samples. Retry the same report with its original
+sequence, timestamp and payload. If unchanged facts must remain current, renew them deliberately with a new sequence
+and sample time before the existing freshness window expires; change-only reporting without renewal eventually becomes
+stale. This reduces unnecessary event growth, but does not bound retention or worst-case history query cost. No default
+physical pruning of observation events is provided.
+
+A fresh current session component can fill an absent resume reference through the existing report-only
+persistence path with `launcher` provenance, below Core scrape/adoption evidence. Pi and Pi-based community references
+are promoted only if the adapter's default session-file check accepts them. A reference outside that resume format stays
+in the accepted observation, with model/context facts and its receipt intact, but writes no resume token or identity event.
+Generic community harnesses retain their pass-through reference behavior. A promoted reference emits the existing session-identity event once after
+commit; it does not stamp independent verification or resumability. A known conflicting Core reference stays
+unchanged and makes current observations unknown. A retry returns its original receipt without repeating
+identity effects. Community process identity remains unconfirmed without independent Core evidence.
+Runner context does not provision a collector or enable legacy watchdog/compaction enforcement; that
+watchdog's raw cache path excludes runner-reported entries.
+
+Core observes launch-recorded community runners independently of session reports. Once the existing startup
+readiness is committed, a concrete foreground shell with no live child can establish the existing process
+mismatch and end only the sampled run credential, even before any native reference was reported. A shell
+wrapper with a live descendant, incomplete/unreadable census or changed pane/binding stays unconfirmed;
+unknown evidence never ends a run. On Linux, a permission-hidden process (`EPERM`/`EACCES` reading its stat)
+makes this absence check unconfirmed, even when the hidden process might be unrelated: its parent cannot be read.
+Processes that disappeared (`ENOENT`/`ESRCH`) do not mark the census permission-incomplete; macOS retains its existing
+`ps` listing. Other process-table consumers retain their row-only listing behavior. Pending launch remains unconfirmed until readiness. Explicit same-process
+adoption retains the observed pane anchor and its existing ready state. Native Claude/Codex/Pi checks and
+Pi-RPC report routing keep their existing paths. A report plus a live Node process does not independently
+verify the native conversation.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
   `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
 - **Posting:** post one at a time, in order, with a short timeout. Never make the agent wait on a post.
@@ -261,6 +328,77 @@ permission or input handling in existing built-in runtimes or require every poss
   - a Ctrl-C byte inside a paste also aborts;
   - without a TTY, input is read line by line;
   - this isn't a binary-safe channel.
+
+### Optional run-bound native input and wake (version 1)
+
+The optional native-channel implementation uses the launch's `OPENRIG_RUN_ID` and private `OPENRIG_ACTIVITY_HOOK_TOKEN` grant. Give the launch credential to the component that reports this launch's activity. That component can be a runner or the harness's own lifecycle hooks. `GET /api/activity/runner-channel` is run-filtered SSE, and one `POST` resource at that same path carries hello, acceptance, submitted and result messages. There is no command file or global event-feed subscription.
+
+Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,wake,cancel}}`. Capabilities are explicit booleans intersected with the recorded runner kind and Core implementation availability. They describe this live implementation, not native identity or program qualification. Core selects generic recorded runner kinds, never a community app-name whitelist. Builtin Pi/OMP remain kind0, preset-owned runners kind1, and OpenRig-hosted Pi-RPC kind2. A shared protocol or wrapper does not qualify a program or confer another runtime's invocation mapping.
+
+#### Runtime coverage and qualification
+
+| Runtime class | Existing behavior and optional native-channel limits |
+|---|---|
+| Builtin managed Pi | Existing input/wake/named-cancel implementation and its own invocation mapping; each live capability still requires current authority and implementation evidence. |
+| Builtin OMP | Input-only shared RPC implementation with its own tests. Keeps `omp_session_file`, OMP approval/provider/HOME/state and protocol-v2 behavior; wake/cancel remain false without a proven OMP invocation mapping. |
+| Hosted Pi-RPC community programs | Input-only shared RPC implementation, recorded kind2 and `community:<runtime>` reference. Each executable must satisfy the declared protocol; no inherited Pi qualification or wake/cancel capability. |
+| Preset-owned runner (`runner: true`) | Its actual implemented and declared operations intersect with Core support. The independent dsh consumer has its own mapping; another ACP or stream-JSON program does not inherit it. |
+| Claude Code | Typed interaction and saved-session bounded headless wake remain. The separate opt-in launch-owned hook bridge supports live ordinary delivery and wake through its existing lease; it is not this structured runner channel or named cancellation. |
+| Codex raw TUI | Existing typed interaction and saved-session bounded headless wake remain. Those headless commands are not this live native input/wake/cancel channel. |
+| Cursor / Hermes / Pi TUI | Maintained TUI launchers have no live native consumer; new native operations are unavailable. Pi TUI is distinct from managed Pi RPC. |
+| OpenClaw local / gateway | Same TUI limit. Client exit does not prove native turn cancellation, stopped gateway work or gateway custody. |
+| OpenShell owned / attached | Existing scoped guest activity/work and operation/resource/native identity remain. They do not provide the hosted pane/PID run binding; no new native channel is advertised. |
+| Terminal / stub | Existing shell or scripted-test interaction remains. No native program capability is inferred from builtin kind0 or a stub fixture. |
+| Other external consumers | Generic contract eligibility is program-independent; actual consumer implementation and separate evidence are required for each operation. |
+
+All classes retain typed default. Unsupported native requests refuse before a native or typed effect; absence of an active consumer is not permission to fall back after uncertainty. OMP/hosted2 input acceptance uses the correlated prompt response and does not fabricate a native invocation ID or model-work result. Optional observations remain `runner_reported`; neither reported session/model/context nor a common ABI independently verifies native identity. No new telemetry collector is installed.
+
+The maintained TUI launchers and bounded headless wake child remove the run-ID/hook-token pair when a run ID is present, while legacy hook-only environments and required identity/provider metadata remain unchanged. The caller retains its authority; native children receive none of the new run credential. These controls do not add a native consumer to a TUI launcher.
+
+#### Native delivery and named commands
+
+Every seat still defaults to `typed`. `rig seat set-input-route <seat> --route native --reason ...` saves the native input preference even without a connected runner, and reports live input/wake capability separately. Saving the preference does not launch a runner, deliver or replay input, or establish a capability; native sends and wakes remain not offered while no capable runner is available. Native requests retain the existing sender, original-conversation constraint and interruption/held policy. The saved request ID's route is immutable: a preference change applies to a new ID. A native refusal or uncertain effect never types a fallback, and `--verify` never invokes a terminal-pane verifier for a native receipt.
+
+Explicit terminal interaction, submit-only Enter, exact terminal text and OpenRig's reserved Pi compaction control keep their existing guarded typed path. They are not native model prompts and cannot reuse an ID already bound to native input. Ordinary OpenRig notices still follow the seat's selected input route.
+
+Each request SSE event is preceded by the standard SSE comment `: runner-frame-chars=<n>`, where `<n>` is the exact JavaScript string length (UTF-16 code units) of the complete serialized receipt in its `data` field, including payload and ordered member IDs. Readers use this per-event length plus a bounded SSE envelope allowance instead of assuming a single-message quota bounds a composed group; without the comment, the existing bounded frame allowance applies. The comment is only framing metadata: it changes neither admission nor custody, and legacy SSE consumers ignore it.
+
+A request frame contains `{version:1, runId, requestId, sequence, kind, payload}`. Input payload is `{text}`; wake payload is `{question}`. The request ID is its existing outbox operation ID. A combined send retains one primary ID plus its ordered source-member links. Sequence is run-local and ordered; an SSE cursor is not acceptance. The live receiver retains every immutable ID/payload and result for its process lifetime, acknowledges custody by POST, and waits for Core's durable acceptance response before writing the native prompt. It retries saved HTTP receipts after lost replies; it never repeats a native write to repair HTTP delivery. Restarting a runner creates a new run, not a persistent receiver command journal. At a committed Core run replacement, the earlier run's offered/accepted receipts and unanswered submitted wakes become `receiver_state_lost`/indeterminate. Never-offered requests become rejected/failed with “not offered: its run ended”; they are not replayed into the new run. Known ordinary-input submissions and terminal results keep their recorded outcomes.
+
+An unreadable binding, including a failed grant-standing read, returns retryable `409 runner_grant_unverified`.
+It does not revoke authority, clear the live receiver map or discard retained receipts. The existing consumers retry
+those saved HTTP posts after verification recovers; they do not repeat native work. Positive stale/revoked authority
+keeps its existing refusal. A new native request still requires a currently capable runner.
+
+After native protocol submission/acceptance the runner posts `submitted`; native delivery is not model-work completion. A terminal result whose submission could not be established may instead carry `{completion:"unknown", submissionUnknown:true}` from accepted custody. Core retains that terminal uncertainty as outbox `indeterminate`, never `delivered`; it cannot include a successful wake answer or an acceptance claim. Known pre-effect native rejection is separate. Erased native content remains an unavailable opaque custody tombstone, not an executable request.
+
+`POST /api/seat/command/:seatRef` accepts `{requestId,type:"wake",question}` and returns its saved custody stage. `GET` at the same resource with `?requestId=...` reads its result. `rig ask <rig> <question> --wake <seat>` uses this live path only when the seat explicitly selects `native`; unavailable native capability is a refusal. Historical Claude/Codex one-shot wakes and raw session tokens retain their existing semantics.
+
+A wake waits for the current execution to finish and then gets its own native prompt. Pi's ordinary busy input continues to steer; dsh's ordinary busy input continues to queue. During the dedicated wake, later managed input waits. Pi gates the dedicated prompt on native control-state evidence and pending person/startup preflight, not on a guessed idle flag. Person controls remain usable; a person steering into the wake makes its attribution unknown. Only that prompt's actual assistant text and terminal native outcome become `{kind:"wake",answer:string|null,nativeTurnId,completion:"completed"|"interrupted"|"failed"|"unknown"}`. Tools, old output and partial streaming text are not substituted for an answer. Known terminal native outcomes release the managed barrier. Pi waits for the authoritative prompt disposition before committing any answer: only a dedicated `started` invocation can answer. A queued or otherwise uncorrelated execution reports `{completion:"unknown",answer:null,ownershipUnknown:true}` and quarantines all managed input for that run as `native_ownership_unknown`. Core persists that fence atomically with the result; reconnect, restart and content erasure cannot clear it. A handled command with no execution evidence returns no answer and can release normally. A caller timeout returns the request ID and latest saved stage for lookup; it neither clears the native barrier nor cancels the prompt.
+
+Consumer fixtures exercise Pi RPC shapes from the installed Pi 1.5.0 SDK and dsh's ACP implementation at 0.2.1-rc.2. Stand-in native backends prove the runner/Core plumbing, not actual program or provider qualification. Separate opt-in tests execute installed Pi 1.5.0 and dsh 0.2.1-rc.2 against a loopback fake Anthropic provider with scratch homes and dummy keys. They exercise actual idle/busy input and dedicated wake sequencing, not a real vendor backend, named cancellation or other versions/forks; no program default is promoted. Set `OPENRIG_NATIVE_PROGRAM_PROOF=1`, `OPENRIG_NATIVE_PI_BIN` and `OPENRIG_NATIVE_DSH_BIN` to explicit installed executables, then run the existing `runner-conformance-real-routes.test.ts` in a private network namespace with loopback enabled.
+
+The existing `tmux-server-isolation-daemon.test.ts` also launches managed Pi and a declared dsh preset through the built CLI and daemon with offline native backends. It kills only its scratch daemon with SIGKILL during a wake and restarts it through the normal daemon startup. It checks retained run authority, receiver/native-child and pane process lineage, the recovered answer, duplicate-ID retry and a subsequent wake without repeated native prompts. This covers daemon OS-process recovery with a live receiver map; it does not establish receiver-map persistence after the runner itself dies or combine the crash with the installed-program provider test.
+
+Managed Pi and dsh additionally post `{type:"turn",runId,sequence,nativeTurnId,state:"opened"|"closed",acceptedTurnIds}` through the authenticated channel. Core retains these as `agent.runner_turn` events and exposes the latest open bound invocation in seat status. This sequence belongs to the turn-report family, independently of observation samples and outbox delivery sequences. Identical retries are idempotent; conflicting sequence reuse, closed-epoch reuse and regressing accepted mappings are refused. Missing evidence provides no target and never proves idle.
+
+Pi's native scope is an agent invocation from `agent_start` (or `turn_start` when closed) to `agent_end`; steers have distinct accepted IDs inside that invocation. dsh's native scope is its one outstanding prompt RPC, not the ACP session. The foundation retains Pi followups at the runner and supports internal successor/permission preparation fences. Native permission metadata requires a bound run grant and matching authenticated turn evidence; legacy install authority cannot authenticate these additional fields. A committed turn withdrawal blocks later submissions and decisions, and remains unconfirmed while an existing submission is still in flight or its handoff cannot be followed locally. Managed Pi and the dsh example implement named cancellation when their live capabilities declare it. Other implementations must declare only operations they actually implement and qualify.
+
+### Named managed cancellation
+
+`POST /api/seat/command/:seatRef` accepts `{type:"cancel",requestId,target:{runId,nativeTurnId}}`. Obtain the exact target from `rig seat status <seat> --json` (`nativeInput.target`), then freeze it. `rig seat cancel <seat> --run-id <run> --native-turn-id <epoch> --request-id <id>` sends that explicit target; repeating the same command reconciles its retained receipt. Missing target is invalid. Neither an accepted-input ordinal nor a native session ID substitutes for the native invocation ID. This operation does not change the seat's typed/native input preference or synthesize typed controls.
+
+Cancellation shares the existing outbox and run-bound stream, with `kind:"cancel",payload:{target}`. Control can overtake an unacknowledged ordinary input, while ordinary input/wake FIFO and immutable identities remain intact. Reconnect may replay an older unacknowledged frame even after a higher control cursor; the receiver's retained map reconciles that ID without a repeated native effect.
+
+Temporary connection or grant-standing uncertainty refuses fresh cancellation with a retryable response before consuming its ID. A declared unsupported operation remains `not-supported`. Missing invocation ownership is unknown, never proof of `not-this-turn`; a lost receiver map keeps that target refusal for the rest of the run, cleared only by a new run. It does not make unrelated input unavailable merely because a cancellation needs reconciliation. Original input/wake uncertainty and no-replay guards still apply. Legacy install-token reporting cannot claim native authority. An authenticated permission ask without verified invocation correlation is accepted with a diagnostic; claimed invocation tags are denial-only hints, so withdrawal still rejects late permissions for that named turn.
+
+The runner posts `{type:"cancel-prepare",runId,requestId,sequence}` on the existing channel. Core derives the immutable target from its receipt and withdraws its asks before confirming preparation. `receipt.withdrawal` keeps pending/confirmed stage, counts and timestamps, including partial failure. No native abort is written until permission submission/callback drain and an exact target recheck. A legitimate pending drain can continue; person input remains usable and may supersede unsubmitted local preparation. Actual failed preparation is retired by the runner as `stage:"rejected",result:{kind:"cancel",reason,applied:false}`, with no outcome. Withdrawn approvals stay withdrawn. Core receipt acceptance alone never proves that no native operation was written.
+
+The four effect outcomes remain `requested`, `cancelled`, `not-this-turn`, and `not-supported`. Submitted cancellation is `requested,confirmed:false`; native operation acceptance is separate evidence. Pi records its correlated abort acknowledgement as `operationAccepted`. For a Pi cancellation whose target ended during preparation or after submission, its agent_settled event releases the cancellation hold, without waiting for an abort ACK or another cancellation state query. Person prompts entered before settlement stay in the existing held prompt queue and are sent afterward; agent_end alone is not native readiness. A correlated abort ACK is not a settlement fallback. Normal input/wake readiness still applies: Pi can retain native queued words after abort, and a dedicated wake still waits for native idle with an empty queue. In that case an explicit person continuation can let those words run before the dedicated wake. This is a disclosed limitation, not automatic successor progress. A bare agent_settled releases the hold too: aborted is optional evidence, not a continuation requirement. Pi may use agent_settled.aborted when present, or prior native abort evidence, with known-safe empty-queue evidence; a retained or unknown queue stays requested/unconfirmed. A late ACK does not revise the immutable final result. Continuing is not cancellation proof and never restores withdrawn approvals; dsh uses its exact outstanding prompt's cancelled response. Normal end or process exit never invents cancellation proof. Before submission, a positively ended/replaced target is not-this-turn. Requested work with unknown native acceptance retains indeterminate custody.
+
+Pi never clears queued words for managed cancellation. Unknown or person-owned native queues reject only that local preparation without disabling ordinary input. Person prompts and native controls remain usable. dsh sends managed `session/cancel` once for the exact outstanding prompt; a person's repeated `/abort` remains available. A person abort before prompt write suppresses it as a local interruption without sending a premature native cancel. Opened/closed report retries remain ordered but do not gate ordinary dsh prompts or terminal progress; shutdown retains its existing total two-second drain bound.
+
+`rig seat status <seat> --json` projects body-free `nativeInput.unresolved` evidence across current and older runs: request/target/member IDs, sender/destination, stage, withdrawal, reconciliation and uncertain requested outcomes. Historical evidence does not imply all current work is held. The pane and status identify the person operating the seat or its responsible agent as reconciler. A submitted Pi cancellation waits for native agent_settled; ordinary native readiness and dedicated-wake queue ownership requirements still apply. The supported continuation is a new plain prompt in that pane, without resending retained words, distinct from /abort and rig seat stop. Known retained input IDs and waiting managed IDs are reported in the authenticated cancellation result. Existing responsible-agent work uses the ordinary queue route to a different bound node, with quoted nonerased words read from the same node/run Outbox owner. Existing owner/escalation and receiving-agent settings supply routing; missing or unavailable owners leave visible concrete guidance rather than another wake behind the stranded queue. This work is a captured report, not proof of delivery, pickup or automatic progress. Erasure and immutable queue-ID retries retain their existing ownership rules. If ownership cannot be recovered, an explicit scoped manual choice is `rig seat stop <seat> --reason <text>`; nothing restarts, replays, or releases on a timer. A cancel request carries no fallback words. Erasure preserves opaque custody/target evidence and rejects reuse/late results while removing content and free-form detail; unresolved erased IDs remain inspectable. Fixture tests prove protocol plumbing; installed-program qualification is recorded separately.
 
 ## 6. Cancel: requested isn't the same as done
 

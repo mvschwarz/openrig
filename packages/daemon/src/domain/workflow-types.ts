@@ -12,6 +12,9 @@ import type { WorkflowScope } from "./workflow-scope.js";
 
 export type WorkflowExitKind = "handoff" | "waiting" | "done" | "failed";
 
+/** A step-trail row's reason: an exit, or `resumed` for a resume line (no exit; the step's packet is redriven). */
+export type WorkflowTrailReason = WorkflowExitKind | "resumed";
+
 /** OPR.0.4.6.WF2 FR-1: the closed v1 branch-key set — exactly the recorded
  *  exit enum. Growth ONLY via the step-declared-outcome-enums rail (PRD §6
  *  named deferral); never free-text, identity, or opaque evidence JSON. */
@@ -264,6 +267,7 @@ export interface WorkflowInstance {
    * site. null = unbound = pre-FAC-1 behavior byte-identical.
    */
   boundRig: string | null;
+  boundPod?: string | null;
   lifecycleOperationKey: string | null;
   compiledInputDigest: string | null;
   lifecycleBinding: Record<string, unknown> | null;
@@ -310,7 +314,7 @@ export interface WorkflowStepTrailEntry {
   stepId: string;
   stepRole: string;
   closedAt: string;
-  closureReason: WorkflowExitKind;
+  closureReason: WorkflowTrailReason;
   closureEvidence: Record<string, unknown> | null;
   actorSession: string;
   nextQitemId: string | null;

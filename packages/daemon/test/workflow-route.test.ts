@@ -600,6 +600,25 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(queueSnapshot()).toEqual(queueBefore);
     });
 
+    // The adopted successor is itself handed off again to the same target: the next route without --packet selects it,
+    // and its own successor is the one to adopt, not the earlier adoption replayed.
+    it("adopts a second queue handoff to the same target after the first, without --packet, and absorbs that retry", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview(false);
+      await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig" });
+      const { created: next } = await queueRepo.handoff({ qitemId: successor, fromSession: "reviewer2@rig", toSession: "reviewer2@rig" });
+      expect(next.qitemId).not.toBe(reviewPacket);
+
+      const routed = await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig" });
+
+      expect(routed).toMatchObject({ closedPacketId: successor, newPacketId: next.qitemId, adoptedHandoff: { successorState: "pending" } });
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).currentFrontier).toEqual([next.qitemId]);
+      const version = runtime.instanceStore.getByIdOrThrow(instanceId).version;
+      const queueBefore = queueSnapshot();
+      expect(await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig" })).toEqual(routed);
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toMatchObject({ version, currentFrontier: [next.qitemId] });
+      expect(queueSnapshot()).toEqual(queueBefore);
+    });
+
     // No queue transition records an adoption, so its event says who adopted, why, and which packet it replaced.
     it("records the actor, reason and replaced packet in the adoption event", async () => {
       const { instanceId, reviewPacket, successor } = await handedOffReview();
@@ -622,6 +641,68 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(await res.json()).toMatchObject({ error: "packet_already_closed", state: "handed-off", closureTarget: "reviewer2@rig" });
       expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toEqual(before);
       expect(queueSnapshot()).toEqual(queueBefore);
+    });
+
+    // `rig workflow abort` cancels the frontier packets; one an ordinary queue handoff already closed has nothing left to
+    // cancel, and canceling it would reopen a terminal row (terminal_reopen_requires_ack), leaving the instance waiting.
+    it("abort ends the instance without writing the handed-off packet's queue row again", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview();
+      const queueBefore = queueSnapshot();
+
+      const aborted = await runtime.abort({ instanceId, reason: "work moved elsewhere", actorSession: "orch@rig" });
+
+      expect(aborted).toMatchObject({ status: "aborted", closedPacketIds: [], alreadyClosedPacketIds: [reviewPacket] });
+      const after = runtime.instanceStore.getByIdOrThrow(instanceId);
+      expect(after.status).toBe("aborted");
+      expect(after.currentFrontier).toEqual([]);
+      expect(queueSnapshot()).toEqual(queueBefore);
+      expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("handed-off");
+      expect(queueRepo.getByIdOrThrow(successor).state).toBe("done");
+      // A successor the queue already closed is named, with no command that would hit the same terminal refusal.
+      expect(aborted.advisories).toHaveLength(1);
+      expect(aborted.advisories![0]).toContain(successor);
+      expect(aborted.advisories![0]).not.toContain("rig queue update");
+    });
+
+    it("abort leaves a live handoff successor as the queue left it and names it with the way to stop it", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview(false);
+
+      const res = await app.request(`/api/workflow/${instanceId}/abort`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "work moved elsewhere", actorSession: "orch@rig" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as { status: string; alreadyClosedPacketIds: string[]; advisories: string[] };
+      expect(body).toMatchObject({ status: "aborted", alreadyClosedPacketIds: [reviewPacket] });
+      expect(body.advisories).toHaveLength(1);
+      expect(body.advisories[0]).toContain(successor);
+      expect(body.advisories[0]).toContain(`rig queue update ${successor} --state canceled`);
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).status).toBe("aborted");
+      expect(queueRepo.getByIdOrThrow(successor).state).toBe("pending");
+    });
+
+    // `rig queue handoff-and-complete` closes the frontier packet `done` with a live successor, outside the frontier guard.
+    // Route refuses that packet, so before this the abort was the only verb left, and it refused too.
+    it("abort ends the instance when handoff-and-complete closed the frontier packet done, naming the live successor", async () => {
+      const { instanceId, entryPacket } = await instantiate();
+      const projected = await runtime.project({ instanceId, currentPacketId: entryPacket, exit: "handoff", actorSession: "producer@rig" });
+      const reviewPacket = projected.nextQitemId!;
+      const { created } = await queueRepo.handoffAndComplete({ qitemId: reviewPacket, fromSession: "reviewer@rig", toSession: "reviewer2@rig" });
+      expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("done");
+      await expect(runtime.route({ instanceId, packetId: reviewPacket, toSession: "reviewer2@rig", actorSession: "orch@rig" }))
+        .rejects.toMatchObject({ code: "packet_already_closed" });
+
+      const aborted = await runtime.abort({ instanceId, reason: "work moved elsewhere", actorSession: "orch@rig" });
+
+      expect(aborted).toMatchObject({ status: "aborted", closedPacketIds: [], alreadyClosedPacketIds: [reviewPacket] });
+      expect(aborted.advisories).toHaveLength(1);
+      expect(aborted.advisories![0]).toContain(`rig queue update ${created.qitemId} --state canceled`);
+      expect(aborted.advisories![0]).toContain("reviewer2@rig");
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).status).toBe("aborted");
+      expect(queueRepo.getByIdOrThrow(reviewPacket).state).toBe("done");
+      expect(queueRepo.getByIdOrThrow(created.qitemId).state).toBe("pending");
     });
   });
 });

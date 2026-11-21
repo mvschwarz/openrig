@@ -1,5 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_SECTION_CAP, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
+import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_SECTION_CAP, SLACK_TEXT_CAP, type QitemLike } from "../src/domain/gateway/slack/message.js";
+
+describe("person-facing question labels", () => {
+  it.each(["Ship", "Ship (recommended)", "Ship (Recommended)"])("marks %s as recommended once in the accessible text and option history", (label) => {
+    const modes: Partial<QitemLike>[] = [{}, { sharedChannel: true }, { ownerNotificationKind: "human-decision-resolved" }];
+    for (const mode of modes) {
+      const message = buildOutboundMessage({ qitemId: "q-label", summary: "Choose", body: "Pick one.", ...mode,
+        humanQuestions: [{ id: "ship", question: "Ship now?", options: [
+          { id: "yes", label, recommended: true }, { id: "hold", label: "Hold" },
+        ] }],
+      }, { sourceLabel: "test" });
+      expect(message.text.match(/\(recommended\)/gi)).toHaveLength(1);
+      const sections = message.blocks.filter((b) => (b as { type?: string }).type === "section");
+      expect(JSON.stringify(sections).match(/\(recommended\)/gi)?.length ?? 0).toBe(mode.sharedChannel || mode.ownerNotificationKind ? 1 : 0);
+      expect(message.text.split("\n")).toContain("• Hold");
+    }
+  });
+});
 
 describe("Slice-11 outbound message — content hygiene (item 7)", () => {
   const opts = { sourceLabel: "vm-openrig-build" };

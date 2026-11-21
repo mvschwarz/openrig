@@ -195,7 +195,9 @@ describe("SeatHandoverService", () => {
     expect(sessionRegistry.getSessionsForRig(rig.id).find(session => session.id === sessionId)?.status).toBe("superseded");
     const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
     expect(JSON.parse(event.payload)).toMatchObject({ nodeId: node.id, previousOccupant: "dev-impl@seat-rig", currentOccupant: "dev-impl@seat-rig", source });
-    expect(db.prepare("SELECT origin FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id)).toEqual({ origin: "launched" });
+    // #3409: it records the folder it was launched in (the seat's saved folder), so rig down doesn't name it as unrecorded.
+    expect(db.prepare("SELECT origin, launched_cwd FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id))
+      .toEqual({ origin: "launched", launched_cwd: "/project" });
   });
 
   // #875: a Codex seat whose launch carried its guidance as developer instructions left none in the repository AGENTS.md,
@@ -1631,6 +1633,21 @@ describe("SeatHandoverService", () => {
     expect(durableRows()).toBe(before);
   });
 
+  it.each([["readiness", true], ["launch", false]] as const)(
+    "#3253: a handover whose %s fails after a respawn without the limit forwards the notice", async (_step, launched) => {
+      seedSeat();
+      const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+      respawnPane.mockResolvedValue({ ok: true, processLimits: notice });
+      if (launched) checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+      else launchHarness.mockResolvedValue({ ok: false, error: "codex binary not found" });
+
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+      expect(result).toMatchObject({ ok: false, code: "successor_create_failed", processLimits: notice });
+      // one source: the structured notice (the CLI renders its line); the guidance doesn't repeat it
+      expect((result as { guidance: string }).guidance).not.toMatch(/process_limits requested/);
+    });
+
   it("maps a listPanes THROW resolving the departing pane to a loud successor_create_failed (no rejection, seat untouched)", async () => {
     const { node } = seedSeat();
     // The departing-pane probe rethrows BEFORE any respawn — the live retiree is wholly untouched.
@@ -2020,6 +2037,8 @@ describe("SeatHandoverService", () => {
     const rules = { allow: [], deny: ["Read(./private/**)"] };
     const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
     expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", rules, actor: "operator@seat-rig", reason: "Set successor rules" })).toMatchObject({ ok: true });
+    const claudeAutoMode = { environment: ["$defaults", "Source control: github.com/acme"] };
+    expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", autoMode: claudeAutoMode, actor: "operator@seat-rig", reason: "Set successor auto mode" })).toMatchObject({ ok: true });
     launchHarness.mockResolvedValue({ ok: true, resumeToken: "claude-successor", resumeType: "claude_id" });
     const claudeService = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
@@ -2029,7 +2048,7 @@ describe("SeatHandoverService", () => {
     });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
     expect(launchHarness).toHaveBeenCalledTimes(1);
-    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeMcp });
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeAutoMode, claudeMcp });
   });
 
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {

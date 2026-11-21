@@ -21,15 +21,22 @@ function realpath(p: string): string {
  * The tmux server flags for an environment. `-L <name>` and the bare form resolve under the attaching
  * terminal's own TMUX_TMPDIR, so they're used only for tmux's standard directory (`/tmp/tmux-<uid>`)
  * with no custom TMUX_TMPDIR in play: nothing for its `default` socket, `-L <name>` for another.
- * Every other socket is named by its path, `-S <path>`. Outside tmux (no $TMUX), nothing: the daemon
- * shares the TMUX_TMPDIR of the shell that started it, so the default form stays as it was.
+ * Every other socket is named by its path, `-S <path>`. Outside tmux, a custom TMUX_TMPDIR also
+ * needs an explicit path because an attaching terminal may have a different environment.
  */
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
   // tmux puts the socket path first, as is: keep any whitespace in it.
   const socket = env["TMUX"]?.replace(/,\d+,\d+$/, "");
-  if (!socket?.trim()) return [];
   const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
+  if (!socket?.trim()) {
+    if (!customTmpdir || uid === undefined) return [];
+    try {
+      return ["-S", path.join(fs.realpathSync(path.resolve(tmpdir)), `tmux-${uid}`, "default")];
+    } catch {
+      return [];
+    }
+  }
   if (!customTmpdir && uid !== undefined) {
     const standardDirs = [path.join("/tmp", `tmux-${uid}`), path.join(realpath("/tmp"), `tmux-${uid}`)];
     const socketDirs = [path.dirname(socket), realpath(path.dirname(socket))];
@@ -80,7 +87,9 @@ function shellWord(value: string, force = false): string {
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
 export function tmuxOnDaemonServer(): string {
-  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
+  // A server name or socket path with `=` is quoted, as tmuxAttachCommand quotes a session word: zsh reads a word that
+  // starts with `=` as a command lookup.
+  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg, arg.includes("=")))).join(" ");
   return `tmux${server ? ` ${server}` : ""}`;
 }
 
@@ -119,4 +128,10 @@ function tmuxSessionWord(session: string): string {
 export function tmuxAttachCommand(session: string): string {
   const word = tmuxSessionWord(session);
   return `${tmuxOnDaemonServer()} attach -t ${shellWord(word, word.includes("="))}`;
+}
+
+/** `tmux set-window-option -t <window> -u window-size` on the daemon's server, for one window by its id (`@N`): drops
+ *  that window's own `window-size`, so it follows the value it inherits again. */
+export function tmuxUnsetWindowSizeCommand(window: string): string {
+  return `${tmuxOnDaemonServer()} set-window-option -t ${shellWord(window)} -u window-size`;
 }

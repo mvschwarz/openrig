@@ -4,7 +4,7 @@ import type { ProviderAccount, ProviderSignal } from "../src/domain/provider/pro
 
 // Slice-04 (OPR.0.5.0.4) — the four-block ASSEMBLY (proof item 4, unit shape). A PURE assembler
 // over already-collected accounts/rawBindings/signals: it emits real bound rows + explicit
-// unbound rows (seat_with_no_account), computes same_account_on_n_seats ONLY from repeated real
+// unbound rows (no registry placement, no anomaly), computes same_account_on_n_seats ONLY from repeated real
 // account IDs, preserves signals unchanged, and invents nothing.
 
 const ASOF = "2026-08-03T12:00:00.000Z";
@@ -68,7 +68,7 @@ describe("assembleFourBlock — proof-4 mixed-provider shape", () => {
     expect(solo!.anomalies.some((a) => a.kind === "same_account_on_n_seats")).toBe(false);
   });
 
-  it("emits an explicit unbound row for a seat with no account, carrying seat_with_no_account", () => {
+  it("emits an explicit unbound row for a seat with no Codex registry placement, with no anomaly", () => {
     const m = assembleFourBlock({
       accounts: ACCOUNTS,
       rawBindings: [
@@ -81,12 +81,8 @@ describe("assembleFourBlock — proof-4 mixed-provider shape", () => {
     expect(unbound).toBeDefined();
     expect(unbound!.accountId).toBeNull();
     expect(unbound!.boundAt).toBeNull();
-    const anomaly = unbound!.anomalies.find((a) => a.kind === "seat_with_no_account");
-    expect(anomaly).toBeDefined();
-    if (anomaly && anomaly.kind === "seat_with_no_account") {
-      expect(anomaly.seat).toBe("seat-9");
-      expect(anomaly.asOf).toBe(ASOF);
-    }
+    // No applicable placement isn't evidence of a missing account, so nothing is manufactured from the null.
+    expect(unbound!.anomalies).toEqual([]);
   });
 
   it("does NOT flag same_account_on_n_seats when ONE seat appears in duplicate identical bound rows", () => {

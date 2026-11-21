@@ -826,6 +826,27 @@ describe("RigTeardownOrchestrator", () => {
       expect(result.errors).toEqual([]);
     });
 
+    // #3416: launch writes both entries with a leading `exec` now, and settings written before that hold them without it.
+    it("takes back the relay hooks and the status line both with and without the leading exec", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const s = claudeCwd(own);
+      const written = JSON.parse(fs.readFileSync(s.settings, "utf-8")) as { statusLine: { command: string } };
+      expect(written.statusLine.command.startsWith("exec ")).toBe(true);
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }],
+        PreToolUse: [{ hooks: [{ type: "command", command: `exec ${s.relay}`, timeout: 5 }] }] });
+
+      await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+
+      const old = claudeCwd(own);
+      const current = JSON.parse(fs.readFileSync(old.settings, "utf-8")) as Record<string, any>;
+      current["statusLine"]["command"] = current["statusLine"]["command"].replace(/^exec /, "");
+      fs.writeFileSync(old.settings, JSON.stringify(current, null, 2));
+
+      await teardownWith(old.asset).teardown(claudeRig("claude-rig-old", old.cwd));
+      expect(fs.readFileSync(old.settings, "utf-8")).toBe(own);
+    });
+
     it("keeps settings.local.json as {} when OpenRig's entries were all it held, since nothing says who created it", async () => {
       const s = claudeCwd();
       addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
@@ -904,6 +925,101 @@ describe("RigTeardownOrchestrator", () => {
         await teardownWith(s.asset, tmux).teardown(rigId);
         expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
         expect(fs.existsSync(s.collector)).toBe(false);
+      }
+    });
+
+    /** A Claude seat saved at one folder whose session was launched in another, as `rig up <rig> --existing --cwd` does
+     *  for one run (#3347); `launchedCwd: null` is a session from before launches recorded their folder. */
+    function claudeRigLaunchedIn(name: string, savedCwd: string, launchedCwd: string | null): string {
+      const rig = rigRepo.createRig(name);
+      const node = rigRepo.addNode(rig.id, "dev", { runtime: "claude-code", cwd: savedCwd });
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@${name}`, "initial", undefined,
+        launchedCwd ? { launchedCwd } : undefined).id, "running");
+      return rig.id;
+    }
+
+    it("cleans OpenRig's Claude files in the folder a --cwd restore launched the seat in, and in its saved folder", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const saved = claudeCwd(own), run = claudeCwd(own);
+      for (const s of [saved, run]) addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+
+      const result = await teardownWith(run.asset).teardown(claudeRigLaunchedIn("claude-rig", saved.cwd, run.cwd));
+
+      for (const s of [saved, run]) {
+        expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+        expect(fs.existsSync(s.collector)).toBe(false);
+        expect(fs.existsSync(path.join(s.cwd, ".openrig"))).toBe(false);
+      }
+      expect(result.launchFolderUnrecorded).toBeUndefined();
+      expect(result.errors).toEqual([]);
+    });
+
+    it("cleans the saved folder of a session from before launches recorded their folder, and names that seat", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const s = claudeCwd(own);
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+
+      const result = await teardownWith(s.asset).teardown(claudeRigLaunchedIn("claude-rig", s.cwd, null));
+
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+      expect(fs.existsSync(s.collector)).toBe(false);
+      expect(result.launchFolderUnrecorded).toEqual([`dev@claude-rig: ${s.cwd}`]);
+      expect(result.errors).toEqual([]);
+    });
+
+    it.each(["another rig's seat was launched there", "a sibling launched there failed to stop"] as const)(
+      "keeps a run folder's files while %s, and still cleans the saved folder", async (consumer) => {
+        const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+        const saved = claudeCwd(own), run = claudeCwd(own);
+        addHooks(run.settings, { Stop: [{ hooks: [{ type: "command", command: run.relay }] }] });
+        const before = fs.readFileSync(run.settings, "utf-8");
+        const rigId = claudeRigLaunchedIn("claude-rig", saved.cwd, run.cwd);
+        const tmux = mockTmux();
+        if (consumer === "another rig's seat was launched there") {
+          claudeRigLaunchedIn("other-rig", fs.mkdtempSync(path.join(tmpDir, "other-saved-")), run.cwd);
+        } else {
+          const sibling = rigRepo.addNode(rigId, "survivor", { runtime: "claude-code", cwd: fs.mkdtempSync(path.join(tmpDir, "survivor-saved-")) });
+          sessionRegistry.updateStatus(sessionRegistry.registerSession(sibling.id, "survivor@claude-rig", "initial", undefined,
+            { launchedCwd: run.cwd }).id, "running");
+          tmux.killSession = vi.fn(async target => target === "survivor@claude-rig"
+            ? { ok: false, code: "kill_failed", message: "tmux error" } : { ok: true });
+        }
+
+        await teardownWith(run.asset, tmux).teardown(rigId);
+
+        expect(fs.readFileSync(run.settings, "utf-8")).toBe(before);
+        expect(fs.readFileSync(run.collector, "utf-8")).toBe(COLLECTOR);
+        expect(fs.readFileSync(saved.settings, "utf-8")).toBe(own);
+        expect(fs.existsSync(saved.collector)).toBe(false);
+      });
+
+    // A launched seat's latest session can read detached while its terminal still runs (this server didn't show it). Until
+    // tmux reports it absent, its saved and launched folders are its own; once absent, its stop is recorded and both go.
+    it.each(["present", "absent"] as const)("a launched seat whose latest session reads detached and probes %s keeps or gives back both folders", async (state) => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const saved = claudeCwd(own), run = claudeCwd(own);
+      for (const s of [saved, run]) addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+      const before = [saved, run].map((s) => fs.readFileSync(s.settings, "utf-8"));
+      const rig = rigRepo.createRig("claude-rig");
+      const node = rigRepo.addNode(rig.id, "dev", { runtime: "claude-code", cwd: saved.cwd });
+      const session = sessionRegistry.registerSession(node.id, "dev@claude-rig", "initial", undefined, { launchedCwd: run.cwd });
+      sessionRegistry.updateStatus(session.id, "detached");
+      const tmux = mockTmux();
+      tmux.probeSession = vi.fn(async () => ({ state }));
+
+      await teardownWith(run.asset, tmux).teardown(rig.id);
+
+      const stopped = (db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(session.id) as { intentionally_stopped: number }).intentionally_stopped;
+      if (state === "present") {
+        expect([saved, run].map((s) => fs.readFileSync(s.settings, "utf-8"))).toEqual(before);
+        for (const s of [saved, run]) expect(fs.readFileSync(s.collector, "utf-8")).toBe(COLLECTOR);
+        expect(stopped).toBe(0);
+      } else {
+        for (const s of [saved, run]) {
+          expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+          expect(fs.existsSync(s.collector)).toBe(false);
+        }
+        expect(stopped).toBe(1);
       }
     });
 

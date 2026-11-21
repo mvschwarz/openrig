@@ -89,12 +89,14 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Finite Node-command grammar: canonical POSIX quotes or literal unquoted words.
- * Shell expansion/operators and wrappers remain user-owned, never managed commands. */
+/** Finite Node-command grammar: canonical POSIX quotes or literal unquoted words, optionally after one leading `exec`
+ * (the shape OpenRig generates since #3416, so `sh -c` becomes the Node process; the shape without it is what earlier
+ * versions wrote, and both stay OpenRig's). Shell expansion/operators and other wrappers remain user-owned, never
+ * managed commands. Keep in parity with settingsRelayPath in activity-relay.cjs. */
 export function parseManagedClaudeNodeCommand(command: string): { executable: string; args: string[] } | null {
   if (/[\r\n]/.test(command)) return null;
   const token = /'(?:[^']|'"'"')*'|[-A-Za-z0-9_./:@%+=,]+/.source;
-  const text = command.trim();
+  const text = command.trim().replace(/^exec[ \t]+/, "");
   if (!new RegExp(`^(?:${token})(?:[ \t]+(?:${token}))+$`).test(text)) return null;
   const tokens = text.match(new RegExp(token, "g"))!;
   const decoded = tokens.map(token => token.startsWith("'") ? token.slice(1, -1).split(`'"'"'`).join("'") : token);
@@ -102,4 +104,14 @@ export function parseManagedClaudeNodeCommand(command: string): { executable: st
   const executable = decoded[0]!;
   if (executable !== "node" && (!isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(basename(executable)))) return null;
   return { executable, args: decoded.slice(1) };
+}
+
+/** The Node command OpenRig generates for a managed Claude setting (the status line collector, the activity relay):
+ *  the pinned interpreter and its arguments, POSIX-quoted. `exec` lets `sh -c` become Node instead of waiting on it
+ *  (dash keeps the shell otherwise, #3416); the matchers still own the shape without it. */
+export function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
+  const quotedArgs = args.map(shellQuote).join(" ");
+  const pinned = `${shellQuote(executable)} ${quotedArgs}`;
+  // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar.
+  return `exec ${parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`}`;
 }

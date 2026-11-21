@@ -125,6 +125,7 @@ export function getLatestStartupFailedEvent(db: Database.Database, nodeId: strin
   stage?: StartupFailureStage;
   requestedResumeToken?: string | null;
   requestedResumeType?: string | null;
+  readinessCode?: string;
 } | null {
   const row = db.prepare(
     "SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1",
@@ -827,10 +828,10 @@ export class StartupOrchestrator {
         const hasPendingReadinessWork = getPendingReadinessWork();
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
-          return this.fail(input, "attention_required", errors, undefined, isFreshLaunch || (forkContext ?? false), undefined, false, "readiness_check", hasPendingReadinessWork);
+          return this.fail(input, "attention_required", errors, undefined, isFreshLaunch || (forkContext ?? false), undefined, false, "readiness_check", hasPendingReadinessWork, undefined, readiness.code);
         }
         errors.push(`Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
-        return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext ?? false, undefined, false, "readiness_check", hasPendingReadinessWork);
+        return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext ?? false, undefined, false, "readiness_check", hasPendingReadinessWork, undefined, readiness.code);
       }
     } catch (err) {
       if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "readiness_failed");
@@ -1106,7 +1107,8 @@ export class StartupOrchestrator {
 
       const remaining = timeoutMs - (Date.now() - startTime);
       if (remaining <= 0) {
-        return { ready: false, reason: result.reason ?? "readiness timeout" };
+        // The last check's code says what the pane was doing when time ran out (a harness that returned to a shell).
+        return { ready: false, reason: result.reason ?? "readiness timeout", ...(result.code ? { code: result.code } : {}) };
       }
 
       await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
@@ -1129,6 +1131,7 @@ export class StartupOrchestrator {
     stage?: StartupFailureStage,
     hasPendingWork?: boolean,
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
+    readinessCode?: string,
   ): StartupResult {
     if (input.firstInputPassed) {
       pendingContext = false;
@@ -1157,6 +1160,7 @@ export class StartupOrchestrator {
       requestedResumeToken: input.resumeToken ?? null,
       requestedResumeType: input.resumeType ?? null,
       ...(probe ? { probe } : {}),
+      ...(readinessCode ? { readinessCode } : {}),
     });
     return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}),
       ...(probe ? { probe } : {}),

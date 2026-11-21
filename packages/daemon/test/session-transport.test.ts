@@ -633,6 +633,49 @@ describe("SessionTransport", () => {
     expect(queue.getById(item.qitemId)?.lastNudgeResult).toBe("verified");
   });
 
+  it.each(["typed", "native"])("%s input with a delivery ID keeps the outbox optional without a guard", async route => {
+    const { node } = seedCanonicalRig();
+    db.prepare("UPDATE nodes SET input_route = ? WHERE id = ?").run(route, node.id);
+    expect(db.prepare("PRAGMA table_info(outbox_entries)").all()).toEqual([]);
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ sendText, sendKeys }), { sleep: async () => {} });
+
+    const result = await transport.send("dev-impl@my-rig", "optional history", { deliveryId: "optional-history" });
+
+    if (route === "typed") {
+      expect(result.ok).toBe(true);
+      expect(sendText).toHaveBeenCalledOnce();
+      expect(sendKeys).toHaveBeenCalledOnce();
+    } else {
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "guard_unavailable" });
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([true, false])("a native member with primary present=%s never falls back to unguarded typed input", async primaryPresent => {
+    migrate(db, ALL_MIGRATIONS);
+    const { node } = seedCanonicalRig();
+    const outbox = new OutboxHandler(db);
+    const input = { senderSession: "sender", destinationSession: "dev-impl@my-rig", body: "retained native" };
+    for (const outboxId of ["native-owner", "native-member"]) outbox.record({ ...input, outboxId });
+    outbox.admitRunner({ ...input, outboxId: "native-owner", nodeId: node.id, runId: "run-one", kind: "input",
+      inputRoute: "native", payload: { text: input.body }, memberIds: ["native-owner", "native-member"] });
+    if (!primaryPresent) db.prepare("DELETE FROM outbox_entries WHERE outbox_id = 'native-owner'").run();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ sendText, sendKeys }), { sleep: async () => {} });
+
+    const result = await transport.send(input.destinationSession, input.body, { deliveryId: "native-member", actorSession: input.senderSession });
+
+    expect(result).toMatchObject(primaryPresent
+      ? { ok: true, runnerReceipt: { requestId: "native-owner", stage: "pending" } }
+      : { ok: false, reason: "native_receipt_unavailable" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["a shell", "bash", "shell prompt", "target_runtime_unverified"],
     ["a numbered choice", "node", "› 1. Yes, continue\n  2. No, cancel\n\nPress enter to continue", "target_needs_input"],
@@ -2828,6 +2871,18 @@ describe("SessionTransport", () => {
       const facts = evidence();
       expect(facts.map((fact) => fact.messageId)).toEqual(["msg-1", "msg-1"]);
       expect(new Set(facts.map((fact) => fact.attemptId)).size).toBe(2);
+    });
+
+    it.each([
+      ["pending", {}, "none"], ["offered", {}, "unknown"], ["accepted", {}, "unknown"],
+      ["rejected", {}, "none"], ["submitted", {}, "submitted"], ["completed", {}, "submitted"],
+      ["completed", { result: { completion: "failed" } }, "submitted"],
+      ["completed", { result: { submissionUnknown: true } }, "uncertain"],
+      ["accepted", { reconciliation: "receiver_state_lost" }, "uncertain"],
+      ["submitted", { reconciliation: "native_ownership_unknown" }, "uncertain"],
+      ["pending", { erasedAt: "2026-11-16" }, "unknown"],
+    ])("native written evidence follows %s and its uncertainty (%j)", (stage, extra, fact) => {
+      expect(writtenFact({ ok: true, sessionName: "native@r", runnerReceipt: { stage, ...extra as object } } as Parameters<typeof writtenFact>[0])).toBe(fact);
     });
 
     it("reads what was written from each result shape, and nothing the result doesn't show", () => {

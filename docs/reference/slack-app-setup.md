@@ -33,8 +33,8 @@ not fill in; if so, follow the form.
 1. Open the link from `rig slack manifest --url` in a browser.
    > **Note on Slack's manifest dialog:** If opening the link results in an empty manifest `{}`
    > or Slack reports an error translating the manifest, copy the output of `rig slack manifest`
-   > (run without flags) and paste it directly into the **YAML** tab in Slack's "Create an app from
-   > an app manifest" dialog.
+   > (run without `--url`, and with `--private-channel` if you chose it) and paste it directly into
+   > the **YAML** tab in Slack's "Create an app from an app manifest" dialog.
 2. Sign in to Slack if asked, pick the workspace, review the prefilled manifest, and click
    **Next**, then **Create**. (If **Create** stays disabled, go **Back** and check that a
    development workspace is selected and the manifest step shows no error).
@@ -422,7 +422,11 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
 ## Reconnect recovery and status
 
 When a posted ask is answered, closed, canceled or replaced elsewhere, the connector edits its
-original primary message with the status, time, actor and closure note. Buttons become option
+original primary message with the status, time, actor and closure note. An answered ask's status
+names the chosen option (**Answered: Hold**); for a typed reply it says **Answered with a typed
+reply**, and the words stay in the thread's confirmation. When a decision is parked on the person
+again, each park's message names only what that park recorded, so an earlier park's message says
+**Answered**. Buttons become option
 text and the answer hint disappears; the remaining content and reconciliation marker stay as
 posted. Supplemental messages are unchanged. This adds no post or reaction and needs no agent
 turn. Separate resolution notices retain their existing behavior.

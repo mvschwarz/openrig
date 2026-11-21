@@ -6,6 +6,7 @@ import type { TranscriptIngestHealth, TranscriptStore } from "../domain/transcri
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { startTmuxTranscriptCapture } from "../domain/transcript-capture.js";
 import { redactTranscriptContent } from "../domain/transcript-redaction.js";
+import { TranscriptGrepTimeoutError } from "../domain/transcript-grep.js";
 
 interface SessionRow {
   node_id: string;
@@ -216,6 +217,11 @@ export function transcriptRoutes(): Hono {
       return c.json({ error: "Missing required query parameter: pattern" }, 400);
     }
 
+    // The scan runs the caller's regular expression over every line, so it happens on its own thread with
+    // a deadline: on the daemon's thread a catastrophic pattern would stop every other request and every
+    // sweep (domain/transcript-grep.ts). The pattern itself is not bounded here; a long regex is the
+    // caller's to write, and the deadline is what keeps it from costing the daemon.
+
     // Pre-validate regex
     try {
       new RegExp(pattern);
@@ -250,7 +256,16 @@ export function transcriptRoutes(): Hono {
       );
     }
 
-    const matches = transcriptStore.grep(resolution.rigName, sessionName, pattern);
+    let matches: string[] | null;
+    try {
+      matches = await transcriptStore.grep(resolution.rigName, sessionName, pattern);
+    } catch (err) {
+      // A scan that outlived its bound was ended; the request answers honestly instead of holding.
+      if (err instanceof TranscriptGrepTimeoutError) {
+        return c.json({ error: `Grep scan ended: ${err.message}. Try a narrower pattern.` }, 504);
+      }
+      throw err;
+    }
     if (matches === null) {
       return c.json({ error: transcriptIngestError(sessionName, ingestHealth), ingestHealth }, 503);
     }

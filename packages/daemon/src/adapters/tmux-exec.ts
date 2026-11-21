@@ -2,8 +2,10 @@ import { exec, execFile, spawn, type ChildProcessWithoutNullStreams } from "node
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
 import type { ArgvExecFn, ExecFn } from "./tmux.js";
-import { mayStartTmuxServer, reportTmuxServerLimit, TMUX_SERVER_LIMIT_PREFIX, tmuxServerStartCommand } from "../tmux-server-start.js";
+import { mayStartTmuxServer, reportTmuxServerLimit, startsServerOnly, TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS,
+  tmuxServerStartCommand } from "../tmux-server-start.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -15,8 +17,7 @@ export const TMUX_EXEC_TIMEOUT_MS = 30_000;
 // the explicit per-session config channel, never through the daemon's ambient credentials.
 function tmuxClientEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of ["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN", "OPENRIG_AUTH_BEARER_TOKEN",
-    "OPENRIG_TERMINAL_BEARER_TOKEN", "OPENRIG_RELAY_INBOUND_TOKEN", "OPENRIG_RELAY_OUTBOUND_TOKEN"]) delete env[key];
+  for (const key of Object.keys(env)) if (isTmuxCredentialEnvKey(key)) delete env[key];
   return env;
 }
 
@@ -107,7 +108,9 @@ function tmuxStartShell(cmd: string, replaceShell = false): string {
   const creating = process.platform !== "win32" && /^tmux\s/.test(cmd)
     && /(?:^|\s)(?:new-session|start-server|attach-session|-D)(?:\s|$)/.test(cmd.replaceAll("'", ""))
     ? TMUX_SERVER_LIMIT_PREFIX : "";
-  return creating + (replaceShell && /^tmux\s/.test(cmd) ? `exec ${cmd}` : cmd);
+  // #3253: the server a bare `tmux -D` start makes gets no session bus (Linux, where tmux may be built with systemd).
+  const noBus = process.platform === "linux" && replaceShell && startsServerOnly(cmd) ? TMUX_SERVER_NO_SESSION_BUS : "";
+  return creating + noBus + (replaceShell && /^tmux\s/.test(cmd) ? `exec ${cmd}` : cmd);
 }
 
 /** Replace the shell only for tmux clients; other adapter commands keep shell builtins such as kill. */

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { type PreparationFailure, type RestoreDeliveryFailure } from "./claude-compaction-enforcer.js";
+import { type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import { describeDefaultReceiver, resolveDefaultReceiver } from "./default-receiver.js";
@@ -9,7 +9,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 
-/** Recovery needs an independent agent whose address can hold a row, even when its seat is missing or stopped. */
+/** An eligible parent owns recovery; otherwise notify the person, or the receiver if person resolution fails. */
 function recoveryRecipient(db: Database.Database, queue: QueueRepository, session: string): { session: string; kind: "agent" | "human"; note: string } {
   const unusable = (candidate: string): string | null => {
     if (candidate === session || physicalSessionName(db, candidate) === physicalSessionName(db, session))
@@ -30,26 +30,31 @@ function recoveryRecipient(db: Database.Database, queue: QueueRepository, sessio
     }
     reasons.push(reason);
   }
-  let receiver = resolveDefaultReceiver(db);
-  if (receiver.session) {
-    const reason = unusable(receiver.session);
-    if (reason) {
-      reasons.push(reason);
-      receiver = resolveDefaultReceiver(db, () => ({ session: null, problem: reason }));
+  let person: string;
+  try { person = workflowHumanDestination(); }
+  catch (error) {
+    reasons.push(`The registered person could not be resolved: ${error instanceof Error ? error.message : String(error)}`);
+    let receiver = resolveDefaultReceiver(db);
+    if (receiver.session) {
+      const reason = unusable(receiver.session);
+      if (reason) {
+        reasons.push(reason);
+        receiver = resolveDefaultReceiver(db, () => ({ session: null, problem: reason }));
+      }
     }
+    if (receiver.session) {
+      const reason = unusable(receiver.session);
+      if (!reason) return { session: receiver.session, kind: "agent",
+        note: `${reasons.join("; ")}. Recovery owner: ${describeDefaultReceiver(receiver)} This is a receiver fallback, not the person's selection. This records ownership, not delivery or pickup.` };
+    }
+    throw error;
   }
-  if (receiver.session) {
-    const reason = unusable(receiver.session);
-    if (!reason) return { session: receiver.session, kind: "agent",
-      note: `Recovery owner: ${describeDefaultReceiver(receiver)} This records ownership, not delivery or pickup.` };
-    if (!reasons.includes(reason)) reasons.push(reason);
-  }
-  return { session: workflowHumanDestination(), kind: "human",
-    note: `${reasons.length ? `${reasons.join("; ")}. ` : ""}No independent recovery agent could be resolved, so this notice goes to the registered person.` };
+  return { session: person, kind: "human",
+    note: `${reasons.length ? `${reasons.join("; ")}. ` : ""}No eligible independent delegating parent could be resolved, so this notice goes to the registered person.` };
 }
 
 /** One existing diagnostic queue item per compaction attempt, also across restarts. */
-export async function reportRestoreDeliveryFailure(db: Database.Database, queue: QueueRepository, failure: RestoreDeliveryFailure): Promise<void> {
+export async function reportRestoreDeliveryFailure(db: Database.Database, queue: QueueRepository, failure: RestoreDeliveryFailure, options?: { completed: boolean }): Promise<void> {
   const { sessionName, attemptId, lastDelivery } = failure;
   const qitemId = `qitem-compaction-restore-${attemptId}`;
   const reason = [lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass].filter(Boolean).join("; ");
@@ -59,8 +64,27 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
     : "";
   const existing = queue.getById(qitemId);
   if (existing) {
-    // An owner's closed disposition stands. Changed evidence updates the same row without another wake.
-    if (["pending", "in-progress", "blocked"].includes(existing.state) && existing.summary !== summary) {
+    // A system completion settles the current sequence; a late compaction report may owe it again.
+    // Preserve owner dispositions, using the actual closing transition rather than a later receipt/note.
+    if (!["pending", "in-progress", "blocked"].includes(existing.state)) {
+      if (!lastDelivery.ok && existing.state === "done" && existing.closureReason === "no-follow-on"
+        && queue.closingTransition(qitemId, existing.state)?.actorSession === "system:compaction") {
+        queue.update({ qitemId, actorSession: "system:compaction", state: "pending", reopen: true, summary,
+          transitionNote: `${summary}. A re-owed sequence failed after this attempt's automatic completion; its earlier completion remains in the history.` });
+      }
+      return;
+    }
+    if (options?.completed && lastDelivery.ok && lastDelivery.stage === "compliance_prompt") {
+      const caveat = lastDelivery.reason === "delivered_over_unreadable_pane" ? " over an unreadable pane"
+        : lastDelivery.reason === "delivered_over_unreadable_input_box" ? " over an unreadable input box" : "";
+      const completed = `Managed restore for ${sessionName}: ${lastDelivery.stage} delivered at ${lastDelivery.at}${caveat}; current restore sequence delivered`;
+      const note = `${completed}. This records delivery, not proof the seat read it. A late compaction report can owe another sequence for this attempt. Previous notice: ${existing.summary ?? "restore delivery was owed"}`;
+      queue.update({ qitemId, actorSession: "system:compaction", state: "done", closureReason: "no-follow-on",
+        summary: completed, resolution: note, transitionNote: note });
+      return;
+    }
+    // Changed evidence updates the same row without another wake.
+    if (existing.summary !== summary) {
       queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: `${summary}. ${possibleWriteHold}`.trim() });
     }
     return;
@@ -78,6 +102,27 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
     body: recipient.kind === "human"
       ? `${summary}. ${recipient.note} OpenRig still owes this stage after repeated delivery failures, and its existing poll keeps retrying. This does not prove the compaction finished. On the OpenRig host, rig compact ${seat} --state shows the stage, why it waits and, when this compaction has one, its restore map. rig seat status ${seat} shows the seat. Do not issue another /compact. ${possibleWriteHold}To restore the seat yourself instead: read rig compact ${seat} --state first, then run rig compact ${seat} --cancel so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land). Then send the seat a restore request naming the restore map --state showed. If it showed none, because this compaction skipped its map, ask the seat to restore from its restore-pending marker, or from its own transcript if the marker is missing.`
       : `${summary}. ${recipient.note} OpenRig still owes this stage after repeated delivery failures. Please inspect the seat and decide whether intervention is needed. This does not prove native compaction finished. The existing poll retries with its delivery checks. Inspect rig compact ${shellQuote(sessionName)} --state --json and rig seat status ${shellQuote(sessionName)} before acting. Do not issue another /compact. Restore map: ${failure.mapPath}. The latest reason is in this item's summary and transition notes. Restore input follows ordinary delivery defaults: a draft can receive and submit the restore text unless the operator enabled draft protection. The seat's draft-aware mode and transport.draft_delivery=refuse keep their existing protections. A lost /compact result is not replayed. ${possibleWriteHold}To restore the seat yourself instead: first run rig compact ${shellQuote(sessionName)} --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land), then send the seat a restore request naming the restore map${failure.markerPath ? `, its restore-pending marker ${failure.markerPath}` : ""} and the packet the marker names.`,
+  });
+}
+
+/** One notice per attempt, also across restarts: its restore was delivered, but the seat's RESTORED note never appeared. */
+export async function reportRestoreUptakeUnknown(db: Database.Database, queue: QueueRepository, unknown: RestoreUptakeUnknown): Promise<void> {
+  const { sessionName, attemptId, mapPath, doneAt, waitedMinutes } = unknown;
+  const qitemId = `qitem-compaction-uptake-${attemptId}`;
+  if (queue.getById(qitemId)) return;
+  const recipient = recoveryRecipient(db, queue, sessionName);
+  const seat = shellQuote(sessionName);
+  const summary = `Managed restore for ${sessionName}: uptake unknown (no restore note ${waitedMinutes} minutes after the audit was sent)`;
+  const what = `OpenRig delivered this compaction's restore request and post-restore audit, the last at ${doneAt}. The audit asks the seat to write a RESTORED note beside its restore map, and none appeared within ${waitedMinutes} minutes. So whether the seat took up the restore is unknown: it may still be at the post-compaction boundary, or it may have restored without writing the note. Nothing failed that OpenRig can see, and OpenRig resends nothing.`;
+  await queue.create({
+    qitemId, sourceSession: sessionName,
+    destinationSession: recipient.session,
+    summary, wakeTrigger: "openrig",
+    tags: ["compaction", "restore-delivery", "restore-uptake", `attempt:${attemptId}`],
+    evidenceRef: recipient.kind === "agent" ? mapPath : null,
+    body: recipient.kind === "human"
+      ? `${summary}. ${recipient.note} ${what} Check the seat with rig seat status ${seat} and rig capture ${seat} on the OpenRig host. If it's still at the boundary, ask it to restore from its newest restore map.`
+      : `${summary}. ${recipient.note} ${what} Check the seat with rig seat status ${seat} and rig capture ${seat}. If it's still at the boundary, send it a restore request naming this map: ${mapPath}.`,
   });
 }
 

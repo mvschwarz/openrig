@@ -175,6 +175,8 @@ export interface SeatHandoverMutationResult {
   startedWithoutRequired?: string[];
   /** What the successor was told on taking the seat: its held messages, which are never replayed (#2431). */
   warnings?: string[];
+  /** #3253: the handover went ahead without the seat's requested process limit (the request stays stored). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). Nothing was typed into
    *  its pane; a context or priming packet the failed handover didn't deliver was not delivered either. */
   recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
@@ -186,9 +188,13 @@ export type SeatHandoverResult =
   | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported" | "resume_token_unavailable" | "fork_source_not_found"; message: string; guidance: string }
   | { ok: false; code: "address_conflict" | "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
-  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string }
+  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string;
+    /** #3253: the successor went on without the seat's requested process limit before the failure. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   // #2985: once the successor was launched in the respawned pane, the failure says so and names the pane.
-  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string }
+  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string;
+    /** #3253: the respawned pane went on without the seat's requested process limit before the failure. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   // #2985: `--recover` found nothing to adopt, or could not prove the pane's process is the failed handover's successor.
   | { ok: false; code: "no_handover_to_recover" | "handover_attempt_superseded" | "successor_identity_unproven" | "recover_runtime_unsupported"; message: string; guidance: string }
   | Extract<SeatStatusResult, { ok: false }>;
@@ -666,7 +672,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}), claudePermissions: permissionOverride.claudePermissions, claudeMcp, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}), claudePermissions: permissionOverride.claudePermissions, claudeAutoMode: permissionOverride.claudeAutoMode, claudeMcp, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -678,6 +684,8 @@ export class SeatHandoverService {
       },
     });
     if (!launch.ok) {
+      // #3253: a respawn that went on without the seat's limit says so in the failure too.
+      const limitsFailure = launch.processLimits ? { processLimits: launch.processLimits } : {};
       // #2985: the harness was launched into the respawned pane and only readiness failed. The previous occupant is
       // already ended and the successor may come up (or already be working) there, but the handover never commits,
       // so its generation is never registered. Retrying the handover would end it, so the guidance says what may be
@@ -703,9 +711,10 @@ export class SeatHandoverService {
           message: `Handover failed at step "${launch.step}": ${launch.message}`,
           replacementStarted: true,
           ...(launch.tmuxPane ? { successorPane: launch.tmuxPane } : {}),
-          guidance: recorded
+          ...limitsFailure,
+          guidance: (recorded
             ? `${this.recoverLine(quoted)} ${unadoptedNote}`
-            : unadoptedNote,
+            : unadoptedNote),
         };
       }
       return {
@@ -715,9 +724,10 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: launch.code === "successor_preflight_failed"
+        ...limitsFailure,
+        guidance: (launch.code === "successor_preflight_failed"
           ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
-          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry."),
       };
     }
 
@@ -769,6 +779,7 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-restore-packet": ${delivered.message}`,
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
           guidance: recorded
             ? `${this.recoverLine(shellQuote(latestSession.session_name))} The successor candidate was unwound and the seat's binding is unchanged. The successor is live in pane "${launch.tmuxPane}" without its restore packet; ${NO_RETRY}`
             : "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
@@ -852,6 +863,7 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-rebuild-priming": ${delivered.message}`,
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
           guidance: recorded
             ? `${this.recoverLine(shellQuote(latestSession.session_name))} The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; ${NO_RETRY}`
             : "The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; retry only after tmux delivery is healthy.",
@@ -888,6 +900,7 @@ export class SeatHandoverService {
       launchAdditionNotes,
       startedWithoutRequired,
       launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
+      ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
       // #2861 item 2: finalization can still fail once the successor is ready in the respawned pane.
       recordFailure: (failureCode) => RECOVERABLE_FINALIZE_CODES.has(failureCode) && this.recordUnadoptedSuccessor({ node,
@@ -1032,9 +1045,9 @@ export class SeatHandoverService {
   }
 
   /** #2985: the pane's one foreground Claude is the attempt's launch: it names exactly the session id the daemon
-   *  generated for it, the same process in two samples, in the seat session's only pane, with an unchanged PID (as
-   *  `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt, never from the
-   *  process. Reads only. */
+   *  generated for it, the same process in two samples, in the only pane of the seat session's current window, with an
+   *  unchanged PID (as `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt,
+   *  never from the process. Reads only. */
   private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true; onLaunchConversation?: true } | { ok: false; message: string; unprovable?: true }> {
     const first = await this.proveAttemptSuccessorOnce(attempt, cwd);
     if (first.ok || !first.unprovable) return first;
@@ -1055,10 +1068,19 @@ export class SeatHandoverService {
   private async proveAttemptSuccessorOnce(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true; onLaunchConversation?: true } | { ok: false; message: string; unprovable?: undefined } | { ok: false; message: string; unprovable: true; foreground: string }> {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
+    // The launch's own rule: the successor is the only pane of the session's current window (tmux list-panes without -s),
+    // the window a send to the session's name reaches and the readiness check reads. Other windows don't count.
     const onlyPane = async () => {
-      // Every window of the session (tmux list-panes -s): a pane in another window is a second pane too.
-      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession, true);
+      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession);
       return panes.length === 1 && panes[0]?.id === attempt.pane;
+    };
+    // Why not: a successor alone in a window that isn't the current one is still there, and selecting it is the person's.
+    const notOnlyPane = async () => {
+      const inSession = (await this.tmuxAdapter.listPanes(attempt.canonicalSession, true)).some((pane) => pane.id === attempt.pane);
+      const ownWindow = inSession ? await this.tmuxAdapter.listPanes(attempt.pane) : [];
+      return ownWindow.length === 1 && ownWindow[0]?.id === attempt.pane
+        ? `Pane "${attempt.pane}" of ${attempt.canonicalSession} is alone in its window, but that window isn't the session's current window, where sends to the seat and the readiness check go. In tmux, select the successor's window, then run the recovery again.`
+        : `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}'s current window, where the failed handover launched its successor.`;
     };
     // #3044 review S1: proven as the adapter's readiness proves the launch (claude-code-adapter assessManagedProbe): with
     // its frozen executable and, for a #! wrapper that starts Claude without exec (#2341), as the script's child.
@@ -1068,9 +1090,7 @@ export class SeatHandoverService {
       ?? (() => listNativeProcesses({ claudeLaunchPaths: scriptLaunch, frozenExecutable: selectedExecutable }));
     const proofInput = { target: attempt.pane, tmux: this.tmuxAdapter, listProcesses: list, expectedToken: token, selectedExecutable, scriptLaunch };
     try {
-      if (!await onlyPane()) {
-        return { ok: false, message: `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}, where the failed handover launched its successor.` };
-      }
+      if (!await onlyPane()) return { ok: false, message: await notOnlyPane() };
       const native = await verifyClaudePaneProcess(proofInput);
       if (!native) {
         const panePid = await this.tmuxAdapter.getPanePid(attempt.pane);
@@ -1103,9 +1123,9 @@ export class SeatHandoverService {
       // proven process says the current one (read only, as the resume refresher reads it), bracketed by a third equal
       // observation of the same process.
       const configDir = nodePath.resolve(cwd ?? process.cwd(), claudeConfigRootFor(this.db, attempt.nodeId));
-      const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt, sessionName: attempt.canonicalSession });
+      const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt });
       // #3044 review (:1050): a file that confirms the launch's conversation changes nothing; one that can't be read (missing,
-      // older than the process, of another session, or a Claude that writes none) leaves the launch's conversation as the
+      // older than the process, or a Claude that writes none) leaves the launch's conversation as the
       // record, said as unconfirmed, never a refusal. The fork parent its launch named comes from the proven argv either
       // way: only the session file is unread (#3246 review).
       const launched = claudeCommandForkParent(native.process.command ?? "");
@@ -1238,13 +1258,15 @@ export class SeatHandoverService {
       { tmux_pane: string | null } | undefined)?.tmux_pane?.trim() || null;
     let processNow: string | null = null;
     if (pane) try {
+      const belongsToParent = async () => (await this.tmuxAdapter.listPanes(records.sessionName, true)).some(candidate => candidate.id === pane);
+      if (!(await belongsToParent())) return { process: null, telemetry: records.telemetry, resumeToken: records.resumeToken };
       const input = { target: pane, tmux: this.tmuxAdapter, listProcesses: this.injectedListProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (first) {
         const configDir = nodePath.resolve(records.nodeCwd ?? process.cwd(), claudeConfigRootFor(this.db, records.nodeId));
-        const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt, sessionName: records.sessionName });
+        const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt });
         const again = read ? await observeClaudePaneRuntime(input) : null;
-        if (read && again?.fingerprint === first.fingerprint) processNow = read;
+        if (read && again?.fingerprint === first.fingerprint && await belongsToParent()) processNow = read;
       }
     } catch { processNow = null; }
     return { process: processNow, telemetry: records.telemetry, resumeToken: records.resumeToken };
@@ -1354,14 +1376,18 @@ export class SeatHandoverService {
     startedWithoutRequired?: string[];
     /** #2426: what the successor's preparation named, as a launch's warnings (what became of openrig-core's earlier copies). */
     launchWarnings?: string[];
+    /** #3253: the launch went ahead without the seat's requested process limit. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
     cleanup: (() => Promise<void>) | null;
     /** #2861 item 2: records the failed attempt of a composer-launched successor (returns whether it was recorded). */
     recordFailure?: (failureCode: string) => boolean;
     /** #2985: this finalization adopts the running successor of a failed handover (`--recover`). */
     recovered?: { attempt: SeatHandoverAttempt; continuity?: "resumed"; conversationUnconfirmed?: string };
   }): Promise<SeatHandoverResult> {
-    const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
+    const fail = async (refused: SeatHandoverResult): Promise<SeatHandoverResult> => {
       if (input.cleanup) await input.cleanup();
+      // #3253: a successor that went on without the seat's limit says so, also when its finalization fails.
+      const result = !refused.ok && input.processLimits ? { ...refused, processLimits: input.processLimits } as SeatHandoverResult : refused;
       if (!result.ok && input.recordFailure?.(result.code) && "guidance" in result) {
         // #3044 review S6: the refusal's own guidance (retry, or discovered-source advice) would end the running
         // successor; the message already says what refused, so the recovery leads.
@@ -1505,6 +1531,7 @@ export class SeatHandoverService {
     }
     // #2426: the successor's preparation is named on the result, as a launch names it.
     if (input.launchWarnings?.length && "result" in committed) committed.result.warnings = [...(committed.result.warnings ?? []), ...input.launchWarnings];
+    if (input.processLimits && "result" in committed) committed.result.processLimits = input.processLimits;
     return committed;
   }
 
@@ -1914,6 +1941,8 @@ export class SeatHandoverService {
       // Keep the handover tenure/ready registration; only discovered successors are adopted.
       if (input.reportedSource.mode !== "discovered") {
         this.db.prepare("UPDATE sessions SET origin = 'launched' WHERE id = ?").run(newSession.id);
+        // It was launched in the seat's saved folder (the successor launch's node.cwd).
+        this.sessionRegistry.recordLaunchedCwd(newSession.id, input.node.cwd);
       }
       // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.
       const tenure = this.readOccupantTenure(input.node.id);

@@ -1,12 +1,12 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readProcessTable, readProcTable } from "../src/domain/process-table.js";
+import { readProcChildren, readProcessChildrenNow, readProcessTable, readProcessTableCensusNow, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
 import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
-import { restoreProc, serveProcRoot, writeFakeProc } from "./helpers/fake-proc.js";
+import { restoreProc, serveProcRoot, writeFakeProc, readPermissionHiddenProc } from "./helpers/fake-proc.js";
 
 let scratch: string | undefined;
 afterEach(() => {
@@ -61,11 +61,11 @@ describe("readProcTable", () => {
       42: { stat: stat(42, "sh", "Z", 40, 41, 41, 360_099), cmdline: "" },
     });
     expect((await readProcTable(root)).sort((a, b) => a.pid - b.pid)).toEqual([
-      { pid: 1, ppid: 0, pgid: 1, tpgid: -1, executableName: "systemd", startedAt: "Tue Oct  6 09:00:12 2026", command: "/sbin/init splash" },
-      { pid: 2, ppid: 0, pgid: 0, tpgid: -1, executableName: "kworker/u32:4-e", startedAt: "Tue Oct  6 09:00:00 2026", command: "[kworker/u32:4-events_unbound]" },
-      { pid: 40, ppid: 1, pgid: 40, tpgid: -1, executableName: "tmux: server (x", startedAt: "Tue Oct  6 09:05:01 2026", command: "tmux new-session -d" },
-      { pid: 41, ppid: 40, pgid: 41, tpgid: 41, executableName: "claude", startedAt: "Tue Oct  6 10:00:00 2026", command: "claude --resume tok-1 a.b x y ??" },
-      { pid: 42, ppid: 40, pgid: 41, tpgid: 41, executableName: "sh", startedAt: "Tue Oct  6 10:00:00 2026", command: "[sh] <defunct>" },
+      { pid: 1, ppid: 0, pgid: 1, tpgid: -1, executableName: "systemd", state: "S", startedAt: "Tue Oct  6 09:00:12 2026", command: "/sbin/init splash" },
+      { pid: 2, ppid: 0, pgid: 0, tpgid: -1, executableName: "kworker/u32:4-e", state: "I", startedAt: "Tue Oct  6 09:00:00 2026", command: "[kworker/u32:4-events_unbound]" },
+      { pid: 40, ppid: 1, pgid: 40, tpgid: -1, executableName: "tmux: server (x", state: "S", startedAt: "Tue Oct  6 09:05:01 2026", command: "tmux new-session -d" },
+      { pid: 41, ppid: 40, pgid: 41, tpgid: 41, executableName: "claude", state: "S", startedAt: "Tue Oct  6 10:00:00 2026", command: "claude --resume tok-1 a.b x y ??" },
+      { pid: 42, ppid: 40, pgid: 41, tpgid: 41, executableName: "sh", state: "Z", startedAt: "Tue Oct  6 10:00:00 2026", command: "[sh] <defunct>" },
     ]);
   });
 
@@ -118,7 +118,7 @@ describe("readProcTable", () => {
     // A process that exited between its stat and its command line.
     fs.rmSync(path.join(root, "8", "cmdline"));
     expect(await readProcTable(root)).toEqual([
-      { pid: 7, ppid: 1, pgid: 7, tpgid: 7, executableName: "node", startedAt: expect.any(String), command: "[node]" },
+      { pid: 7, ppid: 1, pgid: 7, tpgid: 7, executableName: "node", state: "S", startedAt: expect.any(String), command: "[node]" },
     ]);
   });
 
@@ -151,6 +151,35 @@ describe("readProcTable", () => {
     await expect(readProcTable(root)).rejects.toThrow(/8\/stat: EISDIR/);
   });
 
+  it("reports permission-hidden stats without changing the row-only listing", async () => {
+    const root = fakeProc(0, {
+      7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" },
+      8: { stat: stat(8, "node", "S", 7, 7, 7, 0), cmdline: "node\0" },
+    });
+    fs.chmodSync(path.join(root, "8", "stat"), 0);
+    const census = await readPermissionHiddenProc(root, 8);
+    expect(census.permissionHiddenPids).toEqual([8]);
+    expect(census.rows.map((row: { pid: number }) => row.pid)).toEqual([7]);
+    if (process.getuid?.() !== 0) expect((await readProcTable(root)).map(row => row.pid)).toEqual([7]);
+    fs.rmSync(path.join(root, "8", "stat"));
+    expect((await readProcCensus(root)).permissionHiddenPids).toEqual([]);
+  });
+
+  it("reads each process's state, so a zombie codex under the live Codex isn't taken for the seat", async () => {
+    const token = "00000000-0000-7000-8000-000000000002";
+    const started = "Sat Jan  1 12:00:00 2000";
+    const root = writeFakeProc([
+      { pid: 40, ppid: 1, pgid: 40, tpgid: 41, name: "sh", startedAt: started, command: "sh" },
+      { pid: 41, ppid: 40, pgid: 41, tpgid: 41, name: "codex", startedAt: started, command: "", argv: ["codex", "resume", token] },
+      { pid: 42, ppid: 41, pgid: 41, tpgid: 41, name: "codex", startedAt: started, command: "", state: "Z" },
+    ]);
+    serveProcRoot(root);
+    const zombie = (await readProcTable(root)).find(row => row.pid === 42);
+    expect(zombie).toMatchObject({ state: "Z", command: "[codex] <defunct>" });
+    expect((await verifyCodexPaneProcess({ target: "%1", tmux: { getPanePid: async () => 40 },
+      expectedToken: token, requireResume: true }))?.process.pid).toBe(41);
+  });
+
   it("rejects when there is no process table to read", async () => {
     await expect(readProcTable(path.join(os.tmpdir(), "openrig-no-proc-here"))).rejects.toThrow();
   });
@@ -164,14 +193,86 @@ describe("readProcTable", () => {
   });
 });
 
+describe("readProcChildren", () => {
+  /** A thread's children file under the fake process 7, or (null) the thread's directory alone. */
+  const thread = (root: string, tid: number, children: string | null) => {
+    fs.mkdirSync(path.join(root, "7", "task", String(tid)), { recursive: true });
+    if (children !== null) fs.writeFileSync(path.join(root, "7", "task", String(tid), "children"), children);
+  };
+
+  it("lists the children every thread started, as the kernel writes them, skipping a thread with no file", async () => {
+    const root = fakeProc(0, { 7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" } });
+    thread(root, 7, "8 9 ");
+    thread(root, 70, "10 ");
+    thread(root, 71, null);
+    expect((await readProcChildren(7, root))?.sort((a, b) => a - b)).toEqual([8, 9, 10]);
+    thread(root, 7, "");
+    thread(root, 70, "");
+    expect(await readProcChildren(7, root)).toEqual([]);
+  });
+
+  it("is null where no thread has the file, and rejects when the threads or a file can't be read", async () => {
+    const root = fakeProc(0, { 7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" } });
+    // The process is gone, or its threads can't be listed.
+    await expect(readProcChildren(7, root)).rejects.toThrow(/ENOENT/);
+    // A kernel without CONFIG_PROC_CHILDREN.
+    thread(root, 7, null);
+    expect(await readProcChildren(7, root)).toBeNull();
+    // A file that exists but can't be read (EISDIR here, as root reads past a permission).
+    fs.mkdirSync(path.join(root, "7", "task", "7", "children"));
+    await expect(readProcChildren(7, root)).rejects.toThrow(/EISDIR/);
+  });
+
+  it("names a child this process started, on Linux, and nothing elsewhere", async () => {
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      const children = await readProcessChildrenNow(process.pid);
+      if (process.platform === "linux") expect(children).toContain(child.pid);
+      else expect(children).toBeNull();
+    } finally {
+      child.kill();
+    }
+  });
+});
+
 describe("readProcessTable", () => {
   it("shares one read among the callers that ask while it runs, and reads again after", async () => {
     const first = readProcessTable();
     expect(readProcessTable()).toBe(first);
-    await first;
+    const census = readProcessTableCensus();
+    expect(readProcessTableCensus()).toBe(census);
+    expect((await census).rows).toBe(await first);
     const second = readProcessTable();
     expect(second).not.toBe(first);
     await second;
+  });
+
+  it("a census for evidence begins its own read, joining none in flight, and keeps its hidden pids", async () => {
+    const shared = readProcessTableCensus();
+    const now = readProcessTableCensusNow(), again = readProcessTableCensusNow();
+    expect(now).not.toBe(shared);
+    expect(again).not.toBe(now);
+    expect(readProcessTableCensus()).toBe(shared);
+    const [sharedCensus, nowCensus] = await Promise.all([shared, now, again]);
+    expect(nowCensus.rows).not.toBe(sharedCensus.rows);
+    expect(nowCensus.rows.some((row) => row.pid === process.pid)).toBe(true);
+    expect(Array.isArray(nowCensus.permissionHiddenPids)).toBe(true);
+  });
+
+  it("clears both shared accessors after a failed census so a later read can recover", async () => {
+    const root = fakeProc(0, { 7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" } });
+    serveProcRoot(path.join(root, "missing"));
+    const rows = readProcessTable(), census = readProcessTableCensus();
+    expect(readProcessTable()).toBe(rows);
+    expect(readProcessTableCensus()).toBe(census);
+    const failures = await Promise.allSettled([rows, census]);
+    expect(failures.map(result => result.status)).toEqual(["rejected", "rejected"]);
+    serveProcRoot(root);
+    const recoveredRows = readProcessTable(), recoveredCensus = readProcessTableCensus();
+    expect(recoveredRows).not.toBe(rows);
+    expect(recoveredCensus).not.toBe(census);
+    expect((await recoveredCensus).rows).toBe(await recoveredRows);
+    expect((await recoveredRows).map(row => row.pid)).toEqual([7]);
   });
 
   it.runIf(process.platform === "linux")("spawns no ps for either lister on Linux", async () => {

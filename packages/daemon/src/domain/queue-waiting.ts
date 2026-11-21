@@ -5,7 +5,9 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { nextDueAt } from "./watchdog-due.js";
+import { isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 import type { WatchdogJob } from "./watchdog-jobs-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy" | "backgroundWork"> | null;
 
@@ -86,6 +88,15 @@ export class WaitingStatements {
     }
     return known;
   }
+}
+
+/** Whether a row's stored tags (a JSON array, or null) carry every one of `wanted`. */
+function hasTags(tags: string | null, wanted: string[]): boolean {
+  if (!tags) return false;
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed) && wanted.every(t => parsed.includes(t));
+  } catch { return false; }
 }
 
 /** The queue_items columns a waiting view reads from its own row. */
@@ -182,13 +193,22 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     view.nextBackstop.owner = recoveryOwner ?? row.destination_session;
     view.nextBackstop.dueAt = base ? new Date(Date.parse(base) + delay * 1000).toISOString() : null;
     view.nextBackstop.mechanism = row.state === "pending" ? "queue-stuck-sweep:unclaimed" : "queue-stuck-sweep:pickup (activity checked at detection)";
+    // A queue-only seat's cold watchdog reminder (#3076) waits, with no nudge, for a person or the seat's next turn; the
+    // stuck sweep files no unclaimed finding for it, so none is promised here.
+    if (row.state === "pending" && row.source_session === "watchdog@system" && hasTags(row.tags, ["watchdog", "queue-only"])) {
+      view.nextBackstop = { owner: row.destination_session, dueAt: null, intervalSeconds: null,
+        mechanism: "none (queue-only reminder row: it waits for someone to pick it up or for the agent's next ordinary turn; no timed sweep)" };
+    }
   }
   if (row.state === "blocked") {
     const hasTimers = statements.hasTable("queue_transition_wakes");
-    const timer = hasTimers ? statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
+    const timer = hasTimers ? readWithCurrentParkBoundary(boundary => statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
       FROM queue_transition_wakes w JOIN watchdog_jobs j ON j.job_id = w.wake_ref
       WHERE w.qitem_id = ? AND w.phase = 'armed' AND j.state = 'active'
-      ORDER BY w.transition_id DESC LIMIT 1`).get(id) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
+        AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+          WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+        ${boundary}
+      ORDER BY w.transition_id DESC LIMIT 1`).get(id)) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
     // The scheduler's own due time: a never-evaluated reminder fires one interval after registration (#801),
     // and the wake-now marker is due now (#860).
     const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,
@@ -205,7 +225,9 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
         notice = state?.notice;
         if (state?.evidence?.attention?.scope && state.attentionRevision) view.attention = { scope: state.evidence.attention.scope, revision: state.attentionRevision, source: "last observed by wait timer" };
       } catch { /* operator YAML has no queue notice */ }
-      if (notice) view.nextBackstop = { owner: recoveryOwner ?? row.source_session, mechanism: `unconsumed wait notice; delivery=${notice.deliveryStatus}`, intervalSeconds: sweepInterval,
+      // A queue-only seat's notice (#3076) was noted on the row or became a queue row: held at the seat, and the stuck
+      // sweep files no unconsumed-wait finding for it. The timer stays the backstop.
+      if (notice && !isQueueOnlyDeliveryCode(notice.deliveryStatus)) view.nextBackstop = { owner: recoveryOwner ?? row.source_session, mechanism: `unconsumed wait notice; delivery=${notice.deliveryStatus}`, intervalSeconds: sweepInterval,
         dueAt: new Date(Date.parse(notice.at) + resolvePickupThresholdMinutes() * 60_000).toISOString() };
     }
   }

@@ -54,6 +54,9 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
+>     Activity hooks use a daemon-owned relay copy under `OPENRIG_HOME/runtime/assets/`. Existing hooks migrate
+>     once to that stable path; moving the same OpenRig version to another Node installation then leaves hook
+>     commands and trust records unchanged. The daemon refreshes the copy from its own shipped relay at startup.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
 >     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
 >     and status line back out once no Claude seat uses that directory.
@@ -182,33 +185,44 @@ user.
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
 `~/.claude/skills` and `~/.agents/skills` when the daemon starts. For a new install, add it with the command for the
-agent doing the setup. Both use this release's tag:
+agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.16/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.16/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent pi
 ```
+
+**OMP:** this pin installs the shared skill only. The `v0.7.20` skill does not yet include OMP attachment guidance,
+and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
+`/reload-plugins` first.
 
 If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
 after `tree/` with it, including its `v` prefix. `rig --version` prints the version and a commit, for example
 `0.6.11 (379f0a0d)`; the tag is `v0.6.11`. The skill is in the repository from v0.6.6; on an older install, use the
 v0.6.6 tag or upgrade first.
 
-These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
+A Claude Code session that was already running doesn't see a skills folder created after it started: neither the
+project's `.claude/skills` that this command adds nor the `~/.claude/skills` the daemon fills on its first start. In
+that session, type `/reload-skills` (Claude Code 2.1.152 or later), or start a new one, before `/rigs`.
+
+The Claude Code and Codex lines are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 
 **One command, for the full setup.** It needs Node.js 22 or 24 with npm already installed. The preview prints what the
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.16/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.16/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -389,6 +403,20 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+Restore requests run one at a time by default. To keep up to two requests
+outstanding, for example, use `rig start --last --concurrency 2`. A request that
+times out can keep running in the daemon, so more than two restores can still be
+running; check `rig ps` before retrying. Each rig reports its own result, and
+interactive fresh-start decisions remain serialized.
+
+To deliberately start individual seats with fresh conversations during a multi-rig
+restore, name each logical ID and rig: `rig start --last --fresh '<logical-id>@<rig-name>'`.
+Every named seat must belong to one selected rig. Use its rig ID when names are
+ambiguous. Unknown or ambiguous seats stop the selected-rig restore before it starts.
+An externally attached seat is left attached and reported as not fresh. With
+`--last`, a seat in a running or deliberately stopped rig is reported as skipped;
+other selected rigs still restore. Other seats use their normal restore behavior.
 
 An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
 restore to finish, then replaces only the named seats that still hold the exact
@@ -925,6 +953,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
 | Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when that start finds all of its seats lost; a kernel that was already down before the reboot stays down, and `rig start` names `rig up kernel --existing`. Check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| OpenRig's home moved (a new `HOME`, account or machine), and restoring an existing rig reports that no rig was found | A shell that exports `OPENRIG_HOME` (legacy `RIGGED_HOME`) or `OPENRIG_DB` still points `rig` and any daemon it starts at the old home, and a daemon started there makes an empty home at that path. Run `rig daemon stop` from that shell first. Then point `OPENRIG_HOME` at the new home folder and `OPENRIG_DB` at the database file in it, or unset them (an unset `OPENRIG_HOME` follows `HOME`), and start the daemon again. A seat whose saved folder isn't on this machine starts in another folder, which the restore names when it can read the seat's terminal; to choose the folder, run `rig up <rig> --existing --cwd <dir>`. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
 

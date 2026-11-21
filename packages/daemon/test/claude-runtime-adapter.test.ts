@@ -12,6 +12,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 
 const probeEvidence = expect.objectContaining({
   status: expect.any(String), code: expect.any(String),
@@ -53,6 +54,55 @@ function makeBinding(cwd = "/project"): NodeBinding {
     cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd,
   };
 }
+
+it("shares a poll's Claude idle-shell listings without collapsing each two-sample proof", async () => {
+  let reads = 0;
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  const listProcesses = vi.fn(async () => {
+    reads++;
+    return [900, 910, 920].map((pid) => ({
+      pid, ppid: 1, pgid: pid, tpgid: pid === 910 && reads === 3 ? 911 : pid,
+      executableName: "bash", command: "/bin/bash", startedAt,
+    }));
+  });
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "$ ");
+  tmux.getPanePid = vi.fn(async (target) => Number(target));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses });
+  const pass = new ObservationPass({ now: () => 0 });
+  const codes = [];
+  for (const pid of [900, 910, 920]) {
+    const result = await adapter.checkReady({ ...makeBinding(), tmuxSession: String(pid) }, { observationPass: pass });
+    codes.push("code" in result ? result.code : "ready");
+  }
+  expect(codes).toEqual(["returned_to_shell", "awaiting_runtime", "returned_to_shell"]);
+  expect(reads).toBe(4);
+});
+
+it("reduces enumerations for a sequential poll of Claude idle shells", async () => {
+  const rows = Array.from({ length: 90 }, (_, i) => ({
+    pid: 1000 + i, ppid: 1, pgid: 1000 + i, tpgid: 1000 + i,
+    executableName: "bash", command: "/bin/bash", startedAt: "Sat Jan  1 12:00:00 2000",
+  }));
+  const listProcesses = vi.fn(async () => rows);
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "$ ");
+  tmux.getPanePid = vi.fn(async (target) => Number(target));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses });
+  const poll = async (pass?: ObservationPass) => {
+    for (let pid = 1000; pid < 1090; pid++) {
+      const result = await adapter.checkReady({ ...makeBinding(), tmuxSession: String(pid) }, pass ? { observationPass: pass } : undefined);
+      expect(result).toMatchObject({ ready: false, code: "returned_to_shell" });
+    }
+  };
+  await poll();
+  expect(listProcesses).toHaveBeenCalledTimes(180);
+  listProcesses.mockClear();
+  await poll(new ObservationPass({ now: () => 0 }));
+  expect(listProcesses).toHaveBeenCalledTimes(91);
+});
 
 function makeEntry(overrides?: Partial<ProjectionEntry>): ProjectionEntry {
   return {
@@ -100,6 +150,26 @@ it("the pod-aware managed continuation retains custom options and the current re
   await adapter.launchHarness({ ...makeBinding(), permissionMode: "auto", claudeExecutable: "/native/claude", claudeLaunch: launch }, { name: "seat", resumeToken: "same" });
   expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationConfigDir: launch.configDir }), "auto");
   expect(command).toHaveBeenCalledWith([...launch.args, "--permission-mode", "auto", "--resume", "same"], { OPENRIG_RESUME_LAUNCH: "same" });
+});
+
+it.each([
+  ["replaces the running block with the saved one", { environment: ["$defaults", "Saved B"] }],
+  ["drops the running block after a clear", undefined],
+  ["drops the running block when the saved one can't be read", { unreadable: "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it." }],
+] as const)("a managed continuation from captured arguments %s, and records what it sent", async (_label, choice) => {
+  const tmux = mockTmux();
+  tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+  const command = vi.fn((_args: string[]) => "private-launch");
+  const prepare = vi.fn(async () => ({ command, assertCurrent: () => {}, warnings: [] }));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, claudeManagedLaunch: { prepare } as never });
+  const running = { permissions: { deny: ["Read(./private/**)"] }, autoMode: { environment: ["Running A"] } };
+  const launch = { args: ["--settings", JSON.stringify(running), "--model", "opus"], configDir: null, warnings: [] };
+  const result = await adapter.launchHarness({ ...makeBinding(), permissionMode: "auto", claudeExecutable: "/native/claude", claudeLaunch: launch,
+    ...(choice ? { claudeAutoMode: choice as never } : {}) }, { name: "seat", resumeToken: "same" });
+  const sent = command.mock.calls[0]![0];
+  const block = choice && !("unreadable" in choice) ? choice : undefined;
+  expect(JSON.parse(sent[sent.indexOf("--settings") + 1]!)).toEqual({ permissions: running.permissions, ...(block ? { autoMode: block } : {}) });
+  expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: block ?? null } });
 });
 
 // 51-07 A1 — a per-agent model declared in the spec must reach the claude launch command.
@@ -1322,7 +1392,7 @@ describe("Claude Code runtime adapter", () => {
       ok: true,
       resumeToken: "abc-123",
       resumeType: "claude_id",
-      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments" },
+      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments", claudeAutoMode: null },
     });
     expect(tmux.sendKeys).toHaveBeenCalledTimes(2);
     expect(tmux.sendKeys).toHaveBeenNthCalledWith(2, "r01-impl", ["Enter"]);
@@ -1354,7 +1424,7 @@ describe("Claude Code runtime adapter", () => {
       ok: true,
       resumeToken: "abc-123",
       resumeType: "claude_id",
-      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments" },
+      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits", reason: "emitted_launch_arguments", claudeAutoMode: null },
     });
   });
 

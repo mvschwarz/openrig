@@ -56,7 +56,7 @@ member, so it checks its rows again.
 
 The server tells the member this in its MCP instructions. The text is versioned, so you can check which version a tool received:
 
-> Member workflow (member-workflow/v2). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
+> Member workflow (member-workflow/v3). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. An item titled "Checked on …" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself. Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
 
 ## Ring it when work lands
 
@@ -72,6 +72,22 @@ entry. The entry holds secret names, never values:
   - `authorization_ref`, when the tool needs one, names the secret holding the `Authorization` header value.
   - Credentials in the URL itself (`https://user:pass@host/…`) are sent as Basic `Authorization` instead, unless
     `authorization_ref` is set: then its value is sent, and the URL's credentials are dropped.
+  - `signing_secret_ref`, when the trigger verifies signed webhooks, names the secret holding a
+    [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
+    signing secret.
+    - **Use the `whsec_` form** (`whsec_` followed by base64): the sender and the receiver both decode it to the same
+      key.
+    - **A value without `whsec_` is used as its raw UTF-8 bytes,** as receivers that accept raw secrets read it.
+    - **The headers:** each ring then carries three, alongside any `Authorization`:
+      - `webhook-id`, new for every ring, including a row rung again for a new wake;
+      - `webhook-timestamp`, in seconds;
+      - `webhook-signature`, which is `v1,` and the base64 HMAC-SHA256 of `<webhook-id>.<webhook-timestamp>.` and
+        the body bytes exactly as sent.
+    - **When the ring isn't sent:** if the secret it names isn't set, or is `whsec_` followed by nothing or by text
+      that isn't valid base64 (with its padding), the ring isn't sent. The result is
+      `failed:webhook (<url_ref>) not rung: its signing secret (<name>) …`, never an unsigned ring.
+    - **Header names:** a receiver that reads other header names, such as a provider's own prefixed ones, doesn't
+      verify these.
   - The daemon reads each from its environment (the name, or `OPENRIG_<NAME>`), else from `secrets_env_file`, an env file kept at mode 0600.
 - **The ring:** when a row lands for the member, the daemon POSTs
   `{"source":"openrig.queue","schema_version":1,"event":"work-waiting","qitem_id":…,"destination":…,"summary":…,"from":…}`.
@@ -97,7 +113,8 @@ These facts stay separate on the row:
     member itself. A notice to a creator lists only that creator's rows: when another creator's row joins, the notice moves to
     the next recipient. It says whether the member has read its own pending inbox recently: a check-in, never a receipt or a
     claim. A member with a declared route (a delegation parent or `escalates_to`) gets one finding per unclaimed row at that
-    route instead.
+    route instead. A finding is a diagnostic about its row, not a second assignment: read the row and act on it. Closing the
+    finding alone doesn't complete the row, and the sweep closes the finding itself once the row is no longer stuck.
   - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
   - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.
@@ -171,7 +188,11 @@ and nothing else is offered:
   is exactly that seat.
 - **What it reaches:**
   - It hands work to its rigs' other seats, never to a person or another host's seat.
-  - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
+  - It reads the items it sent and the items addressed to it from those seats or from an external address
+    (`<id>@external`), never the team's internal items or an external address's items to another seat. The address is
+    matched by its shape, not looked up among registered people: a registered person, a shared channel's address (which
+    its unregistered writers post under) and any other `@external` ref count. A person's answer addressed to its seat is
+    readable this way too.
   - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
     and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
 - **A first task without a seat address:** with `--task-destination <member@rig>` on the same `rig mcp serve`, a

@@ -4,7 +4,7 @@ import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
-import { readProcessTable } from "./process-table.js";
+import { readProcessChildrenNow, readProcessTable, readProcessTableCensusNow } from "./process-table.js";
 
 export interface NativeProcessRow {
   pid: number;
@@ -18,6 +18,8 @@ export interface NativeProcessRow {
   /** OS executable path, not argv[0], for otherwise unresolved Claude rows. */
   executablePath?: string;
   startedAt?: string;
+  /** The run state's letter, where it was read (Linux /proc); `Z` is a zombie. */
+  state?: string;
 }
 
 export type NativeRuntime = "claude-code" | "codex";
@@ -689,6 +691,9 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
   for (const row of rows) {
     const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
     if (row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
+    // A zombie (an exited child nobody reaped) can't take input or run anything, and its argv is gone. Only a state read
+    // as `Z` excludes it: an unread state is no evidence.
+    if (row.state === "Z") continue;
     if (runtime === "claude-code" ? !claudeRow(row) : osExecutable !== executable) continue;
     // OS-named Codex with unreadable argv still competes for the foreground.
     // A readable argv[0] naming a different executable is positive contrary evidence.
@@ -1003,6 +1008,13 @@ function idleShellRoot(rows: NativeProcessRow[], pid: number): NativeProcessRow 
     && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid) ? root : null;
 }
 
+/** An idle shell's identity, for comparing two samples: the row without its run state, which changes as the shell
+ *  wakes and sleeps (S, R) while it stays the same process. */
+function shellFingerprint(root: NativeProcessRow): string {
+  const { state: _state, ...identity } = root;
+  return JSON.stringify(identity);
+}
+
 /** Whether the bound pane is a stable idle shell: in two samples the pane's own shell owns the foreground with
  * nothing else in its group, and it is the same shell both times. A missing, failed or changing listing is not idle:
  * a launch script still starting the runtime holds the foreground the same way a shell label would suggest. */
@@ -1018,7 +1030,41 @@ export async function verifyPaneIdleShell(input: {
       // Idle proof needs the complete table, but no executable-path or argv enrichment.
       const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
       const root = idleShellRoot(rows, pid);
-      return root ? JSON.stringify(root) : null;
+      return root ? shellFingerprint(root) : null;
+    } catch { return null; }
+  };
+  const first = await sample();
+  return first !== null && await sample() === first;
+}
+
+/** Whether the bound pane holds nothing but its idle shell: `verifyPaneIdleShell`'s two matching samples, and in each
+ *  the shell has no child process at all. A harness or any other job started from it, suspended or in the background in
+ *  another process group, is a child, so it isn't empty. For ending a pane without --stop; delivery keeps the
+ *  foreground rule above. A missing or failed listing isn't empty. Each sample reads the table anew, after its pane
+ *  read: another observer's shared read still in flight may predate a job started since. A process hidden from this user
+ *  (Linux hidepid) could be the shell's child, so a census with any hidden pid isn't empty either, nor is a shell whose
+ *  own children list (Linux, where the kernel keeps one) names any process. */
+export async function verifyPaneEmptyShell(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+}): Promise<boolean> {
+  const sample = async (): Promise<string | null> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return null;
+      const rows = input.listProcesses ? await input.listProcesses()
+        : await runAsyncSite("codex.runtime.list_processes", async () => {
+          const census = await readProcessTableCensusNow();
+          // A hidden stat can't show its parent; even an unrelated one leaves the shell's children unknown.
+          if (census.permissionHiddenPids.length > 0) throw new Error("some processes are hidden from this user");
+          // hidepid=2 leaves another user's process out of the census altogether; the shell's own list still names it.
+          const children = await readProcessChildrenNow(pid);
+          if (children && children.length > 0) throw new Error("the shell has a child process");
+          return census.rows;
+        });
+      const root = idleShellRoot(rows, pid);
+      return root && !rows.some(row => row.ppid === pid) ? shellFingerprint(root) : null;
     } catch { return null; }
   };
   const first = await sample();
@@ -1086,7 +1132,7 @@ export async function observeClaudeDelivery(
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
       const root = idleShellRoot(rows, pid);
       if (root) {
-        return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
+        return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: shellFingerprint(root) };
       }
       return unknown;
     } catch { return unknown; }

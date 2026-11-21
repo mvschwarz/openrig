@@ -24,19 +24,30 @@ function run(setup: (dir: string) => Record<string, string> = () => ({})) {
   const dir = mkdtempSync(join(tmpdir(), "cursor-example-")); dirs.push(dir);
   const fake = join(dir, "cursor-agent");
   // create-chat prints an id and keeps running, as Cursor's does; any other call records its arguments and exits.
-  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = create-chat ]; then echo chat-abc; exec sleep 30; fi\necho "$@ CFG=$CURSOR_CONFIG_DIR" > "${dir}/started"\nprintf '%s\\0' "$@" > "${dir}/args"\n`);
+  const observe = `legacy=false; [ "\${OPENRIG_ACTIVITY_HOOK_TOKEN-}" != legacy-hook ] || legacy=true
+printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "\${OPENRIG_RUN_ID+x}" "\${OPENRIG_ACTIVITY_HOOK_TOKEN+x}" "$legacy" "$OPENRIG_NODE_ID" "\${OPENRIG_SESSION_NAME-}" "\${OPENRIG_URL-}" "\${OPENRIG_OCCUPANT_GENERATION-}" "\${ANTHROPIC_API_KEY-}" >> "${dir}/native-env"`;
+  writeFileSync(fake, `#!/bin/sh\n${observe}\nif [ "$1" = create-chat ]; then echo chat-abc; exec sleep 30; fi\necho "$@ CFG=$CURSOR_CONFIG_DIR" > "${dir}/started"\nprintf '%s\\0' "$@" > "${dir}/args"\n`);
   chmodSync(fake, 0o755);
   const env = setup(dir);
   const root = join(dir, "results");
   const attempt = newLaunchAttempt("dev-cursor@r", root);
   const exit = spawnSync(join(EXAMPLE, "openrig-cursor-launch"), [], { cwd: dir, env: { PATH: process.env["PATH"]!, OPENRIG_CURSOR_AGENT: fake,
     OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", OPENRIG_LAUNCH_RESULT: attempt.file, OPENRIG_LAUNCH_ATTEMPT: attempt.attempt, ...env },
-    timeout: 20_000 }).status;
+    timeout: 20_000 });
   const started = join(dir, "started");
-  return { args: existsSync(join(dir, "args")) ? readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1) : [], exit, read: readLaunchResult(attempt, "cursor", root), started: existsSync(started) ? readFileSync(started, "utf8") : null, dir };
+  return { args: existsSync(join(dir, "args")) ? readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1) : [], exit: exit.status, stderr: exit.stderr?.toString(), read: readLaunchResult(attempt, "cursor", root), started: existsSync(started) ? readFileSync(started, "utf8") : null, dir,
+    childEnv: existsSync(join(dir, "native-env")) ? readFileSync(join(dir, "native-env"), "utf8").trim().split("\n") : [] };
 }
 
 describe("the documented Cursor launcher and preset", () => {
+  it.each([false, true])("keeps private run authority out of both Cursor children, bound=%s", bound => {
+    const result = run(() => ({ ...(bound ? { OPENRIG_RUN_ID: "actual-run" } : {}), OPENRIG_ACTIVITY_HOOK_TOKEN: bound ? "scoped-fixture-secret" : "legacy-hook",
+      OPENRIG_SESSION_NAME: "cursor@rig", OPENRIG_URL: "http://fixture.test", OPENRIG_OCCUPANT_GENERATION: "generation", ANTHROPIC_API_KEY: "fixture-provider" }));
+    expect(result.exit).toBe(0);
+    expect(result.childEnv).toEqual(Array(2).fill(`${bound ? "||false" : "|x|true"}|node-1|cursor@rig|http://fixture.test|generation|fixture-provider`));
+    expect(JSON.stringify(result)).not.toContain("scoped-fixture-secret");
+    expect(JSON.stringify(result)).not.toContain("actual-run");
+  });
   it("reports the chat create-chat made, then reopens it in the seat's own Cursor config folder", () => {
     const { read, started, dir } = run();
     expect(read).toEqual({ ok: true, nativeRef: "chat-abc", producer: "openrig-cursor-launch 2" });

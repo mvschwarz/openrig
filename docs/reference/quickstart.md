@@ -12,15 +12,23 @@ In your project folder, add OpenRig's `rigs` skill to the agent you use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.16/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.16/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs --skill rigs --agent pi
 ```
+
+**OMP:** this pin installs the shared skill only. The `v0.7.20` skill does not yet include OMP attachment guidance,
+and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in.
 
 These use this release's tag, for a new install. If OpenRig is already installed, replace the tag after `tree/` with
 the one that matches `rig --version` (`v` and its version number), or upgrade first. If the command fails with `npx: command not found`, Node.js isn't
-installed or isn't on your PATH yet (see [What you need](#what-you-need)). Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what
-you want built.
+installed or isn't on your PATH yet (see [What you need](#what-you-need)). Then type `/rigs` in Claude Code, `$rigs`
+in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already open), and say what you want built.
+If Claude Code was already running when you added the skill, type `/reload-skills` first, or start a new
+session: a session doesn't see a skills folder created after it started.
 
 The skill has your agent work through the steps below in order. It says what it will run and change before it runs
 it, and it asks before installing anything on your system. It finishes when you're talking to the operator.

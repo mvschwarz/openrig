@@ -6,7 +6,7 @@ import { SessionRegistry, sessionCommunityHarnessSelect, sessionCommunityRunnerS
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, runtimeRungInventory } from "../src/domain/activity-taxonomy.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { StartupOrchestrator, isRecoverableStartupFailure, type StartupInput, type StartupResult } from "../src/domain/startup-orchestrator.js";
+import { StartupOrchestrator, getLatestStartupFailedEvent, isRecoverableStartupFailure, type StartupInput, type StartupResult } from "../src/domain/startup-orchestrator.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -2882,6 +2882,21 @@ describe("StartupOrchestrator", () => {
     const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors).toEqual([`Readiness timeout after 0.1s — harness did not become interactive: ${notFound}`]);
+  });
+
+  it("#3318 rehearsal: a readiness wait that ends on a return to a shell records that code on the startup failure", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: false, reason: "The probe pane returned to a shell instead of staying inside the runtime.", code: "returned_to_shell" })) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
+    expect(result.ok).toBe(false);
+    expect(getLatestStartupFailedEvent(db, seed.nodeId, seed.sessionId)).toMatchObject({ stage: "readiness_check", readinessCode: "returned_to_shell" });
+  });
+
+  it("#3318 rehearsal: a readiness wait that ends while the harness is still starting records that code, not a shell", async () => {
+    const starting = seedSession();
+    const slow = mockAdapter({ checkReady: vi.fn(async () => ({ ready: false, reason: "not yet", code: "awaiting_runtime" })) });
+    await createOrchestrator().startNode(makeInput(starting, { adapter: slow, readinessTimeoutMs: 100 }));
+    expect(getLatestStartupFailedEvent(db, starting.nodeId, starting.sessionId)?.readinessCode).toBe("awaiting_runtime");
   });
 
   it("a launch Claude refused under disableSideloadFlags reports the refusal when the readiness wait ends (#3245)", async () => {

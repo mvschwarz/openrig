@@ -22,7 +22,11 @@ export type SharedHistoryResult =
   | { ok: false; code: "seat_unavailable" | "source_unavailable" | "history_unavailable"; message: string };
 
 const seatUnavailable = (): SharedHistoryResult => ({ ok: false, code: "seat_unavailable", message: "The selected seat is unavailable." });
-const sourceUnavailable = (): SharedHistoryResult => ({ ok: false, code: "source_unavailable", message: "There is no compatible current history source for this seat." });
+// Most often the seat's conversation changed since the last save (a /clear, /resume or new conversation), so the same
+// next step as the review's own changed-record reply (#3391) applies here too.
+const sourceUnavailable = (rigName: string): SharedHistoryResult => ({ ok: false, code: "source_unavailable",
+  message: `There is no compatible current history source for this seat. To save its current conversation, run rig snapshot ${rigName}; `
+    + "to start the seat blank, run rig seat launch <seat> --fresh --reason <why>." });
 const historyUnavailable = (): SharedHistoryResult => ({ ok: false, code: "history_unavailable", message: "This history is no longer available for a resume attempt. Refresh the list." });
 
 /** Stored snapshot JSON can be structurally restore-usable while an older
@@ -50,21 +54,21 @@ export function listSharedHistories(
   const retained = selection?.retained ? deps.snapshotRepo.selectRestoreUsable(rigId, selection.snapshotId) : null;
   const snapshot = selection?.retained ? (retained?.ok ? retained.snapshot : null)
     : currentRestoreSnapshot(deps.rigRepo.db, deps.snapshotRepo, rig, node.id);
-  if (!snapshot || !HISTORY_REF_RE.test(snapshot.id) || snapshot.data.rig.id !== rigId) return sourceUnavailable();
+  if (!snapshot || !HISTORY_REF_RE.test(snapshot.id) || snapshot.data.rig.id !== rigId) return sourceUnavailable(rig.rig.name);
   // A same-name replacement, omitted roster member, or runtime switch is not
   // the same saved seat. Never borrow a captured row from another node.
   const savedNode = snapshot.data.nodes.find((entry) => entry.id === node.id && entry.logicalId === node.logicalId);
   if (!savedNode || (snapshot.data.topologyRoster && !snapshot.data.topologyRoster.intendedNodeIds.includes(node.id))
     || savedNode.runtime !== node.runtime
-    || restoreRuntimeCompatibilityError(node.runtime, snapshot.data.nodeStartupContext?.[node.id]?.runtime)) return sourceUnavailable();
+    || restoreRuntimeCompatibilityError(node.runtime, snapshot.data.nodeStartupContext?.[node.id]?.runtime)) return sourceUnavailable(rig.rig.name);
   const active = resolveActiveSnapshotSession(snapshot.data, node.id);
-  if (active.kind === "ambiguous") return sourceUnavailable();
+  if (active.kind === "ambiguous") return sourceUnavailable(rig.rig.name);
   if (selection && selection.snapshotId !== snapshot.id) return historyUnavailable();
 
   const allRows = capturedPreviewSessionRows(snapshot);
   const ids = new Set<string>();
   for (const row of allRows) {
-    if (typeof row.id !== "string" || !HISTORY_REF_RE.test(row.id) || ids.has(row.id)) return sourceUnavailable();
+    if (typeof row.id !== "string" || !HISTORY_REF_RE.test(row.id) || ids.has(row.id)) return sourceUnavailable(rig.rig.name);
     ids.add(row.id);
   }
   const rows = allRows.filter((row) => row.nodeId === node.id);

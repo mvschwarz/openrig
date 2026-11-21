@@ -36,6 +36,9 @@ export interface TeardownResult {
    *  (settings that don't parse, a collector that isn't the shipped one), as `<file>: <why>`. Present only when
    *  something was kept. */
   keptFiles?: string[];
+  /** Claude seats whose latest launch recorded no folder (one started before launches recorded it), as
+   *  `<session>: <saved folder>`: down can't tell whether it ran somewhere else. Present only when there was one. */
+  launchFolderUnrecorded?: string[];
   /** Sessions of seats joined with `rig attach` as an external CLI, which down doesn't stop or check. Without --delete
    *  each keeps its claim as it was, whether or not the app still runs. Present only when there was one. */
   leftRunning?: string[];
@@ -468,15 +471,28 @@ export class RigTeardownOrchestrator {
     return this.deps.sessionRegistry.getLatestLiveSessions(rigId);
   }
 
-  /** This rig's seats whose files may still be in use: each live session, and each released one. A released session
-   *  (claimed, then detached by rig unclaim or down) is its owner's and may still be running, whether or not it's still
-   *  its seat's latest, so its cwd stays in use until recordAlreadyStoppedIntent sees tmux report it absent. */
-  private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd">> {
+  /** This rig's seats whose files may still be in use: each live session, each released one, and each seat whose latest
+   *  session reads detached without a recorded stop. A released session (claimed, then detached by rig unclaim or down)
+   *  is its owner's and may still be running, whether or not it's still its seat's latest. A detached latest session may
+   *  still be running too (this server didn't show it), as settledSkillSeats also holds. Either's folders stay in use
+   *  until recordAlreadyStoppedIntent sees tmux report it absent and records the stop. */
+  private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd"> & { launchedCwd: string | null }> {
     const released = this.db.prepare(`
-      SELECT n.id AS nodeId, n.runtime, n.cwd FROM nodes n JOIN sessions s ON s.node_id = n.id
-      WHERE n.rig_id = ? AND s.origin = 'claimed' AND s.status = 'detached' AND s.intentionally_stopped = 0
-    `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd">>;
-    return [...this.getLatestLiveSessions(rigId), ...released];
+      SELECT n.id AS nodeId, n.runtime, n.cwd, s.id AS sessionId FROM nodes n JOIN sessions s ON s.node_id = n.id
+      WHERE n.rig_id = ? AND s.status = 'detached' AND s.intentionally_stopped = 0
+        AND (s.origin = 'claimed' OR s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1))
+    `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd" | "sessionId">>;
+    return [...this.getLatestLiveSessions(rigId), ...released]
+      .map((session) => ({ ...session, launchedCwd: this.launchedCwdOf(session.sessionId) }));
+  }
+
+  /** The folder a session was launched in, as its launch recorded it; null when none was (a database from before the
+   *  record, or a session OpenRig didn't launch). */
+  private launchedCwdOf(sessionId: string): string | null {
+    try {
+      return (this.db.prepare("SELECT launched_cwd FROM sessions WHERE id = ?").get(sessionId) as { launched_cwd: string | null } | undefined)?.launched_cwd ?? null;
+    } catch { return null; }
   }
 
   private liveGuidanceTargets(rigId: string): Set<string> {
@@ -516,10 +532,13 @@ export class RigTeardownOrchestrator {
     const rows = this.db.prepare(`
       SELECT DISTINCT cwd FROM nodes WHERE rig_id = ? AND runtime = 'claude-code' AND cwd IS NOT NULL
     `).all(rigId) as Array<{ cwd: string }>;
-    if (rows.length === 0) return;
+    // Each saved folder, and each folder a launch of this rig's Claude seats recorded: a run's own `--cwd` (#3347) too.
+    const cwds = [...rows.map((row) => row.cwd), ...this.launchedClaudeCwds(rigId)];
+    this.reportUnrecordedLaunchFolders(rigId, result);
+    if (cwds.length === 0) return;
     const inUse = this.claudeTargetsInUse(rigId);
     const done = new Set<string>();
-    for (const { cwd } of rows) {
+    for (const cwd of cwds) {
       const key = this.guidancePathKey(cwd);
       if (inUse.has(key) || done.has(key)) continue;
       done.add(key); // one cleanup per directory, however many of this rig's seats name it
@@ -534,6 +553,33 @@ export class RigTeardownOrchestrator {
     }
   }
 
+  /** The folders this rig's Claude sessions recorded as launched in. A database from before the record has none. */
+  private launchedClaudeCwds(rigId: string): string[] {
+    try {
+      return (this.db.prepare(`
+        SELECT DISTINCT s.launched_cwd AS cwd FROM sessions s JOIN nodes n ON n.id = s.node_id
+        WHERE n.rig_id = ? AND n.runtime = 'claude-code' AND s.launched_cwd IS NOT NULL
+      `).all(rigId) as Array<{ cwd: string }>).map((row) => row.cwd);
+    } catch { return []; }
+  }
+
+  /** A Claude seat whose latest session OpenRig launched without recording its folder (before the record) may have run
+   *  elsewhere than its saved folder; down names it rather than guess. A database from before the record names none. */
+  private reportUnrecordedLaunchFolders(rigId: string, result: TeardownResult): void {
+    let rows: Array<{ sessionName: string; cwd: string | null }>;
+    try {
+      rows = this.db.prepare(`
+        SELECT s.session_name AS sessionName, n.cwd FROM nodes n JOIN sessions s ON s.node_id = n.id
+        WHERE n.rig_id = ? AND n.runtime = 'claude-code' AND s.launched_cwd IS NULL AND COALESCE(s.origin, '') <> 'claimed'
+          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
+      `).all(rigId) as Array<{ sessionName: string; cwd: string | null }>;
+    } catch { return; }
+    for (const row of rows) {
+      const entry = `${row.sessionName}: ${row.cwd ?? "no saved folder"}`;
+      if (!result.launchFolderUnrecorded?.includes(entry)) (result.launchFolderUnrecorded ??= []).push(entry);
+    }
+  }
+
   /** What a Claude seat may still use, by the same rule as guidance files: the cwd of a Claude seat of any other rig that
    *  isn't archived, or of one of this rig's Claude seats still live (a failed stop, an inconclusive probe, an attached
    *  CLI) or released and not seen gone. Each cwd's settings file, collector, `.claude` and `.openrig` are keyed by
@@ -545,8 +591,19 @@ export class RigTeardownOrchestrator {
       WHERE r.archived_at IS NULL AND r.id <> ? AND n.runtime = 'claude-code' AND n.cwd IS NOT NULL
     `).all(rigId) as Array<{ cwd: string }>;
     const cwds = rows.map((row) => row.cwd);
+    // Where another rig's Claude seat last launched, and where this rig's still-live seats were launched: a run's own
+    // `--cwd` counts as theirs, like a saved folder.
+    try {
+      cwds.push(...(this.db.prepare(`
+        SELECT s.launched_cwd AS cwd FROM nodes n JOIN rigs r ON r.id = n.rig_id JOIN sessions s ON s.node_id = n.id
+        WHERE r.archived_at IS NULL AND r.id <> ? AND n.runtime = 'claude-code' AND s.launched_cwd IS NOT NULL
+          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
+      `).all(rigId) as Array<{ cwd: string }>).map((row) => row.cwd));
+    } catch { /* a database from before the record */ }
     for (const session of this.seatsInUse(rigId)) {
-      if (session.runtime === "claude-code" && session.cwd) cwds.push(session.cwd);
+      if (session.runtime !== "claude-code") continue;
+      if (session.cwd) cwds.push(session.cwd);
+      if (session.launchedCwd) cwds.push(session.launchedCwd);
     }
     const keys = new Set<string>();
     for (const cwd of cwds) {

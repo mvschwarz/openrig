@@ -1,3 +1,6 @@
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,7 +19,7 @@ import { ModelDivergenceMonitor } from "../src/domain/model-divergence/model-div
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) fn(); });
-function fixture(runtime = "claude-code") {
+function fixture(runtime = "claude-code", bulk = true) {
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "observed-model-"))); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const rigs = new RigRepository(db), sessions = new SessionRegistry(db), identities = new SeatIdentityStore(db);
@@ -42,14 +45,73 @@ function fixture(runtime = "claude-code") {
   const getPanePid = vi.fn(async (): Promise<number | null> => 10);
   const thread = vi.fn(async () => id);
   const readAllPaneProcesses = vi.fn(async (): Promise<Map<string, { pid: number; command: string | null }> | null> => new Map([["%1", { pid: 10, command: "claude" }]]));
-  const reader = new CurrentModelReader({ sessions, identities,
+  const reports = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => new Date(boot + 60_000) });
+  const reader = new CurrentModelReader({ sessions, identities, runnerObservations: reports,
     context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
     codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
-    readAllPaneProcesses, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
+    readAllPaneProcesses: bulk ? readAllPaneProcesses : undefined, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
   });
   const input = { nodeId: node.id, canonicalSessionName: "editor@studio", runtime, sessionStatus: "running" };
-  return { db, dir, rigs, rig, node, sessions, identities, session, tenure, boot, stamp, path, id, claudeRecord, reader, input, list, getPanePid, thread, processRows, readAllPaneProcesses };
+  return { db, dir, rigs, rig, node, sessions, identities, reports, session, tenure, boot, stamp, path, id, claudeRecord, reader, input, list, getPanePid, thread, processRows, readAllPaneProcesses };
 }
+
+it.each([["observe", "revoke"], ["observeInventory", "revoke"], ["observe", "replace"], ["observeInventory", "replace"]] as const)("projects only current accepted community model facts via %s with %s fencing", async (method, change) => {
+  const f = fixture("synth");
+  f.sessions.recordCommunityHarnessSelection(f.session.id, "synth", true);
+  const grants = new ActivityGrantStore(f.db, () => new Date(f.boot + 1000));
+  const grant = grants.issue({ nodeId: f.node.id, generation: f.tenure.generationUuid, issuedBy: "Core",
+    run: { runId: "actual-model-run", sessionId: f.session.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 10 } } });
+  expect(grants.activate(grant.grantId)).toBe(true);
+  expect(f.reports.recordRunnerObservation(grant, { runId: grant.runId, sequence: 1, occurredAt: f.stamp, observations: { model: { id: "reported/model" } } }).ok).toBe(true);
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: "reported/model", source: "runner_reported", observedAt: f.stamp, generation: f.tenure.generationUuid });
+  expect(await f.reader.observeInventory([f.input])).toMatchObject([{ status: "observed", model: "reported/model", source: "runner_reported" }]);
+  expect(f.getPanePid).not.toHaveBeenCalled(); expect(f.list).not.toHaveBeenCalled();
+  expect(f.rigs.getRig(f.rig.id)!.nodes[0]?.model).toBe("configured-model");
+  const pending = method === "observe" ? f.reader.observe(f.input) : f.reader.observeInventory([f.input]);
+  if (change === "revoke") grants.revoke({ grantId: grant.grantId }, "stopped");
+  else {
+    const replacement = grants.issue({ nodeId: f.node.id, generation: f.tenure.generationUuid, issuedBy: "Core",
+      run: { runId: "replacement-model-run", sessionId: f.session.id, binding: grant.binding! } });
+    expect(grants.activate(replacement.grantId)).toBe(true);
+    expect(f.reports.recordRunnerObservation(replacement, { runId: replacement.runId, sequence: 1, occurredAt: f.stamp,
+      observations: { model: { id: "replacement/model" } } }).ok).toBe(true);
+  }
+  const completed = await pending;
+  expect(Array.isArray(completed) ? completed[0] : completed).toMatchObject({ status: "unknown", model: null });
+  expect(await f.reader.observe(f.input)).toMatchObject(change === "revoke" ? { status: "unknown", model: null } : { status: "observed", model: "replacement/model" });
+});
+
+it.each([
+  { bulk: false, revoke: true }, { bulk: false, revoke: false },
+  { bulk: true, revoke: true }, { bulk: true, revoke: false },
+])("fences runner facts after the mixed inventory final await (bulk=$bulk revoke=$revoke)", async ({ bulk, revoke }) => {
+  const f = fixture("claude-code", bulk);
+  const node = f.rigs.addNode(f.rig.id, "runner", { runtime: "synth", cwd: f.dir });
+  const session = f.sessions.registerSession(node.id, "runner@studio");
+  f.sessions.updateStatus(session.id, "running");
+  f.sessions.recordCommunityHarnessSelection(session.id, "synth", true);
+  f.sessions.updateBinding(node.id, { tmuxSession: "runner@studio", tmuxPane: "%2" });
+  const tenure = f.sessions.currentOccupantTenure(node.id)!;
+  const grants = new ActivityGrantStore(f.db, () => new Date(f.boot + 1000));
+  const grant = grants.issue({ nodeId: node.id, generation: tenure.generationUuid, issuedBy: "Core",
+    run: { runId: "mixed-run", sessionId: session.id, binding: { runtime: "synth", runner: 1, pane: "%2", panePid: 30 } } });
+  expect(grants.activate(grant.grantId)).toBe(true);
+  expect(f.reports.recordRunnerObservation(grant, { runId: grant.runId, sequence: 1,
+    occurredAt: new Date(parseSqliteUtcMs(tenure.bootAt) + 2000).toISOString(), observations: { model: { id: "reported/model" } } }).ok).toBe(true);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  if (bulk) f.readAllPaneProcesses.mockImplementationOnce(async () => { entered(); await held; return new Map([["%1", { pid: 10, command: "claude" }]]); });
+  else f.getPanePid.mockImplementationOnce(async () => { entered(); await held; return 10; });
+  const pending = f.reader.observeInventory([{ nodeId: node.id, canonicalSessionName: "runner@studio", runtime: "synth", sessionStatus: "running" }, f.input]);
+  await started;
+  await Promise.resolve(); await Promise.resolve();
+  if (revoke) grants.revoke({ grantId: grant.grantId }, "stopped");
+  release();
+  const result = await pending;
+  expect(result[0]).toMatchObject(revoke ? { status: "unknown", model: null } : { status: "observed", model: "reported/model", source: "runner_reported" });
+  expect(result[1]).toMatchObject({ status: "observed", model: "response-model", source: "claude-assistant-response" });
+});
 
 it("reports assistant-response evidence separately from the pin, with native time and no record contents", async () => {
   const f = fixture(); const result = await f.reader.observe(f.input);

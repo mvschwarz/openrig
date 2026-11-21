@@ -315,7 +315,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await sweep();
     expect(notices()).toEqual([]);
     const [finding] = perRow();
-    expect(finding!.summary).toBe(`Stuck sweep: undelivered-wake on ${row.qitemId} (0 min)`);
+    expect(finding!.summary).toBe(`Checked on ${row.qitemId}: its owner couldn't be woken (0 minutes)`);
     expect(finding!.destinationSession).toBe(PERSON);
   });
 
@@ -324,7 +324,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await sweep();
     expect(notices()).toEqual([]);
     const [finding] = perRow();
-    expect(finding!.summary).toBe(`Stuck sweep: undelivered-wake on ${row.qitemId} (0 min)`);
+    expect(finding!.summary).toBe(`Checked on ${row.qitemId}: its owner couldn't be woken (0 minutes)`);
     expect(finding!.body).toContain("typo@hub has no wake route on this daemon");
   });
 
@@ -333,7 +333,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await sweep({ resolveOrchestrator: (s: string) => (s === MEMBER ? "lead@hub" : null) });
     expect(notices()).toEqual([]);
     const [finding] = perRow();
-    expect(finding!.summary).toBe(`Stuck sweep: unclaimed-obligation on ${row.qitemId} (61 min)`);
+    expect(finding!.summary).toBe(`Checked on ${row.qitemId}: nobody has picked it up in 61 minutes`);
     expect(finding!.destinationSession).toBe("lead@hub");
   });
 

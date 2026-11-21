@@ -104,6 +104,69 @@ describe("actual run grants", () => {
     return { ...f, session, anchor, issue };
   }
 
+  it.each([null, 0])("activates builtin OMP without stamping a community declaration, recorded runner=%s", recorded => {
+    const f = run();
+    f.db.prepare("UPDATE nodes SET runtime = 'omp' WHERE id = ?").run(f.node.id);
+    f.db.prepare("UPDATE sessions SET agent_app = NULL, agent_runner = ? WHERE id = ?").run(recorded, f.session.id);
+    const grant = f.grants.issue({ nodeId: f.node.id, generation: f.generation, issuedBy: "OMP launch", run: {
+      runId: "omp-attempt", sessionId: f.session.id, binding: { ...f.anchor, runtime: "omp", runner: 0 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    expect(f.grants.standing(grant.grantId)).toBe("current");
+    f.grants.reconcileBinding(f.node.id);
+    expect(f.db.prepare("SELECT agent_app, agent_runner FROM sessions WHERE id = ?").get(f.session.id))
+      .toEqual({ agent_app: null, agent_runner: recorded });
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process",
+      reason: null, sessionName: "dev-guest@guest-rig", observedAt: new Date().toISOString(),
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    const adopted = f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "adopt");
+    expect(f.grants.standing(grant.grantId)).toBe("current");
+    expect(f.grants.get(grant.grantId)?.sessionId).toBe(f.session.id);
+    expect(f.db.prepare("SELECT agent_app FROM sessions WHERE id = ?").get(adopted.id)).toEqual({ agent_app: null });
+    f.db.prepare("UPDATE seat_identity_verdicts SET evidence_pane_pid = 999 WHERE node_id = ?").run(f.node.id);
+    expect(f.grants.standing(grant.grantId)).toBe("stale");
+  });
+
+  it.each(["app", "runner", "pane", "pid", "session", "generation"] as const)("fences builtin OMP authority after %s changes", changed => {
+    const f = run();
+    f.db.prepare("UPDATE nodes SET runtime = 'omp' WHERE id = ?").run(f.node.id);
+    f.db.prepare("UPDATE sessions SET agent_app = NULL, agent_runner = 0 WHERE id = ?").run(f.session.id);
+    const grant = f.grants.issue({ nodeId: f.node.id, generation: f.generation, issuedBy: "OMP launch", run: {
+      runId: "omp-attempt", sessionId: f.session.id, binding: { ...f.anchor, runtime: "omp", runner: 0 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    if (changed === "app") f.db.prepare("UPDATE sessions SET agent_app = 'omp' WHERE id = ?").run(f.session.id);
+    if (changed === "runner") f.db.prepare("UPDATE sessions SET agent_runner = 2 WHERE id = ?").run(f.session.id);
+    if (changed === "pane") f.db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = ?").run(f.node.id);
+    if (changed === "pid") new SeatIdentityStore(f.db).upsert({ nodeId: f.node.id, verdict: "unconfirmed", evidenceSource: "pane_process",
+      reason: null, sessionName: "dev-guest@guest-rig", observedAt: "2999-01-01T00:00:00.000Z",
+      evidence: { registeredPane: "%1", observedPid: 999, observedPanePid: 999, observedCommand: "node", matchedLayer: null } });
+    if (changed === "session") f.sessions.registerSession(f.node.id, "dev-guest@guest-rig");
+    if (changed === "generation") f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "handover");
+    expect(f.grants.standing(grant.grantId)).not.toBe("current");
+  });
+
+  it("keeps builtin OMP authority pending until staged cutover and fences late predecessor cleanup", async () => {
+    const f = run();
+    f.db.prepare("UPDATE nodes SET runtime = 'omp' WHERE id = ?").run(f.node.id);
+    f.db.prepare("UPDATE sessions SET agent_app = NULL, agent_runner = NULL WHERE id = ?").run(f.session.id);
+    const begin = runnerGrantIssuer(f.db, { getPanePid: async pane => pane === "%1" ? 101 : 202,
+      setSessionEnv: async () => {}, unsetSessionEnv: async () => {} });
+    const first = await begin({ nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never, "omp", "first", 0);
+    first.dispatched();
+    const generation = f.sessions.reserveOccupantGeneration()!;
+    const staged = await begin({ nodeId: f.node.id, tmuxSession: "omp-staging", tmuxPane: "%2", launchGeneration: generation } as never,
+      "omp", "staged", 0);
+    staged.dispatched();
+    expect(f.grants.standing(staged.grantId)).toBe("pending");
+    expect(f.grants.standing(first.grantId)).toBe("current");
+    f.db.prepare("UPDATE bindings SET tmux_pane='%2' WHERE node_id=?").run(f.node.id);
+    const successor = f.sessions.registerClaimedSession(f.node.id, "dev-guest@guest-rig", "handover", generation);
+    expect(f.grants.standing(staged.grantId)).toBe("current");
+    expect(f.grants.get(staged.grantId)?.sessionId).toBe(successor.id);
+    await first.finish(false);
+    expect(f.grants.standing(staged.grantId)).toBe("current");
+    expect(f.db.prepare("SELECT agent_app,agent_runner FROM sessions WHERE id=?").get(successor.id)).toEqual({ agent_app: null, agent_runner: null });
+  });
+
   it("stages a successor without replacing its predecessor; activation and late cleanup address exact grants", () => {
     const f = run();
     const first = f.issue("attempt-1");
@@ -347,9 +410,12 @@ describe("actual run grants", () => {
     const binding = { nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never;
     const first = await begin(binding, "synth", "first", 1);
     const token = [...env.values()][0]!;
-    expect(first.wrap("node runner.js")).not.toContain(token);
-    expect(first.wrap("node runner.js")).toContain("set +x");
-    expect(first.wrap("node runner.js")).toContain("set-environment");
+    const wrapped = first.wrap("node runner.js");
+    const grantKey = [...env.keys()][0]!;
+    expect(wrapped).not.toContain(token);
+    expect(wrapped).toContain("set +x");
+    expect(wrapped).toContain(`-r ${grantKey}`);
+    expect(wrapped).not.toContain(`-u ${grantKey}`);
     first.dispatched();
     const second = await begin(binding, "synth", "second", 1);
     second.dispatched();

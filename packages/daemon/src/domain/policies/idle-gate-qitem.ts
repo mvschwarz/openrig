@@ -31,6 +31,9 @@ export interface IdleGateQitemDeps {
    * a lightweight seam without constructing a second oracle.
    */
   seatActivity: Pick<SeatActivityService, "getSeatStateBySession">;
+  /** The seat's typing guard is at queue-only (#3076): a person types there, and the pending gate row already is the
+   *  reminder in its queue, so the seat is never woken for it. */
+  isQueueOnlySeat?: (sessionName: string) => boolean;
 }
 
 interface PendingGateRow {
@@ -77,6 +80,18 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
         .filter((r) => r.roles.length > 0);
       if (gated.length === 0) {
         return { action: "skip", reason: "no_pending_gate" };
+      }
+
+      // A queue-only seat: never woken, the gate row is the reminder. Recorded once, then quiet until another
+      // evaluation is recorded for the job.
+      if (deps.isQueueOnlySeat?.(seat) === true) {
+        let last: string | null = null;
+        try {
+          last = (db.prepare("SELECT skip_reason FROM watchdog_history WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 1")
+            .get(job.jobId) as { skip_reason: string | null } | undefined)?.skip_reason ?? null;
+        } catch { /* no history to read: record it */ }
+        return { action: "skip", reason: last === "queue_only_seat" ? "queue_only_seat_unchanged" : "queue_only_seat",
+          notes: { seat, qitemId: gated[0]!.qitemId, pendingGateCount: gated.length } };
       }
 
       // Signal B — the shared arbitrated activity verdict. This is the same
@@ -190,6 +205,9 @@ const WAKE_MACHINERY_NOTE_PREFIXES = [
   "ladder-suspend:",
   "ladder-resume:",
   "park wake fired:",
+  // A queue-only seat's park wake records (#3076).
+  "park wake noted on this row:",
+  "park wake queued as row:",
   "idle-gate:",
 ];
 

@@ -192,6 +192,21 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
       .toMatchObject({ status: 200, body: { closedQitem: { state: "blocked" }, revisionNote: expect.stringContaining("isn't checked for hold") } });
   });
 
+  it("a legacy partial-answer retry cannot reconcile an older operation after another person finishes, even with app-only fields", async () => {
+    const f = fixture(); const id = await f.ask();
+    const request = { verb: "answer", qitemId: id, questionId: "q1", optionId: "yes",
+      expectedRevision: await f.revision(id), auditNotes: { operationId: "partial-answer" } };
+    expect(await f.act(request)).toMatchObject({ status: 200, body: { answer: { outcome: "recorded" } } });
+    expect(await f.act({ verb: "answer", qitemId: id, actorSession: OTHER, questionId: "q2", optionId: "no" }))
+      .toMatchObject({ status: 200, body: { closedQitem: { state: "done" } } });
+    const before = f.written(id);
+    for (const appSubmission of [undefined, {}]) {
+      expect(await f.act({ ...request, ...(appSubmission ? { appSubmission } : {}) }))
+        .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+      expect(f.written(id)).toEqual(before);
+    }
+  });
+
   it("a summary, a wake or a claim leaves the revision alone", async () => {
     const f = fixture(); const id = await f.ask();
     const read = await f.revision(id);

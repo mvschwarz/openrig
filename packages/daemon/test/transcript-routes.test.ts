@@ -269,6 +269,27 @@ describe("transcript routes", () => {
     expect(body.error).toContain("pattern");
   });
 
+  it("GET /grep leaves a long pattern to the caller, since the deadline bounds the scan", async () => {
+    const { store } = seedRigWithTranscript("hello world\ndecision made\nfoo bar\n");
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/grep?pattern=" + encodeURIComponent(`${"a".repeat(300)}|decision`));
+    expect(res.status).toBe(200);
+    expect((await res.json()).matches).toEqual(["decision made"]);
+  });
+
+  it("GET /grep ends a pattern that would block the daemon instead of holding the request", async () => {
+    const { store } = seedRigWithTranscript("aaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\ndecision made\n");
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    // `(a+)+$` against that line is catastrophic backtracking: with plain `node`, the match does not
+    // return in a minute. The scan runs on its own thread with a deadline, so the request answers with
+    // an honest 504 after that deadline rather than stopping every other request and every sweep.
+    const nested = await app.request("/api/transcripts/dev-impl@my-rig/grep?pattern=" + encodeURIComponent("(a+)+$"));
+    expect(nested.status).toBe(504);
+    expect((await nested.json()).error).toContain("ended");
+  }, 30_000);
+
   it("GET /tail with ambiguous session name across rigs returns 409", async () => {
     // Create two rigs with same name and same session name
     const rig1 = rigRepo.createRig("my-rig");

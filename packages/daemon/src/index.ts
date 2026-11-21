@@ -20,6 +20,8 @@ import {
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  makePermissionPromptReader,
+  makePromptKindReader,
   makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
@@ -36,6 +38,7 @@ import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js"
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
 import { startSeatPollers } from "./domain/seat-activity-service.js";
+import { startIdentityReconciler } from "./domain/seat-identity-reconciler.js";
 import {
   ensureOpenRigInstance,
   formatInstanceInitializationConflicts,
@@ -219,7 +222,8 @@ export function startWakeLadderScheduler(deps: {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
-  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
+  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">
+    & Partial<Pick<import("./domain/seat-activity-service.js").SeatActivityService, "codexPermissionState">>;
   agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   gatewaySubsystem?: { status?: () => { state?: unknown }; dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
@@ -248,6 +252,11 @@ export function startWakeLadderScheduler(deps: {
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
       ...(deps.tmuxAdapter ? { readHookReviews: makeKernelHookReviewReader({ db, tmux: deps.tmuxAdapter }) } : {}),
+      readPermissionPrompts: makePermissionPromptReader({ db,
+        getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
+          order: runtime === "claude-code" ? "source" : "arrival" }),
+        getCodexPermissionState: (nodeId, raisedAt) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt),
+      }),
       readPromptState: makePromptStateReader({
         db,
         getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
@@ -255,7 +264,9 @@ export function startWakeLadderScheduler(deps: {
           sessionName,
           order: runtime === "claude-code" ? "source" : "arrival",
         }),
+        getCodexPermissionState: (nodeId, raisedAt, after) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt, after),
       }),
+      readPromptKind: makePromptKindReader({ db, getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId) }),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),
@@ -297,6 +308,10 @@ export async function startServer(port?: number) {
   });
   if (!initialization.ok) {
     throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
+  }
+  if (initialization.workspaceExistingProject) {
+    console.log(`[openrig] workspace.root holds a project of its own (${initialization.workspaceExistingProject}); `
+      + "OpenRig left it as it is and reads that project's own id.");
   }
 
   // bug-fix slice auth-bearer-tailscale-trust: distinguish "explicit
@@ -410,7 +425,9 @@ export async function startServer(port?: number) {
         // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
         // Persists the per-seat pane PID/command verdict so node-inventory
         // gates the running/active projection on verified process identity.
-        deps.seatIdentityReconciler?.start();
+        // daemon.identity_poll_interval_ms (OPENRIG_IDENTITY_POLL_INTERVAL_MS) slows it down (default 5 s,
+        // unchanged); startup-only: read once here.
+        startIdentityReconciler(deps.seatIdentityReconciler);
         startPeriodicSnapshotScheduler(deps);
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
@@ -460,6 +477,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["terminal-reachability", () => deps.terminalReachability?.stop()],
       ["network-connector", () => deps.networkConnector?.stop()],
       ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],

@@ -492,6 +492,21 @@ describe("Rig CRUD routes", () => {
 
   // -- UX-T01b: Rig summary endpoint --
 
+  it("summary excludes a planned unlaunched hold until it has assigned work", async () => {
+    const rig = repo.createRig("held-summary");
+    const running = repo.addNode(rig.id, "dev.worker", { runtime: "codex" });
+    const held = repo.addNode(rig.id, "dev.optional", { runtime: "codex" });
+    const session = sessionRegistry.registerSession(running.id, "dev-worker@held-summary");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rig.id, held.id, JSON.stringify({ reason: "on demand" }));
+    const summary = async () => (await (await app.request("/api/rigs/summary")).json())[0];
+    expect(await summary()).toMatchObject({ lifecycleState: "running", restoreLifecycleState: "degraded" });
+    db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
+      VALUES ('q-held-summary', datetime('now'), datetime('now'), 'operator@test', 'dev-optional@held-summary', 'pending', 'routine', 'routine', 'work')`).run();
+    expect(await summary()).toMatchObject({ lifecycleState: "degraded", restoreLifecycleState: "degraded" });
+  });
+
   it("GET /api/rigs/summary -> rig list with node counts", async () => {
     const rig1 = repo.createRig("alpha");
     repo.addNode(rig1.id, "orchestrator", { runtime: "claude-code" });

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { parseLinuxProcessArguments } from "./native-process-arguments.js";
@@ -17,9 +18,19 @@ export interface ProcessTableRow {
   command: string;
   /** Linux Codex's exact argv from this same /proc cmdline sample; null when unreadable or malformed. */
   argv?: string[] | null;
+  /** The run state's letter from the same /proc stat line (`Z` is a zombie, proc_pid_stat(5) field 3). Absent where it
+   *  wasn't read: `ps` on other platforms isn't asked for it. */
+  state?: string;
+}
+
+/** Permission-hidden Linux processes make absence unprovable, without changing the rows a listing exposes. */
+export interface ProcessTableCensus {
+  rows: ProcessTableRow[];
+  permissionHiddenPids: number[];
 }
 
 let inFlight: Promise<ProcessTableRow[]> | null = null;
+let censusInFlight: Promise<ProcessTableCensus> | null = null;
 let procRoot = "/proc";
 
 /**
@@ -29,8 +40,54 @@ let procRoot = "/proc";
  * read.
  */
 export function readProcessTable(): Promise<ProcessTableRow[]> {
-  inFlight ??= (process.platform === "linux" ? readProcTable(procRoot) : readPsTable()).finally(() => { inFlight = null; });
+  inFlight ??= readProcessTableCensus().then(census => census.rows);
   return inFlight;
+}
+
+/** The same shared read, with the omissions relevant to a caller using absence as evidence. */
+export function readProcessTableCensus(): Promise<ProcessTableCensus> {
+  censusInFlight ??= (process.platform === "linux" ? readProcCensus(procRoot)
+    : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }))).finally(() => {
+      censusInFlight = null;
+      inFlight = null;
+    });
+  return censusInFlight;
+}
+
+/** A census of the table that begins now and is shared with no other caller, for evidence that must be newer than this
+ *  moment: a shared read still in flight may have listed its processes before a process started. Its permission-hidden
+ *  pids are kept, so a caller using absence as evidence can tell it couldn't see every process. */
+export function readProcessTableCensusNow(): Promise<ProcessTableCensus> {
+  return process.platform === "linux" ? readProcCensus(procRoot)
+    : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }));
+}
+
+/** A process's children as Linux lists them, read now: every owner's, including those /proc's hidepid=2 leaves out of
+ *  a census. Null where there's no such list (another platform, or a kernel without it). */
+export function readProcessChildrenNow(pid: number): Promise<number[] | null> {
+  return process.platform === "linux" ? readProcChildren(pid, procRoot) : Promise.resolve(null);
+}
+
+/** The pids in a process's `task/<tid>/children` files (`root` for tests). Each lists the children one thread started,
+ *  so every thread's is read; a thread that exited meanwhile has none. The files are the process's own, readable under
+ *  any hidepid. Null when no thread has one (a kernel without CONFIG_PROC_CHILDREN). Rejects when the threads can't be
+ *  listed (the process is gone) or a file that exists can't be read. */
+export async function readProcChildren(pid: number, root = "/proc"): Promise<number[] | null> {
+  const task = `${root}/${pid}/task`;
+  let listed = false;
+  const children: number[] = [];
+  for (const tid of await fs.promises.readdir(task)) {
+    let text: string;
+    try {
+      text = await fs.promises.readFile(`${task}/${tid}/children`, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    listed = true;
+    for (const child of text.split(/\s+/)) if (child) children.push(Number(child));
+  }
+  return listed ? children : null;
 }
 
 /** Points the Linux read at a /proc of a test's own, so a scenario's processes reach the observers through it; no
@@ -132,18 +189,23 @@ const READER_SOURCE = String.raw`
 
 let reader: Worker | null = null;
 let lastAsk = 0;
-const asked = new Map<number, { worker: Worker; rows: ProcessTableRow[]; resolve: (rows: ProcessTableRow[]) => void; reject: (error: Error) => void }>();
+const asked = new Map<number, { worker: Worker; census: ProcessTableCensus; resolve: (census: ProcessTableCensus) => void; reject: (error: Error) => void }>();
 
 /** The process table read from /proc (`root` for tests): the rows ps would print, without a process of its own. The
  *  files are read on the reader's thread: a read that waits (a cmdline waits on its process's memory lock) holds that
  *  thread, never the daemon's event loop, which only parses what it is sent. */
 export function readProcTable(root = "/proc"): Promise<ProcessTableRow[]> {
+  return readProcCensus(root).then(census => census.rows);
+}
+
+/** A /proc read whose permission omissions stay distinct from processes that have exited. */
+export function readProcCensus(root = "/proc"): Promise<ProcessTableCensus> {
   const worker = reader ??= startReader();
   const id = ++lastAsk;
   // Idle, the reader keeps no process up; while an answer is owed it does.
   worker.ref();
   return new Promise((resolve, reject) => {
-    asked.set(id, { worker, rows: [], resolve, reject });
+    asked.set(id, { worker, census: { rows: [], permissionHiddenPids: [] }, resolve, reject });
     worker.postMessage({ id, root });
   });
 }
@@ -157,13 +219,16 @@ function startReader(): Worker {
     if ("files" in part) {
       for (const [pid, stat, cmdline] of part.files) {
         const row = procRow(pid, stat, cmdline, part.bootTime);
-        if (row) ask.rows.push(row);
+        if (row) ask.census.rows.push(row);
+        if (typeof stat !== "string" && (stat.code === "EPERM" || stat.code === "EACCES")) {
+          ask.census.permissionHiddenPids.push(Number(pid));
+        }
       }
       if (!part.done) return;
     }
     asked.delete(part.id);
     if (asked.size === 0) worker.unref();
-    if ("files" in part) ask.resolve(ask.rows);
+    if ("files" in part) ask.resolve(ask.census);
     else ask.reject(new Error(part.error));
   });
   // A reader lost fails what it owed, and only that: its `error` then its `exit` may come after the next read has
@@ -208,6 +273,7 @@ function procRow(pid: string, stat: ProcFile, cmdlineFile: ProcFile | null, boot
     tpgid: Number(fields[5]),
     // The kernel may give a worker thread a longer name; ucomm is the task name's 15 bytes.
     executableName: printable(comm.slice(0, 15)),
+    state: fields[0],
     startedAt: lstart(bootTime + Math.floor(Number(fields[19]) / TICKS_PER_SECOND)),
     command,
     ...(name === "codex" ? { argv: typeof cmdlineFile === "string"

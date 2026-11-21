@@ -291,3 +291,38 @@ it("expected input does not answer a native selection prompt", async () => {
   expect(result).toMatchObject({ ok: false, sent: false, reason: "target_needs_input" });
   expect(f.commands.some(command => command.includes("paste-buffer") || command.includes("send-keys"))).toBe(false);
 });
+
+it.each([["claude-code", false], ["codex", false], ["claude-code", true], ["codex", true]] as const)("conditional native %s send rechecks identity and caller after lease wait (abort=%s)", async (runtime, abort) => {
+  const f = fixture(runtime, true);
+  const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
+  const { RunnerChannel } = await import("../src/domain/runner-channel.js");
+  const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
+  const grants = new ActivityGrantStore(f.db);
+  const grant = grants.issue({ nodeId: f.node.id, generation: f.registry.currentOccupantTenure(f.node.id)!.generationUuid, issuedBy: "launch",
+    run: { runId: "original-run", binding: { runtime, runner: 1, pane: "%1", panePid: 10 } } });
+  expect(grants.activate(grant.grantId)).toBe(true);
+  const outbox = new OutboxHandler(f.db), channel = new RunnerChannel(grants, outbox);
+  channel.post(grant.token, { type: "hello", version: 1, runId: "original-run", retained: true, capabilities: { input: true, wake: true, cancel: false } });
+  cleanup.push(channel.connect(grant.token));
+  new RigRepository(f.db).setNodeInputRoute(f.node.id, "native");
+  const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: f.registry,
+    tmuxAdapter: f.tmux, contextUsageStore: f.store, runnerChannel: channel } as never);
+  let release!: () => void, queued!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const atLease = new Promise<void>(resolve => { queued = resolve; });
+  const operation = f.guard!.operation.bind(f.guard!);
+  const held = operation(f.expected.sessionName, async () => { await gate; });
+  vi.spyOn(f.guard!, "operation").mockImplementation((name, fn, retained) => {
+    queued(); return operation(name, fn, retained);
+  });
+  const caller = new AbortController();
+  const pending = transport.send(f.expected.sessionName, "for original A", { expectedIdentity: f.expected, deliveryId: "native-original", signal: caller.signal } as never);
+  await atLease;
+  if (abort) vi.mocked(f.tmux.getPanePid).mockImplementation(async () => { caller.abort(); return 10; });
+  else f.replace();
+  release(); await held;
+  const result = await pending;
+  expect(result).toMatchObject({ ok: false, sent: false, reason: abort ? "caller_cancelled" : "expected_identity_mismatch" });
+  expect(outbox.runnerReceipt("native-original")).toBeNull();
+  expect(f.commands.some(command => command.includes("paste-buffer") || command.includes("send-keys"))).toBe(false);
+});

@@ -130,11 +130,14 @@ export function seatLines(r: Row, opts: { differsFirst?: boolean } = {}): Conten
   const c = (r["configured"] ?? {}) as Row;
   const configured = c["source"] === "registry"
     ? `configured: profile ${str(c["profileRef"])} (registry, recorded ${str(c["recordedAt"])}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
+    : c["source"] === "claude_token"
+      ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${str(c["label"])} (the seat's own credential file)`
     : c["source"] === "default_login"
       ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
       : `configured: unknown (${str(c["reason"])})`;
   const lines: ContentLine[] = [{ text: `  ${str(r["seatSession"])}  ${str(r["runtime"])}  ${configured} · allowance not linked` }];
   if (c["source"] === "default_login" && c["homeNote"]) lines.push({ text: `    ${c["homeNote"]}` });
+  if (c["source"] === "claude_token" && c["note"]) lines.push({ text: `    ${c["note"]}` });
   for (const note of (r["registryNotes"] as string[] | undefined) ?? []) lines.push({ text: `    ${note}` });
   const observed = r["observed"] as Row | undefined;
   const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];

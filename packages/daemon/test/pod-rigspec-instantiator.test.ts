@@ -21,6 +21,8 @@ import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { stringify as stringifyYaml } from "yaml";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -82,6 +84,7 @@ describe("PodRigInstantiator", () => {
     onboardingEnabledResolver?: () => boolean,
     continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">,
     extraDeps?: Record<string, unknown>,
+    launcherDeps?: Record<string, unknown>,
   ) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
@@ -89,7 +92,7 @@ describe("PodRigInstantiator", () => {
     const sessionRegistry = new SessionRegistry(db);
     const eventBus = new EventBus(db);
     const tmux = mockTmux();
-    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, ...(launcherDeps ?? {}) });
     const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const adapter = mockAdapter();
     const codexAdapter = mockAdapter("codex");
@@ -138,7 +141,7 @@ describe("PodRigInstantiator", () => {
     expect(done.edges.outgoing).toMatchObject([{ kind: "delegates_to", to: { logicalId: "dev.qa" } }]);
   });
 
-  it.each(["pi", "claude-code", "codex", "stub"])("limits Core-observed pane forwarding to grant-owning runtimes: %s", async runtime => {
+  it.each(["pi", "omp", "claude-code", "codex", "stub"])("limits Core-observed pane forwarding to grant-owning runtimes: %s", async runtime => {
     const adapter = mockAdapter(runtime);
     const { db, inst, tmux, sessionRegistry } = setup(undefined, { [runtime]: adapter });
     try {
@@ -148,16 +151,16 @@ describe("PodRigInstantiator", () => {
       expect(result.ok).toBe(true);
       const binding = vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0];
       expect(binding).toBeDefined();
-      expect(binding!.tmuxPane).toBe(runtime === "pi" ? "%47" : null);
+      expect(binding!.tmuxPane).toBe(runtime === "pi" || runtime === "omp" ? "%47" : null);
       expect(sessionRegistry.getBindingForNode(binding!.nodeId)?.tmuxPane).toBe("%47");
     } finally { db.close(); }
   });
 
-  it("does not invent an unresolved launch pane for a grant-owning runtime", async () => {
-    const adapter = mockAdapter("pi");
-    const { db, inst } = setup(undefined, { pi: adapter });
+  it.each(["pi", "omp"])("does not invent an unresolved launch pane for grant-owning %s", async runtime => {
+    const adapter = mockAdapter(runtime);
+    const { db, inst } = setup(undefined, { [runtime]: adapter });
     try {
-      const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = "pi";
+      const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = runtime;
       expect((await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT)).ok).toBe(true);
       expect(vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0].tmuxPane).toBeNull();
     } finally { db.close(); }
@@ -324,6 +327,30 @@ describe("PodRigInstantiator", () => {
     expect(launchHarness).toHaveBeenCalled();
     expect(launchHarness.mock.calls[0]?.[0].model).toBe("gpt-5.5");
     db.close();
+  });
+
+  // A member's declared working folder that isn't there yet is created before the seat's terminal starts, so the seat
+  // starts in it, as the kernel creates its own folder. A restore never creates one (restore-guidance-after-down.test.ts).
+  it("creates a member's declared working folder before its terminal starts, when it isn't there yet", async () => {
+    const parent = fs.mkdtempSync(nodePath.join(os.tmpdir(), "declared-folder-"));
+    const project = nodePath.join(parent, "new", "project");
+    const createFolder = vi.fn((dir: string) => { fs.mkdirSync(dir, { recursive: true }); });
+    const { db, inst, tmux } = setup(undefined, undefined, undefined, undefined, undefined, undefined, { createFolder });
+    const presentAtStart: boolean[] = [];
+    vi.mocked(tmux.createSession).mockImplementation(async (_name: string, cwd?: string) => {
+      presentAtStart.push(!!cwd && fs.existsSync(cwd));
+      return { ok: true as const };
+    });
+    try {
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project }], edges: [] }] })), RIG_ROOT);
+      expect(result.ok).toBe(true);
+      expect(createFolder).toHaveBeenCalledWith(project);
+      expect(presentAtStart).toEqual([true]);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+      db.close();
+    }
   });
 
   it("uses cwdOverride for launched nodes without changing spec-relative agent resolution", async () => {
@@ -2128,6 +2155,520 @@ state: 2-named
     } finally {
       realFs.rmSync(specDir, { recursive: true, force: true });
     }
+  });
+
+  describe("process_limits lifecycle and retention (#3253)", () => {
+    it("stores the limit on creation and, on re-apply, writes it before the pane is created; absent keeps, {} clears", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." };
+        const spec = (processLimits?: { tasksMax?: number }) => RigSpecCodec.serialize(makeRigSpec({
+          pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(processLimits ? { processLimits } : {}) }], edges: [] }],
+        }));
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+        // What the terminal would read for the seat at the moment its pane is created.
+        const seen: Array<{ tasksMax: number } | undefined> = [];
+        let nodeId = "";
+        tmux.createSession = vi.fn(async () => {
+          seen.push(nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined);
+          return { ok: true as const };
+        });
+
+        const mat = await inst.materialize(spec({ tasksMax: 512 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodeProcessLimits(nodeId)).toEqual({ tasksMax: 512 });
+        expect(RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, processLimits: { tasksMax: 512 } }], edges: [] }] })))
+          .toContain("tasks_max: 512");
+
+        const kept = await inst.launchMaterialized(spec(), RIG_ROOT, rigId);
+        expect(kept.ok, JSON.stringify(kept)).toBe(true);
+        expect(seen.at(-1)).toEqual({ tasksMax: 512 });
+
+        clearOccupancy(rigId);
+        const replaced = await inst.launchMaterialized(spec({ tasksMax: 1024 }), RIG_ROOT, rigId);
+        expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+        expect(seen.at(-1)).toEqual({ tasksMax: 1024 });
+
+        clearOccupancy(rigId);
+        const cleared = await inst.launchMaterialized(spec({}), RIG_ROOT, rigId);
+        expect(cleared.ok, JSON.stringify(cleared)).toBe(true);
+        expect(seen.at(-1)).toBeUndefined();
+        expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as { process_limits: string | null })
+          .process_limits).toBeNull();
+      } finally {
+        db.close();
+      }
+    });
+
+    it("with memory_max, a re-apply writes the new value before the pane; absent keeps, a mapping replaces whole, {} clears both", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." };
+        const spec = (processLimits?: { tasksMax?: number; memoryMax?: number }) => RigSpecCodec.serialize(makeRigSpec({
+          pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(processLimits ? { processLimits } : {}) }], edges: [] }],
+        }));
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+        const G = 1073741824;
+        const seen: Array<{ tasksMax?: number; memoryMax?: number } | undefined> = [];
+        let nodeId = "";
+        tmux.createSession = vi.fn(async () => {
+          seen.push(nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined);
+          return { ok: true as const };
+        });
+
+        const mat = await inst.materialize(spec({ tasksMax: 512, memoryMax: G }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodeProcessLimits(nodeId)).toEqual({ tasksMax: 512, memoryMax: G });
+
+        const kept = await inst.launchMaterialized(spec(), RIG_ROOT, rigId);
+        expect(kept.ok, JSON.stringify(kept)).toBe(true);
+        expect(seen.at(-1)).toEqual({ tasksMax: 512, memoryMax: G });
+
+        for (const next of [{ tasksMax: 512, memoryMax: 2 * G }, { memoryMax: 2 * G }, { tasksMax: 64 }, { tasksMax: 64, memoryMax: G }]) {
+          clearOccupancy(rigId);
+          const replaced = await inst.launchMaterialized(spec(next), RIG_ROOT, rigId);
+          expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+          expect(seen.at(-1)).toEqual(next);
+        }
+
+        clearOccupancy(rigId);
+        const cleared = await inst.launchMaterialized(spec({}), RIG_ROOT, rigId);
+        expect(cleared.ok, JSON.stringify(cleared)).toBe(true);
+        expect(seen.at(-1)).toBeUndefined();
+        expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as { process_limits: string | null })
+          .process_limits).toBeNull();
+      } finally {
+        db.close();
+      }
+    });
+
+    it("the first materialized launch and a persisted fresh launch keep a stored memory_max beside tasks_max", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const BOTH = '{"tasks_max":512,"memory_max":4294967296}';
+        const stored = (nodeId: string) =>
+          (db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as { process_limits: string | null }).process_limits;
+        const spec = (name: string) => RigSpecCodec.serialize(makeRigSpec({ name, pods: [{ id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: ".",
+            processLimits: { tasksMax: 512, memoryMax: 4294967296 } }], edges: [] }] }));
+
+        const mat = await inst.materialize(spec("memory-first"), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matNodeId = rigRepo.getRig(mat.result.rigId)!.nodes[0]!.id;
+        expect(stored(matNodeId)).toBe(BOTH);
+        await inst.launchFirstMaterializedNode(mat.result.rigId, matNodeId);
+        expect(stored(matNodeId)).toBe(BOTH);
+
+        const made = await inst.instantiate(spec("memory-persisted"), RIG_ROOT);
+        expect(made.ok, JSON.stringify(made)).toBe(true);
+        if (!made.ok) return;
+        const nodeId = rigRepo.getRig(made.result.rigId)!.nodes[0]!.id;
+        for (const s of sessionRegistry.getSessionsForRig(made.result.rigId)) {
+          sessionRegistry.markDetached(s.id);
+          sessionRegistry.clearBinding(s.nodeId);
+        }
+        await inst.launchPersistedFresh(made.result.rigId, nodeId);
+        expect(stored(nodeId)).toBe(BOTH);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a first-start retry with a changed memory_max is refused, and the same value (as a size) is not", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: ".",
+          process_limits: { tasks_max: 512, memory_max: 1073741824 } };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        expect(worker.processLimits).toEqual({ tasksMax: 512, memoryMax: 1073741824 });
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        for (const processLimits of [{ tasks_max: 512, memory_max: "2G" }, { tasks_max: 512 }, { memory_max: "1G" }]) {
+          expect(await inst.retryFirstStart(rigId, worker.id, { ...memberRaw, process_limits: processLimits }, RIG_ROOT)).toMatchObject({
+            ok: false, code: "first_start_retry_refused", message: "Member source disagrees with the retained seat identity or policy." });
+        }
+        const retried = await inst.retryFirstStart(rigId, worker.id, { ...memberRaw, process_limits: { tasks_max: 512, memory_max: "1G" } }, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(worker.id) as { process_limits: string | null })
+          .process_limits).toBe('{"tasks_max":512,"memory_max":1073741824}');
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a stored value that can't be read is kept as stored by the first materialized launch and a persisted fresh launch", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const BAD = "{not json";
+        const stored = (nodeId: string) =>
+          (db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as { process_limits: string | null }).process_limits;
+        const corrupt = (nodeId: string) => db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(BAD, nodeId);
+        const spec = (name: string) => RigSpecCodec.serialize(makeRigSpec({ name, pods: [{ id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: ".",
+            processLimits: { tasksMax: 512 } }], edges: [] }] }));
+
+        const mat = await inst.materialize(spec("limits-first"), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matNodeId = rigRepo.getRig(mat.result.rigId)!.nodes[0]!.id;
+        corrupt(matNodeId);
+        expect(rigRepo.getRig(mat.result.rigId)!.nodes[0]!.processLimitsError).toMatch(/process_limits/);
+        await inst.launchFirstMaterializedNode(mat.result.rigId, matNodeId);
+        expect(stored(matNodeId)).toBe(BAD);
+
+        const made = await inst.instantiate(spec("limits-persisted"), RIG_ROOT);
+        expect(made.ok, JSON.stringify(made)).toBe(true);
+        if (!made.ok) return;
+        const nodeId = rigRepo.getRig(made.result.rigId)!.nodes[0]!.id;
+        corrupt(nodeId);
+        for (const s of sessionRegistry.getSessionsForRig(made.result.rigId)) {
+          sessionRegistry.markDetached(s.id);
+          sessionRegistry.clearBinding(s.nodeId);
+        }
+        await inst.launchPersistedFresh(made.result.rigId, nodeId);
+        expect(stored(nodeId)).toBe(BAD);
+      } finally {
+        db.close();
+      }
+    });
+
+    it.each([["{}", {}], ["a value", { tasks_max: 1024 }]] as const)(
+      "a first-start retry with %s keeps an unreadable stored value as stored, without a new refusal", async (_name, processLimits) => {
+        const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+          [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+          [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+        });
+        try {
+          const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+          expect(start.ok, JSON.stringify(start)).toBe(true);
+          if (!start.ok) return;
+          const rigId = start.result.rigId;
+          vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+            failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+          const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: ".",
+            process_limits: { tasks_max: 512 } };
+          expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+          const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+          const BAD = "{not json";
+          db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(BAD, worker.id);
+          const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+          sessionRegistry.updateStatus(session.id, "exited");
+          sessionRegistry.clearBinding(worker.id);
+          tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+          const retried = await inst.retryFirstStart(rigId, worker.id, { ...memberRaw, process_limits: processLimits }, RIG_ROOT);
+          // the launch goes on (here a terminal stub that reads no limits; a real one reports process_limits_invalid)
+          expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+          expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(worker.id) as { process_limits: string | null })
+            .process_limits).toBe(BAD);
+        } finally {
+          db.close();
+        }
+      });
+
+    it("a terminal member's limit is stored with its node, before any launch", async () => {
+      const { db, rigRepo, inst, tmux } = setup({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") });
+      try {
+        const addNode = vi.spyOn(rigRepo, "addNode");
+        tmux.createSession = vi.fn(async () => ({ ok: false as const, code: "tmux_failed", message: "refused in this test" }));
+        const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "infra", label: "Infra",
+          members: [{ id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: ".", processLimits: { tasksMax: 64 } }],
+          edges: [] }] })), RIG_ROOT);
+        expect(addNode).toHaveBeenCalledWith(expect.any(String), "infra.server", expect.objectContaining({ processLimits: { tasksMax: 64 } }));
+        const rigId = result.ok ? result.result.rigId : (db.prepare("SELECT id FROM rigs").get() as { id: string } | undefined)?.id;
+        const node = rigId ? rigRepo.getRig(rigId)?.nodes.find((n) => n.logicalId === "infra.server") : undefined;
+        if (node) expect(rigRepo.getNodeProcessLimits(node.id)).toEqual({ tasksMax: 64 });
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  describe("pool block stored on the model node (#3395 Piece 1)", () => {
+    const memberBase = { id: "impl", agent_ref: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." };
+    const yamlSpec = (pool?: unknown, name = "test-rig") => stringifyYaml({
+      version: "0.2", name,
+      pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(pool === undefined ? {} : { pool }) }], edges: [] }],
+      edges: [],
+    });
+    const fullBlock = (fields: Record<string, unknown>) => ({ spec: {
+      max: 3, min: 0, dispatchAfterSeconds: 60, idleGraceSeconds: 300, cooldownSeconds: 60, dispatchTag: null, cwdTemplate: null, drain: false,
+      ...fields,
+    } });
+
+    function poolSetup() {
+      const ctx = setup({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") });
+      ctx.tmux.startServer = vi.fn(async () => {});
+      ctx.tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+      const clearOccupancy = (rigId: string) => {
+        for (const s of ctx.sessionRegistry.getSessionsForRig(rigId)) {
+          ctx.sessionRegistry.markDetached(s.id);
+          ctx.sessionRegistry.clearBinding(s.nodeId);
+        }
+      };
+      return { ...ctx, clearOccupancy };
+    }
+
+    it("A spec with a valid `pool` block on the model member loads, stays `valid`, and the block is stored on the model node.", async () => {
+      const { db, rigRepo, inst } = poolSetup();
+      try {
+        const yaml = yamlSpec({ max: 3, dispatch_tag: "role:impl" });
+        expect(RigSpecSchema.validate(RigSpecCodec.parse(yaml))).toEqual({ valid: true, errors: [] });
+        const mat = await inst.materialize(yaml, RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const nodeId = rigRepo.getRig(mat.result.rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ dispatchTag: "role:impl" }));
+
+        // `rig up` (import) goes through instantiate: the block lands on the node there too, every field as written
+        const every = { max: 5, min: 2, dispatch_after_s: 45, idle_grace_s: 120, cooldown_s: 90, dispatch_tag: "role:qa", cwd_template: "/work/{slot}", drain: true };
+        const up = await inst.instantiate(yamlSpec(every, "up-rig"), RIG_ROOT);
+        expect(up.ok, JSON.stringify(up)).toBe(true);
+        if (!up.ok) return;
+        const upNode = rigRepo.getRig(up.result.rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(upNode)).toEqual(fullBlock({ max: 5, min: 2, dispatchAfterSeconds: 45, idleGraceSeconds: 120,
+          cooldownSeconds: 90, dispatchTag: "role:qa", cwdTemplate: "/work/{slot}", drain: true }));
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A spec whose pool has `max: 0` loads, and the block is stored with `max: 0`.", async () => {
+      const { db, rigRepo, inst } = poolSetup();
+      try {
+        const mat = await inst.materialize(yamlSpec({ max: 0 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const nodeId = rigRepo.getRig(mat.result.rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 0 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    it("`pool: {}` validates with no advisory, and re-applied over a stored block it clears that block.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        expect(RigSpecSchema.validate(RigSpecCodec.parse(yamlSpec({})))).toEqual({ valid: true, errors: [] });
+        const mat = await inst.materialize(yamlSpec({ max: 3 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({}));
+
+        clearOccupancy(rigId);
+        const cleared = await inst.launchMaterialized(yamlSpec({}), RIG_ROOT, rigId);
+        expect(cleared, JSON.stringify(cleared)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toBeUndefined();
+        expect((db.prepare("SELECT pool FROM nodes WHERE id = ?").get(nodeId) as { pool: string | null }).pool).toBeNull();
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A re-apply without the key leaves the stored block unchanged, and a new block replaces it whole.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        const mat = await inst.materialize(yamlSpec({ max: 3, min: 1 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+
+        const kept = await inst.launchMaterialized(yamlSpec(), RIG_ROOT, rigId);
+        expect(kept, JSON.stringify(kept)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ min: 1 }));
+
+        clearOccupancy(rigId);
+        const replaced = await inst.launchMaterialized(yamlSpec({ max: 5 }), RIG_ROOT, rigId);
+        expect(replaced, JSON.stringify(replaced)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 5 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A block that can't be used loads the rig, and re-applied over a stored block it is kept as authored with its error: the stored block is not removed.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        const mat = await inst.materialize(yamlSpec({ max: 3 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+
+        clearOccupancy(rigId);
+        const bad = { max: 2, min: 4 };
+        const reapplied = await inst.launchMaterialized(yamlSpec(bad), RIG_ROOT, rigId);
+        expect(reapplied, JSON.stringify(reapplied)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toEqual({ raw: bad, error: "pool.max: must be at least min (4)" });
+
+        const unknownKey = { max: 1, colour: "blue" };
+        const fresh = await inst.materialize(yamlSpec(unknownKey, "second-rig"), RIG_ROOT);
+        expect(fresh.ok, JSON.stringify(fresh)).toBe(true);
+        if (!fresh.ok) return;
+        const freshNode = rigRepo.getRig(fresh.result.rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(freshNode)).toMatchObject({ raw: unknownKey, error: expect.stringMatching(/^pool\.colour: unknown field/) });
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A stored block that can't be read comes back as stored, with why, and reading it never throws.", () => {
+      const { db, rigRepo } = setup();
+      try {
+        const rig = rigRepo.createRig("stored-rig");
+        const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex" });
+        db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run("{not json", node.id);
+        expect(rigRepo.getNodePool(node.id)).toEqual({ raw: "{not json", error: "pool: the stored value is not valid JSON" });
+        db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: "many" }), node.id);
+        expect(rigRepo.getNodePool(node.id)).toEqual({ raw: { max: "many" }, error: "pool.max: must be a whole number of 0 or more" });
+        db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run("{}", node.id);
+        expect(rigRepo.getNodePool(node.id)).toEqual({ raw: {}, error: "pool: the stored block is empty" });
+      } finally {
+        db.close();
+      }
+    });
+
+    // #3395 C6/C7: the advisory text, counted in the whole outcome, so a second copy anywhere fails
+    const advisory = "dev.impl pool.max: must be at least min (4); pool not used";
+    const occurrences = (outcome: unknown) => JSON.stringify(outcome).split(advisory).length - 1;
+
+    it("Launch paths (`materializeStructured`, `launchMaterialized`, `addMemberToPod`) return the pool advisory in their warnings exactly once.", async () => {
+      const { db, inst, clearOccupancy } = poolSetup();
+      try {
+        const bad = { max: 2, min: 4 };
+        const structured = await inst.materializeStructured(RigSpecCodec.parse(yamlSpec(bad)), RIG_ROOT);
+        expect(structured.ok, JSON.stringify(structured)).toBe(true);
+        if (!structured.ok) return;
+        expect(structured.result.warnings.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(structured)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const launched = await inst.launchMaterialized(yamlSpec(bad), RIG_ROOT, structured.result.rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        if (!launched.ok) return;
+        expect(launched.result.warnings?.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(launched)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const clean = await inst.launchMaterialized(yamlSpec({ max: 3 }), RIG_ROOT, structured.result.rigId);
+        expect(JSON.stringify(clean)).not.toContain(" pool.");
+      } finally {
+        db.close();
+      }
+    });
+
+    it("Import returns the pool advisory in `warnings` exactly once (C6, through the load front).", async () => {
+      const { db, inst } = poolSetup();
+      try {
+        const imported = await inst.instantiate(yamlSpec({ max: 2, min: 4 }, "import-rig"), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        expect(occurrences(imported)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A fresh launch of the model seat from its launch recipe leaves the stored block as it is.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        const mat = await inst.materialize(yamlSpec({ max: 3 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        rigRepo.setNodePool(nodeId, fullBlock({ max: 7 }));
+
+        clearOccupancy(rigId);
+        const relaunched = await inst.launchPersistedFresh(rigId, nodeId);
+        expect(relaunched.status, JSON.stringify(relaunched)).toBe("launched");
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 7 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    // #3395, spec section 5, "Stored": the retry launches from the seat's stored settings (its fragment can't carry
+    // `pool`), so it reads the stored pool block from the node, as the first start does.
+    it("A first-start retry of a seat reports its stored pool block that can't be used once in its warnings, and the retry still launches.", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: "." };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        // Stored as a re-apply writes a block that can't be used: as authored.
+        expect(rigRepo.setNodePool(worker.id, { raw: { max: -1 } })).toBe(true);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        const stored = "dev.worker pool.max: must be a whole number of 0 or more; pool not used";
+        expect(JSON.stringify(retried).split(stored).length - 1, JSON.stringify(retried)).toBe(1);
+        expect(rigRepo.getNodePool(worker.id)).toEqual({ raw: { max: -1 }, error: expect.any(String) });
+      } finally {
+        db.close();
+      }
+    });
   });
 
   describe("launch_wrapper lifecycle and retention", () => {

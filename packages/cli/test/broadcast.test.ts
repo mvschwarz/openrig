@@ -156,13 +156,27 @@ describe("Broadcast CLI", () => {
   });
   afterEach(() => { vi.unstubAllEnvs(); });
 
-  function makeCmd(): Command {
+  function makeCmd(deps: StatusDeps = runningDeps(port)): Command {
     const prog = new Command(); prog.exitOverride();
-    prog.addCommand(broadcastCommand(runningDeps(port)));
+    prog.addCommand(broadcastCommand(deps));
     return prog;
   }
 
   // S2 (OPR.0.5.4.3): the broadcast renderer must SURFACE an additive warning.
+  it.each([false, true])("renders native pending and unknown custody without claiming it was sent or model work completed (json=%s)", async json => {
+    const client = { post: async () => ({ status: 200, data: { total: 2, sent: 0, failed: 0, pendingNative: 1, indeterminateNative: 1,
+      results: [{ ok: true, sessionName: "a@r", runnerReceipt: { version: 1, requestId: "pending", stage: "accepted" } },
+        { ok: true, sessionName: "b@r", runnerReceipt: { version: 1, requestId: "unknown", stage: "completed", result: { submissionUnknown: true } } }] } }) } as unknown as DaemonClient;
+    const result = await captureLogs(() => makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync(["node", "rig", "broadcast", "message", ...(json ? ["--json"] : [])]));
+    if (json) expect(JSON.parse(result.logs[0]!)).toMatchObject({ sent: 0, pendingNative: 1, indeterminateNative: 1 });
+    else {
+      expect(result.logs.join("\n")).not.toContain(": sent");
+      expect(result.logs.join("\n")).toContain("native receipt accepted");
+      expect(result.logs.join("\n")).toContain("native effect unknown");
+      expect(result.logs.join("\n")).toContain("1 native pending");
+    }
+    expect(result.exitCode).toBe(1);
+  });
   it("broadcast renderer surfaces the unknown-sender notice from the response warning", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "warn-rig", "hello"]);

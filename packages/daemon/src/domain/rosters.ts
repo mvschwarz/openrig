@@ -12,6 +12,8 @@ export interface RosterWake {
     url_ref: string;
     /** Secret name holding the Authorization header value, when the tool requires one. */
     authorization_ref?: string;
+    /** Secret name holding a Standard Webhooks signing secret (`whsec_…`), when the tool verifies signed rings. */
+    signing_secret_ref?: string;
     /** Absolute path of an env file (0600) holding those keys, when they aren't in the daemon's environment. */
     secrets_env_file?: string;
   };
@@ -40,6 +42,25 @@ export interface RosterMember extends Reference {
   label?: string;
   /** Why an authored `label` isn't used. The roster still loads, and the member is named by its seat as before. */
   label_problem?: string;
+  /** Its owner says it takes no requests (only `false` is authored; a member takes them by default). Work sent to it is
+   *  still written, and the sender is told so, with `takes_requests_note`, so it can send the work elsewhere. */
+  takes_requests?: false;
+  /** Why it takes no requests, as a sender's assistant can repeat it: the label rule (plain text, at most 200 characters). */
+  takes_requests_note?: string;
+  /** Why an authored `takes_requests` or `takes_requests_note` can't be used. The roster still loads; a note that can't be
+   *  used leaves the flag in place. */
+  takes_requests_problem?: string;
+  /** Which client the participant uses and what kind of participant it is, as the service that issued its access recorded
+   *  them (authored as `app` and `kind`): each a short lowercase token, passed through as recorded. That service owns the
+   *  values; absent is unknown, never inferred from a name or label. Not a seat's node kind. */
+  participant?: { app?: string; kind?: string };
+  /** Why an authored `app` or `kind` isn't used. Each is dropped on its own, and the roster still loads. */
+  participant_problem?: string;
+  /** The team this member is the declared entry point for, as the roster's author recorded it: a plain team name. It's
+   *  context only: no escalation, routing or ownership of other members' work follows from it. */
+  lead_of?: string;
+  /** Why an authored `lead_of` isn't used. It's dropped, and the roster still loads. */
+  lead_of_problem?: string;
 }
 export interface Roster {
   version: 1;
@@ -59,16 +80,20 @@ function parseWake(value: unknown): RosterWake {
   const hook = object(value) ? value.webhook : undefined;
   if (!object(hook) || text(hook.url_ref) === null
       || (hook.authorization_ref !== undefined && text(hook.authorization_ref) === null)
+      || (hook.signing_secret_ref !== undefined && text(hook.signing_secret_ref) === null)
       || (hook.secrets_env_file !== undefined && text(hook.secrets_env_file) === null)) {
-    throw new Error("A member's wake needs webhook.url_ref (optional authorization_ref and secrets_env_file): secret names, never values");
+    throw new Error("A member's wake needs webhook.url_ref (optional authorization_ref, signing_secret_ref and secrets_env_file): secret names, never values");
   }
   return { webhook: { url_ref: hook.url_ref as string,
     ...(hook.authorization_ref === undefined ? {} : { authorization_ref: hook.authorization_ref as string }),
+    ...(hook.signing_secret_ref === undefined ? {} : { signing_secret_ref: hook.signing_secret_ref as string }),
     ...(hook.secrets_env_file === undefined ? {} : { secrets_env_file: hook.secrets_env_file as string }) } };
 }
 
 /** The most a member's label, or a team's name as it's shown, may hold. */
 export const MEMBER_LABEL_MAX = 200;
+/** The longest declared `lead_of` team name, in characters. */
+export const LEAD_OF_MAX = 40;
 
 // What changes how the text around it shows: C0 and C1 controls, the line and paragraph separators, and the bidirectional
 // embeddings, overrides and isolates. Also the invisible characters that let two names that look the same differ: the word
@@ -85,6 +110,17 @@ function shownTextProblem(field: string, value: unknown): string | null {
   if (LAYOUT_CONTROLS.test(value)) return `${field} holds a control character (a line break, a separator, a bidirectional control or an invisible character)`;
   if (/[<>]/.test(value)) return `${field} holds an angle bracket`;
   return null;
+}
+
+/** A participant's `app` or `kind` as recorded: a letter, then up to 31 lowercase letters, digits or hyphens. */
+const PARTICIPANT_TOKEN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** An authored `app` or `kind`: the token, or why it isn't used. Absent or empty is unknown, with nothing to say. */
+function participantField(field: "app" | "kind", value: unknown): { token?: string; problem?: string } {
+  if (value === undefined || value === "") return {};
+  if (typeof value === "string" && PARTICIPANT_TOKEN.test(value)) return { token: value };
+  const shown = JSON.stringify(value) ?? String(value);
+  return { problem: `${field} ${shown.length > 40 ? `${shown.slice(0, 40)}…` : shown} isn't a short lowercase token (a letter, then up to 31 lowercase letters, digits or hyphens)` };
 }
 
 /** Select authored fields only: a file cannot supply runtime or observed-model facts. */
@@ -109,12 +145,32 @@ export function parseRoster(value: unknown): Roster {
               : null;
     // A label that can't be used never stops the roster loading either: the member is named by its seat instead.
     const badLabel = m.label === undefined ? null : shownTextProblem("label", m.label);
+    // So does a takes-requests flag or note that can't be used: a bad flag reads as taking requests, a bad note leaves the
+    // flag without it, and either says why.
+    const takes = m.takes_requests, takesNote = m.takes_requests_note;
+    const takesProblem = takes !== undefined && typeof takes !== "boolean" ? `takes_requests ${JSON.stringify(takes)} isn't true or false`
+      : takesNote !== undefined && takes !== false ? "takes_requests_note is for a member with takes_requests: false"
+        : takesNote !== undefined ? shownTextProblem("takes_requests_note", takesNote) : null;
+    // So does an app or kind that isn't a token: that one is dropped, and the problem says why.
+    const app = participantField("app", m.app), kind = participantField("kind", m.kind);
+    const participant = { ...(app.token ? { app: app.token } : {}), ...(kind.token ? { kind: kind.token } : {}) };
+    const participantProblem = [app.problem, kind.problem].filter(Boolean).join("; ");
+    // So does a lead_of that isn't a plain team name: absent or empty declares nothing.
+    const leadOf = m.lead_of === undefined || m.lead_of === "" ? undefined : m.lead_of;
+    const leadOfProblem = leadOf === undefined ? null : shownTextProblem("lead_of", leadOf)
+      ?? ([...(leadOf as string).trim()].length > LEAD_OF_MAX ? `lead_of is longer than ${LEAD_OF_MAX} characters` : null);
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
       ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
       ...(cadenceProblem ? { check_in_problem: cadenceProblem }
         : { ...(cadence === undefined ? {} : { check_in_minutes: cadence as number }), ...(onRequest === true ? { check_in_on_request: true as const } : {}) }),
-      ...(m.label === undefined ? {} : badLabel ? { label_problem: badLabel } : { label: (m.label as string).trim() }) };
+      ...(m.label === undefined ? {} : badLabel ? { label_problem: badLabel } : { label: (m.label as string).trim() }),
+      ...(takes === false ? { takes_requests: false as const } : {}),
+      ...(takes === false && takesNote !== undefined && !takesProblem ? { takes_requests_note: (takesNote as string).trim() } : {}),
+      ...(takesProblem ? { takes_requests_problem: takesProblem } : {}),
+      ...(Object.keys(participant).length ? { participant } : {}),
+      ...(participantProblem ? { participant_problem: participantProblem } : {}),
+      ...(leadOf === undefined ? {} : leadOfProblem ? { lead_of_problem: leadOfProblem } : { lead_of: (leadOf as string).trim() }) };
   });
   return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
@@ -131,16 +187,18 @@ function readRosterFile(file: string): Roster {
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export function readRosters(folder: string): { rosters: Roster[]; warnings: string[] } {
-  const rosters: Roster[] = [], warnings: string[] = [];
+/** The rosters in file-name order, each with its file (`files[i]` is `rosters[i]`'s), and the files that couldn't be read,
+ *  so a caller that takes the first roster's entry can tell when an unread file came first. */
+export function readRosters(folder: string): { rosters: Roster[]; warnings: string[]; files: string[]; unreadable: string[] } {
+  const rosters: Roster[] = [], warnings: string[] = [], files: string[] = [], unreadable: string[] = [];
   let names: string[];
   try { names = readdirSync(folder).filter(n => n.endsWith(".json")).sort(); }
-  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`] }; }
+  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`], files, unreadable }; }
   for (const name of names) {
-    try { rosters.push(readRosterFile(join(folder, name))); }
-    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
+    try { rosters.push(readRosterFile(join(folder, name))); files.push(name); }
+    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); unreadable.push(name); }
   }
-  return { rosters, warnings };
+  return { rosters, warnings, files, unreadable };
 }
 
 /** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, or, when there's

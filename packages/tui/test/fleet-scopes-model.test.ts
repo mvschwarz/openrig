@@ -11,6 +11,8 @@
 import { describe, expect, it } from "vitest";
 import { fleetScopesLines, FLEET_SCOPES_HINT, type FleetScopesView } from "../src/scopes/fleet-scopes-model.js";
 import { createViewState } from "../src/state.js";
+import { DaemonClient } from "../src/daemon-client.js";
+import { hydrateSnapshot } from "../src/hydrate.js";
 import type { FleetSnapshot } from "../src/types.js";
 import type { SliceScopeSnap } from "../src/scopes/scopes-model.js";
 
@@ -170,4 +172,34 @@ describe("fleetScopesLines — the selected slice's detail is visible on open", 
     const lines = fleetScopesLines(state(sel), snapWith(view(), { detail: detailSnap }), 120);
     expect(lines.map(l => l.text ?? "").some(t => t.includes("N narrative"))).toBe(false);
   });
+});
+
+it("requests a selected fleet slice while the fleet listing is still pending", async () => {
+  const listing = Promise.withResolvers<Response>();
+  const requests: string[] = [];
+  const slice = { dirName: "build-s1", displayName: "Build" };
+  const client = new DaemonClient({
+    baseUrl: "http://test",
+    fetchImpl: async (url) => {
+      const route = new URL(String(url));
+      requests.push(route.pathname + route.search);
+      return route.pathname === "/api/scopes/fleet" ? listing.promise : Response.json(slice);
+    },
+  });
+  const selected = {
+    ...createViewState({ instanceId: "t" }).get(),
+    section: "fleet" as const,
+    fleetSelected: { hostId: "host-b", mission: "alpha", slice: "build-s1" },
+  };
+  const pending = hydrateSnapshot(client, undefined, null, null, null, selected);
+  const requestsBeforeListing = [...requests];
+  listing.resolve(Response.json({ error: "fleet unavailable" }, { status: 503 }));
+  const result = await pending;
+
+  expect(requestsBeforeListing).toEqual([
+    "/api/scopes/fleet",
+    "/api/scopes/slice?host=host-b&mission=alpha&slice=build-s1",
+  ]);
+  expect(result.fleetSliceDetail).toEqual({ detail: slice });
+  expect(result.readErrors).toEqual([expect.stringContaining("fleet projects:")]);
 });
