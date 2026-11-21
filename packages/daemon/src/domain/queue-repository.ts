@@ -645,6 +645,9 @@ export interface QueueClaimInput {
   identityPrincipal?: string | null;
 }
 
+/** A row as a handoff successor shows it (QueueRepository.handoffSuccessorReads). */
+export interface HandoffSuccessorRow { qitemId: string; destinationSession: string; state: QueueState; tsCreated: string }
+
 export interface QueueListOptions {
   /** One legacy exact tag or repeated exact tags, all of which must match before the result bound. */
   tag?: string | string[];
@@ -5232,6 +5235,41 @@ export class QueueRepository {
         AND json_extract(delegated_decision, '$.applicationId') = ?
       ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[];
     return rows.map((row) => this.rowToItem(row));
+  }
+
+  /** #3645: the reads that name handoff successors (routes/queue.ts handoffSuccessors) for a whole page of rows in two
+   *  statements, batched as createLinkedSuccessorLookup reads (`IN (SELECT value FROM json_each(?))`): for each source,
+   *  the rows whose handed_off_from is that source, newest first by ts_created, at most `perSource` (what
+   *  `list({ handedOffFrom, limit: perSource })` picks for that source); and the rows with the given ids, as getById
+   *  finds them. Only the fields a successor shows, from the stored row, with no listing projection per row. */
+  handoffSuccessorReads(sourceQitemIds: readonly string[], targetQitemIds: readonly string[], perSource: number): {
+    bySource: Map<string, HandoffSuccessorRow[]>;
+    byId: Map<string, HandoffSuccessorRow>;
+  } {
+    const bySource = new Map<string, HandoffSuccessorRow[]>();
+    const byId = new Map<string, HandoffSuccessorRow>();
+    type Read = { qitem_id: string; destination_session: string; state: QueueState; ts_created: string };
+    const shown = (r: Read): HandoffSuccessorRow => ({ qitemId: r.qitem_id, destinationSession: r.destination_session, state: r.state, tsCreated: r.ts_created });
+    if (sourceQitemIds.length > 0) {
+      const rows = this.db.prepare(
+        `SELECT qitem_id, destination_session, state, ts_created, source FROM (
+           SELECT qitem_id, destination_session, state, ts_created, handed_off_from AS source,
+             ROW_NUMBER() OVER (PARTITION BY handed_off_from ORDER BY ts_created DESC) AS n
+           FROM queue_items WHERE handed_off_from IN (SELECT value FROM json_each(?)))
+         WHERE n <= ? ORDER BY source, n`,
+      ).all(JSON.stringify([...new Set(sourceQitemIds)]), perSource) as Array<Read & { source: string }>;
+      for (const r of rows) {
+        const list = bySource.get(r.source);
+        if (list) list.push(shown(r)); else bySource.set(r.source, [shown(r)]);
+      }
+    }
+    if (targetQitemIds.length > 0) {
+      const rows = this.db.prepare(
+        "SELECT qitem_id, destination_session, state, ts_created FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))",
+      ).all(JSON.stringify([...new Set(targetQitemIds)])) as Read[];
+      for (const r of rows) byId.set(r.qitem_id, shown(r));
+    }
+    return { bySource, byId };
   }
 
   /** opts.waiting: false skips the row's waiting view (the stuck sweep's own reads); the default builds it. Per call:

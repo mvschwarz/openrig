@@ -160,30 +160,47 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+type HandoffSuccessorFace = { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string };
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): HandoffSuccessorFace {
+  return handoffSuccessorsMany(repo, [item]).get(item.qitemId)!;
+}
+
+/** #3645: handoffSuccessors for a page of rows, with the same face per row, from two statements for the whole page
+ *  (QueueRepository.handoffSuccessorReads) instead of a listing and a getById per row. A lookup that fails says so on
+ *  every row of the page; it never fails the read. */
+export function handoffSuccessorsMany(repo: QueueRepository, items: ReadonlyArray<Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">>): Map<string, HandoffSuccessorFace> {
+  const faces = new Map<string, HandoffSuccessorFace>();
+  if (items.length === 0) return faces;
+  let reads: ReturnType<QueueRepository["handoffSuccessorReads"]>;
   try {
     // Newest first, one past the bound so a cut list is known.
-    const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
+    reads = repo.handoffSuccessorReads(items.map((item) => item.qitemId),
+      items.flatMap((item) => item.closureTarget?.startsWith("qitem-") ? [item.closureTarget] : []), HANDOFF_SUCCESSOR_LIMIT + 1);
+  } catch {
+    for (const item of items) faces.set(item.qitemId, { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." });
+    return faces;
+  }
+  for (const item of items) {
+    const found = reads.bySource.get(item.qitemId) ?? [];
     const truncated = found.length > HANDOFF_SUCCESSOR_LIMIT;
     const successors: HandoffSuccessor[] = found.slice(0, HANDOFF_SUCCESSOR_LIMIT)
       .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
       .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
     const target = item.closureTarget;
     if (target?.startsWith("qitem-") && !successors.some((s) => s.qitemId === target)) {
-      const named = repo.getById(target);
+      const named = reads.byId.get(target);
       if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
     }
-    if (successors.length > 0) return { successors, ...(truncated ? { successorsTruncated: true as const } : {}) };
-    return {
+    if (successors.length > 0) { faces.set(item.qitemId, { successors, ...(truncated ? { successorsTruncated: true as const } : {}) }); continue; }
+    faces.set(item.qitemId, {
       successors,
       successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
         ? `${item.closureReason === "superseded" ? "Its recorded successor on another host is" : "It was handed to another host; its successor there is"} ${target}. This daemon has no copy.`
         : item.closureReason === "superseded" ? "No successor row was found on this daemon for this supersession."
           : "No row on this daemon was made by this handoff.",
-    };
-  } catch {
-    return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
+    });
   }
+  return faces;
 }
 
 export function queueRoutes(): Hono {
@@ -1669,9 +1686,9 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
-        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))
-        ? { ...item, ...handoffSuccessors(repo, item) } : item));
+      const faces = handoffSuccessorsMany(repo, items.filter((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))));
+      return c.json(items.map((item) => faces.has(item.qitemId) ? { ...item, ...faces.get(item.qitemId) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through
