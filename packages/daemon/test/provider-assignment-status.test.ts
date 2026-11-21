@@ -298,6 +298,9 @@ describe("a re-apply that changes nothing keeps a Codex seat on the apply that m
     const planned = await svc.assignmentPlan(request);
     if (!planned.ok) throw new Error(planned.message);
     expect(planned.plan.rows.map((r) => [r.seat, r.effect, r.asApplied])).toEqual([["c1@fleet", "unchanged", true]]);
+    // The plan says what it can't see: a later switch of the home.
+    expect(planned.plan.rows[0]!.notes).toEqual([`the login active in ${accountHome ?? codexHome()} isn't read: if it was switched since `
+      + "(by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again"]);
     const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: "lead@fleet" }, {});
     if (!applied.ok) throw new Error(applied.message);
     return applied.report.results.map((r) => [r.kind, r.detail]);

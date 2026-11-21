@@ -1083,8 +1083,11 @@ that machine. Only the command and its output cross the connection.`);
     for (const row of plan.rows) {
       const last = row.lastResult ? `  last applied: ${kindWords(row.lastResult.kind)} (${row.lastResult.label}, ${row.lastResult.at}): ${row.lastResult.detail}` : null;
       if (row.effect === "not_affected") { console.log(`${row.seat}: not affected (${(row.notes ?? []).join("; ")})`); continue; }
-      if (row.effect === "unchanged") console.log(row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
-        : `${row.seat}: unchanged, already on ${plan.account.label}`);
+      if (row.effect === "unchanged") {
+        console.log(row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
+          : `${row.seat}: unchanged, already on ${plan.account.label}`);
+        if (row.asApplied) for (const note of row.notes ?? []) console.log(`  ${note}`);
+      }
       else if (row.effect === "kept_override") console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`);
       else {
         const check = row.precheck?.safe ? "precheck safe" : `precheck UNSAFE: ${(row.precheck?.reasons ?? []).join(", ")}`;

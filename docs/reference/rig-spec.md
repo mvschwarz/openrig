@@ -971,7 +971,9 @@ time. Seats move one at a time, and each gets one result:
 account. In `--json` this is `assignment` on each `bindings` row, and on each `seatAccounts` row when usage windows are on. A seat's state is one of:
 - **follows:** configured as the assigned account, or still as this assignment's apply left it. A Codex seat with no
   login of its own reads "still as the apply of `<label>` left its home". The login active in that home isn't read,
-  so a later `rig auth switch` there isn't seen.
+  so a later switch there isn't seen, whether by `rig auth switch`, `rig provider switch`, or another rig's apply on
+  the same home. Status still reads follows, and applying the assignment again doesn't move the seat; the plan says
+  so on its row. Move it with `rig provider switch --seat`.
 - **override:** configured with its own choice of another account.
 - **not applied:** the rig has an assignment, but the seat isn't on it yet. Its last result says why; a seat no apply
   has reached yet has none.

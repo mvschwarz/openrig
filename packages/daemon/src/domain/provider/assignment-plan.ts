@@ -186,6 +186,10 @@ function homeOnly(seat: PlanSeatFacts): boolean {
 /** How a seat that's unchanged only as an apply left its home is worded, in the plan, the apply and status. */
 export const asAppliedText = (label: string) => `still as the apply of ${label} left its home`;
 
+/** What the plan can't see for such a seat: its home's login isn't read, so a later switch there doesn't show. */
+const asAppliedLimit = (seat: PlanSeatFacts) => `the login active in ${seat.ownHome?.source === "account-switch" ? seat.ownHome.home : seat.codexHome} isn't read: `
+  + "if it was switched since (by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again";
+
 /** Where a seat stands against its rig's assignment, by the plan's own rules: on the assigned account (configured as it, or
  *  still as the apply of this assignment left it), its own choice of another account, or not moved yet (no result, or its
  *  last result didn't move it). Configuration only: never proof of the login a running session uses. */
@@ -241,7 +245,7 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
     // With --account-home, only when that's the home it was moved to.
     if (appliedThis(seat, account.label, input) && (!input.accountHome
       || (seat.ownHome?.source === "account-switch" && sameHome(input, seat.ownHome.home, input.accountHome)))) {
-      return { seat, effect: "unchanged", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };
+      return { seat, effect: "unchanged", ...(homeOnly(seat) ? { asApplied: true as const, notes: [asAppliedLimit(seat)] } : {}) };
     }
     const override = seatOverride(seat, input) ?? undefined;
     if (override && !input.includeOverrides) return { seat, effect: "kept_override", override, notes: ["kept (seat override); --include-overrides moves it too"] };

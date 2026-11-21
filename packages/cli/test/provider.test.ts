@@ -867,11 +867,14 @@ describe("rig provider status shows each seat against its rig's assignment (#362
 
   it("the plan words a seat that's unchanged only as an apply left its home, not as already on the account", async () => {
     const plan = { daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", reference: "the login team saved in /homes/a" }, includeOverrides: false,
-      rows: [{ seat: "h@fleet", runtime: "codex", current: "the login in /homes/a", effect: "unchanged", activity: "idle", asApplied: true },
+      rows: [{ seat: "h@fleet", runtime: "codex", current: "the login in /homes/a", effect: "unchanged", activity: "idle", asApplied: true,
+        notes: ["the login active in /homes/a isn't read: if it was switched since (by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again"] },
         { seat: "r@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "idle" }],
       codexHomes: [], digest: "0123456789ab", note: "" };
     const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team"], deps(() => ({ ok: true, plan })));
     expect(logs).toContain("h@fleet: unchanged: still as the apply of team left its home");
+    // What the plan can't see for that seat is said under it.
+    expect(logs[logs.indexOf("h@fleet: unchanged: still as the apply of team left its home") + 1]).toBe("  the login active in /homes/a isn't read: if it was switched since (by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again");
     expect(logs).toContain("r@fleet: unchanged, already on team");
   });
 
