@@ -7,6 +7,7 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { spawnSync } from "node:child_process";
 import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
+import { shellWord } from "../cross-host-executor.js";
 
 /** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
  *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
@@ -18,6 +19,12 @@ export function chatroomWatchTmuxArgs(rig: string): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
   return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
     "rig", "chatroom", "watch", "--", tmuxArg(rig)];
+}
+
+/** The printed attach line. The session is quoted for a shell when it needs it, so a pasted line attaches to that exact
+ *  session; a name that needs no quoting prints as it is. */
+export function chatroomAttachHint(session: string): string {
+  return `Attach with: tmux attach -t ${shellWord(session)}`;
 }
 
 /** tmux ends a command at an argument that ends in `;`, unless a `\` comes before it, so a final `;` gets that `\`. */
@@ -201,7 +208,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
           if (result.error || result.status !== 0) throw result.error ?? new Error("tmux session creation failed");
           const created = result.stdout.trim() || sessionName;
           console.log(`Started watch in tmux session: ${created}`);
-          console.log(`Attach with: tmux attach -t ${created}`);
+          console.log(chatroomAttachHint(created));
         } catch {
           console.error(`Failed to create tmux session '${sessionName}'. It may already exist.`);
           process.exitCode = 1;

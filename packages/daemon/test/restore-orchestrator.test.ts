@@ -1404,6 +1404,7 @@ describe("RestoreOrchestrator", () => {
       "floor",
       "medium",
     );
+    // The seat's node is the last argument (index 15), after the unset tail positions.
     expect(codexResume).toHaveBeenCalledWith(
       "codex-session",
       "codex_id",
@@ -1413,6 +1414,8 @@ describe("RestoreOrchestrator", () => {
       "floor",
       "o3",
       "medium",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      node.id,
     );
   });
 
@@ -1426,7 +1429,7 @@ describe("RestoreOrchestrator", () => {
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(node.id, "codex-session", "codex_id", "token-codex", "/work", null, "o3", "full_bypass", "medium");
     expect(codexResume).toHaveBeenCalledWith("codex-session", "codex_id", "token-codex", "/work", null, "full_bypass", "o3",
-      "medium", undefined, undefined, undefined, undefined, envelope);
+      "medium", undefined, undefined, undefined, undefined, envelope, undefined, undefined, node.id);
   });
 
   it("attemptResume forwards the resolved effort to the Pi resume adapter", async () => {
@@ -2011,9 +2014,10 @@ describe("RestoreOrchestrator", () => {
     expect(calls).toHaveLength(2);
     const withHome = calls.filter((c) => c.includes("/homes/worker"));
     expect(withHome).toHaveLength(1);
-    expect(withHome[0]).toHaveLength(12);
+    // Every call ends with the seat's node (index 15), so a seat without its own home differs only at index 11.
+    expect(withHome[0]).toHaveLength(16);
     expect(withHome[0]![11]).toBe("/homes/worker");
-    expect(calls.find((c) => !c.includes("/homes/worker"))!.length).toBeLessThan(12);
+    expect(calls.find((c) => !c.includes("/homes/worker"))![11]).toBeUndefined();
   });
 
   it("resume succeeds -> status 'resumed'", async () => {
@@ -7229,10 +7233,11 @@ describe("RestoreOrchestrator", () => {
       expect(piCall[6]).toBe("high");
       expect(piCall[7]).toEqual(["rtk", "--pi-wrap"]);
 
-      // Codex resume: 7 base args + 7 tail args (effort, nonInterruptive, kernelAuthority, teamPermissionDefault, seatCodexHome, codexPermissions, beforeNativeDispatch) + launchWrapper at index 14
+      // Codex resume: 7 base args + 7 tail args (effort, nonInterruptive, kernelAuthority, teamPermissionDefault, seatCodexHome, codexPermissions, beforeNativeDispatch) + launchWrapper at index 14 + the seat's node at 15
       const codexCall = (codexResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
       expect(codexCall).toBeDefined();
-      expect(codexCall).toHaveLength(15);
+      expect(codexCall).toHaveLength(16);
+      expect(codexCall[15]).toBe(codexNode.id);
       expect(codexCall[0]).toBe("r99-codex-worker");
       expect(codexCall[1]).toBe("codex_id");
       expect(codexCall[2]).toBe("codex-tok-123");

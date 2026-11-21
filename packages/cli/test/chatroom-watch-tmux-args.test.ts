@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { chatroomWatchTmuxArgs } from "../src/commands/chatroom.js";
+import { chatroomAttachHint, chatroomWatchTmuxArgs } from "../src/commands/chatroom.js";
 
 const sessionArg = (rig: string) => { const args = chatroomWatchTmuxArgs(rig); return args[args.indexOf("-s") + 1]; };
 
@@ -43,6 +43,21 @@ const TMUX_SOCKET = `openrig-chatroom-test-${process.pid}`;
 const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
 const names = ["my-rig", "my rig", "it's", 'say "hi"', "$(echo pwned)", "`id`", "a;b", "-rig",
   "a#b", "a##b", "a#{b}", "a#[fg=red]b", "a##[b", "a;", ";"];
+
+// The attach line is meant to be pasted into a shell, so the shell must hand tmux the exact session name.
+describe("chatroom watch --tmux attach hint", () => {
+  it("prints a session that needs no quoting as it is", () => {
+    const plain = sessionArg("my-rig");
+    expect(chatroomAttachHint(plain)).toBe(`Attach with: tmux attach -t ${plain}`);
+  });
+
+  it.each([...names, "release-0_7", "a\\$HOME"].map((rig) => `chatroom@${rig}`))("a shell reads %j back exactly", (session) => {
+    const word = chatroomAttachHint(session).slice("Attach with: tmux attach -t ".length);
+    const out = spawnSync("/bin/sh", ["-c", `printf '%s' ${word}`], { encoding: "utf8" });
+    expect(out.status).toBe(0);
+    expect(out.stdout).toBe(session);
+  });
+});
 
 describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server (private socket)", () => {
   let dir = "";
