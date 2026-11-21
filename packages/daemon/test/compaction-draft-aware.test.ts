@@ -296,7 +296,7 @@ it("automatic, recorded pane: busy sends no /compact; idle with a clear box comp
   expect(f.e.getOwedRestore(seat)).toBeNull();
   expect(f.effects().compactPastes).toBe(1);
   // The actual held rows, counted: none for /compact.
-  expect(f.compactRows("held")).toEqual([]);
+  expect(f.compactRows("retained")).toEqual([]);
 });
 
 it("manual, recorded pane: the preparation prompt is delivered, then /compact goes to the clear box and its restore follows", async () => {
@@ -309,7 +309,7 @@ it("manual, recorded pane: the preparation prompt is delivered, then /compact go
   expect(f.effects()).toMatchObject({ compactPastes: 1, prepPastes: 1 });
   for (let i = 0; i < 6 && f.e.getOwedRestore(seat) !== null; i++) await f.e.maybeAutoCompact(input);
   expect(f.e.getOwedRestore(seat)).toBeNull();
-  expect(f.compactRows("held")).toEqual([]);
+  expect(f.compactRows("retained")).toEqual([]);
 });
 
 // A person's draft holds a manual compaction with nothing written; once they clear the box, an explicit retry sends
@@ -381,11 +381,8 @@ it("a draft-aware seat with a recorded pane is not affected by the pane check", 
   expect(await manual.e.triggerManualCompact({ ...input, usedPercentage: 40 }, { operatorInitiated: true })).toMatchObject({ triggered: true });
 });
 
-// An opted-in draft-aware guard still holds input it can't read; the request says so and names the input box.
-it("at draft-aware, an input box OpenRig can't read holds managed input, and the manual request names it as unreadable", async () => {
-  const f = await fixture();
-  vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
-  vi.spyOn(f.tmux, "captureComposerSnapshot").mockResolvedValue({ ...frame(""), cursor: null });
+// A manual request through the real route, as `rig compact` sends it.
+async function triggerRoute(f: Awaited<ReturnType<typeof fixture>>) {
   vi.spyOn(f.transport, "resolveSessions").mockResolvedValue({ ok: true, sessions: [seat] } as never);
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -395,10 +392,34 @@ it("at draft-aware, an input box OpenRig can't read holds managed input, and the
   });
   app.route("/api/compaction", compactionRoutes());
   const response = await app.request("/api/compaction/trigger", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: seat }) });
-  const body = await response.json() as { reason?: string; error?: string };
+  return await response.json() as { reason?: string; error?: string; compact?: string; preparation?: { compact?: string } };
+}
+
+// An opted-in draft-aware guard still holds input it can't read; the request says so and names the input box.
+it("at draft-aware, an input box OpenRig can't read holds managed input, and the manual request names it as unreadable", async () => {
+  const f = await fixture();
+  vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
+  vi.spyOn(f.tmux, "captureComposerSnapshot").mockResolvedValue({ ...frame(""), cursor: null });
+  const body = await triggerRoute(f);
   expect(body.reason).toBe("draft_input_unknown");
   expect(body.error).toContain("couldn't read its input box");
   expect(f.writes).toEqual([]);
+});
+
+// The /compact paste went in, then the box changed before its Enter: /compact may be in the box unsubmitted, so its
+// restore steps are owed and a retry is refused meanwhile. The request says that, not "retry once the box is empty".
+it("manual, the box changes between the /compact paste and its Enter: the request names the owed restore, not a retry", async () => {
+  const f = await fixture();
+  let staged = false;
+  const real = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport, "send").mockImplementation(async (s: string, t: string, o?: any) => { const r = await real(s, t, o); if (!staged) { staged = true; f.stageMap(); } return r; });
+  vi.spyOn(f.tmux, "captureComposerSnapshot").mockImplementation(async () => frame(f.body().startsWith("/compact") ? `${f.body()} and a word` : f.body()));
+  const body = await triggerRoute(f);
+  expect(body.preparation?.compact).toBe("uncertain");
+  expect(f.effects()).toMatchObject({ compactPastes: 1 });
+  expect(f.e.getOwedRestore(seat)).not.toBeNull();
+  expect(body.error).toContain("Its restore steps follow");
+  expect(body.error).not.toContain("retry explicitly");
 });
 
 // #2575: a seat whose empty input box OpenRig can't read used to sit unrestored, retried on every poll. After two idle

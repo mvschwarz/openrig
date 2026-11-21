@@ -205,8 +205,11 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   const prep = outcome.preparation;
   if (!prep || prep.delivery === "not_sent") return manualReasonMessage(sessionName, outcome.reason);
   const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
+  // An input-box hold names the box only when nothing of /compact was written; once it may have gone in, the owed restore
+  // below is what the person needs, and a retry is refused while it's owed.
+  const heldBeforeCompact = outcome.reason.startsWith("draft_input_") && prep.compact === "not_sent" && !outcome.restoreOwed;
   const detail = (outcome.reason === "preparation_incomplete" || outcome.reason === "map_complete_seat_never_idle"
-    || outcome.reason === "preparation_needs_input" || outcome.reason.startsWith("draft_input_"))
+    || outcome.reason === "preparation_needs_input" || heldBeforeCompact)
     ? manualReasonMessage(sessionName, outcome.reason)
     : outcome.restoreOwed
       ? `/compact was not confirmed (${outcome.reason}) and is never sent again. Its restore steps follow in case it ran; the restore request tells the seat to say so and skip if it didn't compact.`
