@@ -91,6 +91,25 @@ export interface BindingSeatAccount {
   launched?: UnknownSeatObservation;
   /** A provider-observed identity tied to this seat's launch. */
   verified?: UnknownSeatObservation;
+  /** #3625: the rig's assignment for this seat's provider and this seat's last applied result. Claude and Codex seats. */
+  assignment?: SeatAssignment;
+}
+
+/** #3625: a seat against its rig's assignment (`rig provider assign`). Configuration and stored results only: an account
+ *  label here is the operator's name for a reference, never proof of the login a running session uses.
+ *  - follows: configured as the assigned account, or still as this assignment's apply left it;
+ *  - override: configured as its own choice of another account (kept by an apply, or changed since);
+ *  - not_applied: the rig has an assignment and the seat isn't on it yet (no result, or its last result didn't move it);
+ *  - no_assignment: the rig has no assignment for this provider. */
+export interface SeatAssignment {
+  provider: "claude" | "codex";
+  state: "follows" | "override" | "not_applied" | "no_assignment";
+  /** The rig's assignment: label, the reference it named, who asked and when. */
+  intended: { label: string; reference: string; requestedBy: string | null; at: string } | null;
+  /** The seat's last applied result, from any apply to its rig. */
+  applied: { kind: string; label: string; detail: string; at: string; recovery?: string } | null;
+  /** The seat's own choice, in words, when it's an override. */
+  override?: string;
 }
 
 export type SignalSourceClass =
@@ -240,6 +259,8 @@ export interface SeatConfiguredAccount {
    *  fresh readings disagree with it (possibly a different login, never a verdict). `withheld` when several
    *  seats share this session name, so samples keyed by it can't be attributed to one seat. */
   observed?: { windowsSampled?: boolean; lastSampledAt?: string; differsFrom?: string[]; withheld?: true; note?: string };
+  /** #3625: the seat against its rig's assignment, as on its `bindings[]` row. */
+  assignment?: SeatAssignment;
 }
 
 /** Slice 01 — allowance identity: the usage answer's accountId, else the workspace account/read

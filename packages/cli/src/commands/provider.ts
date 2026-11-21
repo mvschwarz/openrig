@@ -163,6 +163,17 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     // prints beside the kept reading.
     if (Array.isArray(m["usage"])) renderUsage(m["usage"] as Array<Record<string, unknown>>);
     if (Array.isArray(m["seatAccounts"])) renderSeatAccounts(m["seatAccounts"] as Array<Record<string, unknown>>);
+    // #3625 — without the seat accounts (usage windows off), the seats with an assignment or a result print on their own.
+    else {
+      const assigned = bindings.filter((b) => assignmentLines(b).length > 0);
+      if (assigned.length) {
+        console.log("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
+        for (const b of assigned) {
+          console.log(`  ${b["seatSession"]}  ${b["runtime"]}  ${configuredText((b["configured"] ?? {}) as Record<string, unknown>)}`);
+          for (const line of assignmentLines(b)) console.log(line);
+        }
+      }
+    }
   }
 
   // Slice 01 — each seat's configured account and its source (present only while provider.usage_windows is on).
@@ -173,11 +184,8 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     return `${f["reason"] ?? "no reason given"}${f["detail"] !== undefined ? ` (${f["detail"]})` : ""}`;
   }
 
-  function renderSeatAccounts(rows: Array<Record<string, unknown>>, where = ""): void {
-    console.log(`SEATS${where} (configured account; not proof of the login a running session uses)`);
-    for (const r of rows) {
-      const c = (r["configured"] ?? {}) as Record<string, unknown>;
-      const configured = c["source"] === "registry"
+  function configuredText(c: Record<string, unknown>): string {
+    return c["source"] === "registry"
         ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
         : c["source"] === "claude_token"
           ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${c["label"]} (the seat's own credential file)`
@@ -186,6 +194,35 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
         : c["source"] === "default_login"
           ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
           : `configured: unknown (${c["reason"]})`;
+  }
+
+  // #3625 slice 4 — a seat against its rig's assignment: what the rig is assigned, where this seat's configuration stands
+  // against it, and its last applied result. Configuration and stored results, never the login a session uses. Nothing
+  // prints for a seat whose rig has no assignment and that has no result.
+  function assignmentLines(r: Record<string, unknown>): string[] {
+    const a = r["assignment"] as Record<string, unknown> | undefined;
+    if (!a || (a["state"] === "no_assignment" && !a["applied"])) return [];
+    const intended = a["intended"] as Record<string, unknown> | null;
+    const applied = a["applied"] as Record<string, unknown> | null;
+    const standing = a["state"] === "follows" ? "this seat is configured as assigned"
+      : a["state"] === "override" ? `this seat is configured with its own choice: ${a["override"] ?? "another account"}`
+        : a["state"] === "not_applied" ? (applied ? "this seat isn't configured as assigned: its last result didn't move it" : "not applied to this seat yet")
+          : "";
+    const lines = [intended
+      ? `    assignment: rig ${r["rigName"]}'s ${a["provider"]} seats to ${intended["label"]} (${intended["reference"]}), set ${intended["at"]}${intended["requestedBy"] ? ` by ${intended["requestedBy"]}` : ""}; ${standing}`
+      : `    assignment: none for rig ${r["rigName"]}'s ${a["provider"]} seats`];
+    if (applied) {
+      lines.push(`    last applied: ${String(applied["kind"]).replace(/_/g, "-")} (${applied["label"]}, ${applied["at"]}): ${applied["detail"]}`);
+      if (applied["recovery"]) lines.push(`      recovery: ${applied["recovery"]}`);
+    }
+    return lines;
+  }
+
+  function renderSeatAccounts(rows: Array<Record<string, unknown>>, where = ""): void {
+    console.log(`SEATS${where} (configured account; not proof of the login a running session uses)`);
+    for (const r of rows) {
+      const c = (r["configured"] ?? {}) as Record<string, unknown>;
+      const configured = configuredText(c);
       const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
       console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
       if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);
@@ -200,6 +237,7 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
       else if (observed?.["windowsSampled"] === false) console.log("    observed: no status-line windows from this seat yet");
       else if (observed?.["note"]) console.log(`    observed: ${observed["note"]}`);
       if (allowance["reason"]) console.log(`    allowance not linked: ${allowance["reason"]}`);
+      for (const line of assignmentLines(r)) console.log(line);
     }
   }
 
@@ -421,7 +459,8 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     .option("--credential-label <label>", "Operator label for the selected Claude token file; not provider-observed account identity")
     .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
-    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string }) => {
+    .option("--host <id>", "Run this status on that registered machine over its SSH entry, with the same output and --json")
+    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string; host?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
         console.error(`--provider must be codex or claude (got ${opts.provider})`);
         process.exitCode = 1;
@@ -431,6 +470,15 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
       if (tokenSelected && (!opts.claudeTokenFile || !opts.credentialLabel || !opts.refresh || opts.provider !== "claude" || opts.allHosts || opts.hosts !== undefined)) {
         console.error("A token probe requires --refresh --provider claude --claude-token-file <absolute path> --credential-label <label>, on one daemon (no --all-hosts/--hosts).");
         process.exitCode = 1; return;
+      }
+      if (opts.host !== undefined) {
+        if (opts.allHosts || opts.hosts !== undefined || tokenSelected) {
+          console.error("--host runs status on one machine: drop --all-hosts, --hosts and the token probe, or run them without --host.");
+          process.exitCode = 1; return;
+        }
+        // A read: a lost connection is a plain failure, since it changes nothing there.
+        return onHost(opts.host, ["provider", "status", ...(opts.refresh ? ["--refresh"] : []), ...(opts.provider ? ["--provider", opts.provider] : []),
+          ...(opts.json ? ["--json"] : [])], { json: opts.json });
       }
       if (tokenSelected) console.error("Claude token usage refresh spends one model turn; timeout or refusal does not prove no allowance was consumed.");
       const client = await getClient(getDeps());
@@ -865,7 +913,7 @@ switch or restart because a report was refused.`)
     const env = remote.env ?? process.env;
     const seat = (env.OPENRIG_SESSION_NAME ?? env.RIGGED_SESSION_NAME)?.trim() || undefined;
     const origin = await originFor(seat, remote.host?.selfHostId ?? (() => localSelfHostId(realDeps())));
-    await runOnSshHost(hostId, argv.slice(0, 3).join(" "), argv, {
+    await runOnSshHost(hostId, argv.slice(0, 3).filter((a) => !a.startsWith("-")).join(" "), argv, {
       origin, ...(opts.json ? { json: true } : {}), ...(opts.changes ? { changes: { check: opts.changes } } : {}),
     }, remote.host);
   };

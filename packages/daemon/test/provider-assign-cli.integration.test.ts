@@ -12,8 +12,9 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 
-// #3625 slice 3: the compiled CLI plans and applies an account assignment to a two-seat rig on a private daemon and tmux
-// server. Only Claude is synthetic: the switch, snapshots, relaunch and resume are production code.
+// #3625 slices 3 and 4: the compiled CLI plans and applies an account assignment to a two-seat rig on a private daemon and
+// tmux server, and status reads each seat against it. Only Claude is synthetic: the switch, snapshots, relaunch and resume
+// are production code.
 it.skipIf(process.platform === "win32")("compiled provider assign plans, then applies, moving both seats and keeping both conversations", async () => {
   const scaffold = prepareHermeticEnv({ baseEnv: { PATH: process.env.PATH, TERM: "xterm-256color" } });
   const rigBin = resolve(dirname(fileURLToPath(import.meta.url)), "../../cli/dist/bin-wrapper.js");
@@ -98,7 +99,27 @@ it.skipIf(process.platform === "win32")("compiled provider assign plans, then ap
     const removal = await rigCli(["provider", "account", "remove", "plan", "--provider", "claude"]);
     expect(removal.code).toBe(1);
     expect(removal.stderr + removal.stdout).toContain(`rig ${rig.name} (claude)`);
-    expect(JSON.stringify([planned, applied, after])).not.toMatch(/synthetic-(start|plan)/);
+
+    // #3625 slice 4: status reads both seats as following the rig's assignment.
+    type Binding = { seatSession: string; assignment?: { state: string; intended: { label: string } | null; applied: { kind: string } | null; override?: string } };
+    const statusOf = async () => Object.fromEntries(((await ok(["provider", "status", "--json"])).bindings as Binding[]).map((b) => [b.seatSession, b.assignment]));
+    const [alpha, beta] = seats as [typeof seats[0], typeof seats[0]];
+    expect(await statusOf()).toMatchObject({
+      [alpha.seat]: { state: "follows", intended: { label: "plan" }, applied: { kind: "switched" } },
+      [beta.seat]: { state: "follows", intended: { label: "plan" }, applied: { kind: "switched" } },
+    });
+    // beta is switched back to its first token by hand: status reads it as the seat's own choice, and alpha still follows.
+    const manual = await ok(["provider", "switch", "--seat", beta.seat, "--to-account", "start", "--token-file", startFile, "--json"]);
+    expect(manual).toMatchObject({ outcome: "rebind_in_progress" });
+    await until(() => launches().length === 5, "beta relaunched by hand");
+    const status = await statusOf();
+    expect(status[alpha.seat]).toMatchObject({ state: "follows" });
+    // The plan's own order names the first of the seat's choices: its account home (its own config dir) comes before its token.
+    expect(status[beta.seat]).toMatchObject({ state: "override", override: `its account home ${beta.home}`, applied: { kind: "switched" } });
+    const human = await rigCli(["provider", "status"]);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain(`this seat is configured with its own choice: its account home ${beta.home}`);
+    expect(JSON.stringify([planned, applied, after, status, human.stdout])).not.toMatch(/synthetic-(start|plan)/);
   } finally {
     db?.close();
     if (daemon) await daemon.stop(); else scaffold.cleanup();

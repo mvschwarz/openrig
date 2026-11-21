@@ -122,11 +122,14 @@ function describeConfigured(c: SeatAccountConfiguration | null): string {
   }
 }
 
-const sameHome = (input: AssignmentPlanInput, a: string | null, b: string | null): boolean =>
+/** What comparing a seat with an account needs: the account, and how homes are compared. */
+type Comparison = Pick<AssignmentPlanInput, "account" | "resolveHome">;
+
+const sameHome = (input: Comparison, a: string | null, b: string | null): boolean =>
   a !== null && b !== null && (a === b || (input.resolveHome ? input.resolveHome(a) === input.resolveHome(b) : false));
 
 /** The seat's own choice for another account, or null when it has none (or its choice is the target). */
-function seatOverride(seat: PlanSeatFacts, input: AssignmentPlanInput): string | null {
+function seatOverride(seat: PlanSeatFacts, input: Comparison): string | null {
   const { account } = input;
   if (seat.followsAssignment) return null;
   if (seat.ownHome && seat.ownHome.source !== "rig" && !sameHome(input, seat.ownHome.home, account.codexHome)) {
@@ -145,10 +148,24 @@ function sameClaudeRef(ref: ClaudeSeatTokenRef, account: AccountRef): boolean {
   return ref.tokenFile === account.file && (ref.kind === "api-key") === (account.kind === "claude_api_key_file");
 }
 
-function unchanged(seat: PlanSeatFacts, input: AssignmentPlanInput): boolean {
+function unchanged(seat: PlanSeatFacts, input: Comparison): boolean {
   const { account } = input;
   if (account.provider === "claude") return seat.claudeRef !== null && sameClaudeRef(seat.claudeRef, account);
   return seat.configured?.source === "registry" && seat.configured.profileRef === account.login && sameHome(input, seat.codexHome, account.codexHome);
+}
+
+/** Where a seat stands against its rig's assignment, by the plan's own rules: on the assigned account (configured as it, or
+ *  still as the apply of this assignment left it), its own choice of another account, or not moved yet (no result, or its
+ *  last result didn't move it). Configuration only: never proof of the login a running session uses. */
+export function assignmentStanding(seat: PlanSeatFacts, account: AccountRef | null, intent: AssignmentIntent,
+  resolveHome?: (home: string) => string): { state: "follows" | "override" | "not_applied"; override?: string } {
+  if (!account) return { state: "not_applied" };
+  const comparison: Comparison = { account, ...(resolveHome ? { resolveHome } : {}) };
+  if (unchanged(seat, comparison)) return { state: "follows" };
+  const last = seat.lastResult;
+  if (seat.followsAssignment && last?.label === intent.label && (last.kind === "switched" || last.kind === "pending_successor")) return { state: "follows" };
+  const override = seatOverride(seat, comparison);
+  return override ? { state: "override", override } : { state: "not_applied" };
 }
 
 /** A Codex seat switches in place only on Linux, on the home the account's login is saved in, and not when it moves to a

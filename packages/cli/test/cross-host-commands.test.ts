@@ -792,6 +792,26 @@ describe("provider account --host (runs on that machine's SSH entry)", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it("status runs on that machine with the same options and output; a lost connection is a plain failure, since it reads", async () => {
+    ran = [];
+    const status = (args: string[], reply?: CrossHostResult) => providerCommand({ lifecycleDeps: { exists: () => false } as never, clientFactory: vi.fn() as never }, {
+      env: { OPENRIG_SESSION_NAME: "dev-core@fleet" },
+      host: { hostRegistryLoader: () => SSH_AND_HTTP, selfHostId: async () => "host-a",
+        crossHostRun: async (entry, argv, opts) => { ran.push({ host: entry.id, argv, origin: opts?.originTriple });
+          return reply ?? { ok: true, failedStep: "none", stdout: "{\"bindings\":[]}\n", stderr: "", remoteExitCode: 0 }; } },
+    }).parseAsync(args, { from: "user" });
+    await status(["status", "--json", "--host", "vm-a"]);
+    expect(ran).toEqual([{ host: "vm-a", origin: "dev-core@fleet@host-a", argv: ["rig", "provider", "status", "--json"] }]);
+    expect(captured.stdoutWrites.join("")).toContain('{"bindings":[]}');
+    ran = [];
+    await status(["status", "--refresh", "--provider", "claude", "--host", "vm-a"]);
+    expect(ran[0]!.argv).toEqual(["rig", "provider", "status", "--refresh", "--provider", "claude"]);
+    captured.stderrLines.length = 0;
+    await status(["status", "--host", "vm-a"], { ok: false, failedStep: "ssh-unreachable", sshStderr: "ssh: connect to host: Connection refused" } as CrossHostResult);
+    expect(captured.stderrLines.join("\n")).not.toContain("remote-outcome-unknown");
+    expect(process.exitCode).toBe(1);
+  });
+
   it("assign plans on that machine with the same options; a lost connection is a plain failure, since it changes nothing", async () => {
     ran = [];
     const plan = (args: string[], reply?: CrossHostResult) => providerCommand({ lifecycleDeps: { exists: () => false } as never, clientFactory: vi.fn() as never }, {

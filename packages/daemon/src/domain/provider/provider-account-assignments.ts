@@ -88,6 +88,18 @@ export class ProviderAccountAssignmentsRepository {
         file: a?.file ?? null, fileKind: a?.fileKind ?? null, home: a?.codexHome ?? null, login: a?.codexLogin ?? null });
   }
 
+  /** Every rig's assignment, for status. */
+  allIntents(): AssignmentIntent[] {
+    return (this.db.prepare("SELECT * FROM provider_account_assignments").all() as Array<{ rig_id: string; provider: AccountRefProvider; label: string;
+      reference: string; requested_by: string | null; created_at: string }>)
+      .map((r) => ({ rigId: r.rig_id, provider: r.provider, label: r.label, reference: r.reference, requestedBy: r.requested_by, at: r.created_at }));
+  }
+
+  /** Every seat's latest result, for status. */
+  allResults(): AssignmentResult[] {
+    return (this.db.prepare("SELECT * FROM provider_assignment_results").all() as ResultRow[]).map(fromRow);
+  }
+
   /** The rigs whose assignment names this label: a label in use can't be removed. */
   rigsUsing(provider: AccountRefProvider, label: string): string[] {
     return (this.db.prepare(`SELECT r.name FROM provider_account_assignments a JOIN rigs r ON r.id = a.rig_id

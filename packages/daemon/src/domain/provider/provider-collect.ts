@@ -11,7 +11,7 @@ import type { CodexAuthMetadata } from "./codex-auth-reader.js";
 import { rollupHostUsage } from "./host-usage-rollup.js";
 import { assembleFourBlock, type RawSeatBinding } from "./provider-read-model.js";
 import { claudeStatuslineSignals } from "./provider-signals.js";
-import type { FourBlockReadModel, ProviderAccount, ProviderSignal, SeatAccountConfiguration, UnknownSeatObservation } from "./provider-types.js";
+import type { FourBlockReadModel, ProviderAccount, ProviderSignal, SeatAccountConfiguration, SeatAssignment, UnknownSeatObservation } from "./provider-types.js";
 import type { NodeLifecycleState } from "../types.js";
 import type { SeatRuntimeHome } from "../seat-runtime-home.js";
 
@@ -36,6 +36,8 @@ export interface ProviderCollectDeps {
   collectSignals?: () => ProviderSignal[];
   /** Each seat's configured account, one per seat in the order given (configuredSeatAccounts). */
   configuredAccounts?: (seats: ProviderSeat[]) => SeatAccountConfiguration[];
+  /** #3625: each seat against its rig's assignment, one per seat in the order given (undefined for other runtimes). */
+  assignments?: (seats: ProviderSeat[]) => Array<SeatAssignment | undefined>;
   /** A real caller-provided clock; the read model's asOf (anomalies borrow it, never invented). */
   now: () => string;
 }
@@ -107,12 +109,14 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
   // Beside each seat's registry placement, what the seat uses: the configuration its next launch reads, and its
   // launch and provider observations, which nothing records yet. The assembler keeps order, so bindings[i] is seat i.
   const configured = deps.configuredAccounts?.(seatUniverse);
+  const assignments = deps.assignments?.(seatUniverse);
   const bindings = model.bindings.map((binding, i) => ({
     ...binding,
     runtime: seatUniverse[i]!.runtime,
     ...(configured?.[i] ? { configured: configured[i] } : {}),
     launched: LAUNCH_NOT_RECORDED,
     verified: IDENTITY_NOT_OBSERVED,
+    ...(assignments?.[i] ? { assignment: assignments[i] } : {}),
   }));
   // Slice-04 S-A: the host-level rollup aggregates the SAME signals this collection produced.
   // Codex deployment presence = auth profiles on disk (a host with codex accounts but no meter

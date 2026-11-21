@@ -36,11 +36,11 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
-import { planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
+import { assignmentStanding, planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
 import { applyAssignment } from "./assignment-apply.js";
-import { ProviderAccountAssignmentsRepository } from "./provider-account-assignments.js";
-import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef } from "./provider-account-refs.js";
-import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
+import { ProviderAccountAssignmentsRepository, type AssignmentResult } from "./provider-account-assignments.js";
+import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef, type AccountRefProvider } from "./provider-account-refs.js";
+import type { FourBlockReadModel, PrecheckResult, ProviderSignal, SeatAccountConfiguration, SeatAssignment } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
 
@@ -150,10 +150,19 @@ export class ProviderServiceImpl implements ProviderService {
     const env = this.deps.env ?? process.env;
     const asOf = (this.deps.now ?? (() => new Date().toISOString()))();
     let auth: CodexAuthMetadata | undefined;
+    let entries: ReturnType<ProviderServiceImpl["seatEntries"]> | undefined;
     let seats: ProviderSeat[] | undefined;
     const readAuth = () => auth ??= readCodexAuthMetadata(env);
-    const listSeats = () => seats ??= this.listSeats();
+    const listEntries = () => entries ??= this.seatEntries();
+    const listSeats = () => seats ??= listEntries().map(({ seat }) => seat);
     const homes = this.homes();
+    // Configuration only (names and references, no usage or samples), so it's computed on every read.
+    let configuredList: SeatAccountConfiguration[] | undefined;
+    const configuredOf = () => configuredList ??= configuredSeatAccounts({ seats: listSeats(), auth: readAuth(), usage: [], claudeSamples: null, ...homes })
+      .map((seat) => seat.configured);
+    // #3625: read from what applies stored; nothing is written.
+    let statuses: Array<SeatAssignment | undefined> | undefined;
+    const assignmentsOf = () => statuses ??= this.assignmentStatuses(listEntries(), configuredOf());
     const collectReactiveSignals = (): ProviderSignal[] => {
       if (!this.deps.agentActivityStore) return [];
       const result = collectReactiveEventSignals({
@@ -176,9 +185,8 @@ export class ProviderServiceImpl implements ProviderService {
         ...(this.deps.collectClaudeSignals?.() ?? []),
         ...collectReactiveSignals(),
       ],
-      // Configuration only (names and references, no usage or samples), so it's computed on every read.
-      configuredAccounts: (all) => configuredSeatAccounts({ seats: all, auth: readAuth(), usage: [], claudeSamples: null, ...homes })
-        .map((seat) => seat.configured),
+      configuredAccounts: () => configuredOf(),
+      assignments: () => assignmentsOf(),
       now: () => asOf,
     });
     // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
@@ -200,7 +208,7 @@ export class ProviderServiceImpl implements ProviderService {
       usage: allUsage,
       claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
       ...homes,
-    });
+    }).map((row, i) => (assignmentsOf()[i] ? { ...row, assignment: assignmentsOf()[i]! } : row));
     return { ...model, usage: allUsage, seatAccounts };
   }
 
@@ -225,8 +233,8 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   /** Every seat on this daemon with its node, as the read model lists them. */
-  private seatEntries(): Array<{ nodeId: string; seat: ProviderSeat }> {
-    const seats: Array<{ nodeId: string; seat: ProviderSeat }> = [];
+  private seatEntries(): Array<{ nodeId: string; rigId: string; seat: ProviderSeat }> {
+    const seats: Array<{ nodeId: string; rigId: string; seat: ProviderSeat }> = [];
     for (const rig of this.deps.listRigs()) {
       for (const entry of getNodeInventory(this.deps.db, rig.id)) {
         if (!entry.canonicalSessionName) continue;
@@ -236,7 +244,7 @@ export class ProviderServiceImpl implements ProviderService {
           : {};
         // The launch's own reader says whether the seat has a token reference; #3148's resolver names its label.
         const tokenRef = runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, entry.nodeId) : null;
-        seats.push({ nodeId: entry.nodeId, seat: {
+        seats.push({ nodeId: entry.nodeId, rigId: rig.id, seat: {
           seatSession: entry.canonicalSessionName,
           rigName: entry.rigName ?? "",
           runtime,
@@ -316,6 +324,58 @@ export class ProviderServiceImpl implements ProviderService {
       order: runtime === "claude-code" ? "source" : "arrival" })?.state ?? "unknown";
   }
 
+  /** #3625: what the plan and status know about each seat's account choices, one per entry. A seat whose configuration is
+   *  still what an apply gave it follows its rig's assignment, so it isn't the seat's own override: this is the one
+   *  definition both read. `resultOf` gives the seat's latest result where it counts. */
+  private assignmentFacts(entries: Array<{ nodeId: string; seat: ProviderSeat }>, configured: Array<SeatAccountConfiguration | null | undefined>,
+    resultOf: (nodeId: string, seat: ProviderSeat) => AssignmentResult | undefined): Array<Omit<PlanSeatFacts, "running" | "activity">> {
+    const homes = this.homes();
+    return entries.map(({ nodeId, seat }, index) => {
+      const own = Object.hasOwn(RUNTIME_HOME_VAR, seat.runtime) ? seatRuntimeHome(this.deps.db, nodeId, seat.runtime as HomeRuntime) : {};
+      const claudeRef = seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null;
+      const seatConfigured = configured[index] ?? null;
+      const ownHome = own.home && own.source ? { home: own.home, source: own.source } : null;
+      const last = resultOf(nodeId, seat);
+      const a = last?.applied;
+      const follows = !!a && ((claudeRef !== null && a.file === claudeRef.tokenFile && (a.fileKind === "api-key") === (claudeRef.kind === "api-key"))
+        || (ownHome?.source === "account-switch" && a.codexHome !== null && a.codexLogin === null && resolvedHome(a.codexHome) === resolvedHome(ownHome.home))
+        // A saved login is a name within its Codex home: the same name in another home is another login.
+        || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin
+          && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
+      return {
+        session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
+        configured: seatConfigured, claudeRef, ownHome,
+        codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
+        ...(follows ? { followsAssignment: true } : {}),
+        ...(last ? { lastResult: { kind: last.kind, label: last.label, detail: last.detail, at: last.at } } : {}),
+      };
+    });
+  }
+
+  /** #3625: each seat against its rig's assignment for its provider, for status: read only, from what applies stored. */
+  private assignmentStatuses(entries: Array<{ nodeId: string; rigId: string; seat: ProviderSeat }>,
+    configured: Array<SeatAccountConfiguration | null | undefined>): Array<SeatAssignment | undefined> {
+    const providerOf = (runtime: string): AccountRefProvider | null => (runtime === "claude-code" ? "claude" : runtime === "codex" ? "codex" : null);
+    const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
+    const intents = new Map(assignments.allIntents().map((i) => [`${i.rigId}\0${i.provider}`, i]));
+    const results = new Map(assignments.allResults().map((r) => [`${r.nodeId}\0${r.provider}`, r]));
+    const resultOf = (nodeId: string, seat: ProviderSeat) => { const p = providerOf(seat.runtime); return p ? results.get(`${nodeId}\0${p}`) : undefined; };
+    // Nothing assigned or applied on this daemon: every seat reads "no assignment" without reading its homes.
+    const facts = intents.size || results.size ? this.assignmentFacts(entries, configured, resultOf) : [];
+    const refs = new ProviderAccountRefsRepository(this.deps.db);
+    return entries.map(({ nodeId, rigId, seat }, index): SeatAssignment | undefined => {
+      const provider = providerOf(seat.runtime);
+      if (!provider) return undefined;
+      const last = resultOf(nodeId, seat);
+      const applied = last ? { kind: last.kind, label: last.label, detail: last.detail, at: last.at, ...(last.recovery ? { recovery: last.recovery } : {}) } : null;
+      const intent = intents.get(`${rigId}\0${provider}`);
+      if (!intent) return { provider, state: "no_assignment", intended: null, applied };
+      const intended = { label: intent.label, reference: intent.reference, requestedBy: intent.requestedBy, at: intent.at };
+      const standing = assignmentStanding({ ...facts[index]!, running: null, activity: "unknown" }, refs.get(provider, intent.label), intent, resolvedHome);
+      return { provider, state: standing.state, intended, applied, ...(standing.override ? { override: standing.override } : {}) };
+    });
+  }
+
   private async planFor(input: AssignmentPlanRequest, tools: AssignmentApplyTools): Promise<
     | { ok: true; plan: AssignmentPlan; account: AccountRef; rigId: string; nodeOf: Map<string, { nodeId: string; runtime: string }> }
     | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string }> {
@@ -338,34 +398,16 @@ export class ProviderServiceImpl implements ProviderService {
     const rigId = (this.deps.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(inRig.nodeId) as { rig_id: string }).rig_id;
     const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
     const results = new Map(assignments.results(rigId, input.provider).map((r) => [r.nodeId, r]));
-    const homes = this.homes();
     const configured = configuredSeatAccounts({ seats: entries.map(({ seat }) => seat), auth: readCodexAuthMetadata(this.deps.env ?? process.env),
-      usage: [], claudeSamples: null, ...homes });
+      usage: [], claudeSamples: null, ...this.homes() }).map((c) => c.configured);
     const nodeOf = new Map<string, { nodeId: string; runtime: string }>();
-    const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => {
-      if (seat.rigName === input.rig) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
-      const own = Object.hasOwn(RUNTIME_HOME_VAR, seat.runtime) ? seatRuntimeHome(this.deps.db, nodeId, seat.runtime as HomeRuntime) : {};
-      const claudeRef = seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null;
-      const seatConfigured = configured[index]?.configured ?? null;
-      const ownHome = own.home && own.source ? { home: own.home, source: own.source } : null;
-      const last = seat.rigName === input.rig ? results.get(nodeId) : undefined;
-      // The seat's choice is still what an apply gave it: it follows the rig's assignment, so it isn't the seat's own.
-      const a = last?.applied;
-      const follows = !!a && ((claudeRef !== null && a.file === claudeRef.tokenFile && (a.fileKind === "api-key") === (claudeRef.kind === "api-key"))
-        || (ownHome?.source === "account-switch" && a.codexHome !== null && a.codexLogin === null && resolvedHome(a.codexHome) === resolvedHome(ownHome.home))
-        // A saved login is a name within its Codex home: the same name in another home is another login.
-        || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin
-          && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
-      return {
-        session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
-        configured: seatConfigured, claudeRef, ownHome,
-        codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
-        running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
-        activity: this.activityOf(nodeId, seat.seatSession, seat.runtime),
-        ...(follows ? { followsAssignment: true } : {}),
-        ...(last ? { lastResult: { kind: last.kind, label: last.label, detail: last.detail, at: last.at } } : {}),
-      };
-    });
+    for (const { nodeId, seat } of entries) if (seat.rigName === input.rig) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
+    const facts = this.assignmentFacts(entries, configured, (nodeId, seat) => (seat.rigName === input.rig ? results.get(nodeId) : undefined));
+    const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => ({
+      ...facts[index]!,
+      running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
+      activity: this.activityOf(nodeId, seat.seatSession, seat.runtime),
+    }));
     const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
       resolveHome: resolvedHome,

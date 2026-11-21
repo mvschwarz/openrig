@@ -687,3 +687,79 @@ describe("rig provider assign (#3625 slices 2 and 3: the plan, and applying it)"
     expect(JSON.parse(stdout[0]!)).toMatchObject({ ok: false, code: "apply_outcome_unknown", digest: "0123456789ab", check: "rig provider assign fleet --provider codex --account team" });
   });
 });
+
+describe("rig provider status shows each seat against its rig's assignment (#3625 slice 4)", () => {
+  const intended = { label: "max-2", reference: "the token file /keys/max-2", requestedBy: "lead@fleet", at: "2026-11-21T08:00:00.000Z" };
+  const switched = { kind: "switched", label: "max-2", detail: "Relaunched a@fleet on max-2", at: "2026-11-21T08:00:00.000Z" };
+  const seatRow = (seatSession: string, assignment: unknown, configured: unknown = { source: "claude_token", label: "max-2", note: "n" }) =>
+    ({ accountId: null, seatSession, rigName: "fleet", boundAt: null, bindingSource: null, runtime: "claude-code", configured, anomalies: [], assignment });
+  const MODEL = { accounts: [], signals: [], asOf: "2026-11-21T08:01:00.000Z", bindings: [
+    seatRow("a@fleet", { provider: "claude", state: "follows", intended, applied: switched }),
+    seatRow("b@fleet", { provider: "claude", state: "override", intended, applied: { ...switched, detail: "Relaunched b@fleet on max-2" },
+      override: 'its own token file /keys/max-3 ("max-3")' }, { source: "claude_token", label: "max-3", note: "n" }),
+    seatRow("c@fleet", { provider: "claude", state: "not_applied", intended, applied: null }),
+    seatRow("u@fleet", { provider: "claude", state: "not_applied", intended,
+      applied: { kind: "unknown", label: "max-2", detail: "didn't report a resumed conversation", at: "t", recovery: "rig launch fleet dev.u --snapshot-id s1" } }),
+    { ...seatRow("x@other", { provider: "claude", state: "no_assignment", intended: null, applied: null }), rigName: "other" },
+  ] };
+  const deps = (get: (path: string) => unknown) => ({ ...runningDeps(1), clientFactory: () => ({ get: async (p: string) => ({ status: 200, data: get(p) }) }) as never });
+
+  it("prints the rig's assignment, where each seat's configuration stands against it, and its last result; a seat with none prints nothing", async () => {
+    const { logs } = await run(["status"], deps(() => MODEL));
+    const at = logs.indexOf("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
+    expect(at).toBeGreaterThan(-1);
+    const rig = "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; ";
+    expect(logs.slice(at + 1)).toEqual([
+      "  a@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat is configured as assigned`,
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
+      "  b@fleet  claude-code  configured: token max-3 (the seat's own credential file)",
+      `${rig}this seat is configured with its own choice: its own token file /keys/max-3 ("max-3")`,
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched b@fleet on max-2",
+      "  c@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}not applied to this seat yet`,
+      "  u@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat isn't configured as assigned: its last result didn't move it`,
+      "    last applied: unknown (max-2, t): didn't report a resumed conversation",
+      "      recovery: rig launch fleet dev.u --snapshot-id s1",
+    ]);
+    // A label is the operator's name for a reference: never worded as the login a session uses.
+    expect(logs.join("\n")).not.toMatch(/signed in|logged in|is using|running on|runs as/i);
+  });
+
+  it("with the seat accounts served (usage windows on), the same lines sit under each seat; --json is the daemon's answer, assignment included", async () => {
+    const withSeats = { ...MODEL, seatAccounts: MODEL.bindings.slice(0, 1).map((b) => ({ seatSession: b.seatSession, rigName: b.rigName, runtime: b.runtime,
+      configured: b.configured, allowance: { linked: false, reason: "not linked" }, assignment: b.assignment })) };
+    const { logs } = await run(["status"], deps(() => withSeats));
+    expect(logs).not.toContain("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
+    const seat = logs.indexOf("  a@fleet  claude-code  configured: token max-2 (the seat's own credential file) · allowance not linked");
+    expect(logs.slice(seat + 1, seat + 4)).toEqual(["    n", "    allowance not linked: not linked",
+      "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned"]);
+    const json = await run(["status", "--json"], deps(() => MODEL));
+    expect(JSON.parse(json.logs[0]!)).toEqual(MODEL);
+  });
+
+  it("--all-hosts prints each host's seats with their assignment, and an ssh host points at status --host", async () => {
+    const view = { hosts: [
+      { hostId: "local", status: "ok", usage: "served", readAt: "t" },
+      { hostId: "vm-a", status: "unsupported-transport", usage: "unavailable", usageReason: "not read", readAt: null,
+        error: "host 'vm-a' is ssh-declared; usage across hosts needs an http registry entry (url; bearer optional). Its seats and assignments: rig provider status --host vm-a" },
+    ], items: [], skipped: [], registry: { state: "read" },
+    seatAccounts: [{ hostId: "local", seats: [{ seatSession: "a@fleet", rigName: "fleet", runtime: "claude-code", configured: { source: "claude_token", label: "max-2", note: "n" },
+      allowance: { linked: false, reason: "not linked" }, assignment: { provider: "claude", state: "follows", intended, applied: switched } }] }] };
+    const { logs } = await run(["status", "--all-hosts"], deps((p) => (String(p).startsWith("/api/provider/usage/hosts") ? view : {})));
+    expect(logs.join("\n")).toContain("Its seats and assignments: rig provider status --host vm-a");
+    expect(logs).toContain("SEATS on local (configured account; not proof of the login a running session uses)");
+    expect(logs).toContain("    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned");
+  });
+
+  it("--host doesn't combine with --all-hosts or --hosts, and asks nothing", async () => {
+    const get = vi.fn();
+    for (const extra of [["--all-hosts"], ["--hosts", "b"]]) {
+      const result = await run(["status", "--host", "vm-a", ...extra], { ...runningDeps(1), clientFactory: () => ({ get }) as never });
+      expect(result.exitCode).toBe(1);
+      expect(result.logs.join("\n")).toContain("--host runs status on one machine");
+    }
+    expect(get).not.toHaveBeenCalled();
+  });
+});
