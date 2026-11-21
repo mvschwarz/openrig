@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { QueueRepositoryError, type QueueItem, type QueueRepository } from "../queue-repository.js";
 import { NetworkBindingError, readNetworkCredential, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "./hub-client.js";
+import { noteEndedBindingRequests, reconcileNetworkRequests } from "./network-requests.js";
 
 /** OpenRig's own sender: the connector creates the local item for the hub's requester, who is named first in it. */
 const LOCAL_SOURCE = "daemon@kernel";
@@ -133,6 +134,8 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
     }
     // Report back what happened locally, for the items this binding holds. A revoked binding never gets here.
     if (live()) await reportBack(deps, binding, hub, now, result);
+    // Then the requests this seat sent through the hub: a create whose answer was lost, and each answer that arrived.
+    if (live()) await reconcileNetworkRequests(deps, binding, hub, now, live);
     deps.bindings.recordContact(binding.id, now());
     if (!destination) {
       deps.bindings.recordError(binding.id, `${binding.localSession} has no session here, so its hub items stay pending until it has one.`);
@@ -160,6 +163,8 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
         deps.bindings.recordError(binding.id, cleanup.message);
       }
       deps.log?.(`network ${binding.id}: revoked by the hub; no new work comes in through it`);
+      // Requests sent through it can't be read now: each says so once, and stays open for a new binding to take over.
+      noteEndedBindingRequests(deps, binding, deps.log);
     } else {
       deps.bindings.recordError(binding.id, error.message);
     }

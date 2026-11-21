@@ -1,6 +1,6 @@
 # Network connector: a local seat as a hub participant
 
-Source of truth: `packages/daemon/src/domain/network/` (`network-bindings.ts`, `network-connector.ts`, `hub-client.ts`),
+Source of truth: `packages/daemon/src/domain/network/` (`network-bindings.ts`, `network-connector.ts`, `network-requests.ts`, `hub-client.ts`),
 `packages/daemon/src/routes/network.ts`, `packages/cli/src/commands/network.ts`.
 
 A hub is another OpenRig queue that its participants reach over MCP, such as a daemon served by `rig mcp serve --http`
@@ -129,6 +129,54 @@ rig queue update <local item> --state done --closure-reason no-follow-on --resol
 - The derived id makes the queue item unique, not the work's outside effects. Anything your agent did outside OpenRig
   before a crash is neither undone nor deduplicated.
 
+## Send a request from a bound seat
+
+A connected seat can also ask the hub's other participants for work, and read their answers here. The daemon reaches
+the hub as the seat's participant, so the agent never holds the participant's token.
+
+```bash
+rig network peers <binding-or-seat> [--json]
+rig network request <binding-or-seat> <peer> --id <request-id> --body-file <path> [--summary "<text>"] [--json]
+```
+
+`peers` lists the seats and members the hub lets the participant address, as the hub's `rig_team` answers for the
+participant's rig. `request` sends one request to a peer, named as `peers` lists it:
+
+- **`--id` is your own id for this request,** unique to it. It becomes the local item's id. To retry a request whose
+  outcome you don't know, send it again with the same id. The same id with a different request is refused
+  (`request_id_reused`), and so is an id that already names another local item.
+- **The request is recorded here first,** as a local queue item from the seat to OpenRig, parked on the hub item
+  (`external:network-request/<hub item>`). It's addressed to OpenRig rather than the seat, so the seat owes nothing on it
+  and isn't reminded about it while it waits. Find it with `rig queue list --mine`.
+- **Then it's created on the hub** under an id derived from the seat's node, the hub, the participant and your request
+  id, so one request is always one hub item.
+- **What `request` returns:** the local item, the hub item and a state.
+  - `sent`: the hub confirmed the item.
+  - `unknown`: the create timed out or its answer was lost. The connector looks for the hub item by its id on its next
+    pass, and creates it there under the same id if it's missing.
+  - `refused`: the hub refused it with a reason, such as `destination_not_found`. The local item closes failed with the
+    hub's words, and `request` exits 1.
+
+**Reading the answer:** on each pass, the connector reads every open request's hub item. When the hub item closes, the
+local item closes the same way:
+- done with the hub's resolution and its closure reason;
+- canceled or denied as itself;
+- failed as failed.
+
+A close with no resolution reads "Closed without a stated result." The close's note names who answered and the hub item:
+"Answered by <peer> via network hub <hub URL> (hub item <id>)". Read it with:
+
+```bash
+rig queue show <request-id>
+```
+
+**A hub item handed on there:** the connector follows the successor the hub names while the participant can read it.
+One it can't read leaves the local item open, with a note saying the answer isn't visible here. That outcome is unknown,
+never done.
+
+**A revoked binding:** each open request sent through it gets a note that its answer can't be read here, and stays
+open. A new binding for the same seat, hub and participant takes it over and keeps reading its hub item.
+
 ## Status
 
 ```bash
@@ -173,6 +221,12 @@ each time it starts.
   An atomic close-if-open needs the hub to offer a conditional close.
 - After a disconnect or a revocation, work already taken keeps running here, but its pickup and result no longer reach
   the hub item, which stays at its last reported stage.
+- **Requests a seat sends:**
+  - Closing or canceling the local item here leaves the hub item as it is: the request isn't withdrawn there.
+  - A disconnected binding leaves its open requests unread, with no note on them, until a new binding for the same
+    seat, hub and participant takes them over.
+  - `rig network status` doesn't list open requests yet. Use `rig queue list --mine`.
+  - Nothing wakes the seat when an answer arrives. Read the local item.
 - If the daemon stops between storing a new installation key and recording the enrollment, that key's folder under
   `network-secrets/` stays with no enrollment, and nothing removes it. It's private to you and unused, so remove it by
   hand.

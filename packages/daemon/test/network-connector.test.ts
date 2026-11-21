@@ -17,8 +17,12 @@ import { Hono } from "hono";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { networkRoutes } from "../src/routes/network.js";
 import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
+import { listNetworkPeers, networkHubRequestId, networkRequestBlocker, originateNetworkRequest } from "../src/domain/network/network-requests.js";
+import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
 
 const PARTICIPANT = "alex@team";
+/** Another seat in the participant's hub rig, which the participant may send to. */
+const PEER = PARTICIPANT.replace(/^alex/, "sam");
 
 class FakeHub {
   readonly items = new Map<string, HubItem & { notes: string[] }>();
@@ -37,6 +41,12 @@ class FakeHub {
   /** Someone else closes these items just as ours arrives: the hub keeps theirs and answers ours as done. */
   readonly raceClose = new Map<string, Partial<HubItem>>();
   closes = 0;
+  /** The seats a create may address. */
+  readonly seats = new Set<string>([PEER]);
+  /** The next create of these ids lands, then its answer is lost. */
+  readonly loseCreateAnswer = new Set<string>();
+  creates = 0;
+  readonly teamCalls: Array<string | undefined> = [];
 
   add(qitemId: string, body = "Summarize the release notes", destination = PARTICIPANT): void {
     this.items.set(qitemId, { qitemId, sourceSession: "assistant@team", destinationSession: destination, state: "pending", body, summary: body, resolution: null, closureReason: null, notes: [] });
@@ -80,6 +90,27 @@ class FakeHub {
         if (theirs) { Object.assign(item, theirs); return; }
         Object.assign(item, { state: input.state, closureReason: input.closureReason, resolution: input.resolution });
         if (this.loseCloseAnswer.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
+      },
+      team: async (rigId) => {
+        this.teamCalls.push(rigId);
+        return { rig: rigId, seats: [...this.seats].map((seat) => ({ session: seat })) };
+      },
+      // As the hub's create does: the same id with the same parties returns the stored item (with a warning when the body
+      // differs), other parties are refused, and an unknown seat is refused.
+      create: async (input) => {
+        this.creates++;
+        const existing = this.items.get(input.qitemId);
+        if (existing) {
+          if (existing.destinationSession !== input.destination || existing.sourceSession !== PARTICIPANT) throw new HubError("refused", `qitemId ${input.qitemId} is already taken.`, "qitem_id_reuse");
+          const { notes: _notes, ...stored } = existing;
+          return existing.body === input.body ? { ...stored } : { ...stored, createWarning: "qitem_body_not_saved" };
+        }
+        if (!this.seats.has(input.destination)) throw new HubError("refused", `No seat here is named '${input.destination}', so nothing was written.`, "destination_not_found");
+        this.items.set(input.qitemId, { qitemId: input.qitemId, sourceSession: PARTICIPANT, destinationSession: input.destination, state: "pending",
+          body: input.body, summary: input.summary ?? null, resolution: null, closureReason: null, notes: [] });
+        if (this.loseCreateAnswer.delete(input.qitemId)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
+        const { notes: _createdNotes, ...created } = this.items.get(input.qitemId)!;
+        return { ...created };
       },
       end: async () => {},
     };
@@ -619,5 +650,126 @@ describe("network connector", () => {
     const service = new NetworkConnectorService(deps, { intervalMs: 1000 });
     await service.round();
     expect(hub.tokens).toEqual([]);
+  });
+
+  describe("requests the seat sends through its hub", () => {
+    const send = (bindingId: string, requestId: string, body = "Review the release notes", peer = PEER) =>
+      originateNetworkRequest(deps, bindings.get(bindingId)!, { peer, requestId, body, summary: "Release notes review" });
+    const answer = (hubId: string, fields: Partial<HubItem>) => Object.assign(hub.items.get(hubId)!, fields);
+    const outcome = (requestId: string) => db.prepare("SELECT outcome FROM network_requests WHERE local_qitem_id = ?").get(requestId);
+
+    it("a create whose answer was lost is found by its id on the next pass: one hub item, and its answer closes the local item", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-1");
+      hub.loseCreateAnswer.add(hubId);
+      expect(await send(b.id, "req-1")).toMatchObject({ localQitemId: "req-1", hubQitemId: hubId, peer: PEER, state: "unknown" });
+      // Recorded first, from the seat to OpenRig, parked on the hub item.
+      const local = repo.getById("req-1")!;
+      expect(local).toMatchObject({ sourceSession: b.localSession, destinationSession: OPENRIG_SENDER, state: "blocked", blockedOn: networkRequestBlocker(hubId) });
+      expect(local.tags).toEqual(expect.arrayContaining([`network-hub-item:${hubId}`, `network-peer:${PEER}`, "network-direction:outbound"]));
+      expect(hub.creates).toBe(1);
+      await pass(b.id);
+      expect(hub.creates).toBe(1);
+      expect(repo.getById("req-1")!.state).toBe("blocked");
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Two typos; otherwise fine." });
+      await pass(b.id);
+      expect(repo.getById("req-1")).toMatchObject({ state: "done", closureReason: "no-follow-on", resolution: "Two typos; otherwise fine." });
+      expect(repo.listTransitions("req-1").at(-1)!.transitionNote).toBe(`Answered by ${PEER} via network hub https://hub.example/mcp (hub item ${hubId}).`);
+      expect(outcome("req-1")).toEqual({ outcome: "done" });
+      await pass(b.id);
+      expect(hub.creates).toBe(1);
+      expect([...hub.items.values()].filter((item) => item.destinationSession === PEER)).toHaveLength(1);
+    });
+
+    it("a create that never reached the hub is created on the next pass under the same id", async () => {
+      const b = bind();
+      hub.down = true;
+      expect((await send(b.id, "req-7")).state).toBe("unknown");
+      expect(hub.creates).toBe(0);
+      hub.down = false;
+      await pass(b.id);
+      expect(hub.creates).toBe(1);
+      expect(hub.items.get(networkHubRequestId(b, "req-7"))).toMatchObject({ destinationSession: PEER, body: "Review the release notes" });
+      await pass(b.id);
+      expect(hub.creates).toBe(1);
+    });
+
+    it("the same request id with another request is refused and sends nothing; the same request returns where it stands", async () => {
+      const b = bind();
+      expect((await send(b.id, "req-2")).state).toBe("sent");
+      await expect(send(b.id, "req-2", "Something else entirely")).rejects.toMatchObject({ code: "request_id_reused", status: 409 });
+      expect(await send(b.id, "req-2")).toMatchObject({ state: "sent" });
+      expect(hub.creates).toBe(1);
+      expect(repo.getById("req-2")!.body).toContain("Review the release notes");
+      // An id that already names another local item is refused too.
+      hub.add("hub-in");
+      await pass(b.id);
+      const [inbound] = runs("hub-in");
+      await expect(send(b.id, inbound!.qitemId)).rejects.toMatchObject({ code: "request_id_reused" });
+      expect(hub.creates).toBe(1);
+    });
+
+    it("a peer the hub doesn't know closes the request failed with the hub's words, and nothing more is read", async () => {
+      const b = bind();
+      const sent = await send(b.id, "req-3", "Review the release notes", PEER.replace(/^sam/, "kim"));
+      expect(sent.state).toBe("refused");
+      expect(repo.getById("req-3")).toMatchObject({ state: "failed" });
+      expect(repo.getById("req-3")!.resolution).toContain("destination_not_found");
+      expect(outcome("req-3")).toEqual({ outcome: "refused" });
+      await pass(b.id);
+      expect(hub.creates).toBe(1);
+    });
+
+    it("a revoked binding leaves its open request open and says once that its answer can't be read here; a new binding brings the answer back", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-4");
+      expect((await send(b.id, "req-4")).state).toBe("sent");
+      hub.revoked = true;
+      expect((await pass(b.id)).error).toBe("revoked");
+      const ended = () => repo.listTransitions("req-4").filter((t) => t.transitionNote?.startsWith("The network binding this request was sent through has ended"));
+      expect(ended()).toHaveLength(1);
+      expect(repo.getById("req-4")!.state).toBe("blocked");
+      expect(outcome("req-4")).toEqual({ outcome: null });
+      hub.revoked = false;
+      const again = bindings.create({ session: b.localSession, hubUrl: b.hubUrl, hubSeat: b.hubSeat, token: "tok-2" });
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Looks good." });
+      await pass(again.id);
+      expect(repo.getById("req-4")).toMatchObject({ state: "done", resolution: "Looks good." });
+      expect(ended()).toHaveLength(1);
+    });
+
+    it("a hub item handed on to one this participant can't read isn't an answer: the request stays open, said once; a readable successor's answer closes it", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-5");
+      await send(b.id, "req-5");
+      answer(hubId, { state: "handed-off", successor: null });
+      await pass(b.id);
+      await pass(b.id);
+      expect(repo.getById("req-5")!.state).toBe("blocked");
+      expect(repo.listTransitions("req-5").filter((t) => t.transitionNote?.startsWith("The hub item was handed on to an item this connection can't read"))).toHaveLength(1);
+      const next = PEER.replace(/^sam/, "lee");
+      hub.add("hub-next", "Review the release notes", next);
+      answer("hub-next", { state: "done", closureReason: "no-follow-on", resolution: "Done by the next seat." });
+      answer(hubId, { successor: "hub-next" });
+      await pass(b.id);
+      expect(repo.getById("req-5")).toMatchObject({ state: "done", resolution: "Done by the next seat." });
+      expect(repo.listTransitions("req-5").at(-1)!.transitionNote).toBe(`Answered by ${next} via network hub https://hub.example/mcp (hub item hub-next).`);
+    });
+
+    it("peers reads the team for the participant's rig, and the routes send a request as the seat's participant", async () => {
+      const b = bind();
+      expect(await listNetworkPeers(deps, b)).toMatchObject({ bindingId: b.id, hubSeat: PARTICIPANT, team: { seats: [{ session: PEER }] } });
+      expect(hub.teamCalls).toEqual([PARTICIPANT.slice(PARTICIPANT.indexOf("@") + 1)]);
+      const app = new Hono();
+      app.use("*", async (c, next) => { c.set("rigRepo" as never, new RigRepository(db) as never); c.set("queueRepo" as never, repo as never); await next(); });
+      app.route("/api/network", networkRoutes({ home, hubConnect: hub.connect }));
+      const peers = await app.request(`/api/network/bindings/${b.id}/peers`);
+      expect(peers.status).toBe(200);
+      const res = await app.request(`/api/network/bindings/${encodeURIComponent(b.localSession)}/requests`, { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ peer: PEER, requestId: "req-6", body: "Review the release notes" }) });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toMatchObject({ localQitemId: "req-6", hubQitemId: networkHubRequestId(b, "req-6"), peer: PEER, state: "sent" });
+      expect(hub.tokens.at(-1)).toBe("tok-1");
+    });
   });
 });
