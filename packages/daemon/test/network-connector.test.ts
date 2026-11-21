@@ -51,6 +51,8 @@ class FakeHub {
   readonly loseCreateAnswer = new Set<string>();
   creates = 0;
   readonly teamCalls: Array<string | undefined> = [];
+  /** The hub's tool list can't be read. */
+  failToolList = false;
 
   add(qitemId: string, body = "Summarize the release notes", destination = PARTICIPANT): void {
     this.items.set(qitemId, { qitemId, sourceSession: "assistant@team", destinationSession: destination, state: "pending", body, summary: body, resolution: null, closureReason: null, notes: [] });
@@ -118,7 +120,10 @@ class FakeHub {
         const { notes: _createdNotes, ...created } = this.items.get(input.qitemId)!;
         return { ...created };
       },
-      offers: async () => true,
+      offers: async () => {
+        if (this.failToolList) throw new HubError("unavailable", "The hub couldn't be reached: tools/list failed");
+        return true;
+      },
       end: async () => {},
     };
     return session;
@@ -994,6 +999,42 @@ describe("network connector", () => {
       expect(repo.getById("req-32")).toMatchObject({ state: "done", resolution: "Ran while you were away." });
       expect(hub.creates).toBe(1);
       expect(repo.listTransitions("req-32").filter((t) => t.transitionNote?.startsWith("Answered by"))).toHaveLength(1);
+    });
+
+    it("a first try whose create meets a taken id and whose readback is refused with 401 stays open and unknown; a new binding reads the accepted work once", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-42");
+      // As if a pass had created this request after the command recorded it, and the hub had moved it on since.
+      hub.items.set(hubId, { qitemId: hubId, sourceSession: PARTICIPANT, destinationSession: `relief-${PEER}`, state: "pending", body: "Review the release notes",
+        summary: null, resolution: null, closureReason: null, notes: [] });
+      hub.duringShow = (id) => { if (id === hubId) throw new HubError("revoked", "The hub refused this participant's credential."); };
+      expect(await send(b.id, "req-42")).toMatchObject({ state: "unknown", hubQitemId: hubId });
+      expect(repo.getById("req-42")!.state).toBe("blocked");
+      expect(outcome("req-42")).toEqual({ outcome: null });
+      expect(repo.listTransitions("req-42").filter((t) => t.transitionNote?.startsWith("The hub refused this binding's credential"))).toHaveLength(1);
+      hub.duringShow = null;
+      hub.revoked = true;
+      expect((await pass(b.id)).error).toBe("revoked");
+      hub.revoked = false;
+      const again = bindings.create({ session: b.localSession, hubUrl: b.hubUrl, hubSeat: b.hubSeat, token: "tok-2" });
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Accepted and done." });
+      await pass(again.id);
+      expect(repo.getById("req-42")).toMatchObject({ state: "done", resolution: "Accepted and done." });
+      expect(repo.listTransitions("req-42").filter((t) => t.transitionNote?.startsWith("Answered by"))).toHaveLength(1);
+    });
+
+    it("a tool list the hub can't serve still reads the answers: the request closes, and the pass reports the failure", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-41");
+      expect((await send(b.id, "req-41")).state).toBe("sent");
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Reviewed." });
+      hub.add("hub-in-41");
+      hub.failToolList = true;
+      const passed = await pass(b.id);
+      expect(repo.getById("req-41")).toMatchObject({ state: "done", resolution: "Reviewed." });
+      expect(passed.error).toBe("unavailable");
+      expect(bindings.get(b.id)!.lastError).toBe("The hub's tool list couldn't be read, so no work was taken in this pass: The hub couldn't be reached: tools/list failed");
+      expect(runs("hub-in-41")).toHaveLength(0);
     });
 
     it("a new request the hub refuses with 401 is refused: nothing was ever accepted", async () => {

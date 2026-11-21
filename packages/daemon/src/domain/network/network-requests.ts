@@ -176,12 +176,12 @@ async function createOnHub(hub: HubSession, receipt: RequestRow, payload: { body
     if (!(error instanceof HubError) || error.kind === "revoked") throw error;
     // The id is taken: another create of this request (a command retry and a pass can overlap) may have landed first and
     // been moved on there since. That isn't a refusal of this request, so it's read back by the same id; if it can't be
-    // read, the outcome stays unknown.
+    // read, the outcome stays unknown, a refused credential included: the hub may hold the request all the same.
     if (error.kind === "refused" && error.code === "qitem_id_reuse") {
       try {
         return { kind: "found", item: await hub.show(receipt.hub_qitem_id) };
       } catch (shown) {
-        if (!(shown instanceof HubError) || shown.kind === "revoked") throw shown;
+        if (!(shown instanceof HubError)) throw shown;
         return { kind: "unknown", error: shown };
       }
     }
@@ -305,20 +305,22 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     settle(deps, receipt, closedHere ? "local_closed" : "unknown", now, closedHere ? null : "The request's text is gone here, so it can't be sent.");
     return result(receipt, "unknown", `${requestId} was ${closedHere ? "closed" : "erased"} here before the hub confirmed hub item ${hubId}, so it isn't sent.`);
   }
+  /** A refused credential when the hub may hold the request anyway: it stays open and unknown, said once, for a new
+   *  binding for the same seat, hub and participant to read. */
+  const keptOpen = (error: HubError): NetworkRequestResult => {
+    const note = `The hub refused this binding's credential, so whether it holds hub item ${hubId} is unknown. This item stays open; a new binding for the same seat, hub and participant reads it.`;
+    if (receipt.last_error !== note && writeLocal(deps, receipt, now, () => deps.queueRepo.update({ qitemId: requestId, actorSession: OPENRIG_SENDER, transitionNote: note }))) noteError(deps, receipt, note);
+    return result(receipt, "unknown", `${note} (${error.message})`);
+  };
   // A request recorded before whose create wasn't confirmed: its hub item is shown first, as the connector's pass does.
   let outcome: Reached;
   try {
     outcome = await withHub(deps, binding, token, (hub) => reachOnHub(deps, hub, binding.id, receipt, !!existing));
   } catch (error) {
     if (!(error instanceof HubError)) throw error;
-    // The credential refused: nothing can be sent through this binding. For a new request that's definite. One whose
-    // earlier create wasn't confirmed may still be on the hub, so it stays open and unknown, for a new binding for the
-    // same seat, hub and participant to read.
-    if (error.kind === "revoked" && existing) {
-      const note = `The hub refused this binding's credential, so whether it holds hub item ${hubId} is unknown. This item stays open; a new binding for the same seat, hub and participant reads it.`;
-      if (receipt.last_error !== note && writeLocal(deps, receipt, now, () => deps.queueRepo.update({ qitemId: requestId, actorSession: OPENRIG_SENDER, transitionNote: note }))) noteError(deps, receipt, note);
-      return result(receipt, "unknown", `${note} (${error.message})`);
-    }
+    // The credential refused: nothing can be sent through this binding. For a new request whose own create was refused
+    // that's definite. One whose earlier create wasn't confirmed may still be on the hub, so it stays open and unknown.
+    if (error.kind === "revoked" && existing) return keptOpen(error);
     outcome = error.kind === "revoked" ? { kind: "refused", error } : { kind: "unknown", error };
   }
   if (outcome.kind === "stopped") {
@@ -332,6 +334,8 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     return result(receipt, "refused", `The hub refused it: ${outcome.error.message}${outcome.error.code ? ` (${outcome.error.code})` : ""}. ${requestId} is closed failed with that reason.`);
   }
   if (outcome.kind === "unknown") {
+    // A credential refused while reading back a taken id: the hub may already hold this request, even on a first try.
+    if (outcome.error.kind === "revoked") return keptOpen(outcome.error);
     deps.db.prepare("UPDATE network_requests SET last_error = ? WHERE local_qitem_id = ?").run(outcome.error.message.slice(0, 500), requestId);
     return result(receipt, "unknown", `${requestId} is recorded, and whether the hub has it yet is unknown (${outcome.error.message}). The connector checks hub item ${hubId} on its next pass and creates it there under the same id if it's missing. Retry only with the same --id.`);
   }
@@ -407,6 +411,8 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
     }
     if (reached.kind === "refused") { refuse(deps, receipt, reached.error, now); continue; }
     if (reached.kind === "unknown") {
+      // A refused credential ends the pass, as on any other call: the connector marks the binding revoked.
+      if (reached.error.kind === "revoked") throw reached.error;
       noteError(deps, receipt, reached.error.message);
       // The hub stopped answering partway: the rest wait for the next pass, and the work taken in this pass stands.
       if (reached.error.kind === "unavailable") return reached.error;
