@@ -1087,15 +1087,28 @@ export function seatCatalogKeptNote(catalog: SeatSkillCatalog): string {
  * description (its trigger) and the exact SKILL.md to read, never the skill bodies. It is delivered to the seat through
  * its per-seat startup text, so it says plainly that it replaces any earlier list (a fork child carries its parent's).
  */
-export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
+export function writeSeatSkillCatalog(paths: SeatSkillPaths, opts?: {
+  /** #3245: a Claude seat launched with launch.claude_sideload off reads this list instead of loading its skills, so the
+   *  list says they are files to read, not skills Claude Code has installed. */
+  claudeWithoutPlugin?: boolean;
+  /** #3245: further skills folders listed after the seat's own, by where they are: the vendored openrig-core's, for a
+   *  seat that selected it and doesn't load it. A skill the seat keeps under the same id is the one listed. */
+  extraSkillsRoots?: readonly string[];
+}): SeatSkillCatalog {
   const lines: string[] = [];
   let ids: string[] = [];
   // The generated router isn't one of the seat's skills; anything else under its reserved name (a team skill named so,
   // or an edited router) is listed like any skill, never hidden.
   const routerGenerated = resolveSeatSkillRouter(paths).written;
   try { ids = fs.readdirSync(paths.skillsRoot, { withFileTypes: true }).filter((e) => e.isDirectory() && !(e.name === SEAT_SKILL_ROUTER_ID && routerGenerated)).map((e) => e.name).sort(); } catch {}
-  for (const id of ids) {
-    const file = nodePath.join(paths.skillsRoot, id, "SKILL.md");
+  const listed: Array<{ id: string; root: string }> = ids.map((id) => ({ id, root: paths.skillsRoot }));
+  for (const root of opts?.extraSkillsRoots ?? []) {
+    let extra: string[] = [];
+    try { extra = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort(); } catch {}
+    for (const id of extra) if (!listed.some((entry) => entry.id === id)) listed.push({ id, root });
+  }
+  for (const { id, root } of listed) {
+    const file = nodePath.join(root, id, "SKILL.md");
     let parsed: ReturnType<typeof parseSkillFrontmatter> | undefined;
     try { parsed = parseSkillFrontmatter(fs.readFileSync(file, "utf8")); } catch { continue; }
     if (!parsed.ok) continue;
@@ -1108,6 +1121,9 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
     lines.length > 0
       ? "Each skill says when to use it. When that moment comes, read its current SKILL.md, then follow it; earlier copies read in this conversation may be out of date."
       : "No OpenRig skills are kept for this seat.",
+    ...(opts?.claudeWithoutPlugin && lines.length > 0
+      ? ["", "These are files to read, not Claude Code skills: none is installed in Claude Code, none has a slash command, and none starts on its own."]
+      : []),
     "",
     ...lines,
     "",
@@ -1125,6 +1141,12 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
     try { if (insideSeatStorage(paths.root, paths.catalogPath)) current = fs.readFileSync(paths.catalogPath); } catch {}
     const ours = current !== undefined && (sha256(current) === digest || record.generated?.[paths.catalogPath] === sha256(current));
     if (!ours) return { path: paths.catalogPath, digest: current ? sha256(current) : digest, count, kept: true, reason: "edited" };
+  }
+  // #3245: a Claude seat without its plugin is sent no list when it keeps no skills, so the file isn't there to send; an
+  // earlier list OpenRig wrote is removed (an edited one was kept above).
+  if (opts?.claudeWithoutPlugin && count === 0) {
+    if (lexists(paths.catalogPath)) removeInsideSeatStorage(paths.root, paths.catalogPath);
+    return { path: paths.catalogPath, digest, count };
   }
   writeInsideSeatStorage(paths.root, paths.catalogPath, text);
   writeProjections(paths.root, { ...record, generated: { ...record.generated, [paths.catalogPath]: digest } });
@@ -1220,7 +1242,13 @@ export function resolveSeatSkillRouter(paths: SeatSkillPaths): SeatSkillRouter {
  * `openrig:openrig-seat-router` through the seat plugin), so it is never listed in the Codex catalog, which stays as it
  * was. A router edited since OpenRig wrote it, or on a linked path, is kept and named, never overwritten.
  */
-export function writeSeatSkillRouter(paths: SeatSkillPaths): SeatSkillRouter {
+export function writeSeatSkillRouter(paths: SeatSkillPaths, opts?: {
+  /** #3245: a Claude seat launched with launch.claude_sideload off loads no plugin, so its router is a file it reads, and
+   *  says so (as `writeSeatSkillCatalog`'s option of the same name). */
+  claudeWithoutPlugin?: boolean;
+  /** #3245: further skills folders listed after the seat's own, as in its catalog (`sideloadOffExtraSkillsRoots`). */
+  extraSkillsRoots?: readonly string[];
+}): SeatSkillRouter {
   const router = resolveSeatSkillRouter(paths);
   // A link on the way: nothing is read through it, and nothing written.
   if (router.kept === "linked") return { id: router.id, path: router.path, written: false, kept: "linked" };
@@ -1230,8 +1258,14 @@ export function writeSeatSkillRouter(paths: SeatSkillPaths): SeatSkillRouter {
     ids = fs.readdirSync(paths.skillsRoot, { withFileTypes: true })
       .filter((e) => e.isDirectory() && e.name !== SEAT_SKILL_ROUTER_ID).map((e) => e.name).sort();
   } catch {}
-  for (const id of ids) {
-    const file = nodePath.join(paths.skillsRoot, id, "SKILL.md");
+  const listed: Array<{ id: string; root: string }> = ids.map((id) => ({ id, root: paths.skillsRoot }));
+  for (const root of opts?.extraSkillsRoots ?? []) {
+    let extra: string[] = [];
+    try { extra = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort(); } catch {}
+    for (const id of extra) if (id !== SEAT_SKILL_ROUTER_ID && !listed.some((entry) => entry.id === id)) listed.push({ id, root });
+  }
+  for (const { id, root } of listed) {
+    const file = nodePath.join(root, id, "SKILL.md");
     let parsed: ReturnType<typeof parseSkillFrontmatter> | undefined;
     try { parsed = parseSkillFrontmatter(fs.readFileSync(file, "utf8")); } catch { continue; }
     if (!parsed.ok) continue;
@@ -1249,6 +1283,9 @@ export function writeSeatSkillRouter(paths: SeatSkillPaths): SeatSkillRouter {
     lines.length > 0
       ? "Each skill says when to use it. When that moment comes, read its SKILL.md, then follow it."
       : "No other OpenRig skills are kept for this seat.",
+    ...(opts?.claudeWithoutPlugin
+      ? ["", "This file and the skills it lists are files to read, not Claude Code skills: none is installed in Claude Code, none has a slash command, and none starts on its own."]
+      : []),
     "",
     ...lines,
     "",

@@ -42,6 +42,8 @@ interface ClaudeResumeOptions {
   openrigHome?: string;
   /** The compaction settings the restore reads from, so the launch grants those files too. */
   restoreReadPolicy?: () => RestoreReadPolicy | null;
+  /** #3245: what a seat with launch.claude_sideload off reads by path, granted with the restore reads. */
+  sideloadOffReads?: (nodeId: string) => { files: string[]; trees: string[] };
   /** Slice 13: whether this restore adds a seat's hook bridge (opted in, on a Claude with asyncRewake). */
   hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
   /** #3416 (3): the seat's status line throttle in seconds, or null when it has none; read at each restore. */
@@ -153,6 +155,7 @@ export class ClaudeResumeAdapter {
     let launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
       ...(this.options.restoreReadPolicy?.() ?? {}),
+      ...(nodeId && this.options.sideloadOffReads ? { skillReads: this.options.sideloadOffReads(nodeId) } : {}),
     });
     let wrapperPrefix = "";
     if (!managed && executable && launchWrapper?.length) {

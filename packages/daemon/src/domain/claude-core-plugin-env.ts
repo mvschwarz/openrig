@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import type { SeatEnv } from "./seat-env.js";
 import { homePluginPath } from "./builtin-startup-files.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 // What a Claude seat needs so it loads the vendored openrig-core plugin (its refocus, compaction-restore and
 // activity hooks). Claude reads CLAUDE_CODE_PLUGIN_DIRS, a colon-separated list, so this has to be the vendored copy
@@ -26,6 +27,17 @@ import { homePluginPath } from "./builtin-startup-files.js";
 export const CLAUDE_PLUGIN_DIRS_ENV = "CLAUDE_CODE_PLUGIN_DIRS";
 /** The seat's launch project, set for a seat that loads the plugin, so a Claude started elsewhere inside the seat can be told from the seat. */
 export const SEAT_PROJECT_DIR_ENV = "OPENRIG_SEAT_PROJECT_DIR";
+
+/**
+ * #3245: whether Claude seats load OpenRig's plugin folders through CLAUDE_CODE_PLUGIN_DIRS (`launch.claude_sideload`,
+ * default on). A person turns it off for a Claude login whose managed settings set `disableSideloadFlags`, which makes
+ * Claude Code refuse that variable at startup. Off, no launch path adds the variable: fresh launch, restore and relaunch
+ * (node launcher), handover successor, provider switch, and the managed `env -i` launch that forwards it by name. Read at
+ * each call, so a change applies to the next launch; a setting that can't be read leaves the usual launch.
+ */
+export function claudeSideloadEnabled(read: () => unknown = () => new SettingsStore().resolveOne("launch.claude_sideload").value): boolean {
+  try { return read() !== false; } catch { return true; }
+}
 
 /** The vendored openrig-core plugin directory under `pluginsDir`, or undefined when it is not vendored. */
 export function vendoredCorePluginDir(pluginsDir: string = getDefaultOpenRigPath("plugins")): string | undefined {
@@ -63,18 +75,67 @@ export function persistedPluginPaths(db: Database.Database, nodeId: string, open
   }
 }
 
+/** #3245: whether the node's saved startup context selects OpenRig's settings.local.json activity relay
+ *  (`claude_activity_hooks`), or undefined when nothing was saved (or it can't be read). */
+export function persistedActivityHooksSelected(db: Database.Database, nodeId: string): boolean | undefined {
+  try {
+    const row = db.prepare("SELECT projection_entries_json FROM node_startup_context WHERE node_id = ?")
+      .get(nodeId) as { projection_entries_json: string } | undefined;
+    if (!row) return undefined;
+    const entries = JSON.parse(row.projection_entries_json) as unknown;
+    return Array.isArray(entries) ? entries.some((e) => typeof e === "object" && e !== null
+      && (e as { category?: unknown }).category === "runtime_resource" && (e as { resourceType?: unknown }).resourceType === "claude_activity_hooks") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Saved selection, even when the vendored manifest is missing; inspection must not call that intentional hooklessness. */
 export function selectedCorePluginDir(paths: readonly string[], pluginsDir: string = getDefaultOpenRigPath("plugins")): string | undefined {
   const dir = join(pluginsDir, "openrig-core");
   return paths.some((path) => canonical(path) === canonical(dir)) ? dir : undefined;
 }
 
+/** Claude Code's system-wide managed settings file on this platform (for every user of the machine), or undefined. */
+export function claudeManagedSettingsPath(platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform === "linux") return "/etc/claude-code/managed-settings.json";
+  if (platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
+  return undefined;
+}
+
+/**
+ * #3245: that file, when it sets `disableSideloadFlags: true`, else undefined (absent, unreadable, not JSON, or the setting
+ * isn't true). It's the only evidence of the policy OpenRig reads, to explain a refusal and suggest
+ * `launch.claude_sideload`; it never changes a launch. Its absence proves nothing: managed settings can also come from
+ * Claude's servers, which leave no file here.
+ */
+export function claudeSideloadPolicyFile(readFile: (path: string) => string, platform: NodeJS.Platform = process.platform): string | undefined {
+  const path = claudeManagedSettingsPath(platform);
+  if (!path) return undefined;
+  try {
+    const parsed = JSON.parse(readFile(path)) as unknown;
+    return typeof parsed === "object" && parsed !== null && (parsed as { disableSideloadFlags?: unknown }).disableSideloadFlags === true ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The directory to load into this node's Claude process, or undefined: not a Claude seat, the plugin is not vendored,
- * or the seat's resolved plugin selection doesn't include it. `selectedPaths` is the selection a launch has just
- * resolved or a snapshot saved; without it the node's persisted startup context is read.
+ * the seat's resolved plugin selection doesn't include it, or `launch.claude_sideload` is off. `selectedPaths` is the
+ * selection a launch has just resolved or a snapshot saved; without it the node's persisted startup context is read.
  */
 export function seatCorePluginDir(
+  node: { id: string; runtime: string | null },
+  db: Database.Database,
+  selectedPaths?: readonly string[],
+  pluginsDir?: string,
+): string | undefined {
+  return claudeSideloadEnabled() ? seatCorePluginSelection(node, db, selectedPaths, pluginsDir) : undefined;
+}
+
+/** The vendored plugin this Claude seat selected, whether or not its launch may load it: what it asked for. */
+export function seatCorePluginSelection(
   node: { id: string; runtime: string | null },
   db: Database.Database,
   selectedPaths?: readonly string[],
@@ -105,6 +166,78 @@ export function seatCodexCorePluginDir(
   const dir = vendoredCorePluginDir(pluginsDir);
   if (!dir) return undefined;
   return selectedCorePluginDir(selectedPaths ?? persistedPluginPaths(db, node.id, pluginsDir ? dirname(pluginsDir) : undefined) ?? [], pluginsDir);
+}
+
+/**
+ * #3245: the env a seat launches with, its declared env plus OpenRig's plugin directories (`withPluginDirs`). A Claude
+ * seat with `launch.claude_sideload` off gets none of them, and a CLAUDE_CODE_PLUGIN_DIRS its own env declares is left
+ * out too, since Claude Code would refuse it; `claudeSideloadOffNotes` names both.
+ */
+export function seatPluginEnv(seatEnv: SeatEnv, dirs: ReadonlyArray<string | undefined>, runtime: string | null): SeatEnv {
+  if (runtime !== "claude-code" || claudeSideloadEnabled()) return withPluginDirs(seatEnv, dirs);
+  if (!(CLAUDE_PLUGIN_DIRS_ENV in seatEnv)) return seatEnv;
+  const { [CLAUDE_PLUGIN_DIRS_ENV]: _leftOut, ...rest } = seatEnv;
+  return rest;
+}
+
+/**
+ * #3245: what a Claude seat asked for that a launch with `launch.claude_sideload` off doesn't deliver, one line each:
+ * none for another runtime or with the setting on. Launch additions it can't pass are named by
+ * `seatLaunchAdditionsForLaunch` with the seat's other refused additions.
+ */
+export function claudeSideloadOffNotes(input: {
+  runtime: string | null;
+  /** The seat selected the vendored openrig-core (`seatCorePluginSelection`). */
+  coreSelected: boolean;
+  /** The seat's declared env, before `seatPluginEnv`. */
+  seatEnv: SeatEnv;
+  /** The seat's profile selects OpenRig's own activity relay copy in .claude/settings.local.json (`claude_activity_hooks`);
+   *  undefined when the launch can't tell. */
+  activityHooksSelected?: boolean;
+}): string[] {
+  if (input.runtime !== "claude-code" || claudeSideloadEnabled()) return [];
+  const notes: string[] = [];
+  if (input.coreSelected) {
+    notes.push("claude_sideload_off: openrig-core isn't loaded (launch.claude_sideload is off), so its refocus and compaction-restore hooks don't run; its skills are in this seat's skill list instead");
+    if (input.activityHooksSelected === false) {
+      notes.push("claude_sideload_off: this seat's profile doesn't select claude_activity_hooks, and openrig-core's activity relay isn't loaded, so the seat reports no activity");
+    }
+  }
+  if (CLAUDE_PLUGIN_DIRS_ENV in input.seatEnv) {
+    notes.push(`claude_sideload_off: ${CLAUDE_PLUGIN_DIRS_ENV} from this seat's env is left out (launch.claude_sideload is off)`);
+  }
+  return notes;
+}
+
+/**
+ * #3245: what a Claude seat with `launch.claude_sideload` off reads by path instead of loading through its plugin, for the
+ * launch to allow reading (`withManagedRestoreReads`): its skill list, its own skills and, when it selected openrig-core,
+ * the vendored plugin's skills. Nothing with the setting on, or for another runtime. Only this seat's storage is named.
+ */
+export function sideloadOffSkillReads(
+  node: { id: string; runtime: string | null },
+  db: Database.Database,
+  seat: { root: string; skillsRoot: string; catalogPath: string } | undefined,
+  pluginsDir?: string,
+): { files: string[]; trees: string[] } {
+  if (node.runtime !== "claude-code" || claudeSideloadEnabled() || !seat) return { files: [], trees: [] };
+  const core = seatCorePluginSelection(node, db, undefined, pluginsDir);
+  return { files: [seat.catalogPath], trees: [seat.skillsRoot, ...(core ? [join(core, "skills")] : [])] };
+}
+
+/**
+ * #3245: the skills folders a Claude seat with `launch.claude_sideload` off lists beyond its own, in its catalog and its
+ * router: the vendored openrig-core's, when the seat selected it. None with the setting on, or for another runtime.
+ */
+export function sideloadOffExtraSkillsRoots(
+  node: { id: string; runtime: string | null },
+  db: Database.Database,
+  selectedPaths?: readonly string[],
+  pluginsDir?: string,
+): string[] {
+  if (node.runtime !== "claude-code" || claudeSideloadEnabled()) return [];
+  const core = seatCorePluginSelection(node, db, selectedPaths, pluginsDir);
+  return core ? [join(core, "skills")] : [];
 }
 
 /** The seat's declared env with the vendored plugin added after any list the seat declared itself. */

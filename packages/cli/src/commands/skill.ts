@@ -52,7 +52,8 @@ interface SeatInspection {
   delivery: { outcome: string; at: string; deliveryId: string } | null;
   confirmed?: { outcome: string; at: string; deliveryId: string } | null;
   /** OPR.0.7.0.13 (router): absent from an older daemon. */
-  router?: { id: string; path: string; written: boolean; kept?: "edited" | "linked" } | null;
+  /** readAsFile (#3245): a Claude seat with launch.claude_sideload off reads the router as a file. */
+  router?: { id: string; path: string; written: boolean; kept?: "edited" | "linked"; readAsFile?: boolean } | null;
   bootstrapLine?: { state: "unasked" | "unknown" } | { state: "yes" | "no"; by: "saved" | "environment" } | null;
   /** OPR.0.7.0.9: what the seat's launch passes of its own additions; absent from an older daemon. */
   launchAdditions?: SeatLaunchAdditionsView | null;
@@ -219,6 +220,7 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
       const state = seat.router.written ? "" : seat.router.kept === "edited" ? " (kept as it is: it differs from what OpenRig wrote)"
         : seat.router.kept === "linked" ? " (not written: a link on the way into this seat's storage)" : " (not written yet)";
       console.log(`router      ${seat.router.id}: ${seat.router.path}${state}`);
+      if (seat.router.readAsFile) console.log("            a file to read, not an installed skill: launch.claude_sideload is off, so this seat loads no plugin");
     }
     if (seat.bootstrapLine) {
       const line = seat.bootstrapLine;

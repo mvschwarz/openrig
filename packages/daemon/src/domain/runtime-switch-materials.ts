@@ -11,8 +11,9 @@ import { claudeConflictTargetPath, filterProtectedProjections, planProjection, p
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
+import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatRouterKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, writeSeatSkillRouter, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
+import { claudeSideloadEnabled, selectedCorePluginDir, vendoredCorePluginDir } from "./claude-core-plugin-env.js";
 import { readSeatEffort } from "./seat-effort.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 
@@ -142,7 +143,9 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
   const neutral = (input.saved?.resolvedStartupFiles ?? []).map((file) => reanchorBuiltinStartupFile(file)).filter((file) => file.absolutePath !== pointer.absolutePath
     && file.absolutePath !== sourceSeat?.catalogPath && !(file.deliveryHint === "guidance_merge" && projectedGuidance.has(file.absolutePath)));
   const delivered = filterProtectedProjections(neutral, plan).delivered;
-  const files: ResolvedStartupFile[] = [...delivered, pointer, ...(runtime === "codex" ? [{
+  // #3245: a Claude target launched with launch.claude_sideload off reads its skills from the same catalog.
+  const sendsCatalog = runtime === "codex" || (runtime === "claude-code" && !claudeSideloadEnabled());
+  const files: ResolvedStartupFile[] = [...delivered, pointer, ...(sendsCatalog ? [{
     path: "openrig-seat-skills.md", absolutePath: seatSkills.catalogPath, ownerRoot: seatSkills.root,
     deliveryHint: "send_text" as const, required: false, appliesOn: ["fresh_start", "restore"] as ("fresh_start" | "restore")[],
   }] : [])];
@@ -206,9 +209,20 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
       if (projected.failed.length) throw new Error(projected.failed.map((failure) => `${failure.effectiveId}: ${failure.error}`).join("; "));
       // #2456: a kept guidance block is named, as at a start, so the switch's result and the successor's first turn say so.
       notes.push(...(projected.warnings ?? []));
-      if (runtime === "codex") {
-        const catalog = writeSeatSkillCatalog(seatSkills);
+      if (sendsCatalog) {
+        // #3245: a Claude target that selected openrig-core lists its skills where the vendored plugin keeps them.
+        const coreDir = runtime === "claude-code" && vendoredCorePluginDir() ? selectedCorePluginDir(pluginPaths ?? []) : undefined;
+        const sideloadOff = runtime === "claude-code"
+          ? { claudeWithoutPlugin: true, extraSkillsRoots: coreDir ? [nodePath.join(coreDir, "skills")] : [] } : undefined;
+        const catalog = writeSeatSkillCatalog(seatSkills, sideloadOff);
         if (catalog.kept) notes.push(seatCatalogKeptNote(catalog));
+        // The router the seat reads as a file lists the same skills, as a start writes it.
+        if (sideloadOff) {
+          try {
+            const router = writeSeatSkillRouter(seatSkills, sideloadOff);
+            if (router.kept) notes.push(seatRouterKeptNote(router));
+          } catch (error) { notes.push(`seat_router_not_written: ${(error as Error).message}`); }
+        }
       }
       const delivered = await adapter.deliverStartup(preLaunch, binding);
       if (delivered.failed.length) throw new Error(delivered.failed.map((failure) => `${failure.path}: ${failure.error}`).join("; "));

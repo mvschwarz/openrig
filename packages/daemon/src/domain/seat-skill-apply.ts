@@ -12,6 +12,7 @@ import { readFootprintAnswer, type FootprintAnswer } from "./footprint-choice.js
 import type { SettingsStore } from "./user-settings/settings-store.js";
 import { seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths, SEAT_SKILL_ROUTER_ID, resolveSeatSkillRouter, writeSeatSkillRouter, type SeatSkillRouter } from "./seat-skill-storage.js";
 import { seatLaunchAdditionsReport, type SeatLaunchAdditionsReport } from "./seat-launch-additions.js";
+import { claudeSideloadEnabled, sideloadOffExtraSkillsRoots } from "./claude-core-plugin-env.js";
 
 // OPR.0.7.0.13 (B) — the seat mode of `rig skill loadout`: inspect a seat's stored selection, or apply it and tell the
 // running seat. Disk state and delivery state are kept apart. A delivery is recorded against the catalog's digest AND
@@ -62,8 +63,9 @@ export interface SeatSkillInspection {
   /** OPR.0.7.0.13 (router): the seat's one generated router skill, or null when the seat has no storage. `written` says
    *  only that the router file matches what OpenRig last wrote there, not that it covers today's selection: `--apply`
    *  rewrites it best-effort and swallows a write error, so a failed rewrite leaves the earlier router reported. The
-   *  bootstrap line is reported apart from it. */
-  router: SeatSkillRouter | null;
+   *  bootstrap line is reported apart from it. `readAsFile` (#3245): a Claude seat with launch.claude_sideload off loads
+   *  no plugin, so the router is a file it reads, not an installed skill. */
+  router: (SeatSkillRouter & { readAsFile?: true }) | null;
   /** OPR.0.7.0.13 (router): the person's saved answer on the one-line bootstrap (slice 20's `readFootprintAnswer`), or
    *  `unknown` when the setting couldn't be read. Whether a launch could write the line is that launch's own result;
    *  this read writes nothing and infers nothing. Null when the caller didn't read the setting. */
@@ -147,7 +149,8 @@ export function inspectSeatSkills(seat: SeatRef, occupant: string | null, db?: D
     seat,
     storage: exists ? paths.root : null,
     skills: exists ? listSkills(paths) : [],
-    router: exists ? resolveSeatSkillRouter(paths) : null,
+    router: exists ? { ...resolveSeatSkillRouter(paths),
+      ...(seat.runtime === "claude-code" && !claudeSideloadEnabled() ? { readAsFile: true as const } : {}) } : null,
     bootstrapLine,
     launchAdditions: seat.runtime === "claude-code" ? seatLaunchAdditionsReport(paths) : null,
     catalogDigest: digest,
@@ -178,8 +181,9 @@ export interface SeatSkillSender {
 }
 
 /**
- * Reconcile the seat's stored selection into its own storage, then, for a Codex seat whose catalog the current occupant
- * hasn't been sent, send it once through the existing transport and record exactly what the transport reported.
+ * Reconcile the seat's stored selection into its own storage, then, for a Codex seat (or a Claude seat launched with
+ * launch.claude_sideload off) whose catalog the current occupant hasn't been sent, send it once through the existing
+ * transport and record exactly what the transport reported.
  */
 export async function applySeatSkills(input: {
   db: Database.Database;
@@ -200,21 +204,30 @@ export async function applySeatSkills(input: {
   const disk = reconcileStoredSelection(seat, paths, input.catalogRoot);
   // The seat's generated router follows what is now in its storage, for either runtime. A router that isn't written
   // is reported (kept or refused) in the inspection; it never stops the apply.
+  // #3245: a Claude seat launched with launch.claude_sideload off loads no plugin, so it reads its router and list as files,
+  // both listing openrig-core's skills where the vendored plugin keeps them, and it's sent its list as a Codex seat is.
+  const claudeWithoutPlugin = seat.runtime === "claude-code" && !claudeSideloadEnabled();
+  const extraSkillsRoots = claudeWithoutPlugin ? sideloadOffExtraSkillsRoots({ id: seat.nodeId, runtime: seat.runtime }, db) : [];
+  const sideloadOff = claudeWithoutPlugin ? { claudeWithoutPlugin: true, extraSkillsRoots } : undefined;
   if (disk.ok && fs.existsSync(paths.root)) {
-    try { writeSeatSkillRouter(paths); } catch { /* reported by the inspection: the router isn't there as written */ }
+    try { writeSeatSkillRouter(paths, sideloadOff); } catch { /* reported by the inspection: the router isn't there as written */ }
   }
   const result = (delivery: SeatSkillApplyResult["delivery"]): SeatSkillApplyResult => ({ inspection: inspectSeatSkills(seat, input.occupant, db, input.bootstrapLine ?? null), disk, delivery });
-  if (seat.runtime !== "codex") return result({ state: "not-sent", reason: "a Claude seat reads its skills from its own plugin; nothing is sent to the running session" });
+  if (seat.runtime !== "codex" && !claudeWithoutPlugin) return result({ state: "not-sent", reason: "a Claude seat reads its skills from its own plugin; nothing is sent to the running session" });
   // An unreadable selection never reaches the catalog or the seat.
   if (!disk.ok) return result({ state: "not-sent", reason: disk.selection === "unreadable"
     ? "the seat's stored selection couldn't be read, so nothing was reconciled or sent" : "the seat's selection was not reconciled, so its list was not sent" });
   let catalog: ReturnType<typeof writeSeatSkillCatalog>;
-  try { catalog = writeSeatSkillCatalog(paths); } catch (error) {
+  try {
+    catalog = writeSeatSkillCatalog(paths, sideloadOff);
+  } catch (error) {
     return result({ state: "not-sent", reason: `the seat's catalog couldn't be written (${(error as Error).message}), so nothing was sent` });
   }
   if (catalog.kept) return result({ state: "not-sent", reason: catalog.reason === "linked"
     ? `${catalog.path} is not inside this seat's storage (a link on the way); nothing was written or sent`
     : `${catalog.path} differs from what OpenRig last wrote; kept as it is and not sent` });
+  if (claudeWithoutPlugin && catalog.count === 0) return result({ state: "not-sent", reason:
+    "the seat keeps no skills now, so no list is sent; a list it was sent earlier in this conversation is out of date" });
   const occupant = input.occupant;
   if (!occupant) return result({ state: "not-sent", reason: "the seat has no running occupant to send to" });
   if (!input.sender) return result({ state: "not-sent", reason: "no transport is available on this daemon" });

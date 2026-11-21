@@ -10,6 +10,9 @@ export interface RestoreReadContext {
   extraInstructionFile?: string | null;
   /** `policies.claude_compaction.preparation_root`: where restore maps go instead of the home's, when set. */
   preparationRoot?: string | null;
+  /** #3245: a seat with launch.claude_sideload off reads its skills by path: these files, and everything under these
+   *  folders (`sideloadOffSkillReads`). */
+  skillReads?: { files: string[]; trees: string[] };
 }
 
 /** The two compaction settings a launch passes so the restore can read the files they name. */
@@ -67,6 +70,8 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
     // The exact file, where it's named and where it resolves (a symlink at the file itself included).
     ...(extra ? spellings(extra) : []),
     ...(context.preparationRoot ? spellings(context.preparationRoot).map(root => `${root}/${seat}/*/RESTORE-MAP.md`) : []),
+    ...(context.skillReads?.files ?? []).flatMap(file => spellings(file)),
+    ...(context.skillReads?.trees ?? []).flatMap(tree => spellings(tree).map(dir => `${dir}/**`)),
   ];
   // Fresh/fork launches know their own UUID. Never grant the fork parent's or
   // another seat's packet directory; a legacy name is not a packet identity.

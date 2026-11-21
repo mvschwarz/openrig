@@ -114,7 +114,7 @@ import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts, 
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
-import { pluginPathsOf } from "./claude-core-plugin-env.js";
+import { claudeSideloadEnabled, pluginPathsOf, sideloadOffExtraSkillsRoots } from "./claude-core-plugin-env.js";
 import { seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode, type SeatLaunchAdditions } from "./seat-launch-additions.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
@@ -1584,7 +1584,10 @@ export class RestoreOrchestrator {
         for (const file of rehydrated.refused) warnings?.push(`Restore: ${file} is not inside this seat's storage (a link on the way); nothing written there`);
         // The seat's generated router is rebuilt from what is now in its storage, for either runtime.
         try {
-          const router = writeSeatSkillRouter(seatSkills);
+          // #3245: with launch.claude_sideload off, as the start writes it: a file to read that lists openrig-core's skills too.
+          const saved = data.nodeStartupContext?.[nodeId];
+          const router = writeSeatSkillRouter(seatSkills, node.runtime === "claude-code" && !claudeSideloadEnabled() ? { claudeWithoutPlugin: true,
+            extraSkillsRoots: sideloadOffExtraSkillsRoots({ id: nodeId, runtime: node.runtime }, this.db, saved ? pluginPathsOf(saved.projectionEntries) : undefined) } : undefined);
           if (router.kept) warnings?.push(`Restore: ${seatRouterKeptNote(router)}`);
         } catch (error) {
           warnings?.push(`Restore: seat_router_not_written: ${(error as Error).message}`);

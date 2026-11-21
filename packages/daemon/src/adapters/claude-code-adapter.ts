@@ -3,6 +3,7 @@ import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/manag
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
+import { claudeSideloadEnabled, claudeSideloadPolicyFile } from "../domain/claude-core-plugin-env.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -102,10 +103,21 @@ function claudeSideloadRefusalLine(paneContent: string): string | null {
 /** Whether a plain capture may hold a refusal, even one wrapped mid-word; only then is a joined capture read. */
 const mayShowSideloadRefusal = (paneContent: string): boolean => paneContent.replace(/\n/g, "").includes("disableSideloadFlags");
 
-function claudeSideloadRefusalReason(line: string): string {
+function claudeSideloadRefusalReason(line: string, policyFile?: string): string {
   return `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on `
     + "disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load "
-    + "this seat's skills and plugins, so this seat can't start while that setting applies.";
+    + "this seat's skills and plugins, so this seat can't start while that setting applies."
+    + (policyFile ? ` ${claudeSideloadSuggestion(policyFile)}` : "");
+}
+
+/** #3245: only with the policy file as evidence (claudeSideloadPolicyFile), what a person can choose; nothing is changed. */
+function claudeSideloadSuggestion(policyFile: string): string {
+  return claudeSideloadEnabled()
+    ? `${policyFile} sets disableSideloadFlags. To start Claude seats under it, run \`rig config set launch.claude_sideload false\` `
+      + "and relaunch: seats then start without OpenRig's plugin folders, get their skills as a list to read, and each launch "
+      + "names what they don't get (such as openrig-core's refocus and compaction-restore hooks)."
+    : `${policyFile} sets disableSideloadFlags, and launch.claude_sideload is already off, so OpenRig passed no plugin folders: `
+      + "the refused variable or flag came from this seat's terminal environment or its launch command.";
 }
 
 /**
@@ -121,6 +133,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
   private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
+  private sideloadOffReads: ((nodeId: string) => { files: string[]; trees: string[] }) | null;
   private hookBridgeLaunch: ((nodeId: string, executable?: string) => boolean | Promise<boolean>) | null;
   private statuslineThrottleLaunch: ((nodeId: string) => number | null | Promise<number | null>) | null;
   private collectorAssetPath: string | null;
@@ -147,6 +160,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     /** The compaction settings the restore reads from, so the launch grants those files too. */
     restoreReadPolicy?: () => RestoreReadPolicy | null;
+    /** #3245: what a seat with launch.claude_sideload off reads by path, granted with the restore reads. */
+    sideloadOffReads?: (nodeId: string) => { files: string[]; trees: string[] };
     /** Slice 13: whether this launch adds a seat's hook bridge (opted in, on a Claude with asyncRewake), read at each
      *  launch; absent, no launch adds it. */
     hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
@@ -179,6 +194,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
     this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
+    this.sideloadOffReads = deps.sideloadOffReads ?? null;
     this.hookBridgeLaunch = deps.hookBridgeLaunch ?? null;
     this.statuslineThrottleLaunch = deps.statuslineThrottleLaunch ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
@@ -436,6 +452,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const settingsSeat = { openrigHome: this.stateDir, session: opts.name };
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge, ...(statusLine ? { statusLine } : {}) }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
+      ...(this.sideloadOffReads ? { skillReads: this.sideloadOffReads(binding.nodeId) } : {}),
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
@@ -589,10 +606,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const refusal = probe.code === "returned_to_shell" && mayShowSideloadRefusal(paneContent)
       ? claudeSideloadRefusalLine((await this.tmux.capturePaneContent(binding.tmuxSession, 40, { joinWrappedLines: true })) ?? paneContent)
       : null;
-    if (refusal) return { ready: false, reason: claudeSideloadRefusalReason(refusal), code: "returned_to_shell" };
+    if (refusal) return { ready: false, reason: claudeSideloadRefusalReason(refusal, this.sideloadPolicyFile()), code: "returned_to_shell" };
 
     if (probe.status === "resumed") return "provedWithoutLaunch" in probe ? { ready: true, provedWithoutLaunch: true } : { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
+  }
+
+  /** #3245: the managed settings file that sets disableSideloadFlags, read only to explain a refusal. */
+  private sideloadPolicyFile(): string | undefined {
+    return claudeSideloadPolicyFile((file) => this.fs.readFile(file));
   }
 
   /** Best-effort public seam for tmux-bound Claude sessions adopted outside the launch path. */
@@ -930,7 +952,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         ok: false,
         probe: probeEvidence,
         error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound)
-          : refusal ? claudeSideloadRefusalReason(refusal) : "pane returned to shell instead of entering Claude"}`,
+          : refusal ? claudeSideloadRefusalReason(refusal, this.sideloadPolicyFile()) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };
     }

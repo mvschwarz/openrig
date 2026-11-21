@@ -36,8 +36,8 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { findOtherSessionOwner } from "./session-owner.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
-import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
-import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./seat-skill-storage.js";
+import { claudeSideloadEnabled, claudeSideloadOffNotes, persistedActivityHooksSelected, seatCodexCorePluginDir, seatCorePluginDir, seatCorePluginSelection, seatPluginEnv } from "./claude-core-plugin-env.js";
+import { retireSeatCoreSkillCopiesForNode, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { inspectStartupStagedText, startupNoInputLine, startupOwnCollapsedPaste, STARTUP_UNCONFIRMED_REASON } from "./startup-submission-evidence.js";
 import { abandonOpenHandoverAttempt, closeHandoverAttempt, openHandoverAttempt, recordFailedHandoverAttempt, type SeatHandoverAttempt } from "./seat-handover-attempts.js";
@@ -645,13 +645,20 @@ export class SeatHandoverService {
     const guidanceNote = keptGuidanceSeatLine(guidancePutBack.notes);
     // #2456: a fresh or rebuild successor is a new conversation no start delivered to, so its first turn points to the seat's
     // send_text startup files, role first. A fork carries its parent's conversation; a discovered successor was prepared.
-    const startupFiles = parsed.source.mode === "fresh" || parsed.source.mode === "rebuild" ? this.startupTextFiles(node.id) : [];
+    const startupFiles = parsed.source.mode === "fresh" || parsed.source.mode === "rebuild"
+      ? [...this.startupTextFiles(node.id), ...this.claudeSkillCatalogFile(node)] : [];
     const startedWithoutRequired = [...guidancePutBack.startedWithoutRequired,
       ...startupFiles.filter((file) => file.required && !file.present).map((file) => file.absolutePath)];
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
       ...guidancePutBack.notes.map((note) => `guidance_put_back: ${note}`),
+      // #3245: what a Claude seat asked for that its successor doesn't get with launch.claude_sideload off.
+      ...claudeSideloadOffNotes({ runtime: node.runtime,
+        coreSelected: seatCorePluginSelection(node, this.db, undefined, this.pluginsDir) !== undefined,
+        seatEnv: this.rigRepo.getEffectiveSeatEnv(node.id),
+        // A successor projects nothing: it keeps the settings.local.json the seat was last launched with.
+        activityHooksSelected: persistedActivityHooksSelected(this.db, node.id) }),
     ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
     // #2426: a seat that loads the vendored openrig-core itself drops OpenRig's earlier copies of its skills before its
@@ -672,7 +679,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}), claudePermissions: permissionOverride.claudePermissions, claudeAutoMode: permissionOverride.claudeAutoMode, claudeMcp, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}), claudePermissions: permissionOverride.claudePermissions, claudeAutoMode: permissionOverride.claudeAutoMode, claudeMcp, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: seatPluginEnv(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs], node.runtime), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -1321,6 +1328,19 @@ export class SeatHandoverService {
 
   private recoverLine(quotedSeat: string): string {
     return `If the successor is running there, adopt it and keep its conversation, typing nothing into the pane: rig seat handover ${quotedSeat} --recover --reason "<why>".`;
+  }
+
+  /** #3245: a Claude seat with launch.claude_sideload off loads no seat plugin, so a fresh or rebuild successor's first turn
+   *  also points to the seat's skill catalog, as a start sends it; none when the seat keeps no skills. */
+  private claudeSkillCatalogFile(node: { id: string; runtime: string | null }): SeatStartupTextFile[] {
+    if (node.runtime !== "claude-code" || claudeSideloadEnabled()) return [];
+    const paths = seatSkillPathsForNode(this.db, node.id);
+    if (!paths) return [];
+    try {
+      const coreDir = seatCorePluginSelection(node, this.db, undefined, this.pluginsDir);
+      const catalog = writeSeatSkillCatalog(paths, { claudeWithoutPlugin: true, extraSkillsRoots: coreDir ? [nodePath.join(coreDir, "skills")] : [] });
+      return catalog.count > 0 || catalog.reason === "edited" ? [{ absolutePath: catalog.path, required: false, present: true, role: false }] : [];
+    } catch { return []; }
   }
 
   /** #2456: the seat's send_text startup files a fresh start delivers, role first; none when the saved context can't be read. */

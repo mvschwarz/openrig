@@ -17,7 +17,7 @@ import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
-import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, seatPluginEnv } from "./claude-core-plugin-env.js";
 import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
@@ -254,7 +254,7 @@ export class NodeLauncher {
       ...this.sessionEnv,
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
       // A one-off CLAUDE_CONFIG_DIR or CODEX_HOME is left out: a seat's home comes from its stored env: alone.
-      ...seatEnvLaunchVars(withPluginDirs(mergeSeatEnv(specEnv, oneOff && withoutRuntimeHomes(oneOff)), [corePluginDir, seatSkillDir, ...additionPluginDirs])),
+      ...seatEnvLaunchVars(seatPluginEnv(mergeSeatEnv(specEnv, oneOff && withoutRuntimeHomes(oneOff)), [corePluginDir, seatSkillDir, ...additionPluginDirs], node.runtime)),
       // The launch project of a seat that loads the plugin, so a Claude started elsewhere inside the seat is not taken for it.
       // For a Codex seat it is also the selection signal its plugin hooks check, beside the interpreter they run with.
       [SEAT_PROJECT_DIR_ENV]: corePluginDir || codexCorePluginDir ? sessionCwd : undefined,

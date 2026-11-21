@@ -5,6 +5,7 @@ import os from "node:os";
 import nodePath from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
+import { claudeManagedSettingsPath } from "../src/domain/claude-core-plugin-env.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -496,14 +497,14 @@ describe("Claude Code runtime adapter", () => {
   // #2277: `claude` was missing when the launch ran (an update re-linking it, say). The shell's own not-found line is the
   // reason. It stays an ordinary wait: the line may be an earlier launch's, left on screen while a new command is still
   // being dispatched into the same pane, so it never ends readiness by itself.
-  const idleShellAfter = async (line: string, claudeExecutable?: string) => {
+  const idleShellAfter = async (line: string, claudeExecutable?: string, files?: Record<string, string>) => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("bash");
     (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
     (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`$ claude --name dev-impl@test-rig\n${line}\nuser@example.test:~/project$ `);
     const adapter = new ClaudeCodeAdapter({
       tmux,
-      fsOps: mockFs(),
+      fsOps: mockFs(files),
       listProcesses: () => [
         { pid: 900, ppid: 1, command: "-bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
       ],
@@ -546,6 +547,26 @@ describe("Claude Code runtime adapter", () => {
     ["a refusal after other text on its line, which isn't quoted", `Error: token=example ${sideloadRefusal}`, sideloadRefusalCore],
   ])("checkReady names Claude's sideload refusal for %s on a pane back at its shell, and keeps waiting (#3245)", async (_label, line, quoted) => {
     expect(await idleShellAfter(line)).toEqual({ ready: false, reason: sideloadReason(quoted), code: "returned_to_shell" });
+  });
+
+  // #3245: the machine's managed settings file is the only evidence read; with it, the reason names the setting a person can
+  // turn off. Nothing is changed and nothing retried.
+  const policyPath = claudeManagedSettingsPath();
+  it.runIf(policyPath !== undefined)("checkReady suggests launch.claude_sideload only when the managed settings file sets disableSideloadFlags (#3245)", async () => {
+    const withPolicy = await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": true }' });
+    expect(withPolicy).toMatchObject({ ready: false, code: "returned_to_shell" });
+    expect((withPolicy as { reason: string }).reason).toBe(`${sideloadReason(sideloadRefusalCore)} ${policyPath} sets disableSideloadFlags. To start Claude seats under it, run \`rig config set launch.claude_sideload false\` and relaunch: seats then start without OpenRig's plugin folders, get their skills as a list to read, and each launch names what they don't get (such as openrig-core's refocus and compaction-restore hooks).`);
+    const saved = process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"];
+    process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "false";
+    try {
+      const alreadyOff = await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": true }' });
+      expect((alreadyOff as { reason: string }).reason).toContain("launch.claude_sideload is already off, so OpenRig passed no plugin folders");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"]; else process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = saved;
+    }
+    // A file that doesn't set it is no evidence: the reason stays as it was.
+    expect(await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": false }' }))
+      .toEqual({ ready: false, reason: sideloadReason(sideloadRefusalCore), code: "returned_to_shell" });
   });
 
   it("checkReady keeps a wrapped sideload refusal whole by reading the joined capture (#3245)", async () => {
