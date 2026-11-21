@@ -39,6 +39,10 @@ function optionalGit(checkout: string, args: string[]): string | null {
   try { return git(checkout, args); } catch { return null; }
 }
 
+function currentBranch(checkout: string): string | null {
+  return optionalGit(checkout, ["branch", "--show-current"]) || null;
+}
+
 function originLabel(origin: string | null): string | null {
   if (!origin) return null;
   try {
@@ -163,7 +167,7 @@ export function inspectGitContext(target: string) {
     const revision = git(checkout, ["rev-parse", "HEAD"]);
     const upstream = optionalGit(checkout, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
     const counts = upstream ? optionalGit(checkout, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.split(/\s+/).map(Number) : null;
-    const branch = optionalGit(checkout, ["symbolic-ref", "--short", "HEAD"]);
+    const branch = currentBranch(checkout);
     const remote = branch ? optionalGit(checkout, ["config", "--get", `branch.${branch}.remote`]) : null;
     const origin = remote ? optionalGit(checkout, ["remote", "get-url", "--", remote]) : null;
     return {
@@ -225,7 +229,7 @@ export function addGitContext(source: string, opts: { pack?: string; name?: stri
     }
     // Older transports can omit HEAD's symref. A full clone may still infer its
     // default branch; retain that relationship instead of detaching it.
-    const branch = branchRef?.slice("refs/heads/".length) ?? (warning ? optionalGit(checkout, ["symbolic-ref", "--short", "HEAD"]) : null);
+    const branch = branchRef?.slice("refs/heads/".length) ?? (warning ? currentBranch(checkout) : null);
     if (branch) {
       if (!warning) git(checkout, ["update-ref", `refs/remotes/origin/${branch}`, revision]);
       // This is a newly created checkout: pin its branch even after a full fallback.
@@ -256,7 +260,8 @@ export function updateGitContext(target: string) {
   const lock = `${target}.update-lock`;
   mkdirSync(lock); // fail visibly on an overlapping update; never steal a lock
   try {
-    const branch = git(checkout, ["symbolic-ref", "--short", "HEAD"]);
+    const branch = currentBranch(checkout);
+    if (!branch) throw new Error("Select a branch with an ordinary Git upstream before updating.");
     const remote = git(checkout, ["config", "--get", `branch.${branch}.remote`]);
     const merge = git(checkout, ["config", "--get", `branch.${branch}.merge`]);
     if (!remote || remote.startsWith("-") || !merge.startsWith("refs/heads/")) throw new Error("Select a branch with an ordinary Git upstream before updating.");
