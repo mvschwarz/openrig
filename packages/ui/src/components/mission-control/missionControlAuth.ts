@@ -36,6 +36,17 @@ export function terminalAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** Keep a token the address gave in this browser. Storage that refuses it (blocked, or full) leaves the token unset;
+ *  the page still loads and the address is still cleaned. */
+function storeToken(key: string, token: string | undefined): void {
+  if (!token) return;
+  try {
+    window.localStorage.setItem(key, token);
+  } catch {
+    // The protected actions are then refused (401), as they are with no token stored.
+  }
+}
+
 export function primeMissionControlBearerTokenFromUrl(): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
@@ -45,13 +56,11 @@ export function primeMissionControlBearerTokenFromUrl(): void {
   if (!tokenKey && !termKey) return;
 
   if (tokenKey) {
-    const token = url.searchParams.get(tokenKey)?.trim();
-    if (token) window.localStorage.setItem(MISSION_CONTROL_BEARER_STORAGE_KEY, token);
+    storeToken(MISSION_CONTROL_BEARER_STORAGE_KEY, url.searchParams.get(tokenKey)?.trim());
     for (const key of TOKEN_QUERY_KEYS) url.searchParams.delete(key);
   }
   if (termKey) {
-    const token = url.searchParams.get(termKey)?.trim();
-    if (token) window.localStorage.setItem(TERMINAL_BEARER_STORAGE_KEY, token);
+    storeToken(TERMINAL_BEARER_STORAGE_KEY, url.searchParams.get(termKey)?.trim());
     for (const key of TERMINAL_TOKEN_QUERY_KEYS) url.searchParams.delete(key);
   }
 

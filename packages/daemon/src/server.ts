@@ -1001,12 +1001,9 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
-    const indexHtml = fs.readFileSync(uiIndexPath, "utf-8");
-    const tokenScript = deps.terminalBearerToken
-      ? `<script>if(!window.localStorage.getItem("openrig.terminalBearerToken"))window.localStorage.setItem("openrig.terminalBearerToken",${JSON.stringify(deps.terminalBearerToken)})</script>`
-      : "";
-    const injected = tokenScript ? indexHtml.replace("</head>", `${tokenScript}</head>`) : indexHtml;
-    return c.html(injected);
+    // A page never carries a configured token: anyone who can reach the daemon can load one. A person who holds the
+    // tokens gives them to the UI once, in its address (?termToken=…&mcToken=…), and the page keeps them in that browser.
+    return c.html(fs.readFileSync(uiIndexPath, "utf-8"));
   });
 
   return app;

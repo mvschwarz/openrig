@@ -10,6 +10,11 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import { ThemeProvider } from "./components/ThemeProvider.js";
+import { primeMissionControlBearerTokenFromUrl } from "./components/mission-control/missionControlAuth.js";
+
+// The daemon puts no token in its pages. A person who holds them opens the UI once with ?termToken=…&mcToken=…; this
+// keeps them in the browser and takes them out of the address bar before anything renders.
+primeMissionControlBearerTokenFromUrl();
 
 const root = document.getElementById("root");
 if (root) {

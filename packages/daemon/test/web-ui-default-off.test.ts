@@ -114,6 +114,20 @@ describe("web UI default off (ui.enabled)", () => {
     expect((await app.request("/assets/app.js")).status).toBe(200);
   });
 
+  it("puts no configured token in any page, the routed fallback or a file served directly", async () => {
+    const MC_TOKEN = "web-ui-mission-control-token";
+    const app = createApp(fixture({ webUiEnabled: true, terminalBearerToken: TOKEN, missionControlBearerToken: MC_TOKEN }));
+    for (const path of ["/", "/specs", "/rigs/rig-1/nodes/dev.impl", "/index.html", "/assets/app.js", "/?termToken=other"]) {
+      const res = await app.request(path);
+      const body = await res.text();
+      expect(res.status, path).toBe(200);
+      expect(body, path).not.toContain(TOKEN);
+      expect(body, path).not.toContain(MC_TOKEN);
+    }
+    // The routed fallback is the built page as it is.
+    expect(await (await app.request("/specs")).text()).toBe(UI_INDEX_HTML);
+  });
+
   it("answers health, API and HTTP terminal routes the same with the UI off and on", async () => {
     const off = createApp(fixture({ terminalBearerToken: TOKEN }));
     const on = createApp(fixture({ terminalBearerToken: TOKEN, webUiEnabled: true }));
