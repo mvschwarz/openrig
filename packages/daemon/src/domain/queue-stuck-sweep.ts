@@ -2177,14 +2177,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         ? null
         : { qitemId: closed.qitemId, tsUpdated: closed.tsUpdated };
     };
-    const recountQualifyingUnroutable = (rows: Candidate[]): Candidate[] => {
+    const recountQualifyingUnroutable = (rows: Candidate[], source: string, destination: string): Candidate[] => {
       const current: Candidate[] = [];
       for (const c of rows) {
         routeNotes.delete(c.row.qitemId);
         routed.delete(c.row.qitemId);
         delegationParent.delete(c.row.qitemId);
         const now_ = freshCandidate("unclaimed-obligation", c.row.qitemId);
-        if (!now_) continue;
+        if (!now_ || now_.row.sourceSession !== source || now_.row.destinationSession !== destination) continue;
         routeAroundMissing(now_);
         routeAroundNoWake(now_);
         if (!recoveries.find(now_.row.qitemId) && !activeBacklogKeyOf(now_) && isUnreachableUnclaimed(now_)) {
@@ -2212,7 +2212,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         routed.delete(c.row.qitemId);
         delegationParent.delete(c.row.qitemId);
         const now_ = freshCandidate("unclaimed-obligation", c.row.qitemId);
-        if (!now_) continue;
+        if (!now_ || now_.row.sourceSession !== group.source || now_.row.destinationSession !== group.destination) continue;
         routeAroundMissing(now_);
         routeAroundNoWake(now_);
         if (!recoveries.find(now_.row.qitemId) && !activeBacklogKeyOf(now_) && isUnreachableUnclaimed(now_)) {
@@ -2223,7 +2223,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const tag = unroutableNoticeTag(group.source, group.destination);
       const target = unreachableNoticeTarget(group.destination, group.source);
       if (!target) {
-        const surviving = refreshYielded ? recountQualifyingUnroutable(liveRows) : liveRows;
+        const surviving = refreshYielded ? recountQualifyingUnroutable(liveRows, group.source, group.destination) : liveRows;
         if (surviving.length === 0) continue;
         liveUnroutableTags.add(tag);
         for (const c of surviving) {
@@ -2234,7 +2234,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
       const openNotice = findUnroutableNotice(deps.db, group.source, group.destination);
       if (openNotice) {
-        if (refreshYielded && recountQualifyingUnroutable(liveRows).length === 0) continue;
+        if (refreshYielded && recountQualifyingUnroutable(liveRows, group.source, group.destination).length === 0) continue;
         liveUnroutableTags.add(tag);
         findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openNotice.qitemId, action: "refreshed" });
         continue;
@@ -2257,7 +2257,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           const existing = findUnroutableNotice(deps.db, group.source, group.destination);
           if (existing) throw new DuplicateOpenUnroutableNoticeError(existing.qitemId);
           othersMayHaveRun();
-          const recounted = recountQualifyingUnroutable(liveRows);
+          const recounted = recountQualifyingUnroutable(liveRows, group.source, group.destination);
           if (recounted.length === 0) throw new UnroutableNoticeSkippedError();
           const latestDismissed = findLatestNonSweepClosedUnroutable(group.source, group.destination);
           if (latestDismissed && !recounted.some((c) => evidenceIsNewer(c.evidenceAt, latestDismissed.tsUpdated))) {
@@ -2286,10 +2286,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
-    const stillUnreachableUnclaimed = (row: QueueItem): boolean => {
-      if (row.state !== "pending" || row.claimedAt || polledRow(row)) return false;
-      if (classOf(row.destinationSession) !== "unroutable" && !sessionMissing(row.destinationSession)) return false;
-      if (recoveries.find(row.qitemId) || deliveryResolutionEvidence(deps, "unclaimed-obligation", row.qitemId, now)) return false;
+    const inspectUnreachableUnclaimed = (row: QueueItem): "live" | "recovery" | "other" => {
+      if (row.state !== "pending" || row.claimedAt || polledRow(row)) return "other";
+      if (classOf(row.destinationSession) !== "unroutable" && !sessionMissing(row.destinationSession)) return "other";
+      if (recoveries.find(row.qitemId)) return "recovery";
+      if (deliveryResolutionEvidence(deps, "unclaimed-obligation", row.qitemId, now)) return "other";
       const savedNotes = new Map(routeNotes);
       const savedRouted = new Set(routed);
       const savedParents = new Map(delegationParent);
@@ -2298,7 +2299,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const probe: Candidate = { kind: "unclaimed-obligation", row, route, ageMinutes: 0, evidenceAt: row.tsCreated, why: "" };
         routeAroundMissing(probe);
         routeAroundNoWake(probe);
-        return !activeBacklogKeyOf(probe) && isUnreachableUnclaimed(probe);
+        return !activeBacklogKeyOf(probe) && isUnreachableUnclaimed(probe) ? "live" : "other";
       } finally {
         routeNotes.clear();
         for (const [k, v] of savedNotes) routeNotes.set(k, v);
@@ -2331,28 +2332,129 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))
           LIMIT 1`,
       ).get(dest, source, STUCK_SWEEP_FINDING_TAG) !== undefined;
-      const pendingRows = deps.db.prepare(
-        `SELECT qitem_id FROM queue_items
+      type PendingCloseRow = {
+        qitem_id: string;
+        ts_updated: string;
+        last_nudge_result: string | null;
+        tags: string | null;
+        max_tid: number;
+      };
+      const queryPendingRows = (): PendingCloseRow[] => deps.db.prepare(
+        `SELECT qitem_id, ts_updated, last_nudge_result, tags,
+                COALESCE((SELECT MAX(t.transition_id) FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id), 0) AS max_tid
+           FROM queue_items
           WHERE destination_session = ? AND source_session = ? AND state = 'pending' AND claimed_at IS NULL
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))`,
-      ).all(dest, source, STUCK_SWEEP_FINDING_TAG) as Array<{ qitem_id: string }>;
+      ).all(dest, source, STUCK_SWEEP_FINDING_TAG) as PendingCloseRow[];
+      const pairEnvKey = (): string => {
+        const recAgent = (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)() ?? "";
+        const opSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)() ?? "";
+        const seatSummary = (seat: string): string =>
+          seat ? `${seat}:${sessionMissing(seat)}:${classOf(seat)}:${isBoundTerminalSeat(deps.db, seat)}` : "";
+        const orch = deps.resolveOrchestrator
+          ? (deps.resolveOrchestrator(dest) ?? "")
+          : JSON.stringify(resolveEscalationOwner(deps.db, dest, (target) => deps.queueRepo.acceptsDestination(target)));
+        const agent = agentSeatNode(dest);
+        let quietJobs = "";
+        try {
+          quietJobs = (deps.db.prepare(
+            "SELECT job_id FROM watchdog_jobs WHERE policy = 'quiet-release' AND state = 'active' ORDER BY job_id",
+          ).all() as Array<{ job_id: string }>).map((j) => j.job_id).join(",");
+        } catch {
+          quietJobs = "";
+        }
+        return JSON.stringify([
+          classOf(dest),
+          sessionMissing(dest),
+          stoppedReason(dest),
+          sessionStoppedOrMissing(dest),
+          isHumanTarget(dest),
+          pollsForWork(dest),
+          isBoundTerminalSeat(deps.db, dest),
+          orch,
+          agent ? `${agent.rig}:${agent.logicalId}` : "",
+          seatSummary(source),
+          seatSummary(recAgent),
+          seatSummary(opSeat),
+          quietJobs,
+        ]);
+      };
+      const pendingRows = queryPendingRows();
       if (deps.queueRepo.deliveryDrains.holds(dest)) {
         if (pendingRows.length > 0) continue;
       } else {
         let hasLivePending = false;
-        for (const { qitem_id } of pendingRows) {
-          if (dueToYield()) {
-            await yieldLoop();
-            if (deps.queueRepo.deliveryDrains.holds(dest)) {
-              hasLivePending = hasOrdinaryPending();
+        const inspected = new Map<string, {
+          tsUpdated: string;
+          lastNudgeResult: string | null;
+          rawTags: string | null;
+          maxTid: number;
+          skipReason: "recovery" | "other";
+          envKey: string;
+        }>();
+        let currentEnv = pendingRows.length > 0 ? pairEnvKey() : "";
+        let toScan = pendingRows;
+        for (let pass = 0; ; pass++) {
+          let passYielded = false;
+          for (const pending of toScan) {
+            if (dueToYield()) {
+              await yieldLoop();
+              passYielded = true;
+              if (deps.queueRepo.deliveryDrains.holds(dest)) {
+                hasLivePending = hasOrdinaryPending();
+                break;
+              }
+              currentEnv = pairEnvKey();
+            }
+            const row = indexed(() => deps.queueRepo.getById(pending.qitem_id, { waiting: false }));
+            if (!row) {
+              inspected.delete(pending.qitem_id);
+              continue;
+            }
+            const verdict = inspectUnreachableUnclaimed(row);
+            if (verdict === "live") {
+              hasLivePending = true;
               break;
             }
+            if (row.state === "pending" && !row.claimedAt && row.sourceSession === source && row.destinationSession === dest) {
+              inspected.set(row.qitemId, {
+                tsUpdated: row.tsUpdated,
+                lastNudgeResult: row.lastNudgeResult ?? null,
+                rawTags: pending.tags,
+                maxTid: pending.max_tid,
+                skipReason: verdict,
+                envKey: currentEnv,
+              });
+            } else {
+              inspected.delete(pending.qitem_id);
+            }
           }
-          const row = indexed(() => deps.queueRepo.getById(qitem_id, { waiting: false }));
-          if (row && stillUnreachableUnclaimed(row)) {
+          if (hasLivePending || !passYielded) break;
+          if (deps.queueRepo.deliveryDrains.holds(dest)) {
+            hasLivePending = hasOrdinaryPending();
+            break;
+          }
+          if (classOf(dest) !== "unroutable" && !sessionMissing(dest)) break;
+          const nowEnv = pairEnvKey();
+          const currentPending = queryPendingRows();
+          const dirty = currentPending.filter((pending) => {
+            const prev = inspected.get(pending.qitem_id);
+            if (!prev) return true;
+            if (prev.envKey !== nowEnv) return true;
+            if (prev.tsUpdated !== pending.ts_updated) return true;
+            if (prev.lastNudgeResult !== pending.last_nudge_result) return true;
+            if (prev.rawTags !== pending.tags) return true;
+            if (prev.maxTid !== pending.max_tid) return true;
+            if (prev.skipReason === "recovery" && !recoveries.find(pending.qitem_id)) return true;
+            return false;
+          });
+          if (dirty.length === 0) break;
+          if (pass >= 2) {
             hasLivePending = true;
             break;
           }
+          currentEnv = nowEnv;
+          toScan = dirty;
         }
         if (hasLivePending) continue;
       }

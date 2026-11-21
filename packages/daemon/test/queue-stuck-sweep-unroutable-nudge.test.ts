@@ -16,6 +16,7 @@ import { isTmuxBoundSession, wireTerminalReachability } from "../src/domain/term
 import { recoveryTag } from "../src/domain/queue-recovery.js";
 import * as stuckSweep from "../src/domain/queue-stuck-sweep.js";
 import {
+  BACKLOG_FOLDED_TAG,
   createStuckSweepStatus,
   runStuckSweep,
   STUCK_SWEEP_FINDING_TAG,
@@ -1190,5 +1191,205 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(resClosed.outcome).toBe("findings");
     expect(queue.getByIdOrThrow(notice2!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(parked2.session).toBe("parked2@ops");
+  });
+
+  it("keeps open notice when a new uncovered row is inserted for the pair during a close-scan yield", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "parked@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(notice).toBeDefined();
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by covered batch" });
+
+    const coveredIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "parked@ops", `Covered row ${i}`, 5, now);
+      coveredIds.push(r.qitemId);
+      await queue.create({
+        sourceSession: "lead@ops",
+        destinationSession: "lead@ops",
+        body: `Open recovery for ${r.qitemId}`,
+        tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(r.qitemId)],
+        nudge: false,
+      });
+    }
+
+    const origGetById = queue.getById.bind(queue);
+    const firstId = coveredIds[0]!;
+    let scheduled = false;
+    let insertedInYield = false;
+    let insertedRowPromise: Promise<QueueItem> | null = null;
+    const spy = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (id === firstId && !scheduled) {
+        scheduled = true;
+        setImmediate(() => {
+          insertedRowPromise = queue.create({
+            sourceSession: "lead@ops",
+            destinationSession: "parked@ops",
+            body: "New uncovered row inserted during close-scan yield",
+            nudge: false,
+          });
+          insertedInYield = db.prepare(
+            "SELECT 1 FROM queue_items WHERE source_session = 'lead@ops' AND destination_session = 'parked@ops' AND body = ?",
+          ).get("New uncovered row inserted during close-scan yield") !== undefined;
+        });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resKeep = await sweep({ now });
+    spy.mockRestore();
+
+    expect(scheduled).toBe(true);
+    expect(insertedInYield).toBe(true);
+    expect(insertedRowPromise).not.toBeNull();
+    const insertedRow = await insertedRowPromise!;
+    expect(resKeep.outcome).toBe("clean");
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+
+    // Once the newly inserted uncovered row closes, the next sweep closes the notice cleanly.
+    queue.update({ qitemId: insertedRow.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved new row" });
+    const resClose = await sweep({ now });
+    expect(resClose.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("keeps open notice when an earlier row loses recovery coverage during a later close-scan yield", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "parked@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(notice).toBeDefined();
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by covered batch" });
+
+    const coveredIds: string[] = [];
+    const recoveryIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "parked@ops", `Covered row ${i}`, 5, now);
+      coveredIds.push(r.qitemId);
+      const rec = await queue.create({
+        sourceSession: "lead@ops",
+        destinationSession: "lead@ops",
+        body: `Open recovery for ${r.qitemId}`,
+        tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(r.qitemId)],
+        nudge: false,
+      });
+      recoveryIds.push(rec.qitemId);
+    }
+
+    // 1) Earlier row's recovery finding is folded and closed during the later yield while the earlier row itself is untouched.
+    const origGetById = queue.getById.bind(queue);
+    const firstId = coveredIds[0]!;
+    const firstRecoveryId = recoveryIds[0]!;
+    let foldScheduled = false;
+    let recoveryFolded = false;
+    const spyFold = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (id === firstId && !foldScheduled) {
+        foldScheduled = true;
+        setImmediate(() => {
+          db.prepare(
+            "UPDATE queue_items SET tags = json_insert(tags, '$[#]', ?) WHERE qitem_id = ? AND json_valid(tags)",
+          ).run(BACKLOG_FOLDED_TAG, firstRecoveryId);
+          queue.update({
+            qitemId: firstRecoveryId,
+            actorSession: "stuck-sweep@system",
+            state: "done",
+            closureReason: "no-follow-on",
+            transitionNote: "folded during later close-scan yield",
+          });
+          recoveryFolded = true;
+        });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resFoldKeep = await sweep({ now });
+    spyFold.mockRestore();
+
+    expect(foldScheduled).toBe(true);
+    expect(recoveryFolded).toBe(true);
+    expect(resFoldKeep.outcome).toBe("clean");
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+
+    // 2) Fresh recovery on the earlier row is closed and superseded by a newer meaningful transition during a later yield.
+    const secondRecovery = await queue.create({
+      sourceSession: "lead@ops",
+      destinationSession: "lead@ops",
+      body: `Fresh recovery for ${firstId}`,
+      tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(firstId)],
+      nudge: false,
+    });
+    let supersedeScheduled = false;
+    let recoverySuperseded = false;
+    const spySupersede = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (id === firstId && !supersedeScheduled) {
+        supersedeScheduled = true;
+        setImmediate(() => {
+          queue.update({
+            qitemId: secondRecovery.qitemId,
+            actorSession: "lead@ops",
+            state: "done",
+            closureReason: "no-follow-on",
+            transitionNote: "closed recovery during later yield",
+          });
+          queue.update({
+            qitemId: firstId,
+            actorSession: "lead@ops",
+            transitionNote: "follow-up after recovery closed",
+          });
+          recoverySuperseded = true;
+        });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resSupersedeKeep = await sweep({ now });
+    spySupersede.mockRestore();
+
+    expect(supersedeScheduled).toBe(true);
+    expect(recoverySuperseded).toBe(true);
+    expect(resSupersedeKeep.outcome).toBe("clean");
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+
+    // Once the uncovered row itself closes, the next sweep closes the notice cleanly.
+    queue.update({ qitemId: firstId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved earlier row" });
+    const resClose = await sweep({ now });
+    expect(resClose.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("excludes rows rerouted to another unreachable destination from the create-transaction recount", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+    seedSeat("ops", "work.parked2", "parked2@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const row = await createNoNudge("lead@ops", "parked@ops", "Rerouted right before create txn", 90, now);
+
+    const origCreate = queue.create.bind(queue);
+    let reroutedBeforeTxn = false;
+    queue.create = (async (input, verifyBeforeCreate) => {
+      if (!reroutedBeforeTxn && (input.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops"))) {
+        reroutedBeforeTxn = true;
+        db.prepare("UPDATE queue_items SET destination_session = 'parked2@ops' WHERE qitem_id = ?").run(row.qitemId);
+      }
+      return origCreate(input, verifyBeforeCreate);
+    }) as typeof queue.create;
+
+    nudgesSent = [];
+    const res = await sweep({ now });
+    queue.create = origCreate;
+
+    expect(reroutedBeforeTxn).toBe(true);
+    expect(res.outcome).toBe("clean");
+    expect(res.error).toBeUndefined();
+    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")))).toHaveLength(0);
+    expect(nudgesSent).toHaveLength(0);
   });
 });
