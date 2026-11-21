@@ -3575,7 +3575,7 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
-    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (database is locked).");
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left with no agent running wasn't recorded (database is locked).");
     expect(notice).not.toHaveBeenCalled();
     expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
   });
@@ -3624,7 +3624,7 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
     expect(result.result.harnessNotStarted).toBeUndefined();
-    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (queue unavailable).");
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left with no agent running wasn't recorded (queue unavailable).");
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
