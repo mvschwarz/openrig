@@ -1396,16 +1396,25 @@ Example:
     .command("set-startup-text")
     .argument("<seat>", "Seat reference")
     .option("--inspect", "List selectable actions and the saved revision")
-    .option("--layer <layer>", "Recipe layer: rig, pod, or member")
+    .option("--clear-override", "Preview or remove a seat-only source override")
+    .option("--layer <layer>", "Action layer: rig, pod, member, or context")
     .option("--recipe-index <index>", "Zero-based action index in the recipe layer")
     .option("--context-index <index>", "Zero-based action index in the saved startup context")
     .option("--text-file <path>", "UTF-8 file containing replacement text")
     .option("--expected-revision <revision>", "Apply only against this preview revision; omit to preview")
     .option("--json", "JSON output")
     .description("Preview or replace one seat's saved application startup text")
-    .action(async (seat: string, opts: { inspect?: boolean; layer?: string; recipeIndex?: string; contextIndex?: string; textFile?: string; expectedRevision?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { inspect?: boolean; clearOverride?: boolean; layer?: string; recipeIndex?: string; contextIndex?: string; textFile?: string; expectedRevision?: string; json?: boolean }) => {
       if (opts.inspect) {
         await runLifecycleVerb("set-startup-text", seat, { inspect: true }, opts, data => console.log(JSON.stringify(data, null, 2)));
+        return;
+      }
+      if (opts.clearOverride) {
+        const contextIndex = opts.contextIndex && /^[0-9]+$/.test(opts.contextIndex) ? Number(opts.contextIndex) : -1;
+        await runLifecycleVerb("set-startup-text", seat, { clearOverride: true, contextIndex, expectedRevision: opts.expectedRevision }, opts, data => {
+          console.log(`${data["preview"] ? "Preview clear" : "Override cleared"}; revision: ${String(data["revision"])}.`);
+          console.log("Saved startup context is unchanged; a recipe-resolved fresh launch uses its current source.");
+        });
         return;
       }
       if (!opts.layer || !opts.recipeIndex || !opts.contextIndex || !opts.textFile) {
@@ -1417,11 +1426,12 @@ Example:
       const recipeIndex = /^[0-9]+$/.test(opts.recipeIndex) ? Number(opts.recipeIndex) : -1;
       const contextIndex = /^[0-9]+$/.test(opts.contextIndex) ? Number(opts.contextIndex) : -1;
       await runLifecycleVerb("set-startup-text", seat, { layer: opts.layer, recipeIndex, contextIndex, value, expectedRevision: opts.expectedRevision }, opts, data => {
-        console.log(data["preview"] ? "Preview (no changes):" : "Saved and read back:");
+        console.log(data["preview"] ? "Preview (no changes):" : data["changed"] === false ? "Already saved; no changes:" : "Saved and read back:");
         console.log(`Revision: ${String(data["revision"])}`);
         console.log(`Old: ${JSON.stringify(data["from"])}\nNew: ${JSON.stringify(data["to"])}`);
-        if (!data["preview"]) console.log(`Recipe readback: ${JSON.stringify(data["recipeText"])}`);
+        if (data["recipeText"] !== undefined) console.log(`Recipe readback: ${JSON.stringify(data["recipeText"])}`);
         console.log(`Applies on: ${JSON.stringify(data["appliesOn"])}; eligible for restore replay: ${String(data["restoreEligible"])}.`);
+        if (opts.layer === "context") console.log("A recipe-resolved fresh start requires exactly one matching original or replacement action; otherwise startup fails.");
         console.log("Existing snapshots keep their captured text. The current conversation is unchanged; no launch was started.");
       });
     });

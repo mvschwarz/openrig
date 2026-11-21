@@ -1,4 +1,5 @@
 import { ActivityGrantStore } from "./activity-grants.js";
+import { applyStartupTextOverrides } from "./seat-startup-text.js";
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
@@ -349,6 +350,14 @@ export class StartupOrchestrator {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.startNodeWithWarnings(input, warnings));
+    }
+    if (!input.isRestore && !input.continueFreshStartup && !input.skipHarnessLaunch) {
+      try {
+        const actions = applyStartupTextOverrides(this.db, input.nodeId, input.startupActions);
+        input = { ...input, startupActions: actions };
+      } catch (error) {
+        return this.fail(input, "failed", [(error as Error).message]);
+      }
     }
     // A contained runtime reconciles saved execution before the ordinary startup prelude writes state or files.
     if (input.adapter.environment) {

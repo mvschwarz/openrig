@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { applyStartupTextOverrides } from "./seat-startup-text.js";
 import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import { effectiveProcessLimits } from "./process-limits.js";
 import { memberPoolBlock, storedPoolAdvisories } from "./seat-pool-spec.js";
@@ -2569,6 +2570,9 @@ export class PodRigInstantiator {
       return { status: "failed", error: configResult.errors.join("; ") };
     }
 
+    try { applyStartupTextOverrides(this.db, input.nodeId, configResult.config.startup.actions); }
+    catch (error) { return { status: "failed", error: (error as Error).message }; }
+
     this.updateNodeResolvedConfig(input.nodeId, configResult.config);
 
     // OPR.0.4.8.3 Seam B: resolve the seat's permission-policy attachment once for this
@@ -3044,6 +3048,12 @@ export class PodRigInstantiator {
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
     }
+    const terminalRigLayers = this.rigStartupLayers(input.rigSpec, input.rigRoot, input.rigId);
+    const startup = resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
+      rigCultureFile: terminalRigLayers.cultureFile, rigStartup: terminalRigLayers.startup,
+      podStartup: input.pod.startup, memberStartup: input.member.startup, operatorStartup: undefined });
+    try { applyStartupTextOverrides(this.db, input.nodeId, startup.actions); }
+    catch (error) { return { status: "failed", error: (error as Error).message }; }
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
@@ -3091,16 +3101,6 @@ export class PodRigInstantiator {
         .run("checkpoint_only", launchResult.session.id);
     } catch { /* best-effort */ }
 
-    const terminalRigLayers = this.rigStartupLayers(input.rigSpec, input.rigRoot, input.rigId);
-    const startup = resolveStartup({
-      specStartup: { files: [], actions: [] },
-      profileStartup: undefined,
-      rigCultureFile: terminalRigLayers.cultureFile,
-      rigStartup: terminalRigLayers.startup,
-      podStartup: input.pod.startup,
-      memberStartup: input.member.startup,
-      operatorStartup: undefined,
-    });
     const resolvedFiles = this.buildTerminalResolvedStartupFiles(terminalRigLayers, input.rigRoot, input.pod, input.member);
     const binding: NodeBinding = {
       id: launchResult.binding.id,

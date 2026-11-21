@@ -1,16 +1,24 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
+import { RigRepository } from "./rig-repository.js";
 import type { NodeLaunchRecipe, StartupAction } from "./types.js";
 
-/** Revision covers both independently persisted inputs, including unrelated fields. */
+/** Revision covers saved context, recipe and shared rig layer, including unrelated fields. */
 export function startupTextRevision(nodeId: string, context: unknown, recipeJson: string): string {
   return createHash("sha256").update(JSON.stringify([nodeId, context, recipeJson])).digest("hex");
 }
 
-export type StartupTextLayer = "rig" | "pod" | "member";
+export type StartupTextLayer = "rig" | "pod" | "member" | "context";
+type RecipeWithOverrides = NodeLaunchRecipe;
+
+function savedNodeInputs(db: Database.Database, nodeId: string) {
+  return db.prepare("SELECT n.launch_recipe_json, r.startup_layers_json FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
+    .get(nodeId) as { launch_recipe_json: string | null; startup_layers_json: string | null } | undefined;
+}
 
 /** Locate an authored action in this seat's private copy of the launch recipe. */
 export function recipeStartupAction(recipe: NodeLaunchRecipe, logicalId: string, layer: StartupTextLayer, index: number): StartupAction | undefined {
+  if (layer === "context") return undefined;
   const [podId, memberId] = logicalId.split(".");
   const pod = recipe.rigSpec.pods.find(candidate => candidate.id === podId);
   const member = pod?.members.find(candidate => candidate.id === memberId);
@@ -30,9 +38,27 @@ function sameAction(a: StartupAction, b: StartupAction): boolean {
     && JSON.stringify(a.appliesOn) === JSON.stringify(b.appliesOn) && a.builtin === b.builtin;
 }
 
+function sameShape(a: StartupAction, b: StartupAction): boolean {
+  return sameAction({ ...a, value: b.value }, b);
+}
+
+/** Apply seat-owned replacements to freshly resolved actions, without editing shared sources. */
+export function applyStartupTextOverrides(db: Database.Database, nodeId: string, actions: StartupAction[]): StartupAction[] {
+  const recipe = new RigRepository(db).getNodeLaunchRecipe(nodeId);
+  if (!recipe) return actions;
+  let updated = actions;
+  for (const override of recipe.startupTextOverrides ?? []) {
+    const matches = updated.flatMap((action, index) => isEditableStartupText(action) && sameShape(action, override.before)
+      && (action.value === override.before.value || action.value === override.value) ? [index] : []);
+    if (matches.length !== 1) throw new Error("Saved startup text no longer matches exactly one resolved action; inspect the seat's source before starting it.");
+    updated = updated.map((action, index) => index === matches[0] ? { ...action, value: override.value } : action);
+  }
+  return updated;
+}
+
 export function inspectSavedStartupText(db: Database.Database, nodeId: string, logicalId: string) {
   const context = db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?").get(nodeId) as { startup_actions_json: string } | undefined;
-  const node = db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = ?").get(nodeId) as { launch_recipe_json: string | null } | undefined;
+  const node = savedNodeInputs(db, nodeId);
   if (!context || !node?.launch_recipe_json) return { ok: false as const, code: "saved_input_missing", message: "Saved startup context and launch recipe are both required." };
   const recipe = JSON.parse(node.launch_recipe_json) as NodeLaunchRecipe;
   const actions = JSON.parse(context.startup_actions_json) as StartupAction[];
@@ -48,10 +74,40 @@ export function inspectSavedStartupText(db: Database.Database, nodeId: string, l
       });
     }
   }
+  const uniqueCandidates = candidates.filter(candidate => candidates.filter(other => other.contextIndex === candidate.contextIndex).length === 1
+    && candidates.filter(other => other.layer === candidate.layer && other.recipeIndex === candidate.recipeIndex).length === 1);
   const unmatchedContext = actions.flatMap((action, contextIndex) =>
-    isEditableStartupText(action) && !candidates.some(candidate => candidate.contextIndex === contextIndex)
+    isEditableStartupText(action) && !uniqueCandidates.some(candidate => candidate.contextIndex === contextIndex)
       ? [{ contextIndex, value: action.value, appliesOn: action.appliesOn }] : []);
-  return { ok: true as const, inspect: true, revision: startupTextRevision(nodeId, [logicalId, context], node.launch_recipe_json), candidates, unmatchedContext };
+  const contextCandidates = unmatchedContext.filter(entry => !candidates.some(candidate => candidate.contextIndex === entry.contextIndex)
+    && actions.filter(action => isEditableStartupText(action) && sameAction(action, actions[entry.contextIndex]!)).length === 1)
+    .map(entry => ({ ...entry, layer: "context" as const, recipeIndex: 0 }));
+  const ambiguousContext = unmatchedContext.filter(entry => !contextCandidates.some(candidate => candidate.contextIndex === entry.contextIndex));
+  return { ok: true as const, inspect: true, revision: startupTextRevision(nodeId, [logicalId, context, node.startup_layers_json], node.launch_recipe_json), candidates: [...uniqueCandidates, ...contextCandidates], ambiguousContext };
+}
+
+/** Remove a seat-only override after its shared source changes; the saved context remains intact. */
+export function clearStartupTextOverride(db: Database.Database, input: { nodeId: string; logicalId: string; contextIndex: number; expectedRevision?: string }) {
+  return db.transaction(() => {
+    const context = db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?").get(input.nodeId) as { startup_actions_json: string } | undefined;
+    const node = savedNodeInputs(db, input.nodeId);
+    if (!context || !node?.launch_recipe_json) return { ok: false as const, code: "saved_input_missing", message: "Saved startup context and launch recipe are both required." };
+    const revision = startupTextRevision(input.nodeId, [input.logicalId, context, node.startup_layers_json], node.launch_recipe_json);
+    if (input.expectedRevision !== undefined && input.expectedRevision !== revision)
+      return { ok: false as const, code: "stale_revision", message: "Saved startup inputs changed; preview again.", revision };
+    const recipe = JSON.parse(node.launch_recipe_json) as RecipeWithOverrides;
+    const action = (JSON.parse(context.startup_actions_json) as StartupAction[])[input.contextIndex];
+    const overrides = recipe.startupTextOverrides ?? [];
+    const matches = overrides.flatMap((entry, index) => isEditableStartupText(action) && entry.value === action.value && sameShape(entry.before, action) ? [index] : []);
+    if (matches.length !== 1) return { ok: false as const, code: "override_not_found", message: "The selected saved action does not identify exactly one seat-only override." };
+    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, clearOverride: true, revision, from: action!.value };
+    overrides.splice(matches[0]!, 1);
+    if (overrides.length) recipe.startupTextOverrides = overrides; else delete recipe.startupTextOverrides;
+    const recipeJson = JSON.stringify(recipe);
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(recipeJson, input.nodeId);
+    const savedRecipe = db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = ?").get(input.nodeId) as { launch_recipe_json: string };
+    return { ok: true as const, preview: false, clearOverride: true, revision: startupTextRevision(input.nodeId, [input.logicalId, context, node.startup_layers_json], savedRecipe.launch_recipe_json), from: action!.value };
+  })();
 }
 
 export function editSavedStartupText(db: Database.Database, input: {
@@ -63,22 +119,54 @@ export function editSavedStartupText(db: Database.Database, input: {
       return { ok: false as const, code: "invalid_startup_text", message: "Replacement must be nonempty application text, not an OpenRig identity action." };
     const context = db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?")
       .get(input.nodeId) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string } | undefined;
-    const node = db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = ?").get(input.nodeId) as { launch_recipe_json: string | null } | undefined;
+    const node = savedNodeInputs(db, input.nodeId);
     if (!context || !node?.launch_recipe_json) return { ok: false as const, code: "saved_input_missing", message: "Saved startup context and launch recipe are both required." };
-    const revision = startupTextRevision(input.nodeId, [input.logicalId, context], node.launch_recipe_json);
+    const revision = startupTextRevision(input.nodeId, [input.logicalId, context, node.startup_layers_json], node.launch_recipe_json);
     if (input.expectedRevision !== undefined && input.expectedRevision !== revision)
       return { ok: false as const, code: "stale_revision", message: "Saved startup inputs changed; preview again.", revision };
-    const recipe = JSON.parse(node.launch_recipe_json) as NodeLaunchRecipe;
+    const recipe = JSON.parse(node.launch_recipe_json) as RecipeWithOverrides;
     const actions = JSON.parse(context.startup_actions_json) as StartupAction[];
     const authored = recipeStartupAction(recipe, input.logicalId, input.layer, input.recipeIndex);
     const saved = actions[input.contextIndex];
-    if (!isEditableStartupText(authored) || !isEditableStartupText(saved) || !sameAction(authored, saved))
+    if (!isEditableStartupText(saved) || (input.layer !== "context" && (!isEditableStartupText(authored) || !sameAction(authored, saved))))
       return { ok: false as const, code: "selection_mismatch", message: "Selected recipe and saved context positions must identify the same application-authored text." };
-    const from = authored.value;
-    const appliesOn = authored.appliesOn;
-    const restoreEligible = appliesOn.includes("restore") && authored.idempotent;
-    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, revision, from, to: input.value, appliesOn, restoreEligible };
-    authored.value = input.value;
+    if (actions.filter(action => isEditableStartupText(action) && sameAction(action, saved)).length !== 1)
+      return { ok: false as const, code: "selection_ambiguous", message: "This saved action is duplicated; select a uniquely identifiable action." };
+    if (input.layer === "context" && actions.some((action, index) => index !== input.contextIndex && isEditableStartupText(action)
+      && sameShape(action, saved) && action.value === input.value))
+      return { ok: false as const, code: "selection_ambiguous", message: "The replacement would be indistinguishable from another saved action." };
+    let recipeMatches = 0;
+    for (const layer of ["rig", "pod", "member"] as const) {
+      for (let index = 0; ; index++) {
+        const action = recipeStartupAction(recipe, input.logicalId, layer, index);
+        if (!action) break;
+        if (isEditableStartupText(action) && sameAction(action, saved)) recipeMatches++;
+      }
+    }
+    if ((input.layer === "context" && recipeMatches !== 0) || (input.layer !== "context" && recipeMatches !== 1))
+      return { ok: false as const, code: "selection_ambiguous", message: "The selected saved action cannot be attributed uniquely to this recipe layer." };
+    if (input.layer === "context") {
+      const collisions = (recipe.startupTextOverrides ?? []).filter(entry => sameShape(entry.before, saved)
+        && !(entry.value === saved.value) && [entry.before.value, entry.value].some(value => value === saved.value || value === input.value));
+      if (collisions.length) return { ok: false as const, code: "selection_ambiguous", message: "The replacement overlaps another seat-only override." };
+    }
+    const from = saved.value;
+    const appliesOn = saved.appliesOn;
+    const restoreEligible = appliesOn.includes("restore") && saved.idempotent;
+    const sourceMatchRequired = input.layer === "context";
+    if (input.expectedRevision === undefined) return { ok: true as const, preview: true, revision, from, to: input.value, appliesOn, restoreEligible, sourceMatchRequired };
+    if (input.value === from) return { ok: true as const, preview: false, changed: false, revision, from, to: from, appliesOn, restoreEligible, sourceMatchRequired };
+    if (input.layer === "context") {
+      const overrides = recipe.startupTextOverrides ?? [];
+      const existing = overrides.find(entry => entry.value === saved.value && sameShape(entry.before, saved));
+      if (existing) existing.value = input.value;
+      else overrides.push({ before: { ...saved }, value: input.value });
+      recipe.startupTextOverrides = overrides;
+    } else {
+      authored!.value = input.value;
+      if (input.layer === "rig" || input.layer === "pod")
+        recipe.startupTextPrivateLayers = [...new Set([...(recipe.startupTextPrivateLayers ?? []), input.layer])];
+    }
     saved.value = input.value;
     const actionsJson = JSON.stringify(actions);
     const recipeJson = JSON.stringify(recipe);
@@ -86,9 +174,10 @@ export function editSavedStartupText(db: Database.Database, input: {
     db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(recipeJson, input.nodeId);
     const savedContext = db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?").get(input.nodeId) as typeof context;
     const savedRecipe = db.prepare("SELECT launch_recipe_json FROM nodes WHERE id = ?").get(input.nodeId) as { launch_recipe_json: string };
-    return { ok: true as const, preview: false, revision: startupTextRevision(input.nodeId, [input.logicalId, savedContext], savedRecipe.launch_recipe_json),
+    return { ok: true as const, preview: false, changed: true, revision: startupTextRevision(input.nodeId, [input.logicalId, savedContext, node.startup_layers_json], savedRecipe.launch_recipe_json),
       from, to: (JSON.parse(savedContext.startup_actions_json) as StartupAction[])[input.contextIndex]!.value,
-      recipeText: recipeStartupAction(JSON.parse(savedRecipe.launch_recipe_json) as NodeLaunchRecipe, input.logicalId, input.layer, input.recipeIndex)!.value,
-      appliesOn, restoreEligible };
+      recipeText: input.layer === "context" ? (JSON.parse(savedRecipe.launch_recipe_json) as RecipeWithOverrides).startupTextOverrides!.find(entry => entry.value === input.value && sameShape(entry.before, saved))!.value
+        : recipeStartupAction(JSON.parse(savedRecipe.launch_recipe_json) as NodeLaunchRecipe, input.logicalId, input.layer, input.recipeIndex)!.value,
+      appliesOn, restoreEligible, sourceMatchRequired };
   })();
 }

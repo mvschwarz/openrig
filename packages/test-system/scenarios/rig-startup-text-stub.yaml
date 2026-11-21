@@ -6,7 +6,7 @@ pods:
     label: Work
     members:
       - id: worker
-        agent_ref: "local:agents/worker"
+        agent_ref: "local:agents/startup-worker"
         profile: default
         runtime: stub
         cwd: .

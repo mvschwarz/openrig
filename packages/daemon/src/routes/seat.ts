@@ -579,7 +579,7 @@ seatRoutes.post("/set-model/node/:nodeId", setModelHandler);
 seatRoutes.post("/set-startup-text/:seatRef", async c => {
   const value: unknown = await c.req.json().catch(() => null);
   const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  const result = await seatLifecycleService(c).setStartupText({ seatRef: c.req.param("seatRef"), inspect: body.inspect === true, layer: body.layer,
+  const result = await seatLifecycleService(c).setStartupText({ seatRef: c.req.param("seatRef"), inspect: body.inspect === true, clearOverride: body.clearOverride === true, layer: body.layer,
     recipeIndex: body.recipeIndex, contextIndex: body.contextIndex, value: body.value, expectedRevision: body.expectedRevision });
   return c.json(result, result.ok ? 200 : result.code === "invalid_startup_text" ? 400 : result.code === "seat_not_found" ? 404 : 409);
 });
