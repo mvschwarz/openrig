@@ -71,6 +71,11 @@ describe("createRecoveryLookup: the recovery index held by its caller", () => {
 });
 
 describe("createLinkedSuccessorLookup: the linked successors of a set of sources", () => {
+  // The fixture's rows are made at `at`; an hour later they're recent sources, whose seat targets the batch covers.
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date(Date.parse(at) + 3_600_000)); });
+  afterEach(() => { vi.useRealTimers(); });
+  const daysBefore = (days: number) => new Date(Date.parse(at) - days * 86_400_000).toISOString();
+
   it("answers exactly what hasLinkedSuccessor answers", () => {
     row("src-1"); row("src-2"); row("src-3"); row("src-4");
     row("s-h", { handedOffFrom: "src-1", destination: "seat-a@r" });                           // linked by handed_off_from
@@ -146,14 +151,13 @@ describe("createLinkedSuccessorLookup: the linked successors of a set of sources
     expect(build).toHaveLength(2);
     const chainPlan = (db.prepare(`EXPLAIN QUERY PLAN ${build.find((sql) => sql.includes("json_each(s.chain_of_record) j"))!}`).all("[]", "[]", "[]", "[]", "", "[]") as Array<{ detail: string }>)
       .map((step) => step.detail);
-    // This source is weeks old, so its seats are read through the destination index, as before.
-    expect(chainPlan).toContain("SEARCH s USING INDEX idx_queue_items_destination_state (destination_session=?)");
+    // The seat arm reads by creation time, not through the destination index's whole history of each seat.
+    expect(chainPlan).toContain("SEARCH s USING INDEX idx_queue_items_created (ts_created>?)");
+    expect(chainPlan).not.toContain("SEARCH s USING INDEX idx_queue_items_destination_state (destination_session=?)");
   });
 
   it("reads a seat's chained rows by creation time while its oldest source is recent, never through the seat's whole history", () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-10-09T11:00:00.000Z"));
-    try {
+    {
       row("src-1", { closureTarget: "desk@r" });
       for (let i = 0; i < 40; i++) row(`d-old-${i}`, { chain: JSON.stringify([`other-${i}`]), destination: "desk@r", created: "2026-09-01T00:00:00.000Z" });
       row("s-c", { chain: JSON.stringify(["src-1"]), destination: "desk@r" });
@@ -171,7 +175,31 @@ describe("createLinkedSuccessorLookup: the linked successors of a set of sources
       expect(plan).toContain("SEARCH s USING INDEX idx_queue_items_created (ts_created>?)");
       expect(plan).not.toContain("SEARCH s USING INDEX idx_queue_items_destination_state (destination_session=?)");
       expect(plan.filter((detail) => /^SCAN (s|queue_items)\b/.test(detail))).toEqual([]);
-    } finally { vi.useRealTimers(); }
+    }
+  });
+
+  it("takes the bound only from sources that name a seat: one naming only a row id doesn't widen the read", () => {
+    row("qitem-ids", { closureTarget: "qitem-target", created: daysBefore(5) });                 // recent, a row-id target only
+    row("qitem-new", { closureTarget: "desk@r" });                                                // the oldest seat-naming source
+    row("qitem-target", { chain: JSON.stringify(["qitem-ids"]), destination: "elsewhere@r" });   // found by the id arm
+    row("d-mid", { chain: JSON.stringify(["qitem-new"]), destination: "desk@r", created: daysBefore(3) });
+    const lookup = createLinkedSuccessorLookup(db, ["qitem-ids", "qitem-new"]);
+    expect(lookup.has("qitem-ids", "qitem-target")).toBe(true);
+    // d-mid predates its source by more than the day's slack, so it's outside the range read; had the row-id source set
+    // the bound (five days back), the read would have reached it.
+    expect(lookup.has("qitem-new", "desk@r")).toBe(false);
+    expect(hasLinkedSuccessor(db, "qitem-new", "desk@r")).toBe(true);
+  });
+
+  it("leaves an old source's seat targets to the per-row query, so it can't widen the read for the rest", async () => {
+    row("qitem-aged", { closureTarget: "seat-a@r", created: daysBefore(10) });
+    row("s-aged", { chain: JSON.stringify(["qitem-aged"]), destination: "seat-a@r", created: daysBefore(9) });
+    row("qitem-new", { closureTarget: "desk@r" });
+    row("s-new", { chain: JSON.stringify(["qitem-new"]), destination: "desk@r" });
+    const lookup = createLinkedSuccessorLookup(db, ["qitem-aged", "qitem-new"]);
+    expect(await countPrepared(perRowSuccessor, () => expect(lookup.has("qitem-new", "desk@r")).toBe(true))).toBe(0);
+    expect(await countPrepared(perRowSuccessor, () => expect(lookup.has("qitem-aged", "seat-a@r")).toBe(true))).toBe(1);
+    expect(hasLinkedSuccessor(db, "qitem-aged", "seat-a@r")).toBe(true);
   });
 
   it("reads a seat's chained rows from a day before its oldest source, and none created earlier", () => {
@@ -204,7 +232,7 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
   function custodyRows(n: number) {
     // terminal rows closed onto a seat with no linked successor: each is a dangling-closure candidate
     for (let i = 0; i < n; i++) {
-      row(`qitem-c${String(i).padStart(4, "0")}`, { state: "done", updated: recent(), closureReason: "handed_off_to", closureTarget: `seat-${i % 7}@r` });
+      row(`qitem-c${String(i).padStart(4, "0")}`, { state: "done", created: recent(), updated: recent(), closureReason: "handed_off_to", closureTarget: `seat-${i % 7}@r` });
     }
   }
 
@@ -227,7 +255,7 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
   });
 
   it("still finds a closure's successor by handed_off_from, by chain_of_record and on a busy destination", async () => {
-    const custody = (id: string, target: string) => row(id, { state: "done", updated: recent(), closureReason: "handed_off_to", closureTarget: target });
+    const custody = (id: string, target: string) => row(id, { state: "done", created: recent(), updated: recent(), closureReason: "handed_off_to", closureTarget: target });
     custody("qitem-k1", "seat-1@r");
     row("s-k1", { handedOffFrom: "qitem-k1", destination: "seat-1@r" });
     custody("qitem-k2", "seat-2@r");
