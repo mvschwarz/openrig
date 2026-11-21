@@ -310,7 +310,9 @@ async function main() {
 
   // agy can continue on its own after a background task finishes: it sends updates and permission requests with no
   // session/prompt open. Treat that as an implicit turn: working while it talks, idle after IMPLICIT_QUIET_MS of silence
-  // (and no open permission ask). A queued prompt waits until the implicit turn ends.
+  // (and no open permission ask). A queued prompt waits until the implicit turn ends. Only an accepted prompt clears what
+  // the last turn left: a refusal's held needs input stays held (no turn start, no idle), and after a cancel a late
+  // permission request is still answered cancelled.
   const IMPLICIT_QUIET_MS = 20_000;
   let implicitTimer;
   const armImplicitEnd = () => {
@@ -320,16 +322,17 @@ async function main() {
       state.implicit = false; state.running = false;
       for (const ask of state.asks) ask.end("turn_ended");
       say("\n── agent-initiated turn end (quiet) ──");
-      postIdle("implicit_quiet");
+      if (state.holding) say("[openrig-agy] a permission request was refused, so the seat reads needs input until the next prompt");
+      else postIdle("implicit_quiet");
       pump();
     }, IMPLICIT_QUIET_MS);
   };
   const beginImplicit = () => {
     if (state.running || agentExited) return;
-    state.running = true; state.implicit = true; state.turn += 1; state.holding = false; state.refused = false;
-    state.waiting = 0; state.resolvedAsk = null; state.cancelRequestedAt = null; state.lastActive = 0;
+    state.running = true; state.implicit = true; state.turn += 1;
+    state.waiting = 0; state.resolvedAsk = null; state.lastActive = 0;
     say("\n[openrig-agy] agy continued on its own (a background task finished?); treating it as a turn");
-    activity.post("UserPromptSubmit", "agent_initiated", { turnId: String(state.turn) });
+    if (!state.holding) activity.post("UserPromptSubmit", "agent_initiated", { turnId: String(state.turn) });
     armImplicitEnd();
   };
 

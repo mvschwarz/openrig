@@ -22,10 +22,14 @@ const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", 
 if (process.argv.includes("--version")) { process.stdout.write("1.5.13\\n"); process.exit(0); }
 log({ start: { argv: process.argv.slice(2), HOME: process.env.HOME ?? null, GEMINI_API_KEY: process.env.GEMINI_API_KEY ?? null,
   token: "OPENRIG_ACTIVITY_HOOK_TOKEN" in process.env } });
-let session = null;
+let session = null; let held = null; const waiting = new Map();
+const OPTIONS = [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }];
+const ask = (id, title) => send({ id, method: "session/request_permission", params: { sessionId: session,
+  toolCall: { toolCallId: id, title, kind: "execute" }, options: OPTIONS } });
+const talk = (text) => send({ method: "session/update", params: { sessionId: session, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } } });
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line); log(message);
-  if (message.method === undefined) return;
+  if (message.method === undefined) { const done = waiting.get(message.id); waiting.delete(message.id); done?.(message); return; }
   const reply = (result) => send({ id: message.id, result });
   const fail = (code, text) => send({ id: message.id, error: { code, message: text } });
   switch (message.method) {
@@ -36,13 +40,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     case "session/resume": return fail(-32603, "Failed to read session");
     case "session/load": session = message.params.sessionId; return reply({});
     case "session/list": return reply({ sessions: [] });
+    case "session/cancel": if (held) { held(); held = null; } return;
     case "session/prompt": {
       const text = message.params.prompt.map((part) => part.text).join("");
+      // A request in the turn, refused by the seat; the turn ends, then agy talks again with no prompt open.
+      if (text === "DENYBG") { waiting.set("perm-deny", () => { reply({ stopReason: "end_turn" }); setTimeout(() => talk("background output"), 200); }); return ask("perm-deny", "Run rm -rf build"); }
+      // A turn cancelled by /abort; agy then talks and asks for permission with no prompt open.
+      if (text === "HOLDCANCEL") { held = () => { reply({ stopReason: "cancelled" }); setTimeout(() => talk("finishing up"), 200); setTimeout(() => ask("perm-after-cancel", "Run git push"), 400); }; return; }
       reply({ stopReason: "end_turn" });
       // A background task finishes after the turn ended, and agy asks for permission with no prompt open.
-      if (text === "BACKGROUND") setTimeout(() => send({ id: "perm-late", method: "session/request_permission", params: { sessionId: session,
-        toolCall: { toolCallId: "t1", title: "Run rig queue update", kind: "execute" },
-        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } }), 300);
+      if (text === "BACKGROUND") setTimeout(() => ask("perm-late", "Run rig queue update"), 300);
       return;
     }
     default: return fail(-32601, "Method not found");
@@ -55,7 +62,7 @@ interface Hook { body: Record<string, unknown> }
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fakeOpenRig() {
+async function fakeOpenRig(mode: "permit" | "deny" = "permit") {
   const hooks: Hook[] = [];
   const submits: Array<Record<string, unknown>> = [];
   const server: Server = createServer((req, res) => {
@@ -67,6 +74,7 @@ async function fakeOpenRig() {
       if (req.method === "POST" && req.url === "/api/activity/hooks") { hooks.push({ body }); return json(200, { ok: true }); }
       if (req.method === "POST" && req.url === "/api/activity/permission-requests") {
         submits.push(body);
+        if (mode === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
       }
       json(404, { error: "not found" });
@@ -157,12 +165,49 @@ describe("the documented agy example runner", () => {
     await waitFor(seat.launch, "the launch record");
     seat.type("BACKGROUND");
     await waitFor(() => events(openrig.hooks).includes("UserPromptSubmit/agent_initiated"), "the agent-initiated turn");
+    expect(events(openrig.hooks)).toContain("Stop/end_turn");
     expect(events(openrig.hooks).indexOf("Stop/end_turn")).toBeLessThan(events(openrig.hooks).indexOf("UserPromptSubmit/agent_initiated"));
     const answer = await waitFor(() => seat.log().find((entry) => entry.id === "perm-late" && entry.method === undefined), "the answer to agy");
     expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
     expect(openrig.submits).toHaveLength(1);
     expect(openrig.submits[0]).toMatchObject({ nativeRef: "sess-new-1", toolCall: { title: "Run rig queue update", kind: "execute" } });
   });
+
+  // The implicit turn's quiet end comes 20 s after agy's last output, so these cells wait it out.
+  it("keeps a refusal's needs input through output agy sends after the turn and through its quiet end, until the next prompt", async () => {
+    const openrig = await fakeOpenRig("deny");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("DENYBG");
+    await waitFor(() => events(openrig.hooks).includes("Notification/permission_prompt"), "the refusal");
+    await waitFor(() => seat.out().includes("agy continued on its own"), "agy's output after the turn");
+    await new Promise((done) => setTimeout(done, 21_000));
+    const seen = events(openrig.hooks);
+    expect(seen).not.toContain("UserPromptSubmit/agent_initiated");
+    expect(seen).not.toContain("Stop/implicit_quiet");
+    expect(seen.at(-1)).toBe("Notification/permission_prompt");
+    // The next prompt is what clears it.
+    seat.type("hello");
+    await waitFor(() => events(openrig.hooks).includes("Stop/end_turn"), "the next prompt's turn");
+    expect(events(openrig.hooks).slice(seen.length)).toEqual(expect.arrayContaining(["UserPromptSubmit/accepted", "Stop/end_turn"]));
+  }, 40_000);
+
+  it("answers a permission request cancelled after a cancel, even past output agy sends after the turn, until the next prompt", async () => {
+    const openrig = await fakeOpenRig();
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("HOLDCANCEL");
+    await waitFor(() => requests(seat.log(), "session/prompt").length === 1, "the held prompt");
+    seat.type("/abort");
+    const late = await waitFor(() => seat.log().find((entry) => entry.id === "perm-after-cancel" && entry.method === undefined), "the late request's answer");
+    expect(late.result).toEqual({ outcome: { outcome: "cancelled" } });
+    expect(openrig.submits).toHaveLength(0);
+    // A genuine prompt, once agy's own turn has gone quiet, has its permission go through OpenRig again.
+    seat.type("BACKGROUND");
+    const answer = await waitFor(() => seat.log().find((entry) => entry.id === "perm-late" && entry.method === undefined), "the next prompt's request", 30_000);
+    expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    expect(openrig.submits).toHaveLength(1);
+  }, 40_000);
 
   it("reopens only by session/resume, and reports a conversation agy can't reopen and doesn't list as missing", async () => {
     const openrig = await fakeOpenRig();
@@ -194,5 +239,52 @@ describe("the documented agy presets", () => {
       env: { PATH: process.env["PATH"]!, HOME: dir, OPENRIG_RESUME_REF: "gone-1", OPENRIG_RUNTIME: "agy-plain", OPENRIG_LAUNCH_RESULT: result, OPENRIG_LAUNCH_ATTEMPT: "attempt-1" } });
     expect(run.status).toBe(1);
     expect(JSON.parse(readFileSync(result, "utf8"))).toMatchObject({ attempt: "attempt-1", harness: "agy-plain", error: "missing" });
+  });
+});
+
+describe("the documented fallback launcher on a Gemini API key", () => {
+  // A stand-in agy: logs its arguments and whether it got the key, and answers the headless first turn with an id.
+  const FAKE_PLAIN = `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+appendFileSync(process.env.FAKE_LOG, JSON.stringify({ argv: process.argv.slice(2), key: process.env.GEMINI_API_KEY ?? null }) + "\\n");
+if (process.argv.includes("-p")) process.stdout.write(JSON.stringify({ conversation_id: "conv-1", response: "ready" }));
+`;
+  function launch(extra: string[], keyFile?: string) {
+    const dir = mkdtempSync(join(tmpdir(), "agy-plain-key-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const fake = join(dir, "fake-agy.mjs");
+    writeFileSync(fake, FAKE_PLAIN);
+    chmodSync(fake, 0o755);
+    const key = keyFile ?? join(dir, "gemini-api-key");
+    if (!keyFile) writeFileSync(key, `${KEY}\n`, { mode: 0o600 });
+    const log = join(dir, "agy.log"), result = join(dir, "result.json");
+    const run = spawnSync("sh", [join(EXAMPLE, "openrig-agy-launch"), "--agy-home", dir, "--agy", fake, "--key-file", key, ...extra], { encoding: "utf8",
+      env: { PATH: process.env["PATH"]!, HOME: dir, FAKE_LOG: log, OPENRIG_RUNTIME: "agy-plain", OPENRIG_LAUNCH_RESULT: result, OPENRIG_LAUNCH_ATTEMPT: "attempt-1" } });
+    const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { argv: string[]; key: string | null }) : [];
+    return { run, calls, record: existsSync(result) ? JSON.parse(readFileSync(result, "utf8")) as Record<string, unknown> : undefined };
+  }
+
+  it("gives agy the key in its environment only, and pins the model for the first turn and the terminal UI", () => {
+    const { run, calls, record } = launch(["--model", "gemini-4-neon-high"]);
+    expect(run.status).toBe(0);
+    expect(calls).toEqual([
+      { argv: ["--model", "gemini-4-neon-high", "-p", "Reply with exactly: ready", "--output-format", "json"], key: KEY },
+      { argv: ["--model", "gemini-4-neon-high", "--conversation", "conv-1"], key: KEY },
+    ]);
+    expect(record).toMatchObject({ harness: "agy-plain", nativeRef: "conv-1" });
+    expect(`${run.stdout}${run.stderr}`).not.toContain(KEY);
+  });
+
+  it("passes a model name with a space as one argument", () => {
+    const { calls } = launch(["--model", "my model"]);
+    expect(calls.map((call) => call.argv.slice(0, 2))).toEqual([["--model", "my model"], ["--model", "my model"]]);
+  });
+
+  it("starts nothing when the key file can't be read", () => {
+    const { run, calls, record } = launch([], "/nonexistent/gemini-api-key");
+    expect(run.status).toBe(2);
+    expect(run.stderr).toMatch(/key file couldn't be read/);
+    expect(calls).toEqual([]);
+    expect(record).toBeUndefined();
   });
 });

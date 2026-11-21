@@ -18,19 +18,28 @@ fi
 producer="openrig-agy-launch 1"
 # The seat's agy login and state live in AGY_HOME (a HOME-style folder); agy keeps them under .gemini/antigravity-cli.
 # The preset's `command` carries setup as arguments (the seat's pane has only the daemon's minimal environment):
-#   openrig-agy-launch [--agy-home DIR] [--agy PATH] [--rig-path DIR]
-AGY_HOME="${AGY_HOME:-$HOME}"; AGY_BIN="${OPENRIG_AGY:-agy}"; AGY_EXTRA_PATH="${AGY_EXTRA_PATH:-}"
+#   openrig-agy-launch [--agy-home DIR] [--agy PATH] [--rig-path DIR] [--key-file FILE] [--model ID]
+# On a Gemini API key (modelProvider "gemini" in the agy home's settings.json), --key-file names the file holding the key:
+# it's read here into GEMINI_API_KEY, in agy's environment only, never its arguments or output. --model pins the model
+# (agy's default on a key is Gemini 3.1 Pro (Low)) for the first headless turn and for the terminal UI.
+AGY_HOME="${AGY_HOME:-$HOME}"; AGY_BIN="${OPENRIG_AGY:-agy}"; AGY_EXTRA_PATH="${AGY_EXTRA_PATH:-}"; KEY_FILE=""; MODEL=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --agy-home) AGY_HOME="$2"; shift 2 ;;
     --agy) AGY_BIN="$2"; shift 2 ;;
     --rig-path) AGY_EXTRA_PATH="$2"; shift 2 ;;
+    --key-file) KEY_FILE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
     *) break ;;
   esac
 done
 store="$AGY_HOME/.gemini/antigravity-cli"
 [ -n "${AGY_EXTRA_PATH:-}" ] && PATH="$AGY_EXTRA_PATH:$PATH" && export PATH   # so the agent can run `rig`
 export HOME="$AGY_HOME"
+if [ -n "$KEY_FILE" ]; then
+  GEMINI_API_KEY="$(cat "$KEY_FILE" 2>/dev/null)" || { echo "openrig-agy-launch: the key file couldn't be read; starting nothing" >&2; exit 2; }
+  export GEMINI_API_KEY
+fi
 
 report() {
   [ -n "${OPENRIG_LAUNCH_RESULT:-}" ] || return 0
@@ -42,7 +51,7 @@ if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   id="$OPENRIG_RESUME_REF"
   plain_id "$id" || { echo "openrig-agy-launch: refusing an unusual conversation id" >&2; exit 2; }
   if [ ! -f "$store/conversations/$id.db" ]; then
-    report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy}\",\"error\":\"missing\",\"producer\":\"$producer\"}"
+    report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy-plain}\",\"error\":\"missing\",\"producer\":\"$producer\"}"
     echo "openrig-agy-launch: agy holds no conversation $id in $store; starting nothing" >&2
     exit 1
   fi
@@ -55,7 +64,7 @@ else
     case "$arg" in --project=*) project="${arg#--project=}" ;; esac
     prev="$arg"
   done
-  out=$("$AGY_BIN" ${project:+--project "$project"} -p "Reply with exactly: ready" --output-format json </dev/null 2>/dev/null) || out=""
+  out=$("$AGY_BIN" ${MODEL:+--model "$MODEL"} ${project:+--project "$project"} -p "Reply with exactly: ready" --output-format json </dev/null 2>/dev/null) || out=""
   if command -v jq >/dev/null 2>&1; then
     id=$(printf '%s' "$out" | jq -r '.conversation_id // empty' 2>/dev/null) || id=""
   else
@@ -63,7 +72,7 @@ else
     id=$(printf '%s' "$out" | sed -n 's/^{"conversation_id":"\([A-Za-z0-9-]*\)".*/\1/p' | head -n 1)
   fi
   # No usable id: report nothing (identity shows unavailable) and start agy on its own conversation.
-  plain_id "$id" || exec "$AGY_BIN" "$@"
+  plain_id "$id" || exec "$AGY_BIN" ${MODEL:+--model "$MODEL"} "$@"
 fi
-report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy}\",\"nativeRef\":\"$id\",\"producer\":\"$producer\"}"
-exec "$AGY_BIN" --conversation "$id" "$@"
+report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy-plain}\",\"nativeRef\":\"$id\",\"producer\":\"$producer\"}"
+exec "$AGY_BIN" ${MODEL:+--model "$MODEL"} --conversation "$id" "$@"
