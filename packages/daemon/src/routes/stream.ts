@@ -4,6 +4,7 @@ import type { EventBus } from "../domain/event-bus.js";
 import { StreamCursorExpiredError, type StreamStore } from "../domain/stream-store.js";
 import { listSubscriptions, readPage, subscribe, unsubscribe } from "../domain/stream-subscriptions.js";
 import { ReaderActionError, readerActions, recordReaderAction } from "../domain/stream-reader-actions.js";
+import { streamIntakeRecord } from "../domain/stream-intake.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
 
@@ -261,6 +262,14 @@ export function streamRoutes(): Hono {
   app.get("/:streamItemId/actions", (c) => {
     const id = c.req.param("streamItemId");
     return c.json({ streamItemId: id, ...readerActions(getStore(c).db, id) });
+  });
+
+  // Where intake recorded the item, if it did: the row it opened or the pending row it was added to (null for neither).
+  app.get("/:streamItemId/intake", (c) => {
+    const store = getStore(c);
+    const item = store.getById(c.req.param("streamItemId"));
+    if (!item) return c.json({ error: "stream item not found" }, 404);
+    return c.json({ streamItemId: item.streamItemId, intake: streamIntakeRecord(store.db, item) });
   });
 
   // GET /:streamItemId — fetch one

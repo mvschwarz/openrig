@@ -10,10 +10,11 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 });
 
 type Reply = { status: number; data: unknown };
-/** A read-only fake daemon keyed by path; anything unlisted is a 404 with the route's own code. */
+/** A read-only fake daemon keyed by path; anything unlisted is a 404 with the route's own code, and intake recorded nothing. */
 function client(routes: Record<string, Reply>) {
   return { get: vi.fn(async (url: string) => routes[url.split("&limit")[0]!] ?? routes[url] ??
-    (url.includes("/dispositions/") ? { status: 404, data: { error: "disposition_not_found" } }
+    (url.endsWith("/intake") ? { status: 200, data: { streamItemId: "S1", intake: null } }
+      : url.includes("/dispositions/") ? { status: 404, data: { error: "disposition_not_found" } }
       : url.includes("/api/projects/list") ? { status: 200, data: [] } : { status: 404, data: { error: "qitem_not_found" } })) };
 }
 const DISP = "/api/projects/dispositions/S1", LIST = "/api/projects/list?streamItemId=S1";
@@ -28,6 +29,26 @@ const row = (state: string, over: Record<string, unknown> = {}) => ({ status: 20
 describe("what became of a stream observation", () => {
   it("nothing recorded yet: awaiting intake", async () => {
     expect(await streamOutcome(client({}), "S1")).toMatchObject({ stage: "awaiting_intake" });
+  });
+
+  it("an item intake holds with no decision yet says it reached intake, and which row; unknown when that can't be read", async () => {
+    const INTAKE = "/api/stream/S1/intake";
+    const record = (how: string) => ({ status: 200, data: { streamItemId: "S1", intake: { qitemId: "qitem-stream-intake-abc", how, state: "pending" } } });
+    const folded = await streamOutcome(client({ [INTAKE]: record("folded") }), "S1");
+    expect(folded).toMatchObject({ stage: "in_intake", intake: { qitemId: "qitem-stream-intake-abc", how: "folded", state: "pending" } });
+    expect(folded.summary).toBe("It reached intake: it was added to intake row qitem-stream-intake-abc, which is pending. No routing decision is recorded yet.");
+    expect((await streamOutcome(client({ [INTAKE]: record("opened") }), "S1")).summary).toContain("it opened intake row qitem-stream-intake-abc");
+    // A daemon without the read, or a read that fails, can't say either way.
+    for (const reply of [{ status: 404, data: "404 Not Found" }, { status: 500, data: { error: "boom" } }]) {
+      const unknown = await streamOutcome(client({ [INTAKE]: reply }), "S1");
+      expect(unknown).toMatchObject({ stage: "intake_unknown", summary: expect.stringContaining("couldn't be checked") });
+      expect(unknown).not.toHaveProperty("intake");
+    }
+    // Reader-linked work still decides what the poster follows.
+    const linked = await streamOutcome(client({ [INTAKE]: record("folded"), "/api/stream/S1/actions": { status: 200, data: { streamItemId: "S1",
+      current: [{ readerSession: "reader-one", action: "act", workQitemId: "q-7", duplicateOf: null, reason: null, actedAt: "t6" }] } },
+      "/api/queue/q-7": row("in-progress", { qitemId: "q-7" }) }), "S1");
+    expect(linked).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-7" }], intake: { qitemId: "qitem-stream-intake-abc" } });
   });
 
   it("deferred by the automatic path, then decided by intake", async () => {

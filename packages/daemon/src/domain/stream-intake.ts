@@ -6,6 +6,7 @@ import type { StreamItem, StreamStore } from "./stream-store.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { RUNNER_PERMIT_TAG } from "./runner-permissions.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 
 export const STREAM_INTAKE_TAG = "stream-subscription";
 
@@ -15,6 +16,23 @@ export const STREAM_INTAKE_TAG = "stream-subscription";
 export function streamIntakeQitemId(firstStreamSortKey: string): string {
   const hash = createHash("sha256").update(firstStreamSortKey).digest("hex").slice(0, 16);
   return `qitem-stream-intake-${hash}`;
+}
+
+/** Where intake recorded a stream item, for `rig stream show`: the intake row it opened (keyed by its sort key), or the
+ *  pending intake row it was added to as a note (`formatIntakeNote`). Null when intake recorded neither. */
+export function streamIntakeRecord(db: Database.Database, item: Pick<StreamItem, "streamItemId" | "streamSortKey">):
+  { qitemId: string; how: "opened" | "folded"; state: string } | null {
+  const opened = db.prepare("SELECT qitem_id AS qitemId, state FROM queue_items WHERE qitem_id = ?")
+    .get(streamIntakeQitemId(item.streamSortKey)) as { qitemId: string; state: string } | undefined;
+  if (opened) return { ...opened, how: "opened" };
+  // Only intake rows' own transitions are read: their ids share the prefix, so the range uses the transitions' row index.
+  // The note is intake's own (the daemon's actor), not a person's quoting it.
+  const prefix = `Stream observation added: ${boundText(item.streamItemId, 120)} (`;
+  const folded = db.prepare(`SELECT t.qitem_id AS qitemId, q.state FROM queue_transitions t JOIN queue_items q ON q.qitem_id = t.qitem_id
+    WHERE t.qitem_id >= 'qitem-stream-intake-' AND t.qitem_id < 'qitem-stream-intake.' AND +t.actor_session = ?
+      AND substr(t.transition_note, 1, ?) = ? ORDER BY t.transition_id LIMIT 1`)
+    .get(OPENRIG_SENDER, prefix.length, prefix) as { qitemId: string; state: string } | undefined;
+  return folded ? { ...folded, how: "folded" } : null;
 }
 
 export interface StreamIntakeCoordinatorDeps {

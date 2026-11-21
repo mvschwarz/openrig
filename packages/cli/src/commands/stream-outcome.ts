@@ -5,6 +5,7 @@ import type { DaemonClient } from "../client.js";
  *
  * Derived each time from existing records, never stored: the automatic path's disposition (accepted, or
  * deferred to intake), intake's classification, and each linked work row's current state and closure, followed through handoffs.
+ * With no routing record, intake's own record of the item (the row it opened, or the one it was added to) says it arrived.
  * Classification, queue persistence, custody and completion stay distinct, and a closed row is reported
  * as its owner's outcome, not as proof a fix shipped. Readers' recorded actions (act, decline, duplicate) are shown beside
  * it; when nothing automatic linked work, the newest reader-linked work decides the stage.
@@ -48,6 +49,22 @@ async function work(client: Get, qitemId: string): Promise<Work> {
   }
 }
 
+/** With no routing record, intake's own record of the item: the intake row it opened, or the pending one it was added to.
+ *  A daemon without that read, or a read that fails, leaves it unknown, never "awaiting" or "reached". */
+async function intake(client: Get, streamItemId: string) {
+  const res = await client.get<unknown>(`/api/stream/${encodeURIComponent(streamItemId)}/intake`)
+    .catch((error: unknown) => ({ status: 0, data: { error: error instanceof Error ? error.message : String(error) } }));
+  const record = res.status === 200 && object(res.data) && "intake" in res.data ? res.data.intake : undefined;
+  if (record === null) return { stage: "awaiting_intake", summary: "No routing decision is recorded yet." };
+  if (object(record) && typeof record.qitemId === "string") {
+    const where = record.how === "folded" ? `it was added to intake row ${record.qitemId}` : `it opened intake row ${record.qitemId}`;
+    return { stage: "in_intake", summary: `It reached intake: ${where}, which is ${record.state}. No routing decision is recorded yet.`,
+      intake: { qitemId: record.qitemId, how: record.how, state: record.state } };
+  }
+  const why = res.status === 404 ? "this daemon doesn't serve intake records" : `the intake read failed (${res.status || "no response"})`;
+  return { stage: "intake_unknown", summary: `No routing decision is recorded yet, and whether it reached intake couldn't be checked: ${why}.` };
+}
+
 async function routed(client: Get, streamItemId: string) {
   const id = encodeURIComponent(streamItemId);
   const [dispositionRes, classificationRes] = await Promise.all([
@@ -68,7 +85,7 @@ async function routed(client: Get, streamItemId: string) {
     const deferred = d && { at: d.acceptedAt, by: d.acceptedBy, reason: d.reason };
     if (!c) return deferred
       ? { stage: "deferred_to_intake", summary: `The automatic path deferred it to intake (${d!.reason}). Intake hasn't recorded a decision yet.`, deferred }
-      : { stage: "awaiting_intake", summary: "No routing decision is recorded yet." };
+      : await intake(client, streamItemId);
     return { stage: "decided_by_intake", summary: `${classification?.path === "experiment" ? `An advisory experiment run by ${c.classifierSession}` : `Intake (${c.classifierSession})`} recorded ${c.action ?? "a classification"}${c.classificationDestination ? ` for ${c.classificationDestination}` : ""}. Work it opened by hand isn't linked here.`,
       classification, ...(deferred ? { deferred } : {}) };
   }
@@ -97,7 +114,7 @@ async function routed(client: Get, streamItemId: string) {
 }
 
 /** Stages where no automatic work is live (none linked, or its effect ended with intake); a reader's linked work decides them. */
-const READER_DECIDES = ["awaiting_intake", "deferred_to_intake", "decided_by_intake", "no_action", "with_intake", "unavailable"];
+const READER_DECIDES = ["awaiting_intake", "in_intake", "intake_unknown", "deferred_to_intake", "decided_by_intake", "no_action", "with_intake", "unavailable"];
 
 export async function streamOutcome(client: Get, streamItemId: string) {
   const [base, actionsRes] = await Promise.all([routed(client, streamItemId),

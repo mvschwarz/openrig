@@ -3,7 +3,10 @@ import Database from "better-sqlite3";
 import { EventBus } from "../src/domain/event-bus.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { streamIntakeQitemId, StreamIntakeCoordinator, STREAM_INTAKE_TAG } from "../src/domain/stream-intake.js";
+import { formatIntakeNote, streamIntakeQitemId, streamIntakeRecord, StreamIntakeCoordinator, STREAM_INTAKE_TAG } from "../src/domain/stream-intake.js";
+import type { StreamItem } from "../src/domain/stream-store.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
+import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
 import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { RUNNER_PERMIT_TAG } from "../src/domain/runner-permissions.js";
 import { migrate } from "../src/db/migrate.js";
@@ -1156,5 +1159,42 @@ describe("StreamIntakeCoordinator with default-permit records", () => {
     } finally {
       c.stop();
     }
+  });
+});
+
+describe("streamIntakeRecord: where intake recorded an item (rig stream show)", () => {
+  // Session names are made the way the product makes them.
+  const source = deriveCanonicalSessionName("dev", "build", "starter");
+
+  it("names the row an item opened or was added to, and nothing for an item intake never handled", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    const coordinator = new StreamIntakeCoordinator({ db, eventBus: bus, streamStore, queueRepo, destination: "queue.worker" });
+    coordinator.start();
+    try {
+      const first = streamStore.emit({ sourceSession: source, body: "one" });
+      await new Promise((r) => setTimeout(r, 50));
+      const second = streamStore.emit({ sourceSession: source, body: "two" });
+      await new Promise((r) => setTimeout(r, 50));
+      const row = streamIntakeQitemId(first.streamSortKey);
+      expect(streamIntakeRecord(db, first)).toEqual({ qitemId: row, how: "opened", state: "pending" });
+      expect(streamIntakeRecord(db, second)).toEqual({ qitemId: row, how: "folded", state: "pending" });
+    } finally {
+      coordinator.stop();
+    }
+    const later = streamStore.emit({ sourceSession: source, body: "after intake stopped" });
+    expect(streamIntakeRecord(db, later)).toBeNull();
+  });
+
+  it("counts only intake's own note for exactly this item", () => {
+    const { db, queueRepo } = setup();
+    const id = "qitem-stream-intake-0000000000000000";
+    const note = (streamItemId: string) => formatIntakeNote({ streamItemId, sourceSession: source } as StreamItem, false);
+    db.transaction(() => queueRepo.createWithinTransaction({ qitemId: id, sourceSession: OPENRIG_SENDER, destinationSession: "queue.worker",
+      body: "intake", summary: "intake", tags: [STREAM_INTAKE_TAG], priority: "routine" }))();
+    queueRepo.update({ qitemId: id, actorSession: OPENRIG_SENDER, transitionNote: note("obs-10") });
+    // A person quoting the note isn't intake recording it.
+    queueRepo.update({ qitemId: id, actorSession: deriveCanonicalSessionName("qa", "one", "rig"), transitionNote: note("obs-1") });
+    expect(streamIntakeRecord(db, { streamItemId: "obs-1", streamSortKey: "k-1" })).toBeNull();
+    expect(streamIntakeRecord(db, { streamItemId: "obs-10", streamSortKey: "k-10" })).toEqual({ qitemId: id, how: "folded", state: "pending" });
   });
 });
