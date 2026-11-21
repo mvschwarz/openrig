@@ -1703,6 +1703,19 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
+    it("rig_queue_list reads a limit header without a truncation header as unknown, not as a complete page (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      const getFn = vi.fn(async () => ({ status: 200, data: [row], headers: new Headers({ "X-OpenRig-Limit": "7" }) }));
+      await setup({ get: getFn });
+
+      // Only an explicit 0 or 1 says whether the page was cut; without one, the result carries no marker at all.
+      const result = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({ items: [row] });
+      expect((result.content as Array<{ text: string }>).map((c) => c.text)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
     it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
       const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
       await setup({ get: getFn });

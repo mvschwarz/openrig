@@ -351,11 +351,12 @@ async function withClient<T>(
 }
 
 /** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
- *  returned. null from a daemon that doesn't send it, which says nothing either way. */
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
 function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
   const limit = headers?.get("X-OpenRig-Limit");
-  if (!limit || !/^\d+$/.test(limit)) return null;
-  return { limit: Number(limit), truncated: headers!.get("X-OpenRig-Truncated") === "1" };
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
