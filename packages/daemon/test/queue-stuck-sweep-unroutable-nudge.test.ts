@@ -1216,26 +1216,31 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
         nudge: false,
       });
     }
+    const coveredSet = new Set(coveredIds);
 
     const origGetById = queue.getById.bind(queue);
-    const firstId = coveredIds[0]!;
-    let scheduled = false;
+    let coveredReads = 0;
+    let readsAtInjection = 0;
     let insertedInYield = false;
     let insertedRowPromise: Promise<QueueItem> | null = null;
     const spy = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
-      if (id === firstId && !scheduled) {
-        scheduled = true;
-        setImmediate(() => {
-          insertedRowPromise = queue.create({
-            sourceSession: "lead@ops",
-            destinationSession: "parked@ops",
-            body: "New uncovered row inserted during close-scan yield",
-            nudge: false,
+      if (coveredSet.has(id)) {
+        coveredReads++;
+        // Schedule once the close-scan batch is visibly underway; the callback runs inside the mid-batch yieldLoop.
+        if (coveredReads === 2) {
+          setImmediate(() => {
+            readsAtInjection = coveredReads;
+            insertedRowPromise = queue.create({
+              sourceSession: "lead@ops",
+              destinationSession: "parked@ops",
+              body: "New uncovered row inserted during close-scan yield",
+              nudge: false,
+            });
+            insertedInYield = db.prepare(
+              "SELECT 1 FROM queue_items WHERE source_session = 'lead@ops' AND destination_session = 'parked@ops' AND body = ?",
+            ).get("New uncovered row inserted during close-scan yield") !== undefined;
           });
-          insertedInYield = db.prepare(
-            "SELECT 1 FROM queue_items WHERE source_session = 'lead@ops' AND destination_session = 'parked@ops' AND body = ?",
-          ).get("New uncovered row inserted during close-scan yield") !== undefined;
-        });
+        }
       }
       return origGetById(id, opts);
     }) as typeof queue.getById);
@@ -1243,12 +1248,14 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     const resKeep = await sweep({ now });
     spy.mockRestore();
 
-    expect(scheduled).toBe(true);
     expect(insertedInYield).toBe(true);
+    expect(readsAtInjection).toBeGreaterThanOrEqual(2);
+    expect(readsAtInjection).toBeLessThan(coveredIds.length);
+    expect(coveredReads).toBe(coveredIds.length);
     expect(insertedRowPromise).not.toBeNull();
     const insertedRow = await insertedRowPromise!;
-    expect(resKeep.outcome).toBe("clean");
     expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+    expect(resKeep.outcome).toBe("clean");
 
     // Once the newly inserted uncovered row closes, the next sweep closes the notice cleanly.
     queue.update({ qitemId: insertedRow.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved new row" });
@@ -1257,7 +1264,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
   });
 
-  it("keeps open notice when an earlier row loses recovery coverage during a later close-scan yield", async () => {
+  it("keeps open notice when an earlier row loses folded recovery coverage during a later close-scan yield", async () => {
     seedSeat("ops", "coord.lead", "lead@ops");
     seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
 
@@ -1282,29 +1289,36 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
       });
       recoveryIds.push(rec.qitemId);
     }
+    const coveredSet = new Set(coveredIds);
 
-    // 1) Earlier row's recovery finding is folded and closed during the later yield while the earlier row itself is untouched.
+    // Earlier row's recovery finding is folded and closed during the later close-scan yield while the row itself is untouched.
     const origGetById = queue.getById.bind(queue);
     const firstId = coveredIds[0]!;
     const firstRecoveryId = recoveryIds[0]!;
-    let foldScheduled = false;
+    let coveredReads = 0;
+    let readsAtInjection = 0;
+    let sawFirstBeforeYield = false;
     let recoveryFolded = false;
     const spyFold = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
-      if (id === firstId && !foldScheduled) {
-        foldScheduled = true;
-        setImmediate(() => {
-          db.prepare(
-            "UPDATE queue_items SET tags = json_insert(tags, '$[#]', ?) WHERE qitem_id = ? AND json_valid(tags)",
-          ).run(BACKLOG_FOLDED_TAG, firstRecoveryId);
-          queue.update({
-            qitemId: firstRecoveryId,
-            actorSession: "stuck-sweep@system",
-            state: "done",
-            closureReason: "no-follow-on",
-            transitionNote: "folded during later close-scan yield",
+      if (coveredSet.has(id)) {
+        coveredReads++;
+        if (id === firstId) sawFirstBeforeYield = true;
+        if (coveredReads === 2) {
+          setImmediate(() => {
+            readsAtInjection = coveredReads;
+            db.prepare(
+              "UPDATE queue_items SET tags = json_insert(tags, '$[#]', ?) WHERE qitem_id = ? AND json_valid(tags)",
+            ).run(BACKLOG_FOLDED_TAG, firstRecoveryId);
+            queue.update({
+              qitemId: firstRecoveryId,
+              actorSession: "stuck-sweep@system",
+              state: "done",
+              closureReason: "no-follow-on",
+              transitionNote: "folded during later close-scan yield",
+            });
+            recoveryFolded = true;
           });
-          recoveryFolded = true;
-        });
+        }
       }
       return origGetById(id, opts);
     }) as typeof queue.getById);
@@ -1312,39 +1326,76 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     const resFoldKeep = await sweep({ now });
     spyFold.mockRestore();
 
-    expect(foldScheduled).toBe(true);
+    expect(sawFirstBeforeYield).toBe(true);
     expect(recoveryFolded).toBe(true);
-    expect(resFoldKeep.outcome).toBe("clean");
+    expect(readsAtInjection).toBeGreaterThanOrEqual(2);
+    expect(readsAtInjection).toBeLessThan(coveredIds.length);
     expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+    expect(resFoldKeep.outcome).toBe("clean");
 
-    // 2) Fresh recovery on the earlier row is closed and superseded by a newer meaningful transition during a later yield.
-    const secondRecovery = await queue.create({
-      sourceSession: "lead@ops",
-      destinationSession: "lead@ops",
-      body: `Fresh recovery for ${firstId}`,
-      tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(firstId)],
-      nudge: false,
-    });
-    let supersedeScheduled = false;
+    // Once the uncovered earlier row closes, the next sweep closes the notice cleanly.
+    queue.update({ qitemId: firstId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved earlier row" });
+    const resClose = await sweep({ now });
+    expect(resClose.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("keeps open notice when an earlier row's closed recovery is superseded by a newer transition during a later close-scan yield", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "parked@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(notice).toBeDefined();
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by covered batch" });
+
+    const coveredIds: string[] = [];
+    const recoveryIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "parked@ops", `Covered row ${i}`, 5, now);
+      coveredIds.push(r.qitemId);
+      const rec = await queue.create({
+        sourceSession: "lead@ops",
+        destinationSession: "lead@ops",
+        body: `Open recovery for ${r.qitemId}`,
+        tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(r.qitemId)],
+        nudge: false,
+      });
+      recoveryIds.push(rec.qitemId);
+    }
+    const coveredSet = new Set(coveredIds);
+
+    const origGetById = queue.getById.bind(queue);
+    const firstId = coveredIds[0]!;
+    const firstRecoveryId = recoveryIds[0]!;
+    let coveredReads = 0;
+    let readsAtInjection = 0;
+    let sawFirstBeforeYield = false;
     let recoverySuperseded = false;
     const spySupersede = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
-      if (id === firstId && !supersedeScheduled) {
-        supersedeScheduled = true;
-        setImmediate(() => {
-          queue.update({
-            qitemId: secondRecovery.qitemId,
-            actorSession: "lead@ops",
-            state: "done",
-            closureReason: "no-follow-on",
-            transitionNote: "closed recovery during later yield",
+      if (coveredSet.has(id)) {
+        coveredReads++;
+        if (id === firstId) sawFirstBeforeYield = true;
+        if (coveredReads === 2) {
+          setImmediate(() => {
+            readsAtInjection = coveredReads;
+            queue.update({
+              qitemId: firstRecoveryId,
+              actorSession: "lead@ops",
+              state: "done",
+              closureReason: "no-follow-on",
+              transitionNote: "closed recovery during later yield",
+            });
+            queue.update({
+              qitemId: firstId,
+              actorSession: "lead@ops",
+              transitionNote: "follow-up after recovery closed",
+            });
+            recoverySuperseded = true;
           });
-          queue.update({
-            qitemId: firstId,
-            actorSession: "lead@ops",
-            transitionNote: "follow-up after recovery closed",
-          });
-          recoverySuperseded = true;
-        });
+        }
       }
       return origGetById(id, opts);
     }) as typeof queue.getById);
@@ -1352,13 +1403,151 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     const resSupersedeKeep = await sweep({ now });
     spySupersede.mockRestore();
 
-    expect(supersedeScheduled).toBe(true);
+    expect(sawFirstBeforeYield).toBe(true);
     expect(recoverySuperseded).toBe(true);
-    expect(resSupersedeKeep.outcome).toBe("clean");
+    expect(readsAtInjection).toBeGreaterThanOrEqual(2);
+    expect(readsAtInjection).toBeLessThan(coveredIds.length);
     expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+    expect(resSupersedeKeep.outcome).toBe("clean");
 
-    // Once the uncovered row itself closes, the next sweep closes the notice cleanly.
     queue.update({ qitemId: firstId, actorSession: "lead@ops", state: "canceled", transitionNote: "resolved earlier row" });
+    const resClose = await sweep({ now });
+    expect(resClose.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("keeps open notice when destination becomes unroutable during yield while remaining rows are recovery-covered", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    const parked = seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "parked@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(notice).toBeDefined();
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by mixed batch" });
+
+    // Early rows are uncovered; tail rows scanned after the yield are recovery-covered so only envKey invalidation catches the unbind.
+    const batchIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "parked@ops", `Mixed row ${i}`, 5, now);
+      batchIds.push(r.qitemId);
+      if (i >= STUCK_SWEEP_YIELD_EVERY_ROWS - 10) {
+        await queue.create({
+          sourceSession: "lead@ops",
+          destinationSession: "lead@ops",
+          body: `Open recovery for tail row ${r.qitemId}`,
+          tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(r.qitemId)],
+          nudge: false,
+        });
+      }
+    }
+    const batchSet = new Set(batchIds);
+
+    // Start destination bound so the uncovered early rows pass before the yield.
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-env-change', ?, 'parked@ops', 'running', '2026-11-18T00:00:00Z')")
+      .run(parked.nodeId);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-env-change', ?, 'tmux', 'parked@ops', '%97')")
+      .run(parked.nodeId);
+
+    const origGetById = queue.getById.bind(queue);
+    let batchReads = 0;
+    let readsAtUnbind = 0;
+    let unboundDuringYield = false;
+    const spy = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (batchSet.has(id)) {
+        batchReads++;
+        if (batchReads === 2) {
+          setImmediate(() => {
+            readsAtUnbind = batchReads;
+            db.prepare("DELETE FROM bindings WHERE node_id = ?").run(parked.nodeId);
+            db.prepare("DELETE FROM sessions WHERE node_id = ?").run(parked.nodeId);
+            unboundDuringYield = true;
+          });
+        }
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resKeep = await sweep({ now });
+    spy.mockRestore();
+
+    expect(unboundDuringYield).toBe(true);
+    expect(readsAtUnbind).toBeGreaterThanOrEqual(2);
+    expect(readsAtUnbind).toBeLessThan(batchIds.length);
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+    expect(resKeep.outcome).toBe("clean");
+
+    // Rebinding parked@ops allows the next sweep to close the notice cleanly.
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-env-recover', ?, 'parked@ops', 'running', '2026-11-18T00:00:00Z')")
+      .run(parked.nodeId);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-env-recover', ?, 'tmux', 'parked@ops', '%98')")
+      .run(parked.nodeId);
+    const resClose = await sweep({ now });
+    expect(resClose.outcome).toBe("findings");
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("keeps open notice when continuous mid-yield row mutations hit the close-scan pass bound", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "parked@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+    expect(notice).toBeDefined();
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by churning covered batch" });
+
+    const coveredIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "parked@ops", `Churn row ${i}`, 5, now);
+      coveredIds.push(r.qitemId);
+      await queue.create({
+        sourceSession: "lead@ops",
+        destinationSession: "lead@ops",
+        body: `Open recovery for churn row ${r.qitemId}`,
+        tags: [STUCK_SWEEP_FINDING_TAG, recoveryTag(r.qitemId)],
+        nudge: false,
+      });
+    }
+    const coveredSet = new Set(coveredIds);
+
+    // Mutate ts_updated on the batch during each pass's yield so passes 0, 1, and 2 all see dirty rows and hit the pass-2 fail-open bound.
+    const origGetById = queue.getById.bind(queue);
+    let totalReads = 0;
+    let passReads = 0;
+    let mutationsApplied = 0;
+    let pendingImmediate: ReturnType<typeof setImmediate> | null = null;
+    const spy = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (coveredSet.has(id)) {
+        totalReads++;
+        passReads++;
+        if (pendingImmediate === null && mutationsApplied < 3 && passReads >= 2) {
+          pendingImmediate = setImmediate(() => {
+            pendingImmediate = null;
+            mutationsApplied++;
+            const bumped = new Date(now.getTime() + mutationsApplied * 1000).toISOString();
+            for (const cid of coveredIds) {
+              db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(bumped, cid);
+            }
+            passReads = 0;
+          });
+        }
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+
+    const resBound = await sweep({ now });
+    if (pendingImmediate !== null) clearImmediate(pendingImmediate);
+    spy.mockRestore();
+
+    expect(mutationsApplied).toBe(3);
+    expect(totalReads).toBeGreaterThan(coveredIds.length * 2);
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+    expect(resBound.outcome).toBe("clean");
+
+    // Once churn stops, the next sweep closes the notice cleanly.
     const resClose = await sweep({ now });
     expect(resClose.outcome).toBe("findings");
     expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
@@ -1387,9 +1576,9 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     queue.create = origCreate;
 
     expect(reroutedBeforeTxn).toBe(true);
+    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")))).toHaveLength(0);
     expect(res.outcome).toBe("clean");
     expect(res.error).toBeUndefined();
-    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")))).toHaveLength(0);
     expect(nudgesSent).toHaveLength(0);
   });
 });

@@ -2286,11 +2286,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
-    const inspectUnreachableUnclaimed = (row: QueueItem): "live" | "recovery" | "other" => {
+    const inspectUnreachableUnclaimed = (row: QueueItem): "live" | "recovery" | "delivery" | "other" => {
       if (row.state !== "pending" || row.claimedAt || polledRow(row)) return "other";
       if (classOf(row.destinationSession) !== "unroutable" && !sessionMissing(row.destinationSession)) return "other";
       if (recoveries.find(row.qitemId)) return "recovery";
-      if (deliveryResolutionEvidence(deps, "unclaimed-obligation", row.qitemId, now)) return "other";
+      if (deliveryResolutionEvidence(deps, "unclaimed-obligation", row.qitemId, now)) return "delivery";
       const savedNotes = new Map(routeNotes);
       const savedRouted = new Set(routed);
       const savedParents = new Map(delegationParent);
@@ -2332,20 +2332,25 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))
           LIMIT 1`,
       ).get(dest, source, STUCK_SWEEP_FINDING_TAG) !== undefined;
-      type PendingCloseRow = {
+      type PendingCloseMeta = {
         qitem_id: string;
         ts_updated: string;
         last_nudge_result: string | null;
         tags: string | null;
         max_tid: number;
       };
-      const queryPendingRows = (): PendingCloseRow[] => deps.db.prepare(
+      const pendingRows = deps.db.prepare(
+        `SELECT qitem_id FROM queue_items
+          WHERE destination_session = ? AND source_session = ? AND state = 'pending' AND claimed_at IS NULL
+            AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))`,
+      ).all(dest, source, STUCK_SWEEP_FINDING_TAG) as Array<{ qitem_id: string }>;
+      const queryPendingMeta = (): PendingCloseMeta[] => deps.db.prepare(
         `SELECT qitem_id, ts_updated, last_nudge_result, tags,
                 COALESCE((SELECT MAX(t.transition_id) FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id), 0) AS max_tid
            FROM queue_items
           WHERE destination_session = ? AND source_session = ? AND state = 'pending' AND claimed_at IS NULL
             AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))`,
-      ).all(dest, source, STUCK_SWEEP_FINDING_TAG) as PendingCloseRow[];
+      ).all(dest, source, STUCK_SWEEP_FINDING_TAG) as PendingCloseMeta[];
       const pairEnvKey = (): string => {
         const recAgent = (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)() ?? "";
         const opSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)() ?? "";
@@ -2355,14 +2360,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           ? (deps.resolveOrchestrator(dest) ?? "")
           : JSON.stringify(resolveEscalationOwner(deps.db, dest, (target) => deps.queueRepo.acceptsDestination(target)));
         const agent = agentSeatNode(dest);
-        let quietJobs = "";
-        try {
-          quietJobs = (deps.db.prepare(
-            "SELECT job_id FROM watchdog_jobs WHERE policy = 'quiet-release' AND state = 'active' ORDER BY job_id",
-          ).all() as Array<{ job_id: string }>).map((j) => j.job_id).join(",");
-        } catch {
-          quietJobs = "";
-        }
         return JSON.stringify([
           classOf(dest),
           sessionMissing(dest),
@@ -2376,10 +2373,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           seatSummary(source),
           seatSummary(recAgent),
           seatSummary(opSeat),
-          quietJobs,
         ]);
       };
-      const pendingRows = queryPendingRows();
       if (deps.queueRepo.deliveryDrains.holds(dest)) {
         if (pendingRows.length > 0) continue;
       } else {
@@ -2389,15 +2384,34 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           lastNudgeResult: string | null;
           rawTags: string | null;
           maxTid: number;
-          skipReason: "recovery" | "other";
+          skipReason: "recovery" | "delivery" | "other";
           envKey: string;
         }>();
-        let currentEnv = pendingRows.length > 0 ? pairEnvKey() : "";
-        let toScan = pendingRows;
+        // Zero-yield fast path avoids pairEnvKey() and MAX(transition_id) queries until a yield actually fires.
+        const preYieldVerdicts = new Map<string, "recovery" | "delivery" | "other">();
+        let currentEnv: string | null = null;
+        let metaById = new Map<string, PendingCloseMeta>();
+        let toScan: Array<{ qitem_id: string }> = pendingRows;
         for (let pass = 0; ; pass++) {
           let passYielded = false;
           for (const pending of toScan) {
             if (dueToYield()) {
+              if (currentEnv === null && preYieldVerdicts.size > 0) {
+                const preYieldEnv = pairEnvKey();
+                for (const meta of queryPendingMeta()) {
+                  const skipReason = preYieldVerdicts.get(meta.qitem_id);
+                  if (!skipReason) continue;
+                  inspected.set(meta.qitem_id, {
+                    tsUpdated: meta.ts_updated,
+                    lastNudgeResult: meta.last_nudge_result,
+                    rawTags: meta.tags,
+                    maxTid: meta.max_tid,
+                    skipReason,
+                    envKey: preYieldEnv,
+                  });
+                }
+                preYieldVerdicts.clear();
+              }
               await yieldLoop();
               passYielded = true;
               if (deps.queueRepo.deliveryDrains.holds(dest)) {
@@ -2405,9 +2419,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
                 break;
               }
               currentEnv = pairEnvKey();
+              metaById = new Map(queryPendingMeta().map((m) => [m.qitem_id, m]));
             }
             const row = indexed(() => deps.queueRepo.getById(pending.qitem_id, { waiting: false }));
             if (!row) {
+              preYieldVerdicts.delete(pending.qitem_id);
               inspected.delete(pending.qitem_id);
               continue;
             }
@@ -2417,15 +2433,25 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
               break;
             }
             if (row.state === "pending" && !row.claimedAt && row.sourceSession === source && row.destinationSession === dest) {
-              inspected.set(row.qitemId, {
-                tsUpdated: row.tsUpdated,
-                lastNudgeResult: row.lastNudgeResult ?? null,
-                rawTags: pending.tags,
-                maxTid: pending.max_tid,
-                skipReason: verdict,
-                envKey: currentEnv,
-              });
+              if (currentEnv === null) {
+                preYieldVerdicts.set(row.qitemId, verdict);
+              } else {
+                const meta = metaById.get(row.qitemId);
+                if (meta) {
+                  inspected.set(row.qitemId, {
+                    tsUpdated: row.tsUpdated,
+                    lastNudgeResult: row.lastNudgeResult ?? null,
+                    rawTags: meta.tags,
+                    maxTid: meta.max_tid,
+                    skipReason: verdict,
+                    envKey: currentEnv,
+                  });
+                } else {
+                  inspected.delete(row.qitemId);
+                }
+              }
             } else {
+              preYieldVerdicts.delete(pending.qitem_id);
               inspected.delete(pending.qitem_id);
             }
           }
@@ -2436,7 +2462,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           }
           if (classOf(dest) !== "unroutable" && !sessionMissing(dest)) break;
           const nowEnv = pairEnvKey();
-          const currentPending = queryPendingRows();
+          const currentPending = queryPendingMeta();
           const dirty = currentPending.filter((pending) => {
             const prev = inspected.get(pending.qitem_id);
             if (!prev) return true;
@@ -2446,6 +2472,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             if (prev.rawTags !== pending.tags) return true;
             if (prev.maxTid !== pending.max_tid) return true;
             if (prev.skipReason === "recovery" && !recoveries.find(pending.qitem_id)) return true;
+            if (prev.skipReason === "delivery" && !deliveryResolutionEvidence(deps, "unclaimed-obligation", pending.qitem_id, now)) return true;
             return false;
           });
           if (dirty.length === 0) break;
@@ -2454,6 +2481,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             break;
           }
           currentEnv = nowEnv;
+          metaById = new Map(dirty.map((m) => [m.qitem_id, m]));
           toScan = dirty;
         }
         if (hasLivePending) continue;
