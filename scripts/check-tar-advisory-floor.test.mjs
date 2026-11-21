@@ -43,10 +43,14 @@ function lowestAdmitted(range) {
         case ">=":
           if (lowest === null || compare(version, lowest) > 0) lowest = version;
           break;
-        // `>x` admits nothing at x itself; the next patch is the lowest thing it can admit.
-        case ">":
-          if (lowest === null || compare(version, lowest) > 0) lowest = [version[0], version[1], version[2] + 1];
+        // `>x` admits nothing at x itself; the next patch is the lowest thing it can admit. The
+        // incremented bound is what gets compared, so `>=7.5.20 >7.5.20` is read as 7.5.21 and accepted
+        // rather than as its own lower bound of 7.5.20.
+        case ">": {
+          const above = [version[0], version[1], version[2] + 1];
+          if (lowest === null || compare(above, lowest) > 0) lowest = above;
           break;
+        }
         // An upper bound alone leaves the range open below.
         case "<": case "<=":
           if (lowest === null) lowest = [0, 0, 0];
@@ -77,7 +81,7 @@ test("the daemon and the CLI require a tar past the advisory band", () => {
 });
 
 test("the range check rejects the ranges that name a high version and still admit the band", () => {
-  for (const range of ["^7.5.21", ">=7.5.21", "~7.5.21", "7.5.23", ">=7.5.21 <8.0.0", ">7.5.20"]) {
+  for (const range of ["^7.5.21", ">=7.5.21", "~7.5.21", "7.5.23", ">=7.5.21 <8.0.0", ">7.5.20", ">=7.5.20 >7.5.20"]) {
     assert.ok(!below(lowestAdmitted(range), FLOOR), `${range} is accepted`);
   }
   for (const range of ["^7.5.13", "7.5.13", ">=7.5.13", "<7.5.21", "*", "latest", "^7.5.21 || 7.5.13", ">=7.5.14 <7.5.20"]) {
