@@ -215,7 +215,7 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     if (!a || (a["state"] === "no_assignment" && !a["applied"])) return [];
     const intended = a["intended"] as Record<string, unknown> | null;
     const applied = a["applied"] as Record<string, unknown> | null;
-    const standing = a["state"] === "follows" ? "this seat is configured as assigned"
+    const standing = a["state"] === "follows" ? (a["asApplied"] ? `this seat is still as the apply of ${intended?.["label"]} left its home` : "this seat is configured as assigned")
       : a["state"] === "override" ? `this seat is configured with its own choice: ${a["override"] ?? "another account"}`
         : a["state"] === "not_applied" ? notAppliedText(intended, applied)
           : "";
@@ -1043,7 +1043,7 @@ that machine. Only the command and its output cross the connection.`);
   // (slice 2, it changes nothing), and applying exactly that plan, named by its digest (slice 3).
   type PlanRow = { seat: string; runtime: string; current: string; effect: "change" | "unchanged" | "kept_override" | "not_affected";
     override?: string; precheck?: { safe: boolean; reasons: string[]; message?: string }; continuity?: string; activity: string; notes?: string[];
-    lastResult?: { kind: string; label: string; detail: string; at: string } };
+    lastResult?: { kind: string; label: string; detail: string; at: string }; asApplied?: true };
   type Plan = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; includeOverrides: boolean;
     accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; effect: string }> }>;
     intent?: { label: string; reference: string; requestedBy: string | null; at: string }; digest: string; note: string };
@@ -1060,7 +1060,8 @@ that machine. Only the command and its output cross the connection.`);
     for (const row of plan.rows) {
       const last = row.lastResult ? `  last applied: ${kindWords(row.lastResult.kind)} (${row.lastResult.label}, ${row.lastResult.at}): ${row.lastResult.detail}` : null;
       if (row.effect === "not_affected") { console.log(`${row.seat}: not affected (${(row.notes ?? []).join("; ")})`); continue; }
-      if (row.effect === "unchanged") console.log(`${row.seat}: unchanged, already on ${plan.account.label}`);
+      if (row.effect === "unchanged") console.log(row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
+        : `${row.seat}: unchanged, already on ${plan.account.label}`);
       else if (row.effect === "kept_override") console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`);
       else {
         const check = row.precheck?.safe ? "precheck safe" : `precheck UNSAFE: ${(row.precheck?.reasons ?? []).join(", ")}`;

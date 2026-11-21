@@ -66,6 +66,9 @@ export interface PlanRow {
   notes?: string[];
   /** The seat's latest applied result, from any earlier apply. */
   lastResult?: { kind: AssignmentResultKind; label: string; detail: string; at: string };
+  /** Unchanged only as an apply of this label left its home: its configuration names no login, and the login active in
+   *  that home isn't read, so a later change there isn't seen. */
+  asApplied?: true;
 }
 
 export interface PlanHomePeer {
@@ -163,15 +166,24 @@ function appliedThis(seat: PlanSeatFacts, label: string): boolean {
   return !!seat.followsAssignment && last?.label === label && (last.kind === "switched" || last.kind === "pending_successor");
 }
 
+/** A seat whose configuration names no login of its own: a Codex seat on its home's active login (not a home an account
+ *  switch moved it to). That it's on an account rests only on the apply that switched its home. */
+function homeOnly(seat: PlanSeatFacts): boolean {
+  return seat.runtime === "codex" && seat.configured?.source === "default_login" && seat.configured.homeFrom !== "account-switch";
+}
+
+/** How a seat that's unchanged only as an apply left its home is worded, in the plan, the apply and status. */
+export const asAppliedText = (label: string) => `still as the apply of ${label} left its home`;
+
 /** Where a seat stands against its rig's assignment, by the plan's own rules: on the assigned account (configured as it, or
  *  still as the apply of this assignment left it), its own choice of another account, or not moved yet (no result, or its
  *  last result didn't move it). Configuration only: never proof of the login a running session uses. */
 export function assignmentStanding(seat: PlanSeatFacts, account: AccountRef | null, intent: AssignmentIntent,
-  resolveHome?: (home: string) => string): { state: "follows" | "override" | "not_applied"; override?: string } {
+  resolveHome?: (home: string) => string): { state: "follows" | "override" | "not_applied"; override?: string; asApplied?: true } {
   if (!account) return { state: "not_applied" };
   const comparison: Comparison = { account, ...(resolveHome ? { resolveHome } : {}) };
   if (unchanged(seat, comparison)) return { state: "follows" };
-  if (appliedThis(seat, intent.label)) return { state: "follows" };
+  if (appliedThis(seat, intent.label)) return { state: "follows", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };
   const override = seatOverride(seat, comparison);
   return override ? { state: "override", override } : { state: "not_applied" };
 }
@@ -206,7 +218,7 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
 
   // First what each seat would do, then which Codex homes switch in place: a seat on a switching home moves with it,
   // whatever its own choice, because the switch changes that home's active login.
-  type Decision = { seat: PlanSeatFacts; effect: PlanEffect; override?: string; notes?: string[] };
+  type Decision = { seat: PlanSeatFacts; effect: PlanEffect; override?: string; notes?: string[]; asApplied?: true };
   const decisions: Decision[] = inRig.map((seat) => {
     if (seat.runtime !== runtime) {
       return { seat, effect: "not_affected", notes: [seat.runtime === RUNTIME_OF[account.provider === "claude" ? "codex" : "claude"]
@@ -216,7 +228,9 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
     // Still as an apply of this label left it: nothing to do, so a re-apply doesn't restart it (or its Codex home) again.
     // With --account-home, only when that's the home it was moved to.
     if (appliedThis(seat, account.label) && (!input.accountHome
-      || (seat.ownHome?.source === "account-switch" && sameHome(input, seat.ownHome.home, input.accountHome)))) return { seat, effect: "unchanged" };
+      || (seat.ownHome?.source === "account-switch" && sameHome(input, seat.ownHome.home, input.accountHome)))) {
+      return { seat, effect: "unchanged", ...(homeOnly(seat) ? { asApplied: true as const } : {}) };
+    }
     const override = seatOverride(seat, input) ?? undefined;
     if (override && !input.includeOverrides) return { seat, effect: "kept_override", override, notes: ["kept (seat override); --include-overrides moves it too"] };
     return { seat, effect: "change", ...(override ? { override } : {}) };
@@ -228,7 +242,7 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
     if (!onSwitching(d.seat)) continue;
     const moves = `moves with its home: the switch makes ${account.login} the active login of ${d.seat.codexHome}, which this seat runs on`;
     if (d.effect === "kept_override") { d.effect = "change"; d.notes = [`${moves}, so its own choice can't be kept`]; }
-    else if (d.effect === "unchanged") d.notes = [`already on ${account.label}; ${moves}, so it restarts with it`];
+    else if (d.effect === "unchanged") d.notes = [`${d.asApplied ? asAppliedText(account.label) : `already on ${account.label}`}; ${moves}, so it restarts with it`];
   }
 
   const rows: PlanRow[] = [];
@@ -237,7 +251,8 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
     const base = { seat: seat.session, runtime: seat.runtime, current: describeConfigured(seat.configured), activity: seat.activity,
       ...(seat.lastResult ? { lastResult: seat.lastResult } : {}) };
     if (d.effect !== "change") {
-      rows.push({ ...base, effect: d.effect, ...(d.override ? { override: d.override } : {}), ...(d.notes ? { notes: d.notes } : {}) });
+      rows.push({ ...base, effect: d.effect, ...(d.override ? { override: d.override } : {}), ...(d.notes ? { notes: d.notes } : {}),
+        ...(d.asApplied ? { asApplied: true as const } : {}) });
       continue;
     }
     const verdict = await check(seat);

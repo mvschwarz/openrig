@@ -110,6 +110,9 @@ export interface SeatAssignment {
   applied: { kind: string; label: string; detail: string; at: string; recovery?: string } | null;
   /** The seat's own choice, in words, when it's an override. */
   override?: string;
+  /** Follows only as the apply of this label left its home: its configuration names no login, and the login active in
+   *  that home isn't read, so a later change there isn't seen. */
+  asApplied?: true;
 }
 
 export type SignalSourceClass =

@@ -39,23 +39,26 @@ describe("applying an assignment", () => {
     const report = await applyAssignment(plan(CLAUDE, [
       change("a@fleet"), change("b@fleet"), change("u@fleet"), change("busy@fleet"),
       change("on@fleet", { effect: "unchanged" }),
+      change("held@fleet", { runtime: "codex", effect: "unchanged", asApplied: true }),
       change("own@fleet", { effect: "kept_override", override: 'its own token file /keys/max-1 ("max-1")' }),
       change("bad@fleet", { precheck: { safe: false, reasons: ["credential_outranks_token"], message: "ANTHROPIC_API_KEY wins" } }),
       change("cx@fleet", { runtime: "codex", effect: "not_affected" }),
     ]), CLAUDE, d);
     expect(report.results.map((r) => [r.seat, r.kind])).toEqual([
       ["a@fleet", "switched"], ["b@fleet", "failed_before_effect"], ["u@fleet", "unknown"], ["busy@fleet", "switched"],
-      ["on@fleet", "unchanged"], ["own@fleet", "unchanged"], ["bad@fleet", "failed_before_effect"]]);
+      ["on@fleet", "unchanged"], ["held@fleet", "unchanged"], ["own@fleet", "unchanged"], ["bad@fleet", "failed_before_effect"]]);
     // Each seat that could change went through the switch once; the unsafe one wasn't attempted.
     expect(d.switchSeat.mock.calls.map(([s]) => s)).toEqual(["a@fleet", "b@fleet", "u@fleet", "busy@fleet"]);
     expect(report.results[2]!.recovery).toBe("rig launch fleet dev.u --snapshot-id s1");
-    expect(report.results[5]!.detail).toBe('kept (seat override): its own token file /keys/max-1 ("max-1")');
-    expect(report.results[6]!.detail).toBe("not attempted: its precheck was unsafe (credential_outranks_token): ANTHROPIC_API_KEY wins");
+    expect(report.results[4]!.detail).toBe("already on max-2");
+    expect(report.results[5]!.detail).toBe("still as the apply of max-2 left its home");
+    expect(report.results[6]!.detail).toBe('kept (seat override): its own token file /keys/max-1 ("max-1")');
+    expect(report.results[7]!.detail).toBe("not attempted: its precheck was unsafe (credential_outranks_token): ANTHROPIC_API_KEY wins");
     // The activity is the seat's as it was switched, so a working seat shows it lost work in flight.
     expect(report.results[3]!.activity).toBe("running");
     // Saved as each landed; the reference goes with a switched seat only.
     expect(saved.map((s) => [s.seat, s.applied !== undefined])).toEqual([["a@fleet", true], ["b@fleet", false], ["u@fleet", false],
-      ["busy@fleet", true], ["on@fleet", false], ["own@fleet", false], ["bad@fleet", false]]);
+      ["busy@fleet", true], ["on@fleet", false], ["held@fleet", false], ["own@fleet", false], ["bad@fleet", false]]);
     expect(saved[0]!.applied).toEqual({ file: "/keys/max-2", fileKind: "token", codexHome: null, codexLogin: null });
   });
 

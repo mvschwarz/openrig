@@ -108,12 +108,16 @@ describe("the daemon's assignment plan", () => {
     assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d",
       recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome, codexLogin: "team" } });
     const again = await planFor();
-    expect(again.rows.map((r) => r.effect)).toEqual(["unchanged"]);
+    // Its configuration names no login and the home's active login isn't read: it's unchanged only as the apply left it.
+    expect(again.rows.map((r) => [r.effect, r.asApplied])).toEqual([["unchanged", true]]);
     expect(again.codexHomes).toEqual([]);
-    // The rig's assignment is that login: status says the seat follows it.
+    // Moving it to a prepared home is another move: --account-home plans it as a change.
+    const prepared = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a", accountHome: path.join(dir, "prepared") });
+    expect(prepared.ok && prepared.plan.rows.map((r) => r.effect)).toEqual(["change"]);
+    // The rig's assignment is that login: status says the seat follows it, as the apply left its home.
     assignments.setIntent({ rigId: "rig-fleet", provider: "codex", label: "team", reference: "r", requestedBy: null, at: "t" });
     const model = await service().getReadModel();
-    expect(model.bindings.find((b) => b.seatSession === "c1@fleet")!.assignment).toMatchObject({ state: "follows" });
+    expect(model.bindings.find((b) => b.seatSession === "c1@fleet")!.assignment).toMatchObject({ state: "follows", asApplied: true });
     // A result that switched another home isn't this seat's: its own home would switch.
     assignments.saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team", kind: "switched", detail: "d",
       recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: path.join(dir, "elsewhere"), codexLogin: "team" } });

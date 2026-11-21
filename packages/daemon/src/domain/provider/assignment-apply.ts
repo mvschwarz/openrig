@@ -1,6 +1,6 @@
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
 import type { AppliedReference, AssignmentResultKind } from "./provider-account-assignments.js";
-import type { AssignmentPlan, PlanRow } from "./assignment-plan.js";
+import { asAppliedText, type AssignmentPlan, type PlanRow } from "./assignment-plan.js";
 import type { ProviderSwitchResult } from "./provider-service.js";
 
 // #3625 slice 3: carrying out a plan the person has seen, one seat at a time, through the existing switch only. Each
@@ -91,7 +91,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       for (const r of homeRows.get(home)!) doneOnHome.add(r.seat);
       continue;
     }
-    if (row.effect === "unchanged") { record(row, "unchanged", `already on ${plan.account.label}`); continue; }
+    if (row.effect === "unchanged") { record(row, "unchanged", row.asApplied ? asAppliedText(plan.account.label) : `already on ${plan.account.label}`); continue; }
     if (row.effect === "kept_override") { record(row, "unchanged", `kept (seat override): ${row.override}`); continue; }
     if (row.continuity?.startsWith("unsupported")) { record(row, "unsupported", row.continuity); continue; }
     if (unsafe(row)) { record(row, "failed_before_effect", notAttempted(row)); continue; }
@@ -141,7 +141,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     for (const row of waiting) {
       if (state === "unknown") skipped(row);
       else if (state === "switched") await onSwitchedHome(row);
-      else if (row.effect === "unchanged") record(row, "unchanged", `already on ${plan.account.label}; its home wasn't switched`);
+      else if (row.effect === "unchanged") record(row, "unchanged", `${row.asApplied ? asAppliedText(plan.account.label) : `already on ${plan.account.label}`}; its home wasn't switched`);
       else if (row.effect === "kept_override") record(row, "unchanged", `kept (seat override): ${row.override}`);
       else record(row, "failed_before_effect", unsafe(row) ? notAttempted(row) : `not attempted: ${home} wasn't switched`);
     }

@@ -387,7 +387,8 @@ export class ProviderServiceImpl implements ProviderService {
       if (!intent) return { provider, state: "no_assignment", intended: null, applied };
       const intended = { label: intent.label, reference: intent.reference, requestedBy: intent.requestedBy, at: intent.at };
       const standing = assignmentStanding({ ...facts.get(index)!, running: null, activity: "unknown" }, accountOf(provider, intent.label), intent, resolvedHome);
-      return { provider, state: standing.state, intended, applied, ...(standing.override ? { override: standing.override } : {}) };
+      return { provider, state: standing.state, intended, applied, ...(standing.override ? { override: standing.override } : {}),
+        ...(standing.asApplied ? { asApplied: true as const } : {}) };
     });
   }
 

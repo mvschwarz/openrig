@@ -700,6 +700,7 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     seatRow("c@fleet", { provider: "claude", state: "not_applied", intended, applied: null }),
     seatRow("u@fleet", { provider: "claude", state: "not_applied", intended,
       applied: { kind: "unknown", label: "max-2", detail: "didn't report a resumed conversation", at: "t", recovery: "rig launch fleet dev.u --snapshot-id s1" } }),
+    { ...seatRow("h@fleet", { provider: "codex", state: "follows", intended, applied: switched, asApplied: true }, { source: "default_login", home: "/homes/a", homeNote: "n" }), runtime: "codex" },
     seatRow("e@fleet", { provider: "claude", state: "not_applied", intended, applied: { ...switched, label: "max-1", detail: "Relaunched e@fleet on max-1" } }),
     seatRow("f@fleet", { provider: "claude", state: "not_applied", intended,
       applied: { kind: "failed_before_effect", label: "max-2", detail: "relaunch_no_pane: no pane", at: "t" } }),
@@ -725,6 +726,9 @@ describe("rig provider status shows each seat against its rig's assignment (#362
       `${rig}this seat isn't known to be configured as assigned: its last result is unknown and may have moved it (see its recovery)`,
       "    last applied: unknown (max-2, t): didn't report a resumed conversation",
       "      recovery: rig launch fleet dev.u --snapshot-id s1",
+      "  h@fleet  codex  configured: default login (/homes/a)",
+      "    assignment: rig fleet's codex seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is still as the apply of max-2 left its home",
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
       "  e@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
       `${rig}this seat isn't configured as assigned yet: its last result moved it to max-1, an earlier assignment`,
       "    last applied: switched (max-1, 2026-11-21T08:00:00.000Z): Relaunched e@fleet on max-1",
@@ -760,6 +764,16 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     expect(logs.join("\n")).toContain("Its seats and assignments: rig provider status --host vm-a");
     expect(logs).toContain("SEATS on local (configured account; not proof of the login a running session uses)");
     expect(logs).toContain("    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned");
+  });
+
+  it("the plan words a seat that's unchanged only as an apply left its home, not as already on the account", async () => {
+    const plan = { daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", reference: "the login team saved in /homes/a" }, includeOverrides: false,
+      rows: [{ seat: "h@fleet", runtime: "codex", current: "the login in /homes/a", effect: "unchanged", activity: "idle", asApplied: true },
+        { seat: "r@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "idle" }],
+      codexHomes: [], digest: "0123456789ab", note: "" };
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team"], deps(() => ({ ok: true, plan })));
+    expect(logs).toContain("h@fleet: unchanged: still as the apply of team left its home");
+    expect(logs).toContain("r@fleet: unchanged, already on team");
   });
 
   it("--host doesn't combine with --all-hosts or --hosts, and asks nothing", async () => {
