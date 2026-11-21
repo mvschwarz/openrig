@@ -869,7 +869,8 @@ credential kind correctly.
 
 `rig provider switch` moves one seat. `rig provider assign` moves every seat of one provider in a rig to one
 account, in two steps: a plan that changes nothing, then an apply of exactly that plan. Each seat moves through the
-same switch, so it keeps its conversation the way `rig provider switch` would.
+same switch, so it keeps its conversation the way `rig provider switch` would. The exception is `--account-home`,
+where a fresh successor takes the seat with a handover.
 
 **Accounts.** The daemon knows each account by your label and a reference on its own machine:
 
@@ -890,15 +891,25 @@ rig provider account remove budget --provider claude
 - A label is your name for a reference, not proof of the login a running seat uses.
 
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
-and changes nothing. Here team-dev is running, team-qa is stopped with a saved conversation, and team-review has its
-own token file:
+and changes nothing. In this run, team-dev and team-qa are running on the default login, and team-review has its own
+token file. The paths and the host id are shortened; a digest belongs to its own plan, so yours will differ:
 
 ```text
-Plan 27f91203ba75 on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
-team-dev@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity idle
-team-qa@my-rig: from the login in /home/me/.claude; precheck safe; next launch: the reference is saved now, and the seat's next launch resumes its conversation on it; activity unknown
+Plan 205864aff64d on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
+team-dev@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity unknown
+team-qa@my-rig: from the login in /home/me/.claude; precheck safe; in place: the seat is relaunched in its own pane and keeps its conversation; activity unknown
 team-review@my-rig: kept (seat override): its own token file /home/me/keys/claude-own ("own"); --include-overrides moves it too
-A plan only: nothing was changed. Apply exactly this plan with: rig provider assign my-rig --provider claude --account work --apply --plan 27f91203ba75
+A plan only: nothing was changed. Apply exactly this plan with: rig provider assign my-rig --provider claude --account work --apply --plan 205864aff64d
+```
+
+Applying it in the same run:
+
+```text
+Applied plan 205864aff64d on host-a: rig my-rig's claude seats to work (the token file /home/me/keys/claude-work).
+team-dev@my-rig: switched: Relaunched team-dev@my-rig in its own pane on its own token ("work"), resuming its conversation. Work in flight when it stopped didn't carry over.
+team-qa@my-rig: switched: Relaunched team-qa@my-rig in its own pane on its own token ("work"), resuming its conversation. Work in flight when it stopped didn't carry over.
+team-review@my-rig: unchanged: kept (seat override): its own token file /home/me/keys/claude-own ("own")
+Each result is reported on its own: nothing was rolled back or retried.
 ```
 
 The rows read like this:
@@ -924,10 +935,10 @@ time. Seats move one at a time, and each gets one result:
 | Result | Meaning |
 |---|---|
 | `unchanged` | Already on the account, or kept as an override. |
-| `switched` | Moved to the account and relaunched or restarted on it. |
+| `switched` | Moved to the account. A running seat was relaunched or restarted on it. A stopped Claude seat has the reference saved for its next launch. A Codex seat's move is confirmed at its next tool turn. The detail says when a token hasn't taken effect yet. |
 | `pending-successor` | Moved to the prepared home, where a fresh successor took the seat with a handover. |
 | `unsupported` | Can't move in place here, for example a Codex seat that isn't on Linux. |
-| `failed-before-effect` | Refused or failed before changing anything, including a seat whose precheck was unsafe. |
+| `failed-before-effect` | Refused or failed before changing anything, including a seat whose precheck was unsafe (unless another seat then switched its Codex home: that's `unknown`, with its restart command). |
 | `unknown` | Something may have changed. The result names the command that recovers or checks it. |
 
 - **A failure doesn't stop the others.** Nothing is rolled back or retried.
@@ -938,15 +949,17 @@ time. Seats move one at a time, and each gets one result:
   may be. An apply where every seat was refused leaves the rig's earlier assignment as it was.
 - **The CLI waits about 120 seconds** for each seat that changes or restarts. If it times out, the apply may still be
   running: don't run it again, and read the plan to see each seat's result.
-- **The exit code** is 1 when any seat failed or is unknown.
+- **The exit code** is 1 when any seat's result is `failed-before-effect` or `unknown`. `unchanged` and `unsupported`
+  results leave it at 0.
 
 **Status.** `rig provider status` shows each Claude and Codex seat against its rig's assignment, beside its configured
-account. In `--json` this is `assignment` on each `bindings` row. A seat's state is one of:
+account. In `--json` this is `assignment` on each `bindings` row, and on each `seatAccounts` row when usage windows are on. A seat's state is one of:
 - **follows:** configured as the assigned account, or still as this assignment's apply left it. A Codex seat with no
   login of its own reads "still as the apply of `<label>` left its home". The login active in that home isn't read,
   so a later `rig auth switch` there isn't seen.
 - **override:** configured with its own choice of another account.
-- **not applied:** the rig has an assignment, but the seat isn't on it yet. Its last result says why.
+- **not applied:** the rig has an assignment, but the seat isn't on it yet. Its last result says why; a seat no apply
+  has reached yet has none.
 - **no assignment:** the rig has none for that provider.
 
 "Configured" and "applied" describe what the seat's next launch uses and what an apply reported. They aren't proof of

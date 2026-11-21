@@ -466,8 +466,9 @@ export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunO
     .addHelpText("after", `
 Each Claude and Codex seat whose rig has an assignment (rig provider assign) is shown against it: follows (configured as
 the assigned account, or still as its apply left it), override (its own choice of another account), or not applied yet,
-with its last applied result. In --json this is assignment on each bindings row. Configured and applied are what the
-seat's next launch uses and what an apply reported, not proof of the login a running session uses.`)
+with its last applied result. In --json this is assignment on each bindings row, and on each seatAccounts row when usage
+windows are on. Configured and applied are what the seat's next launch uses and what an apply reported, not proof of the
+login a running session uses.`)
     .option("--json", "Output as parseable JSON")
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
