@@ -301,7 +301,8 @@ export class ProviderServiceImpl implements ProviderService {
       }
       // The label was read before the prechecks were awaited. If it was removed and added again meanwhile naming another
       // reference, the plan's digest is of the earlier one: refuse before any seat changes. Nothing is awaited from here to
-      // the first seat's switch.
+      // the first seat's switch call. A label edited after that leaves the seats on the reference reviewed, which their
+      // results record, so status and the next plan don't read them as on the label's new one.
       const current = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
       if (!current || current.kind !== account.kind || current.file !== account.file || current.codexHome !== account.codexHome || current.login !== account.login) {
         return { ok: false, code: "plan_changed",
