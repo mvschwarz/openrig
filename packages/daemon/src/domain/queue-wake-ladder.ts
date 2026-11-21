@@ -1761,6 +1761,14 @@ async function advancePromptRefusals(
         continue; // the drain holds the owner: no membership update, so the next tick tries this prompt again
       }
     }
+    // An owner-held alert first keyed by its occupant alone records the first prompt whose start reads, with no wake and
+    // its hold untouched, so a later prompt has a start to differ from and wakes the owner once (above).
+    if (row?.state === "blocked" && group.permissionHook?.includes("|prompt:") && !row.tags?.includes(group.permissionHook)
+      && row.tags?.some(t => t.startsWith(permissionPrefix)) && !row.tags.some(t => t.startsWith(permissionPrefix) && t.includes("|prompt:"))) {
+      const tags = [...row.tags, group.permissionHook];
+      deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(tags), row.qitemId);
+      row.tags = tags;
+    }
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = [...keys, ...waiterTags].filter(key => !row.tags?.includes(key));
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.

@@ -783,6 +783,43 @@ it("a request owns every notification after it in its run: a third hook keeps th
   expect(newPromptNotes(id)).toEqual([]);
 });
 
+it("an owner-held alert first keyed by its occupant records the first readable prompt with no wake; the next prompt wakes the owner once", async () => {
+  const { f, repo, lead, woken, tick, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  let readable = false;
+  const flaky = makePermissionPromptReader({ db: f.db, log: () => {},
+    getLatestHook: destination => f.store.getLatestForNode({ sessionName: destination, order: "source" }),
+    getPromptStart: (destination, generation) => {
+      if (!readable) throw new Error("retained events unreadable");
+      return f.store.findPermissionPromptStart({ sessionName: destination, generation });
+    } });
+  const startKey = () => `prompt-episode:${f.name}|permission-hook:${f.generation}`
+    + `|prompt:${f.store.findPermissionPromptStart({ sessionName: f.name, generation: f.generation })}|after:start`;
+  await later(0, "Notification", "permission_prompt");
+  await tick(flaky);
+  const id = alerts()[0]!.qitemId;
+  expect(repo.getById(id)!.tags).toContain(`prompt-episode:${f.name}|permission-hook:${f.generation}|after:start`);
+  expect(woken).toEqual([lead]);
+  repo.update({ qitemId: id, actorSession: lead, state: "blocked", blockedOn: "external:answer" });
+
+  readable = true;
+  await tick(flaky);
+  const first = startKey();
+  expect(repo.getById(id)!.tags).toContain(first);
+  expect(woken).toEqual([lead]); // recorded with no wake
+  expect(newPromptNotes(id)).toEqual([]);
+  expect(repo.getById(id)!.state).toBe("blocked");
+
+  await later(14_000, "Notification", "permission_prompt");
+  await tick(flaky);
+  await tick(flaky);
+  expect(startKey()).not.toBe(first);
+  expect(woken).toEqual([lead, lead]);
+  expect(newPromptNotes(id)).toHaveLength(1);
+  expect(repo.getById(id)!.tags).toEqual(expect.arrayContaining([first, startKey()]));
+  expect(repo.getById(id)!.state).toBe("blocked");
+  expect(repo.list({ limit: 100 })).toHaveLength(1);
+});
+
 it("a prompt whose start is read only after its alert was closed keeps that close; a prompt that starts after the close alerts", async () => {
   const { f, repo, lead, woken, tick, later } = promptEpisodeFixture();
   let readable = false;
