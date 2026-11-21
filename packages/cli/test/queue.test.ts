@@ -645,6 +645,13 @@ describe("rig queue CLI", () => {
       expect(result.detail).not.toMatch(/ladder retries/);
     });
 
+    it("a draft-aware held wake says it's tried again on the seat's next idle report, within the cap (#48)", async () => {
+      const { result } = await verify([{ lastNudgeResult: "retained:draft_aware" }]);
+      expect(result).toMatchObject({ outcome: "retained", nextAction: "rig seat held-messages bob@rig" });
+      expect(result.detail).toContain("tried again when the seat next reports idle while it's still in draft-aware mode");
+      expect(result.detail).not.toContain("not retried automatically");
+    });
+
     it("only a missing wake result waits, up to the bound, then stays still-pending", async () => {
       const { result, reads } = await verify([{}]);
       expect(reads).toBeGreaterThan(1);
