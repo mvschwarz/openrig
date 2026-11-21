@@ -3023,6 +3023,136 @@ describe("GET /api/slices observed queue counts", () => {
       }
     });
 
+    it("does not walk or re-resolve a failed primary root for project readiness when it appears after capture", async () => {
+      const alphaExtra = path.join(root, "alpha-readiness-fallback-extra");
+      const alphaSlicePath = path.join(alphaExtra, "shipping", "slices", "01-extra");
+      write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.EXTRA", "active", "Extra Mission"));
+      write(path.join(alphaSlicePath, "SPEC.md"), nodeBytes("OPR.EXTRA", "active", "Extra Slice"));
+
+      // Case 1: primary root is missing at capture (ready additional root makes isReady() true),
+      // then appears before the walk inside isReady(). Request 1 must fail from the captured
+      // missing state without calling fs.readdirSync on the uncaptured primary root; Request 2
+      // captures the newly created primary root coherently across list and project readiness.
+      const latePrimary = path.join(root, "late-primary-missions");
+      expect(fs.existsSync(latePrimary)).toBe(false);
+      const { app: missingApp, indexer: missingIndexer } = route("alpha", false, latePrimary, [alphaExtra]);
+
+      const origIsReady = missingIndexer.isReady.bind(missingIndexer);
+      let createBeforeWalk = true;
+      const readySpy = vi.spyOn(missingIndexer, "isReady").mockImplementation(() => {
+        if (createBeforeWalk) {
+          createBeforeWalk = false;
+          write(path.join(latePrimary, "late-mission", "SPEC.md"), nodeBytes("M.LATE", "active", "Late Mission"));
+          write(path.join(latePrimary, "late-mission", "mission.yaml"), "metadata:\n  id: M.LATE\n  status: active\n");
+          write(path.join(latePrimary, "late-mission", "slices", "02-late", "SPEC.md"), nodeBytes("OPR.LATE", "active", "Late Slice"));
+        }
+        return origIsReady();
+      });
+      vi.mocked(fs.readdirSync).mockClear();
+      try {
+        const first = await missingApp.request("/api/slices");
+        expect(first.status).toBe(500);
+        const readdirOnLatePrimary = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === latePrimary);
+        expect(readdirOnLatePrimary).toHaveLength(0);
+      } finally {
+        readySpy.mockRestore();
+      }
+
+      const second = await missingApp.request("/api/slices");
+      expect(second.status).toBe(200);
+      const secondBody = await second.json() as {
+        slices: Entry[];
+        missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+      };
+      expect(secondBody.slices.map((s) => s.name)).toContain("02-late");
+      expect(secondBody.missions["late-mission"]?.readiness?.historicalStatus).toBe("active");
+
+      // Case 2: primary `..` root is missing at capture and its symlink appears AFTER list()
+      // (inside missionAuthoredStatuses, right before readinessRoot selection). Request 1 must
+      // still fail from the captured missing state with zero fs.readdirSync calls on the failed
+      // spelling, and Request 2 captures the new target cleanly.
+      const lateDotDotTarget = path.join(root, "late-dotdot-readiness-target");
+      fs.mkdirSync(path.join(lateDotDotTarget, "sub"), { recursive: true });
+      write(path.join(lateDotDotTarget, "missions", "dotdot-mission", "SPEC.md"), nodeBytes("M.DOTDOT", "active", "DotDot Mission"));
+      write(path.join(lateDotDotTarget, "missions", "dotdot-mission", "mission.yaml"), "metadata:\n  id: M.DOTDOT\n  status: active\n");
+      write(
+        path.join(lateDotDotTarget, "missions", "dotdot-mission", "slices", "03-dotdot", "SPEC.md"),
+        nodeBytes("OPR.DOTDOT", "active", "DotDot Slice"),
+      );
+      const lateDotDotLink = path.join(root, "beta", "late-readiness-link");
+      fs.mkdirSync(path.dirname(lateDotDotLink), { recursive: true });
+      const unresolvedDotDotPrimary = `${lateDotDotLink}${path.sep}..${path.sep}missions`;
+      expect(fs.existsSync(unresolvedDotDotPrimary)).toBe(false);
+      const { app: dotDotApp, indexer: dotDotIndexer } = route("alpha", false, unresolvedDotDotPrimary, [alphaExtra]);
+
+      const origAuthored = dotDotIndexer.missionAuthoredStatuses.bind(dotDotIndexer);
+      let linkAfterList = true;
+      const authoredSpy = vi.spyOn(dotDotIndexer, "missionAuthoredStatuses").mockImplementation(() => {
+        if (linkAfterList) {
+          linkAfterList = false;
+          fs.symlinkSync(path.join(lateDotDotTarget, "sub"), lateDotDotLink, "dir");
+        }
+        return origAuthored();
+      });
+      vi.mocked(fs.readdirSync).mockClear();
+      try {
+        const firstDotDot = await dotDotApp.request("/api/slices");
+        expect(firstDotDot.status).toBe(500);
+        const readdirOnUnresolved = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === unresolvedDotDotPrimary);
+        expect(readdirOnUnresolved).toHaveLength(0);
+      } finally {
+        authoredSpy.mockRestore();
+      }
+
+      const secondDotDot = await dotDotApp.request("/api/slices");
+      expect(secondDotDot.status).toBe(200);
+      const secondDotDotBody = await secondDotDot.json() as {
+        slices: Entry[];
+        missions: Record<string, { readiness?: { historicalStatus?: string | null } }>;
+      };
+      expect(secondDotDotBody.slices.map((s) => s.name)).toContain("03-dotdot");
+      expect(secondDotDotBody.missions["dotdot-mission"]?.readiness?.historicalStatus).toBe("active");
+
+      // Case 3: primary root capture fails with EACCES while ready additional root exists, and the
+      // EACCES clears before readiness runs. Request 1 must preserve the captured failure (500)
+      // without walking the primary root via fs.readdirSync.
+      const unreadablePrimary = path.join(root, "unreadable-primary-missions");
+      write(path.join(unreadablePrimary, "perm-mission", "SPEC.md"), nodeBytes("M.PERM", "active", "Perm Mission"));
+      write(path.join(unreadablePrimary, "perm-mission", "mission.yaml"), "metadata:\n  id: M.PERM\n  status: active\n");
+      write(path.join(unreadablePrimary, "perm-mission", "slices", "04-perm", "SPEC.md"), nodeBytes("OPR.PERM", "active", "Perm Slice"));
+      const { app: unreadableApp } = route("alpha", false, unreadablePrimary, [alphaExtra]);
+
+      const origNative = fs.realpathSync.native;
+      let injectOnce = true;
+      const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+        if (injectOnce && String(p) === unreadablePrimary) {
+          injectOnce = false;
+          throw Object.assign(new Error("injected primary capture EACCES"), { code: "EACCES" });
+        }
+        return origNative(p, options as never);
+      }) as typeof fs.realpathSync.native);
+      vi.mocked(fs.readdirSync).mockClear();
+      try {
+        const unreadableRes = await unreadableApp.request("/api/slices");
+        expect(unreadableRes.status).toBe(500);
+        const readdirOnUnreadable = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === unreadablePrimary);
+        expect(readdirOnUnreadable).toHaveLength(0);
+      } finally {
+        realpathSpy.mockRestore();
+      }
+
+      // Case 4 (control): primary root missing at capture and still missing at readiness time keeps
+      // the pre-existing 500 outcome without invoking fs.readdirSync on the failed primary spelling.
+      const stillMissingPrimary = path.join(root, "still-missing-primary-missions");
+      expect(fs.existsSync(stillMissingPrimary)).toBe(false);
+      const { app: stillMissingApp } = route("alpha", false, stillMissingPrimary, [alphaExtra]);
+      vi.mocked(fs.readdirSync).mockClear();
+      const stillMissingRes = await stillMissingApp.request("/api/slices");
+      expect(stillMissingRes.status).toBe(500);
+      const readdirOnStillMissing = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === stillMissingPrimary);
+      expect(readdirOnStillMissing).toHaveLength(0);
+    });
+
     it("keeps captured snapshot roots unchanged in sliceRoots during withResolvedRoots", () => {
       const alphaExtra = path.join(root, "alpha-snapshot-missions");
       const alphaSlicePath = path.join(alphaExtra, "shipping", "slices", "01-release");

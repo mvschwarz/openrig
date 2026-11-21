@@ -79,7 +79,7 @@ function zeroQueueCounts(): SliceQueueCounts {
 
 type PhysicalPathResolution =
   | { ok: true; path: string }
-  | { ok: false; missing: boolean };
+  | { ok: false; missing: boolean; error: unknown };
 
 /** Physical path for queue-count keys. A symlinked root without `..` keeps its alias spelling,
  *  and its target can itself contain `..` after another symlink, so use the native realpath. */
@@ -87,7 +87,7 @@ function resolveCanonicalPhysicalPath(absPath: string): PhysicalPathResolution {
   try {
     return { ok: true, path: fs.realpathSync.native(absPath) };
   } catch (err) {
-    return { ok: false, missing: (err as NodeJS.ErrnoException).code === "ENOENT" };
+    return { ok: false, missing: (err as NodeJS.ErrnoException).code === "ENOENT", error: err };
   }
 }
 
@@ -100,6 +100,7 @@ export type ConfiguredRootResolution = {
   identity: string;
   physicalPath: string | null;
   status: "ok" | "missing" | "unreadable";
+  captureError?: unknown;
 };
 
 /** The absolute identity and physical path of a configured root, used for the walk, the
@@ -111,10 +112,17 @@ export type ConfiguredRootResolution = {
  *  physical path as its identity, while a root without `..` keeps its normalized spelling as
  *  its identity alongside the captured physical path. If resolution fails, its spelling is
  *  retained only as identity metadata while its status marks it missing (`ENOENT`) or
- *  unreadable so walks and route ownership never re-resolve or walk an unresolved root during
- *  the same operation. */
+ *  unreadable so walks, route ownership, and project readiness never re-resolve or walk an
+ *  unresolved root during the same operation. */
 function resolveConfiguredRoot(root: string): ConfiguredRootResolution {
-  if (root.length === 0) return { identity: root, physicalPath: null, status: "missing" };
+  if (root.length === 0) {
+    return {
+      identity: root,
+      physicalPath: null,
+      status: "missing",
+      captureError: Object.assign(new Error("ENOENT: no such file or directory, scandir ''"), { code: "ENOENT" }),
+    };
+  }
   const absolute = path.isAbsolute(root) ? root : process.cwd() + path.sep + root;
   const hasDotDot = absolute.split(/[\\/]+/).includes("..");
   const lookupPath = hasDotDot ? absolute : path.resolve(absolute);
@@ -124,6 +132,7 @@ function resolveConfiguredRoot(root: string): ConfiguredRootResolution {
       identity: lookupPath,
       physicalPath: null,
       status: resolved.missing ? "missing" : "unreadable",
+      captureError: resolved.error,
     };
   }
   return {

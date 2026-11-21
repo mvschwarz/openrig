@@ -173,11 +173,22 @@ export function slicesRoutes(): Hono {
       const primaryRoot = typeof deps.indexer.configuredRootResolutions === "function"
         ? deps.indexer.configuredRootResolutions()[0]
         : undefined;
-      const readinessRoot = primaryRoot?.physicalPath ?? primaryRoot?.identity ?? deps.indexer.slicesRoot;
-      return { listing, slicesRoot: readinessRoot, readPolicy };
+      if (primaryRoot && (primaryRoot.status !== "ok" || primaryRoot.physicalPath === null)) {
+        const fallbackCode = primaryRoot.status === "missing" ? "ENOENT" : "EACCES";
+        const captureError = primaryRoot.captureError ?? Object.assign(
+          new Error(`${fallbackCode}: cannot read primary slices root '${primaryRoot.identity}'`),
+          { code: fallbackCode },
+        );
+        return { listing, slicesRoot: null as string | null, primaryCaptureError: captureError, readPolicy };
+      }
+      const readinessRoot = primaryRoot?.physicalPath ?? deps.indexer.slicesRoot;
+      return { listing, slicesRoot: readinessRoot, primaryCaptureError: undefined as unknown, readPolicy };
     });
     if (operation instanceof Response) return operation;
-    const { listing, slicesRoot, readPolicy } = operation;
+    const { listing, slicesRoot, primaryCaptureError, readPolicy } = operation;
+    if (primaryCaptureError !== undefined || slicesRoot === null) {
+      throw primaryCaptureError ?? new Error("Primary slices root capture failed");
+    }
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
     const readiness = await readProjectReadinessAsync(slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
