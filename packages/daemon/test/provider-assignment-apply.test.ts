@@ -285,6 +285,30 @@ describe("applying an assignment on the daemon", () => {
   });
 });
 
+describe("a label changed while the apply computes its plan again", () => {
+  it("is refused before any seat changes, when it was removed and added again naming another reference meanwhile", async () => {
+    seat("a");
+    const claude = stoppedClaude();
+    const digest = await digestOf("max-2", claude);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const precheck = svc.precheck.bind(svc);
+    const waiting = vi.spyOn(svc, "precheck").mockImplementationOnce(async (...args) => { await gate; return precheck(...args); });
+    const applying = svc.applyAssignment(request("max-2", digest), { claudeSeat: claude });
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledOnce());
+    // While its precheck waits, max-2 is removed and added again naming max-3's file.
+    const refs = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
+    expect(refs.remove("claude", "max-2").ok).toBe(true);
+    expect(refs.add({ provider: "claude", label: "max-2", tokenFile: path.join(dir, "max-3") }).ok).toBe(true);
+    const before = everything();
+    release();
+    expect(await applying).toMatchObject({ ok: false, code: "plan_changed",
+      message: expect.stringMatching(/^The account max-2 names another reference since this apply computed its plan\. Nothing changed\./) });
+    expect(everything()).toBe(before);
+    expect(readClaudeSeatTokenRef(db, "a")).toBeNull();
+  });
+});
+
 describe("POST /api/provider/assignment-apply", () => {
   const app = () => {
     const a = new Hono();

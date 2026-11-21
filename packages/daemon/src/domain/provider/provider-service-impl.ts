@@ -299,6 +299,15 @@ export class ProviderServiceImpl implements ProviderService {
           message: `The plan for rig ${input.rig} changed since plan ${input.digest} was shown (it's ${plan.digest} now): a seat, its account, a precheck or a shared home is different. `
             + `Nothing changed. Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
       }
+      // The label was read before the prechecks were awaited. If it was removed and added again meanwhile naming another
+      // reference, the plan's digest is of the earlier one: refuse before any seat changes. Nothing is awaited from here to
+      // the first seat's switch.
+      const current = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
+      if (!current || current.kind !== account.kind || current.file !== account.file || current.codexHome !== account.codexHome || current.login !== account.login) {
+        return { ok: false, code: "plan_changed",
+          message: `The account ${input.label} ${current ? "names another reference" : "was removed"} since this apply computed its plan. Nothing changed. `
+            + `Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+      }
       const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
       const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
       // The rig's assignment is stored once a seat is on the account or may be: switched, pending successor, unknown, or
