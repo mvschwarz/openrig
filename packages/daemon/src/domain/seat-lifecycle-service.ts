@@ -7,6 +7,7 @@ import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type T
 import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
+import { editSavedStartupText, inspectSavedStartupText, type StartupTextLayer } from "./seat-startup-text.js";
 import type { RigRepository } from "./rig-repository.js";
 import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -2578,6 +2579,28 @@ export class SeatLifecycleService {
   private claimedRoutes(seat: SeatDescriptor, sessionName: string): string {
     return claimedSessionRoutes(seat.rigName, sessionName,
       seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType)) === "external");
+  }
+
+  async setStartupText(input: { seatRef: string; inspect?: boolean; layer: unknown; recipeIndex: unknown; contextIndex: unknown; value: unknown; expectedRevision?: unknown }): Promise<ReturnType<typeof editSavedStartupText> | ReturnType<typeof inspectSavedStartupText> | SeatRefusal | { ok: false; code: string; message: string }> {
+    if (!input.inspect && (!(["rig", "pod", "member"] as unknown[]).includes(input.layer)
+      || !Number.isInteger(input.recipeIndex) || (input.recipeIndex as number) < 0
+      || !Number.isInteger(input.contextIndex) || (input.contextIndex as number) < 0
+      || typeof input.value !== "string" || !input.value
+      || (input.expectedRevision !== undefined && (typeof input.expectedRevision !== "string" || !input.expectedRevision)))) {
+      return { ok: false as const, code: "invalid_startup_text", message: "Supply a layer, two nonnegative action indexes, nonempty text, and an expected revision when applying." };
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(resolved.nodeId)) return guard.lifecycle([resolved.nodeId], () => this.setStartupText(input));
+    if (input.inspect) return inspectSavedStartupText(this.db, resolved.nodeId, resolved.entry.logicalId);
+    const session = this.latestSession(resolved.nodeId);
+    if (session && this.startupOrchestrator?.pendingStartupContext(resolved.nodeId, session.id)) {
+      return { ok: false as const, code: "startup_delivery_pending", message: "Finish the pending startup delivery before changing its saved inputs." };
+    }
+    return editSavedStartupText(this.db, { nodeId: resolved.nodeId, logicalId: resolved.entry.logicalId,
+      layer: input.layer as StartupTextLayer, recipeIndex: input.recipeIndex as number, contextIndex: input.contextIndex as number,
+      value: input.value as string, ...(typeof input.expectedRevision === "string" ? { expectedRevision: input.expectedRevision } : {}) });
   }
 
   private describe(resolved: ResolvedSeat): SeatDescriptor {

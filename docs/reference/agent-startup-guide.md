@@ -511,6 +511,20 @@ Per harness: Claude Code's and Codex's permission choices are in the setup refer
 
 ---
 
+### Replace saved application startup text
+
+Prefer a startup file for guidance that changes regularly: adapters read its current contents when the file is eligible for delivery. An existing seat can also have application-authored `send_text` embedded in its saved startup context and its launch recipe. To replace one such action without starting the seat, first inspect its selectable positions:
+
+```bash
+rig seat set-startup-text dev-impl@my-rig --inspect
+rig seat set-startup-text dev-impl@my-rig --layer member --recipe-index 0 --context-index 2 --text-file ./replacement.txt
+rig seat set-startup-text dev-impl@my-rig --layer member --recipe-index 0 --context-index 2 --text-file ./replacement.txt --expected-revision <revision-from-preview>
+```
+
+The second command previews the old and replacement text. The last applies only if both saved inputs still match the preview revision, then reads back the saved text. It changes only the selected seat's saved context and recipe; it does not relaunch, send to its current conversation, or change identity and queue work. An action's `applies_on` and idempotence still govern delivery. Snapshots already captured retain their own startup text; a later snapshot captures the updated context.
+
+`--inspect` lists matching application actions from the seat's saved context and the rig, pod and member layers of its own recipe. It omits generated identity and other platform actions, and reports unmatched saved actions separately. Actions supplied only by an agent spec or profile on disk, or inherited from a shared rig layer absent from the seat's recipe, cannot be updated with this operation. Maintain their source instead. The two indexes must identify the same action. A pending startup delivery must finish before an update, and a stale revision requires a fresh preview. Inspect the saved text before retrying if the outcome of an apply is unknown.
+
 ## Deterministic Configuration
 
 The AgentSpec and RigSpec allow declaring deterministic environment configuration:

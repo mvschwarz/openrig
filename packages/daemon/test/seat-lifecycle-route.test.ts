@@ -51,6 +51,30 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     });
   }
 
+  it("inspects, previews and replaces selected saved startup text through the seat route", async () => {
+    const { node, sessionName } = seedSeat();
+    const action = { type: "send_text", value: "old", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { pods: [{ id: "dev", members: [{ id: "impl", startup: { files: [], actions: [action] } }] }] } };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), node.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'claude-code')").run(node.id, JSON.stringify([action]));
+    const inspect = await post("set-startup-text", sessionName, { inspect: true });
+    expect(inspect.status).toBe(200);
+    expect(await inspect.json()).toMatchObject({ candidates: [{ layer: "member", recipeIndex: 0, contextIndex: 0, value: "old" }] });
+    const request = { layer: "member", recipeIndex: 0, contextIndex: 0, value: "new" };
+    const preview = await post("set-startup-text", sessionName, request);
+    expect(preview.status).toBe(200);
+    const body = await preview.json() as { revision: string };
+    const applied = await post("set-startup-text", sessionName, { ...request, expectedRevision: body.revision });
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toMatchObject({ preview: false, from: "old", to: "new", recipeText: "new" });
+    expect((await post("set-startup-text", sessionName, { ...request, expectedRevision: body.revision })).status).toBe(409);
+  });
+
+  it("rejects a malformed startup-text request", async () => {
+    const response = await setup.app.request("/api/seat/set-startup-text/dev.impl", { method: "POST", headers: { "Content-Type": "application/json" }, body: "null" });
+    expect(response.status).toBe(400);
+  });
+
   it("set-cwd forwards the requested directory, prefers the transport actor and returns preparation warnings", async () => {
     const result = { ok: true as const, seat: {} as never, from: "/workspace", to: "/workspace/planner",
       changed: true, effect: "next_launch" as const, warnings: ["Existing local guidance was retained"] };

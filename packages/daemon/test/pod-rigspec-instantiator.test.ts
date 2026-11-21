@@ -904,6 +904,38 @@ profiles:
     db.close();
   });
 
+  it("uses an updated member action on a fresh launch from its saved recipe", async () => {
+    const { editSavedStartupText } = await import("../src/domain/seat-startup-text.js");
+    const { db, rigRepo, sessionRegistry, inst, tmux } = setup({ [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl") });
+    try {
+      const spec = makeRigSpec();
+      spec.pods[0]!.members[0]!.startup = { files: [], actions: [{ type: "send_text", value: "old instruction", phase: "after_ready", idempotent: true, appliesOn: ["fresh_start", "restore"] }] };
+      const created = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+      expect(created.ok, JSON.stringify(created)).toBe(true);
+      if (!created.ok) return;
+      const rigId = created.result.rigId;
+      const node = rigRepo.getRig(rigId)!.nodes.find(n => n.logicalId === "dev.impl")!;
+      const actions = JSON.parse((db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id = ?").get(node.id) as { startup_actions_json: string }).startup_actions_json);
+      const contextIndex = actions.findIndex((a: { value: string }) => a.value === "old instruction");
+      const request = { nodeId: node.id, logicalId: node.logicalId, layer: "member" as const, recipeIndex: 0, contextIndex, value: "new instruction" };
+      const preview = editSavedStartupText(db, request);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+      expect(editSavedStartupText(db, { ...request, expectedRevision: preview.revision }).ok).toBe(true);
+      for (const session of sessionRegistry.getSessionsForRig(rigId)) {
+        sessionRegistry.markDetached(session.id);
+        sessionRegistry.clearBinding(session.nodeId);
+      }
+      tmux.startServer = vi.fn(async () => {});
+      tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+      (tmux.sendText as ReturnType<typeof vi.fn>).mockClear();
+      const launched = await inst.launchPersistedFresh(rigId, node.id);
+      expect(launched.status, JSON.stringify(launched)).toBe("launched");
+      expect((tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.some(([, text]) => typeof text === "string" && text.includes("new instruction"))).toBe(true);
+      expect((tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.some(([, text]) => typeof text === "string" && text.includes("old instruction"))).toBe(false);
+    } finally { db.close(); }
+  });
+
   it("injects rig identity context into launched agent startup actions", async () => {
     const { db, inst, tmux } = setup();
     const yaml = RigSpecCodec.serialize(makeRigSpec());
