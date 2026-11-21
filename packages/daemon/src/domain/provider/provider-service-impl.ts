@@ -77,6 +77,11 @@ const switchesByHome = new Map<string, Promise<unknown>>();
 /** #3625: the rigs an assignment is being applied to now. In memory, so a daemon restart can't leave a rig locked. */
 const applying = new Set<string>();
 
+/** A home's path with symlinks resolved, or its absolute path when it can't be resolved. */
+function resolvedHome(home: string): string {
+  try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); }
+}
+
 function oneSwitchPerHome<T>(home: string, run: (waited: boolean) => Promise<T>): Promise<T> {
   let key = home;
   try { key = fs.realpathSync(home); } catch { /* an unresolvable home is keyed by its path */ }
@@ -270,10 +275,13 @@ export class ProviderServiceImpl implements ProviderService {
     try {
       const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
       const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
-      // The rig's assignment is stored once a seat has an effect: an apply where every seat was refused or failed before
-      // effect leaves the rig's earlier assignment as it was, so it doesn't hold the label against removal.
+      // The rig's assignment is stored once a seat is on the account or may be: switched, pending successor, unknown, or
+      // unchanged because it was already on it. An apply where every seat was refused, failed before effect or kept its
+      // own override leaves the rig's earlier assignment as it was, so it doesn't hold that label against removal.
       let stored = false;
-      const tookEffect = (kind: string) => kind === "switched" || kind === "pending_successor" || kind === "unknown";
+      const keptOverride = new Set(plan.rows.filter((r) => r.effect === "kept_override").map((r) => r.seat));
+      const tookEffect = (kind: string, seat: string) => kind === "switched" || kind === "pending_successor" || kind === "unknown"
+        || (kind === "unchanged" && !keptOverride.has(seat));
       const report = await applyAssignment(plan, account, {
         switchSeat: (seat) => this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat),
         restartPeer: async (seat, reason) => {
@@ -287,7 +295,7 @@ export class ProviderServiceImpl implements ProviderService {
         ...(tools.successor ? { successor: tools.successor } : {}),
         activityOf: (seat) => this.activityOf(nodeOf.get(seat)?.nodeId ?? "", seat, nodeOf.get(seat)?.runtime ?? ""),
         save: (result, applied) => {
-          if (!stored && tookEffect(result.kind)) {
+          if (!stored && tookEffect(result.kind, result.seat)) {
             assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
             stored = true;
           }
@@ -345,7 +353,9 @@ export class ProviderServiceImpl implements ProviderService {
       const a = last?.applied;
       const follows = !!a && ((claudeRef !== null && a.file === claudeRef.tokenFile && (a.fileKind === "api-key") === (claudeRef.kind === "api-key"))
         || (ownHome?.source === "account-switch" && a.codexHome === ownHome.home && a.codexLogin === null)
-        || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin));
+        // A saved login is a name within its Codex home: the same name in another home is another login.
+        || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin
+          && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
       return {
         session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
         configured: seatConfigured, claudeRef, ownHome,
@@ -358,7 +368,7 @@ export class ProviderServiceImpl implements ProviderService {
     });
     const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
-      resolveHome: (home) => { try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); } },
+      resolveHome: resolvedHome,
       intent: assignments.intent(rigId, input.provider) },
     // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
     (seat) => input.accountHome && account.provider === "codex"

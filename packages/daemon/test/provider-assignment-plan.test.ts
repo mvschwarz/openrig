@@ -12,6 +12,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
 import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
+import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
 import type { SeatRestart } from "../src/domain/provider/provider-service.js";
 
 // The account-home dry run computes paths under OPENRIG_HOME: a scratch path, never the real one. Set before any import.
@@ -72,6 +73,27 @@ afterEach(() => {
 });
 
 describe("the daemon's assignment plan", () => {
+  it("a Codex seat follows an earlier assignment only when its saved login is that name in that home", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    fs.writeFileSync(path.join(codexHome, "auth-profiles", "next.json"), CONTENT, { mode: 0o600 });
+    refs.add({ provider: "codex", label: "next", codexHome, login: "next" });
+    seat("fleet", "c1", "codex", "c1@fleet");
+    // The seat registry gives c1 the saved login "team" in its Codex home.
+    fs.writeFileSync(path.join(codexHome, "auth-seat-registry.tsv"), "seat\trig\truntime\tcwd\tauth_profile\tupdated_ts\nc1@fleet\tfleet\tcodex\t/w\tteam\t2026-11-21T06:00:00Z\n", { mode: 0o600 });
+    const effectAfter = async (appliedHome: string) => {
+      new ProviderAccountAssignmentsRepository(db).saveResult({ rigId: "rig-fleet", provider: "codex", nodeId: "c1", seat: "c1@fleet", label: "team",
+        kind: "switched", detail: "d", recovery: null, activity: "idle", at: "t", applied: { file: null, fileKind: null, codexHome: appliedHome, codexLogin: "team" } });
+      const planned = await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "next", includeOverrides: false, daemon: "host-a" });
+      return planned.ok ? planned.plan.rows[0]!.effect : planned.message;
+    };
+    // An apply gave it "team" in this home: it follows the assignment, so the next one moves it.
+    expect(await effectAfter(codexHome)).toBe("change");
+    // An apply gave "team" in another home: the seat's "team" here is its own choice, kept as an override.
+    const elsewhere = path.join(dir, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    expect(await effectAfter(elsewhere)).toBe("kept_override");
+  });
+
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);

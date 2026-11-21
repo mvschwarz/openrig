@@ -153,6 +153,25 @@ describe("applying an assignment on the daemon", () => {
     expect(uses.remove("claude", "max-1")).toMatchObject({ ok: true });
   });
 
+  it("applying the account a rig's seats are already on stores it and frees the old label; a kept override alone doesn't", async () => {
+    seat("a");
+    const claude = stoppedClaude();
+    const uses = new ProviderAccountRefsRepository(db, { uses: accountRefUses(db) });
+    expect((await svc.applyAssignment(request("max-1", await digestOf("max-1", claude)), { claudeSeat: claude })).ok).toBe(true);
+    // Moved to max-2 by hand: max-1 is still the rig's assignment, so it can't be removed.
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = 'a'").run(JSON.stringify({ label: "max-2", tokenFile: path.join(dir, "max-2") }));
+    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: false, code: "in_use" });
+    // Applying max-3 with the seat kept as an override moves nothing: max-1 stays assigned.
+    const kept = await svc.applyAssignment(request("max-3", await digestOf("max-3", claude)), { claudeSeat: claude });
+    expect(kept.ok && kept.report.results.map((r) => r.kind)).toEqual(["unchanged"]);
+    expect(uses.remove("claude", "max-3")).toMatchObject({ ok: true });
+    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: false, code: "in_use" });
+    // Applying max-2, which the seat is already on, records it as the rig's assignment, and max-1 is free.
+    const same = await svc.applyAssignment(request("max-2", await digestOf("max-2", claude)), { claudeSeat: claude });
+    expect(same.ok && same.report.results.map((r) => [r.kind, r.detail])).toEqual([["unchanged", "already on max-2"]]);
+    expect(uses.remove("claude", "max-1")).toMatchObject({ ok: true });
+  });
+
   it("a second apply to the same rig while one runs is refused, with nothing changed", async () => {
     seat("a");
     let release!: () => void;
