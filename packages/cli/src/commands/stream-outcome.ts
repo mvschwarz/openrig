@@ -56,10 +56,15 @@ async function intake(client: Get, streamItemId: string) {
     .catch((error: unknown) => ({ status: 0, data: { error: error instanceof Error ? error.message : String(error) } }));
   const record = res.status === 200 && object(res.data) && "intake" in res.data ? res.data.intake : undefined;
   if (record === null) return { stage: "awaiting_intake", summary: "No routing decision is recorded yet." };
+  if (object(record) && record.exact === false) {
+    return { stage: "intake_unknown", summary: "No routing decision is recorded yet, and whether it reached intake couldn't be checked: its id is longer than intake's note keeps, so it can't be told apart from another long id." };
+  }
   if (object(record) && typeof record.qitemId === "string") {
     const where = record.how === "folded" ? `it was added to intake row ${record.qitemId}` : `it opened intake row ${record.qitemId}`;
-    const decision = OPEN.includes(record.state) ? `, which is ${record.state}. No routing decision is recorded yet.`
-      : `, and intake closed that row (${record.state}) without a recorded decision for this item.`;
+    // A handed-off row moved on to a successor that may still decide; only these states end the row.
+    const decision = ["done", "failed", "denied", "canceled"].includes(record.state)
+      ? `, and that row was closed (${record.state}) without a recorded decision for this item.`
+      : `, which is ${record.state}. No routing decision is recorded yet.`;
     return { stage: "in_intake", summary: `It reached intake: ${where}${decision}`,
       intake: { qitemId: record.qitemId, how: record.how, state: record.state } };
   }

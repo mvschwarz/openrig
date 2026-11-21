@@ -1206,6 +1206,24 @@ describe("streamIntakeRecord: where intake recorded an item (rig stream show)", 
     }
   });
 
+  it("matches an id with an emoji, and marks a match on an id the note had to cut as not exact", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    const coordinator = new StreamIntakeCoordinator({ db, eventBus: bus, streamStore, queueRepo, destination: "queue.worker" });
+    coordinator.start();
+    try {
+      const first = streamStore.emit({ sourceSession: source, body: "one" });
+      await new Promise((r) => setTimeout(r, 50));
+      const emoji = streamStore.emit({ streamItemId: "obs-\u{1F98A}-1", sourceSession: source, body: "two" });
+      const long = streamStore.emit({ streamItemId: `obs-${"x".repeat(126)}`, sourceSession: source, body: "three" });
+      await new Promise((r) => setTimeout(r, 50));
+      const row = streamIntakeQitemId(first.streamSortKey);
+      expect(streamIntakeRecord(db, emoji)).toEqual({ qitemId: row, how: "folded", state: "pending" });
+      expect(streamIntakeRecord(db, long)).toEqual({ qitemId: row, how: "folded", state: "pending", exact: false });
+    } finally {
+      coordinator.stop();
+    }
+  });
+
   it("counts only intake's own note for exactly this item", () => {
     const { db, queueRepo } = setup();
     const id = "qitem-stream-intake-0000000000000000";
