@@ -1524,10 +1524,12 @@ function stableJsonKey(value: unknown): string {
 
 // ── OPR.0.5.5.19 A5 — the Claude self-report rung (r3): sessions/<pid>.json ──
 // Claude Code's OWN status registry (since v2.1.139): one JSON file per live process
-// under <configDir>/sessions/, carrying {name: <canonical tmux session name>, status:
-// busy|idle|shell|waiting, statusUpdatedAt, ...}. Self-reported truth, SELF-DATED
-// (statusUpdatedAt) — the research doc's top rung, resolved here by the `name` field
-// (OpenRig's canonical session name; no pane-pid plumbing needed on this path).
+// under <configDir>/sessions/, carrying {name, status: busy|idle|shell|waiting,
+// statusUpdatedAt, ...} and, on the versions seen here, its own `pid`. Self-reported truth,
+// SELF-DATED (statusUpdatedAt) — the research doc's top rung. The seat's file is the one for
+// its verified native PID when the identity reconciler has one (verifiedSelfReportPid);
+// otherwise it's matched by `name`, the conversation title, which OpenRig's launch sets to the
+// seat's session name with `--name` and `/rename` changes.
 // UNDOCUMENTED INTERNAL: any read/parse/shape failure returns null — the ladder falls
 // to the next rung, NEVER errors (SPEC mini-req 2a).
 
@@ -1545,7 +1547,11 @@ const defaultSelfReportRead: ClaudeSelfReportRead = {
 };
 
 /** The seat's verified native Claude PID for the self-report read: only from a verified verdict for this same session.
- *  The identity reconciler re-verifies it every few seconds, so a PID whose process ended or was reused stops being named. */
+ *  It names the last verified process, until the next completed reconciliation. The reconciler polls every 5 s but runs
+ *  one pass at a time, so a slow pass leaves the stored verdict older than that. Until then the reader checks only that
+ *  some process holds the PID (signal 0) and that its `<pid>.json` records the same `pid`; nothing binds the file to the
+ *  process's start. So if the process ended and its number was reused, a surviving old file for that PID still reads as
+ *  the seat's. */
 export function verifiedSelfReportPid(verdict: SeatIdentityVerdict | null | undefined, sessionName: string): number | undefined {
   return verdict?.verdict === "verified" && verdict.sessionName === sessionName ? verdict.evidence.observedPid ?? undefined : undefined;
 }
@@ -1561,7 +1567,7 @@ export function readClaudeSelfReportEvidence(input: {
   sessionName: string;
   seatNodeId: string;
   /** The seat's verified native Claude PID. Its own `<pid>.json` is the seat's, whatever its `name` (the conversation
-   *  title, which `/rename` changes) says, while that process runs. */
+   *  title, which `/rename` changes) says, while a process holds that PID; verifiedSelfReportPid names the limit. */
   pid?: number;
   read?: ClaudeSelfReportRead;
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
