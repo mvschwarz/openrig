@@ -298,6 +298,8 @@ wait expires, check rig ps before deciding what to do next.
             return { status: inspected.ok ? 200 : 500, data: (inspected.data ?? { error: inspected.error }) as Record<string, unknown> };
           }) : undefined;
         const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs });
+        if (result.ok && result.data !== null && typeof result.data === "object" && "status" in result.data
+          && ["partial", "failed"].includes(String(result.data.status))) process.exitCode = 1;
         if (behaviour) result.data = { ...(result.data as Record<string, unknown> | undefined), behaviour };
         if (opts.plan && !result.ok && result.outcomeUnknown) {
           const rest: Record<string, unknown> = { ...result };
@@ -611,6 +613,7 @@ wait expires, check rig ps before deciding what to do next.
       }
 
       if (behaviour) res.data = { ...res.data, behaviour };
+      if (["partial", "failed"].includes(String(res.data["status"]))) process.exitCode = 1;
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));

@@ -19,6 +19,7 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
+import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import { resolvePersistedRestorePosture } from "./permission-policy/persisted-restore-posture.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -78,7 +79,7 @@ export type ReconcileNodeResult =
       attemptId: number;
       from: "failed" | "attention_required";
       to: "operator_recovered";
-      evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" };
+      evidence: import("./runtime-recovery.js").RecoveryEvidence;
     }
   | {
       ok: false;
@@ -92,7 +93,8 @@ export type ReconcileNodeResult =
         | "fg_process_not_runtime"
         | "resume_token_not_used"
         | "pane_not_usable"
-        | "proof_superseded";
+        | "proof_superseded"
+        | import("./runtime-recovery.js").RunnerRecoveryFailureCode;
       detail: string;
       probe?: NativeResumeProbeEvidence;
       attemptId?: number;
@@ -1604,6 +1606,9 @@ export class RestoreOrchestrator {
     // Preserve the snapshot's selected plugins and record the committed session before launch continues.
     const savedStartup = data.nodeStartupContext?.[nodeId];
     const onSessionLaunched = opts?.onSessionLaunched;
+    // #3395: a launch from stored state reports the seat's stored pool block that can't be used, once for every restore
+    // path (resume, fresh, subset and single), read from the live node: a seat recreated after the snapshot launches there.
+    warnings?.push(...storedPoolAdvisories(node.logicalId, this.rigRepo.getNodePool(liveNode?.id ?? nodeId)));
     const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, {
       ...launchOpts,
       // #3253: a restore or resume is a recovery: nothing of the seat runs, so a limit that can't be applied doesn't stop
@@ -2909,8 +2914,14 @@ export class RestoreOrchestrator {
       const continuationTail = claudeLaunch ? [...wrapperTail, ...Array(Math.max(0, 11 - wrapperTail.length)).fill(undefined), claudeLaunch] : wrapperTail;
       const wrappedTail = claudeAutoMode !== undefined ? [...continuationTail, ...Array(Math.max(0, 12 - continuationTail.length)).fill(undefined), claudeAutoMode] : continuationTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      // Keep the reserved generation in its final positional slot even when optional restore inputs are absent.
+      const resumeTail = launchGeneration === undefined ? wrappedTail : [
+        ...wrappedTail,
+        ...Array(Math.max(0, 13 - wrappedTail.length)).fill(undefined),
+        launchGeneration,
+      ];
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch, claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice]));
+        ...(resumeTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch, claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice, occupantGeneration?: string]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;
@@ -3033,6 +3044,7 @@ export class RestoreOrchestrator {
   async reconcileNodeRuntimeTruth(
     rigId: string,
     nodeId: string,
+    adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>,
   ): Promise<ReconcileNodeResult> {
     // Locate the node's latest restore attempt and its outcome there. If the
     // outcome is not failed or attention_required, there is nothing to upgrade.
@@ -3107,73 +3119,89 @@ export class RestoreOrchestrator {
       "SELECT runtime FROM nodes WHERE id = ?"
     ).get(nodeId) as { runtime: string | null } | undefined;
     const runtime = nodeRow?.runtime ?? null;
-    // One exact-lineage check per process, accepting the stored token or the recorded rotation.
-    const identity = await rebindAndVerifyPaneIdentity({
-      db: this.db,
-      sessionRegistry: this.sessionRegistry,
-      tmux: this.tmuxAdapter,
-      nodeId,
-      sessionName,
-      runtime,
-      expectedResumeToken,
-      requireExactResumeLineage: true,
-      resumeRotation: rotation,
-      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
-    });
-    if (!identity.ok) {
-      return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };
-    }
-    const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
-    const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
-    const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
-      target: identity.pane,
-      tmux: this.tmuxAdapter,
-      expectedToken: expectedResumeToken,
-      rotation,
-      requireResume: true,
-      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
-    });
-    const probe = assessNativeResumeProbe({
-      runtime,
-      paneCommand,
-      paneContent,
-      // Headerless readiness requires the same stable foreground/argv proof
-      // as the resume adapter; a token-bearing descendant alone is insufficient.
-      ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
-      ...(runtime === "codex" ? { codexProcessVerified: true } : {}),
-    });
-    const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
-    if (!fgProcess) {
-      return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };
-    }
-
-    // Precondition #4: pane is at a usable/idle state — explicitly NOT a
-    // resume-selection prompt and not the "returned to shell" failure mode.
-    if (probe.status !== "resumed") {
-      const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane);
-      // The label reads as a shell, but the runtime's lineage was just proven in this pane: name a shell only for a proven idle one.
-      if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: identity.pane, tmux: this.tmuxAdapter,
-        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })) {
-        return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: "Pane is not shown to be resumed: its command reads as a shell, but it is not a proven idle shell (the runtime may be starting or showing a dialog); reconciliation requires resumed." };
+    // The same currentness guard applies to native and adapter proofs. Adapters can check it before writing identity.
+    const assertCurrent = () => {
+      const latestAttempt = this.currentRestoreAttempt(rigId, nodeId);
+      const latestBinding = this.db.prepare(
+        "SELECT tmux_session FROM bindings WHERE node_id = ?"
+      ).get(nodeId) as { tmux_session: string | null } | undefined;
+      const latestSession = this.db.prepare(
+        "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
+      return latestAttempt?.attemptId === attemptId && latestBinding?.tmux_session === sessionName
+        && latestSession?.session_name === sessionName && latestSession.resume_token === expectedResumeToken;
+    };
+    const adapter = runtime ? adapters?.[runtime] : undefined;
+    let proof: import("./runtime-recovery.js").RecoveryVerificationResult;
+    if (adapter?.verifyRecovery) {
+      proof = await adapter.verifyRecovery({
+        db: this.db, sessionRegistry: this.sessionRegistry, tmux: this.tmuxAdapter,
+        nodeId, sessionName, expectedResumeToken, resumeType: sessRow.resume_type, rotation, assertCurrent,
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+      });
+    } else {
+      // One exact-lineage check per process, accepting the stored token or the recorded rotation.
+      const identity = await rebindAndVerifyPaneIdentity({
+        db: this.db,
+        sessionRegistry: this.sessionRegistry,
+        tmux: this.tmuxAdapter,
+        nodeId,
+        sessionName,
+        runtime,
+        expectedResumeToken,
+        requireExactResumeLineage: true,
+        resumeRotation: rotation,
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+      });
+      if (!identity.ok) {
+        return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };
       }
-      return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
+      const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
+      const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
+      const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
+        target: identity.pane,
+        tmux: this.tmuxAdapter,
+        expectedToken: expectedResumeToken,
+        rotation,
+        requireResume: true,
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+      });
+      const probe = assessNativeResumeProbe({
+        runtime,
+        paneCommand,
+        paneContent,
+        // Headerless readiness requires the same stable foreground/argv proof
+        // as the resume adapter; a token-bearing descendant alone is insufficient.
+        ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
+        ...(runtime === "codex" ? { codexProcessVerified: true } : {}),
+      });
+      const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
+      if (!fgProcess) {
+        return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };
+      }
+
+      // Precondition #4: pane is at a usable/idle state — explicitly NOT a
+      // resume-selection prompt and not the "returned to shell" failure mode.
+      if (probe.status !== "resumed") {
+        const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane);
+        // The label reads as a shell, but the runtime's lineage was just proven in this pane: name a shell only for a proven idle one.
+        if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: identity.pane, tmux: this.tmuxAdapter,
+          ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })) {
+          return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: "Pane is not shown to be resumed: its command reads as a shell, but it is not a proven idle shell (the runtime may be starting or showing a dialog); reconciliation requires resumed." };
+        }
+        return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
+      }
+      proof = { ok: true, evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" } };
     }
 
     // The checks above awaited native reads. A restore or subset launch recorded since, or a changed binding or expected
-    // token, makes this proof one for an older subject, so it can't settle the current outcome.
-    const latestAttempt = this.currentRestoreAttempt(rigId, nodeId);
-    const latestBinding = this.db.prepare(
-      "SELECT tmux_session FROM bindings WHERE node_id = ?"
-    ).get(nodeId) as { tmux_session: string | null } | undefined;
-    const latestSession = this.db.prepare(
-      "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
-    if (latestAttempt?.attemptId !== attemptId || latestBinding?.tmux_session !== sessionName
-      || latestSession?.session_name !== sessionName || latestSession.resume_token !== expectedResumeToken) {
+    // token, makes this proof one for an older subject, so it can't settle the current outcome. Check before adapter failures too.
+    if (!assertCurrent()) {
       return { ok: false, code: "proof_superseded", attemptId, detail: "A newer restore attempt, binding or resume token was recorded while the live seat was checked, so this proof doesn't settle the current outcome." };
     }
+    if (!proof.ok) return { ...proof, attemptId };
 
-    const evidence = { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" as const };
+    const evidence = proof.evidence;
     // A check that overlapped this one may have settled the attempt already: one receipt is enough.
     const settledMeanwhile = !priorReconciliation && this.db.prepare(
       "SELECT 1 FROM events WHERE rig_id = ? AND node_id = ? AND type = 'restore.outcome_reconciled' AND json_extract(payload, '$.attemptId') = ? LIMIT 1",

@@ -24,7 +24,8 @@ export interface ProcessRow {
 
 export interface CurrentGenerationDeps {
   getPanePid: (sessionTarget: string) => Promise<number | null>;
-  listProcesses: () => Promise<ProcessRow[]>;
+  /** `fresh`: a census begun now, not a reused or in-flight one (ProcessCensus.list); a lister may ignore it. */
+  listProcesses: (opts?: { fresh?: boolean }) => Promise<ProcessRow[]>;
   /** Codex: thread id for a live codex pid (the logs join; async post-F1).
    *  `identity` = the census row's startedAt (pid+start-time reuse guard). */
   readThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
@@ -238,9 +239,23 @@ export async function resolveLiveCodexThreadId(
   const codexPids = findDescendants(processes, panePid, commandBasenameIs("codex"));
   if (codexPids.length === 0) return { ok: false, reason: `no codex process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
+  const readStarts = new Map<number, string | undefined>();
   for (const pid of codexPids) {
-    const threadId = await deps.readThreadIdByPid(pid, processes.find((p) => p.pid === pid)?.startedAt);
-    if (threadId) ids.add(threadId);
+    const startedAt = processes.find((p) => p.pid === pid)?.startedAt;
+    const threadId = await deps.readThreadIdByPid(pid, startedAt);
+    if (threadId) { ids.add(threadId); readStarts.set(pid, startedAt); }
+  }
+  // A process can end, and its PID be reused, while its read awaits (an OS open-file read is the longest). A census begun
+  // after the reads must still give each PID that yielded a thread the start it was read with. Only a lister that honours
+  // `fresh` (the record routes') takes a new census here; a cycle lister returns its one census for the pass. Starts
+  // resolve to the second, so a replacement started in the same second still passes.
+  if (readStarts.size) {
+    const after = await deps.listProcesses({ fresh: true });
+    for (const [pid, startedAt] of readStarts) {
+      if (after.find((p) => p.pid === pid)?.startedAt !== startedAt) {
+        return { ok: false, reason: `a codex process under the live pane of ${sessionTarget} changed while its thread was read` };
+      }
+    }
   }
   if (ids.size === 1) return { ok: true, id: [...ids][0]! };
   if (ids.size > 1) return { ok: false, reason: `multiple codex threads under the live pane of ${sessionTarget}` };
