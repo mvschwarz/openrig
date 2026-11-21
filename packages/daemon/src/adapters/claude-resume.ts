@@ -13,7 +13,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
-import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -214,7 +214,8 @@ export class ClaudeResumeAdapter {
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
     }));
-    return result.ok ? { ...result, appliedLaunch, ...(tokenWarnings.length ? { warnings: tokenWarnings } : {}) } : result;
+    const warnings = result.ok ? [...tokenWarnings, ...(result.warnings ?? [])] : [];
+    return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
   }
 
   private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
@@ -254,7 +255,9 @@ export class ClaudeResumeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
+      // Claude's process alone, with nothing of its screen drawn yet, doesn't end the wait: a dialog Claude opens first
+      // (its trust dialog in a moved folder) is drawn after the process starts. It stands only when the wait runs out.
+      if (probe.status === "resumed" && probe.basis !== "process") {
         return { ok: true };
       }
 
@@ -278,7 +281,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "attention_required", message: finalProbe.detail, evidence: finalContent.split("\n").slice(-12).join("\n") };
     }
     if (finalProbe.status === "resumed") {
-      return { ok: true };
+      return finalProbe.basis === "process" ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
 
     // The exact --resume identity is stronger evidence than a pane command or
