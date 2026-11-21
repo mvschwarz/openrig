@@ -1336,6 +1336,41 @@ describe("supported seat and queue integration", () => {
     expect(typedInto(f, "a")).toEqual([]);
   });
 
+  it("an owed notice behind more than a page of capped ones is still reached and sent once; the capped ones keep their evidence", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" });
+    const item = await heldPastWindow(f);
+    const { runWakeLadderTick } = await import("../src/domain/queue-wake-ladder.js");
+    const { lastMeaningfulTransition } = await import("../src/domain/queue-waiting.js");
+    const tickWith = (repo: QueueRepository) => runWakeLadderTick({ db: f.db, queueRepo: repo, retryCap: 3, retryIntervalSeconds: 0,
+      unconfirmedWindowMinutes: 30, resolveOrchestrator: () => "orch@test", attemptWake: async () => "verified" });
+    // The owed notice: staged at the owner's rung by a daemon that stopped before it could send.
+    const stopped = new QueueRepository(f.db, new EventBus(f.db), { loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    stopped.attachOutbox(f.outbox);
+    await toRung(f, item.qitemId, () => tickWith(stopped));
+    const [owed] = f.repo.listOwedHeldSenderNotices();
+    expect(owed).toMatchObject({ qitemId: item.qitemId, state: "pending" });
+    // Ahead of it, 51 older notices whose rows are still held in their episode and whose tries reached the cap (3).
+    const ladder = f.repo.listTransitions(item.qitemId).find(t => t.transitionNote?.startsWith("escalation-rung:"))!.actorSession;
+    const { ts_dispatched } = f.db.prepare("SELECT ts_dispatched FROM outbox_entries WHERE outbox_id = ?").get(owed!.outboxId) as { ts_dispatched: string };
+    const older = new Date(Date.parse(ts_dispatched) - 60_000).toISOString();
+    const capped: string[] = [];
+    for (let i = 0; i < 51; i++) {
+      const row = await f.repo.create({ sourceSession: item.sourceSession, destinationSession: item.destinationSession, body: `older work ${i}`, nudge: false });
+      f.db.prepare("UPDATE queue_items SET last_nudge_result = 'retained:typing_guard' WHERE qitem_id = ?").run(row.qitemId);
+      const id = f.repo.stageHeldSenderNotice(row.qitemId, lastMeaningfulTransition(f.db, row.qitemId)!.id, item.sourceSession, "older notice")!;
+      f.db.prepare("UPDATE outbox_entries SET delivery_state = 'failed', ts_dispatched = ? WHERE outbox_id = ?").run(older, id);
+      for (let n = 0; n < 3; n++) f.repo.transitionLog.append({ qitemId: row.qitemId, state: "pending", actorSession: ladder,
+        transitionNote: `held-sender-notice: ${item.sourceSession} outcome=failed:session_missing` });
+      capped.push(id);
+    }
+    expect(f.repo.listOwedHeldSenderNotices().map(o => o.outboxId)).not.toContain(owed!.outboxId);
+    await tickWith(f.repo); await tickWith(f.repo); await tickWith(f.repo);
+    expect(toldOf(f, item.qitemId)).toHaveLength(1);
+    expect(notes(f, item.qitemId, `held-sender-notice: ${item.sourceSession} outcome=`)).toHaveLength(1);
+    expect(capped.map(id => f.outbox.getById(id)!.deliveryState)).toEqual(capped.map(() => "failed"));
+    expect(f.submissions.filter(s => s.includes("older notice"))).toEqual([]);
+  });
+
   it("rechecks queue applicability before paste", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });

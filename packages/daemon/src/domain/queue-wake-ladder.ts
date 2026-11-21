@@ -60,7 +60,7 @@ import { runSyncSite } from "./sync-site-wrap.js";
 // (escalation view + daemon-health) and exhausts as before.
 
 import type Database from "better-sqlite3";
-import type { QueueItem, QueueRepository } from "./queue-repository.js";
+import type { OwedNoticeCursor, QueueItem, QueueRepository } from "./queue-repository.js";
 import { deriveUsageLimitPools, type UsageLimitPool } from "./provider/provider-signals.js";
 import type { FourBlockReadModel } from "./provider/provider-types.js";
 import {
@@ -662,7 +662,7 @@ async function sendHeldSenderNotice(deps: WakeLadderDeps, row: QueueItem, notice
  *  interval, up to the retry cap; delivered, uncertain or held ones are never sent again, and one whose sender's rig is
  *  draining waits. A notice whose row moved on is retired with why. */
 async function deliverOwedSenderNotices(deps: WakeLadderDeps, now: Date, intervalS: number, cap: number): Promise<void> {
-  for (const owed of deps.queueRepo.listOwedHeldSenderNotices()) {
+  for (const owed of nextOwedNoticePage(deps)) {
     const row = owed.qitemId ? deps.queueRepo.getById(owed.qitemId) : null;
     const episode = row ? lastMeaningfulTransition(deps.db, row.qitemId)?.id ?? 0 : 0;
     if (!row || row.state !== "pending" || readWakeOutcome(row.lastNudgeResult)?.fact !== "held"
@@ -682,6 +682,21 @@ async function deliverOwedSenderNotices(deps: WakeLadderDeps, now: Date, interva
     const outcome = await deps.queueRepo.deliverHeldSenderNotice(owed.outboxId);
     if (!outcome.startsWith("skipped:")) appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${owed.sender} outcome=${outcome}`, true);
   }
+}
+
+/** #48: the owed-notice pass looks at one bounded page per tick, starting where the last tick's page ended and going back
+ *  to the oldest after a short page. Notices that can't go now (capped, a draining sender) keep their place and their
+ *  evidence, and the notices after them are still reached. */
+const OWED_NOTICE_PAGE = 50;
+const owedNoticeCursors = new WeakMap<Database.Database, OwedNoticeCursor>();
+
+function nextOwedNoticePage(deps: WakeLadderDeps): ReturnType<QueueRepository["listOwedHeldSenderNotices"]> {
+  const after = owedNoticeCursors.get(deps.db);
+  let page = deps.queueRepo.listOwedHeldSenderNotices(OWED_NOTICE_PAGE, after);
+  if (after && page.length === 0) page = deps.queueRepo.listOwedHeldSenderNotices(OWED_NOTICE_PAGE);
+  if (page.length < OWED_NOTICE_PAGE) owedNoticeCursors.delete(deps.db);
+  else owedNoticeCursors.set(deps.db, page[page.length - 1]!.cursor);
+  return page;
 }
 
 function minutesSince(ts: number | string | null | undefined, now: Date): number {

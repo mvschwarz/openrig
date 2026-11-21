@@ -52,6 +52,9 @@ export {
 
 export type HumanIntent = "decision" | "update";
 
+/** #48: where a page of owed sender notices ended, in the selector's order. */
+export interface OwedNoticeCursor { ts: string; rowid: number }
+
 export const MC_OPERATION_TAG_PREFIX = "mc-operation:" as const;
 
 export function mcOperationTag(operation: string): string {
@@ -2366,12 +2369,19 @@ export class QueueRepository {
   }
 
   /** #48: recorded sender notices still owed (never tried, or definitely not written), oldest first. */
-  listOwedHeldSenderNotices(limit = 50): Array<{ outboxId: string; sender: string; qitemId: string | null; state: "pending" | "failed" }> {
+  listOwedHeldSenderNotices(limit = 50, after?: OwedNoticeCursor): Array<{ outboxId: string; sender: string; qitemId: string | null;
+    state: "pending" | "failed"; cursor: OwedNoticeCursor }> {
     if (!this.outbox) return [];
-    return (this.db.prepare(`SELECT outbox_id, destination_session, audit_pointer, delivery_state FROM outbox_entries
-      WHERE substr(outbox_id, 1, ?) = ? AND delivery_state IN ('pending','failed') ORDER BY ts_dispatched, rowid LIMIT ?`)
-      .all(HELD_SENDER_NOTICE_PREFIX.length, HELD_SENDER_NOTICE_PREFIX, limit) as Array<{ outbox_id: string; destination_session: string; audit_pointer: string | null; delivery_state: "pending" | "failed" }>)
-      .map((row) => ({ outboxId: row.outbox_id, sender: row.destination_session, qitemId: row.audit_pointer, state: row.delivery_state }));
+    // A page starts after `after` in the same order, so a caller can go past entries it can't act on yet.
+    const ts = after?.ts ?? null;
+    return (this.db.prepare(`SELECT rowid, outbox_id, destination_session, audit_pointer, delivery_state, ts_dispatched FROM outbox_entries
+      WHERE substr(outbox_id, 1, ?) = ? AND delivery_state IN ('pending','failed')
+        AND (? IS NULL OR ts_dispatched > ? OR (ts_dispatched = ? AND rowid > ?))
+      ORDER BY ts_dispatched, rowid LIMIT ?`)
+      .all(HELD_SENDER_NOTICE_PREFIX.length, HELD_SENDER_NOTICE_PREFIX, ts, ts, ts, after?.rowid ?? 0, limit) as Array<{ rowid: number;
+        outbox_id: string; destination_session: string; audit_pointer: string | null; delivery_state: "pending" | "failed"; ts_dispatched: string }>)
+      .map((row) => ({ outboxId: row.outbox_id, sender: row.destination_session, qitemId: row.audit_pointer, state: row.delivery_state,
+        cursor: { ts: row.ts_dispatched, rowid: row.rowid } }));
   }
 
   /** #48: a recorded sender notice whose row is no longer held in that episode isn't sent; it's retired with the reason. */
