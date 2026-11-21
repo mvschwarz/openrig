@@ -1,6 +1,7 @@
 import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
 import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { ClaudeCodeAdapter, replaceClaudeFragment } from "../src/adapters/claude-code-adapter.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import { startPiRecoveryServer, type RunnerRecoveryReply } from "../src/adapters/pi-recovery-rpc.js";
 import type { PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
@@ -136,6 +137,7 @@ describe("RestoreOrchestrator", () => {
 
   function createOrchestrator(opts?: {
     seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"];
+    resolveClaudeFragments?: RestoreOrchestratorDeps["resolveClaudeFragments"];
     tmux?: TmuxAdapter;
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
@@ -157,9 +159,51 @@ describe("RestoreOrchestrator", () => {
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
       seatSkillSelection: opts?.seatSkillSelection,
+      resolveClaudeFragments: opts?.resolveClaudeFragments,
       harnessNotStartedNotice: opts?.harnessNotStartedNotice,
     });
   }
+
+  it.each([false, true])("Claude restores the same conversation after fragment refresh (source invalid=%s)", async invalid => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-claude-fragments-"));
+    try {
+      const target = path.join(cwd, ".mcp.json");
+      const source = path.join(cwd, "fragment.json");
+      const previous = '{ "owner_value": "kept" }\n';
+      fs.writeFileSync(target, previous);
+      fs.writeFileSync(source, invalid ? "[]" : '{"mcpServers":{"spec-mcp":{"command":"fixture"}}}');
+      const snapshot = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd }],
+        edges: [], resumeType: "claude_id", resumeToken: "same-conversation",
+      });
+      const tmux = mockTmux();
+      const claude = mockClaudeResume();
+      const adapter = new ClaudeCodeAdapter({
+        tmux, fsOps: {
+          readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync, replaceFragment: replaceClaudeFragment,
+          exists: fs.existsSync, mkdirp: dir => fs.mkdirSync(dir, { recursive: true }), copyFile: fs.copyFileSync,
+        },
+      });
+      const result = await createOrchestrator({
+        tmux, claude, listProcesses: nativeLineage("claude-code", "same-conversation"),
+        resolveClaudeFragments: async () => ({ ok: true, entries: [{
+          category: "runtime_resource", resourceType: "claude_mcp_fragment", onRestore: "follow_source",
+          effectiveId: "spec-mcp", sourceSpec: "fixture", sourcePath: cwd, resourcePath: "fragment.json", absolutePath: source,
+          classification: "safe_projection",
+        }] }),
+      }).restore(snapshot.id, { adapters: { "claude-code": adapter } });
+      expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "resumed" }] } });
+      expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "same-conversation"]);
+      if (invalid) {
+        expect(fs.readFileSync(target, "utf8")).toBe(previous);
+        expect(result.ok && result.result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("a source was not a readable JSON object")]));
+      } else {
+        expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({
+          owner_value: "kept", mcpServers: { "spec-mcp": { command: "fixture" } },
+        });
+      }
+    } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  });
 
   it.each(["follow", "saved", "removed", "edited-catalog", "unavailable-spec", "delivery-failure"] as const)(
     "Codex restore delivers the current catalog only for following seats: %s", async (mode) => {

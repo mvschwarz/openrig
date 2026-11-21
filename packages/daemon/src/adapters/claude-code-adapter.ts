@@ -16,7 +16,7 @@ import type {
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
-import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
+import { isClaudeFragmentEntry, type ClaudeFragmentEntry, type ProjectionPlan, type ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
@@ -26,7 +26,8 @@ import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/m
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
-import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
+import { isOwnedCollectorCommand, removeOwnedClaudeSettings, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
+import { type ClaudeJsonFragmentType } from "../domain/types.js";
 import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import { insideMissingFolder, isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
@@ -41,6 +42,8 @@ import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeat
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
   writeFile(path: string, content: string): void;
+  /** Compare the observed target before replacing its bytes on the managed refresh path. */
+  replaceFragment?(path: string, content: string, previous: string | null, cwd: string): void;
   exists(path: string): boolean;
   mkdirp(path: string): void;
   copyFile(src: string, dest: string): void;
@@ -135,6 +138,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** P20 — called after a projected file is written to a target, so the manifest
    *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
   private recordProjection: (targetPath: string, content: string) => void;
+  private readProjectionHash: (targetPath: string) => string | null;
   /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
   private managedBlockRecords: ManagedBlockRecords | undefined;
 
@@ -168,6 +172,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
      *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
     recordProjection?: (targetPath: string, content: string) => void;
+    readProjectionHash?: (targetPath: string) => string | null;
     /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
      *  plain merge, as before. */
     managedBlockRecords?: ManagedBlockRecords;
@@ -190,6 +195,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
+    this.readProjectionHash = deps.readProjectionHash ?? (() => null);
     this.managedBlockRecords = deps.managedBlockRecords;
   }
 
@@ -209,6 +215,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const warnings: string[] = [];
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
+    const followedTypes = new Set(plan.entries.filter(isClaudeFragmentEntry)
+      .filter(entry => plan.protectClaudeFragments || entry.onRestore === "follow_source").map(entry => entry.resourceType));
+    const following: ClaudeFragmentEntry[] = [];
 
     for (const entry of plan.entries) {
       try {
@@ -220,6 +229,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           skipped.push(entry.effectiveId);
           continue;
         }
+        if (isClaudeFragmentEntry(entry) && followedTypes.has(entry.resourceType)) {
+          following.push(entry);
+          continue;
+        }
         const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused);
         if (didProject) {
           projected.push(entry.effectiveId);
@@ -229,6 +242,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       } catch (err) {
         failed.push({ effectiveId: entry.effectiveId, error: (err as Error).message });
       }
+    }
+    if (following.length > 0) {
+      const refresh = this.refreshRuntimeFragments(following, binding);
+      projected.push(...refresh.projected);
+      skipped.push(...refresh.skipped);
+      warnings.push(...(refresh.warnings ?? []));
     }
 
     // Activity-hook reconciliation is driven from this ALWAYS-RUN seam (not a
@@ -265,6 +284,84 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
+  }
+
+  /** Stage every fragment for a target before writing it once. A source that fails must not leave a partial merge. */
+  refreshRuntimeFragments(entries: ClaudeFragmentEntry[], binding: NodeBinding): ProjectionResult {
+    const projected: string[] = [];
+    const skipped: string[] = [];
+    const warnings: string[] = [];
+    for (const type of ["claude_mcp_fragment", "claude_settings_fragment"] as const) {
+      const group = entries.filter(entry => entry.resourceType === type);
+      if (group.length === 0) continue;
+      const ids = group.map(entry => entry.effectiveId);
+      const target = claudeFragmentTarget(binding.cwd, type);
+      const keep = (why: string) => {
+        skipped.push(...ids);
+        warnings.push(`Claude fragments ${ids.join(", ")} were skipped for ${target}: ${why}. The file was left intact.`);
+      };
+      if (insideMissingFolder(target, binding.cwd, this.folderPresent)) {
+        keep("the seat's working folder is missing");
+        continue;
+      }
+      let fragments: Record<string, unknown>[];
+      try {
+        fragments = group.map(entry => this.readJsonObjectStrict(entry.absolutePath));
+      } catch {
+        keep("a source was not a readable JSON object");
+        continue;
+      }
+      let previous: string | null;
+      let existing: Record<string, unknown>;
+      try {
+        previous = this.fs.exists(target) ? this.fs.readFile(target) : null;
+        const parsed: unknown = previous?.trim() ? JSON.parse(previous) : {};
+        if (!isPlainObject(parsed)) throw new Error("Invalid target");
+        existing = parsed;
+      } catch {
+        keep("the target was not a readable JSON object");
+        continue;
+      }
+      const merged = fragments.reduce(mergeJsonObjects, existing);
+      const before = fragmentRecordContent(type, existing);
+      const after = fragmentRecordContent(type, merged);
+      let lastHash: string | null;
+      try {
+        lastHash = this.readProjectionHash(target);
+      } catch {
+        keep("the last projection record couldn't be read");
+        continue;
+      }
+      const needsWrite = before !== after || previous === null;
+      const edited = lastHash !== null && (previous === null || lastHash !== hashContent(before));
+      if (!needsWrite && edited) {
+        // The fragment already matches. Keep the earlier record so this edit still protects a later update.
+        projected.push(...ids);
+        continue;
+      }
+      if (edited) {
+        keep("local edits differ from the last OpenRig projection");
+        continue;
+      }
+      if (lastHash === null && !keepsExistingJson(existing, merged)) {
+        keep("OpenRig has no write record and the refresh would replace existing values");
+        continue;
+      }
+      try {
+        if (needsWrite) {
+          this.fs.mkdirp(nodePath.dirname(target));
+          const content = JSON.stringify(merged, null, 2);
+          if (this.fs.replaceFragment) this.fs.replaceFragment(target, content, previous, binding.cwd);
+          else this.fs.writeFile(target, content);
+        }
+      } catch {
+        keep("the replacement file couldn't be written safely");
+        continue;
+      }
+      projected.push(...ids);
+      this.recordFragmentProjection(target, after, warnings);
+    }
+    return { projected, skipped, failed: [], ...(warnings.length ? { warnings } : {}) };
   }
 
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding, sendInteractiveText?: (text: string) => Promise<void>): Promise<StartupDeliveryResult> {
@@ -1101,9 +1198,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[]): boolean | "skipped" {
     switch (entry.resourceType) {
       case "claude_settings_fragment":
-        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"), warnings) || "skipped";
       case "claude_mcp_fragment":
-        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"), warnings) || "skipped";
+        return this.mergeJsonFragment(entry.absolutePath, claudeFragmentTarget(cwd, entry.resourceType), entry.resourceType, warnings) || "skipped";
       case "claude_activity_hooks":
         // Handled (no generic .claude/extensions copy): the relay asset is
         // delivered + the settings hooks reconciled by reconcileClaudeActivityHooks
@@ -1117,7 +1213,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** Merge a JSON fragment into a project file. An existing target that can't be read, or isn't a JSON object (it
    *  doesn't parse, or it holds an array or a single value), belongs to its owner: it's left as it is, nothing is
    *  merged, and a warning says so. Returns whether the fragment was applied. */
-  private mergeJsonFragment(sourcePath: string, targetPath: string, warnings: string[]): boolean {
+  private mergeJsonFragment(sourcePath: string, targetPath: string, type: ClaudeJsonFragmentType, warnings: string[]): boolean {
     const fragment = this.readJsonObjectStrict(sourcePath);
     // The reasons are fixed text: a parser message can quote the file's content.
     const leave = (reason: string) => {
@@ -1140,7 +1236,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const merged = mergeJsonObjects(existing, fragment);
     this.fs.mkdirp(nodePath.dirname(targetPath));
     this.fs.writeFile(targetPath, JSON.stringify(merged, null, 2));
+    this.recordFragmentProjection(targetPath, fragmentRecordContent(type, merged), warnings);
     return true;
+  }
+
+  private recordFragmentProjection(target: string, content: string, warnings: string[]): void {
+    try { this.recordProjection(target, content); }
+    catch { warnings.push(`Claude fragments for ${target}: OpenRig couldn't save the projection record for the next refresh.`); }
   }
 
   /**
@@ -1480,6 +1582,58 @@ interface ActivityHookOutcome {
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function claudeFragmentTarget(cwd: string, type: ClaudeJsonFragmentType): string {
+  return nodePath.resolve(cwd, type === "claude_mcp_fragment" ? ".mcp.json" : ".claude/settings.local.json");
+}
+
+/** Leave the old bytes intact if preparing the replacement fails or the target changed while we prepared it. */
+export function replaceClaudeFragment(path: string, content: string, previous: string | null, cwd: string): void {
+  const directory = fs.realpathSync.native(nodePath.dirname(path));
+  const relative = nodePath.relative(fs.realpathSync.native(cwd), directory);
+  if (relative === ".." || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+    throw new Error("Fragment target is outside the seat's working folder");
+  }
+  const target = nodePath.join(directory, nodePath.basename(path));
+  const previousFile = fs.lstatSync(target, { throwIfNoEntry: false });
+  if (previousFile && (!previousFile.isFile() || previousFile.nlink !== 1)) throw new Error("Fragment target is not a private regular file");
+  const temporary = nodePath.join(directory, `.openrig-fragment-${randomUUID()}`);
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    try {
+      fs.writeFileSync(fd, content, "utf8");
+      if (previousFile) fs.fchmodSync(fd, previousFile.mode & 0o777);
+    } finally { fs.closeSync(fd); }
+    const current = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (previousFile?.dev !== current?.dev || previousFile?.ino !== current?.ino
+        || (current ? fs.readFileSync(target, "utf8") : null) !== previous) {
+      throw new Error("Fragment target changed before replacement");
+    }
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    try { fs.rmSync(temporary, { force: true }); } catch { /* The original error explains why the refresh failed. */ }
+    throw error;
+  }
+}
+
+/** These settings are reconciled by launch and removed by down, independently of fragment projection. */
+function fragmentRecordContent(type: ClaudeJsonFragmentType, value: Record<string, unknown>): string {
+  const content = type === "claude_settings_fragment" ? structuredClone(value) : value;
+  if (type === "claude_settings_fragment") removeOwnedClaudeSettings(content);
+  return JSON.stringify(content, (_key, item: unknown) =>
+    isPlainObject(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+}
+
+/** With no recorded projection, only add values. An overlapping value is the user's until proven otherwise. */
+function keepsExistingJson(existing: unknown, next: unknown): boolean {
+  if (isPlainObject(existing) && isPlainObject(next)) {
+    return Object.entries(existing).every(([key, value]) => Object.hasOwn(next, key) && keepsExistingJson(value, next[key]));
+  }
+  if (Array.isArray(existing) && Array.isArray(next)) {
+    return existing.length <= next.length && existing.every((value, index) => keepsExistingJson(value, next[index]));
+  }
+  return Object.is(existing, next);
 }
 
 function mergeJsonObjects(base: Record<string, unknown>, fragment: Record<string, unknown>): Record<string, unknown> {

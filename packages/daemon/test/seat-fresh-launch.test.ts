@@ -6,7 +6,7 @@ import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src
 import { reconcileSkillLoadout, resolvePluginSkills } from "../src/domain/skill-catalog.js";
 import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -19,7 +19,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import { Reconciler } from "../src/domain/reconciler.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
-import type { ProjectionPlan } from "../src/domain/projection-planner.js";
+import type { ProjectionPlan, ResolveClaudeFragments } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { normalizeStartupBlock } from "../src/domain/startup-validation.js";
 import { deriveOriented } from "../src/domain/startup-proof.js";
@@ -64,6 +64,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let listProcesses: NativeProcessLister;
   let readProcesses: () => Promise<ProcessTableRow[]>;
   let hiddenPids: number[];
+  let resolveClaudeFragments: ResolveClaudeFragments | undefined;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -78,6 +79,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     launchOpts = null;
     harnessResult = { ok: true, resumeToken: "fresh-native-uuid", resumeType: "claude_session_id" };
     paneCommand = "claude";
+    resolveClaudeFragments = undefined;
     tmux = {
       createSession: vi.fn(async (name: string) => {
         if (alive.has(name)) return { ok: false as const, code: "duplicate_session", message: "duplicate" };
@@ -130,6 +132,8 @@ describe("SeatLifecycleService.launchFresh", () => {
       eventBus,
       tmuxAdapter: tmux,
       sleep: async () => undefined,
+      resolveClaudeFragments: async (rigId, nodeId) => resolveClaudeFragments?.(rigId, nodeId)
+        ?? { ok: false, reason: "no fixture recipe", missingRecipe: true },
     });
     invalidations = [];
     activitySwaps = [];
@@ -157,6 +161,52 @@ describe("SeatLifecycleService.launchFresh", () => {
   });
 
   afterEach(() => db.close());
+
+  it.each([false, true])("loads today's Claude fragment selection on a fresh launch (restore opt-in=%s)", async follows => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-claude-fragments-"));
+    try {
+      const seat = seedSeat({ clean: true });
+      const { podInstantiator } = createTestApp(db, {
+        podInstantiatorFsOps: { exists: fs.existsSync, readFile: file => fs.readFileSync(file, "utf8") },
+      });
+      resolveClaudeFragments = podInstantiator.seatClaudeFragments;
+      const recipe = { version: 1, rigRoot: root, rigSpec: { version: "0.2", name: seat.rig.name, edges: [],
+        pods: [{ id: "dev", label: "Development", edges: [], members: [
+          { id: "impl", agentRef: "local:.", profile: "default", runtime: "claude-code", cwd: "." },
+        ] }],
+      } };
+      db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), seat.node.id);
+      fs.writeFileSync(path.join(root, "today.json"), "{}");
+      fs.writeFileSync(path.join(root, "agent.yaml"), `name: impl
+version: "1.0"
+resources:
+  runtime_resources:
+    - id: today
+      path: today.json
+      runtime: claude-code
+      type: claude_mcp_fragment
+${follows ? "      on_restore: follow_source\n" : ""}profiles:
+  default:
+    uses:
+      runtime_resources: [today]
+`);
+      const saved = [
+        startupEntry("guidance", "live-guidance"),
+        { ...startupEntry("guidance", "yesterday"), category: "runtime_resource", resourceType: "claude_mcp_fragment" },
+      ];
+      db.prepare("UPDATE node_startup_context SET projection_entries_json = ? WHERE node_id = ?")
+        .run(JSON.stringify(saved), seat.node.id);
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "apply changed fragment selection" });
+      expect(result.ok).toBe(true);
+      expect(projectedPlan?.entries.map(entry => entry.effectiveId)).toEqual(["live-guidance", "today"]);
+      const context = service.readStartupContext(seat.node.id, root);
+      expect(context.ok && context.context.plan.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectiveId: "today", absolutePath: path.join(root, "today.json"),
+          ...(follows ? { onRestore: "follow_source" } : {}) }),
+      ]));
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
 
   it.each([
     { runtime: "terminal" as const, fail: false },

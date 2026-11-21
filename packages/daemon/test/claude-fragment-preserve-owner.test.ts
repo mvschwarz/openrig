@@ -7,8 +7,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { ClaudeCodeAdapter, replaceClaudeFragment } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -52,9 +53,14 @@ function seat(target: (typeof TARGETS)[number], existing: string | null, fragmen
   const fsOps = {
     readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
     exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile,
+    replaceFragment: replaceClaudeFragment,
     homedir: nodePath.join(root, "home"),
   };
-  const adapter = new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: nodePath.join(root, "openrig"), collectorAssetPath: asset });
+  const written = new Map<string, string>();
+  const adapter = new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: nodePath.join(root, "openrig"), collectorAssetPath: asset,
+    readProjectionHash: (path: string) => written.get(path) ?? null,
+    recordProjection: (path: string, content: string) => written.set(path, createHash("sha256").update(content).digest("hex")),
+  });
   const plan = {
     runtime: "claude-code", cwd, startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
     entries: [{ category: "runtime_resource", effectiveId: "spec-fragment", sourceSpec: "spec", sourcePath: fragmentPath,
@@ -193,5 +199,73 @@ describe("controls: as before", () => {
     const s = seat(TARGETS[0], '{ "owner_note": "keep me" }');
     const r = await sequence(s);
     expect(JSON.parse(r.afterStartup!)).toMatchObject({ owner_note: "keep me", permissions: { allow: ["Bash(npm test:*)"] }, statusLine: { type: "command" } });
+  });
+});
+
+describe("Claude runtime fragments that follow their sources", () => {
+  for (const [target, next] of [
+    [TARGETS[0], { env: { FIXTURE_FLAG: "changed" } }],
+    [TARGETS[1], { mcpServers: { "spec-server": { command: "changed" } } }],
+  ] as const) {
+    it(`${target.rel} refreshes its source, and keeps a later operator edit`, async () => {
+      const s = seat(target, '{ "owner_note": "keep me" }');
+      s.plan.entries[0]!.onRestore = "follow_source";
+      await sequence(s);
+      fs.writeFileSync(s.fragmentPath, JSON.stringify(next));
+      expect(await s.adapter.project(s.plan, s.binding)).toMatchObject({ projected: ["spec-fragment"], failed: [] });
+      expect(JSON.parse(s.read()!)).toMatchObject({ owner_note: "keep me", ...next });
+
+      const edited = '{ "owner_note": "operator edit" }\n';
+      fs.writeFileSync(s.targetPath, edited);
+      const result = await s.adapter.project(s.plan, s.binding);
+      expect(result).toMatchObject({ skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("local edits")] });
+      expect(s.read()).toBe(edited);
+    });
+
+    it(`${target.rel} leaves the old projection intact when a following source is invalid`, async () => {
+      const s = seat(target, null);
+      s.plan.entries[0]!.onRestore = "follow_source";
+      await s.adapter.project(s.plan, s.binding);
+      const before = s.read();
+      fs.writeFileSync(s.fragmentPath, "[]");
+      const result = await s.adapter.project(s.plan, s.binding);
+      expect(result).toMatchObject({ skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("source")] });
+      expect(s.read()).toBe(before);
+    });
+  }
+
+  it("keeps an edit protected after a start that needs no fragment update", async () => {
+    const s = seat(TARGETS[1], null);
+    s.plan.entries[0]!.onRestore = "follow_source";
+    await s.adapter.project(s.plan, s.binding);
+    const edited = JSON.stringify({ ...TARGETS[1].fragment, owner_note: "editor addition" });
+    fs.writeFileSync(s.targetPath, edited);
+    expect((await s.adapter.project(s.plan, s.binding)).warnings).toBeUndefined();
+    fs.writeFileSync(s.fragmentPath, '{"mcpServers":{"spec-server":{"command":"changed"}}}');
+    expect((await s.adapter.project(s.plan, s.binding)).skipped).toEqual(["spec-fragment"]);
+    expect(s.read()).toBe(edited);
+  });
+
+  it("keeps an unrecorded MCP value and reports why a conflicting selection was skipped", async () => {
+    const current = '{ "mcpServers": { "spec-server": { "command": "owner-command" } } }\n';
+    const s = seat(TARGETS[1], current);
+    s.plan.entries[0]!.onRestore = "follow_source";
+    expect(await s.adapter.project(s.plan, s.binding)).toMatchObject({
+      skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("no write record")],
+    });
+    expect(s.read()).toBe(current);
+  });
+
+  it("leaves a linked MCP target intact when the opted-in projection cannot replace it", async () => {
+    const s = seat(TARGETS[1], null);
+    const linked = nodePath.join(nodePath.dirname(s.cwd), "shared-mcp.json");
+    fs.writeFileSync(linked, "{}");
+    fs.symlinkSync(linked, s.targetPath);
+    s.plan.entries[0]!.onRestore = "follow_source";
+    expect(await s.adapter.project(s.plan, s.binding)).toMatchObject({
+      skipped: ["spec-fragment"], failed: [], warnings: [expect.stringContaining("couldn't be written safely")],
+    });
+    expect(fs.readFileSync(linked, "utf8")).toBe("{}");
+    expect(fs.lstatSync(s.targetPath).isSymbolicLink()).toBe(true);
   });
 });

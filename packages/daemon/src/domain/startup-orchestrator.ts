@@ -13,7 +13,7 @@ import type {
   ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
-import type { ProjectionPlan } from "./projection-planner.js";
+import { isClaudeFragmentEntry, type ProjectionPlan, type ResolveClaudeFragments } from "./projection-planner.js";
 import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
@@ -181,6 +181,8 @@ export interface StartupInput {
   resolvedStartupFiles: ResolvedStartupFile[];
   startupActions: StartupAction[];
   isRestore: boolean;
+  /** Existing-seat fresh launch: resolve these Claude fragment types through today's agent spec. */
+  refreshClaudeFragments?: boolean;
   /**
    * OPR.0.7.0.13: a fresh relaunch's decisions about the seat's own skills (seatSkillReplay): saved skill entries and
    * startup skill files that this start must not project or install again. They stay in the saved startup context.
@@ -267,6 +269,7 @@ interface StartupOrchestratorDeps {
   readinessSettings?: Pick<SettingsStore, "resolveOne">;
   /** Process observation for a Claude resume launch's own record of its process (#1077). */
   listProcesses?: NativeProcessLister;
+  resolveClaudeFragments?: ResolveClaudeFragments;
 }
 
 /**
@@ -299,6 +302,7 @@ export class StartupOrchestrator {
   private sessionTransport: SessionTransport;
   private readinessSettings: Pick<SettingsStore, "resolveOne">;
   private listProcesses: NativeProcessLister | undefined;
+  private readonly resolveClaudeFragments?: ResolveClaudeFragments;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -311,6 +315,7 @@ export class StartupOrchestrator {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
     this.listProcesses = deps.listProcesses;
+    this.resolveClaudeFragments = deps.resolveClaudeFragments;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -458,12 +463,35 @@ export class StartupOrchestrator {
     // replay plan, not a newly selected profile with activity hooks removed.
     // RestoreOrchestrator already reconciled the saved activity selection before
     // native resume. Fresh launches still project empty plans to support removal.
+    let projectionPlan = input.plan;
+    if (input.continueFreshStartup && input.adapter.runtime === "claude-code") {
+      // The native start already had its chance to refresh these files. A context continuation must not rewrite them.
+      projectionPlan = { ...input.plan, entries: input.plan.entries.filter(entry => !isClaudeFragmentEntry(entry)) };
+    } else if (input.refreshClaudeFragments && input.adapter.runtime === "claude-code" && !input.adapter.environment && this.resolveClaudeFragments) {
+      const saved = input.plan.entries.filter(isClaudeFragmentEntry);
+      const otherEntries = input.plan.entries.filter(entry => !isClaudeFragmentEntry(entry));
+      const current: Awaited<ReturnType<ResolveClaudeFragments>> = await this.resolveClaudeFragments(input.rigId, input.nodeId)
+        .catch(() => ({ ok: false as const, reason: "could not resolve today's selection" }));
+      if (current.ok) {
+        const entries = [...otherEntries, ...current.entries];
+        for (const entry of saved) {
+          if (!current.entries.some(candidate => candidate.resourceType === entry.resourceType && candidate.effectiveId === entry.effectiveId)) {
+            warnings.push(`Claude fragment ${entry.effectiveId} is no longer selected. Previously merged values were left in place.`);
+          }
+        }
+        projectionPlan = { ...input.plan, entries, protectClaudeFragments: true };
+        input = { ...input, plan: projectionPlan };
+      } else if (saved.length > 0 && (!current.missingRecipe || saved.some(entry => entry.onRestore === "follow_source"))) {
+        projectionPlan = { ...input.plan, entries: otherEntries };
+        warnings.push(`Claude fragments ${saved.map(entry => entry.effectiveId).join(", ")} were skipped because today's selection couldn't be resolved.`);
+      }
+    }
     let projectionResult: ProjectionResult;
     if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
       const skip = input.replaySkip;
       const projectedPlan = skip && skip.entryIds.size > 0
-        ? { ...input.plan, entries: input.plan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
-        : input.plan;
+        ? { ...projectionPlan, entries: projectionPlan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
+        : projectionPlan;
       projectionResult = await input.adapter.project(projectedPlan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
