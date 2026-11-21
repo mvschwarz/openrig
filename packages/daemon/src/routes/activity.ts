@@ -26,6 +26,7 @@ import { validateResumeToken, validateSessionFileFormat } from "../domain/resume
 import { loadCommunityHarnessPreset } from "../domain/community-harness-presets.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import { isClaudeRateLimitHook } from "../domain/provider/claude-interruption.js";
 import {
   PiUsageEntriesStore, hasPiUsageChargesTable, hasPiUsageEntriesTable, validPiProviderCharge, validPiUsageFact,
 } from "../domain/pi-usage-entries-store.js";
@@ -36,7 +37,7 @@ import {
 // ALREADY-NORMALIZED state is the input (one event-name parser, no twin).
 
 /** Translate a recorded hook activity into oracle evidence. Returns null for states the
- *  oracle should not consume (unknown = noise, never evidence). needs_input becomes
+ *  oracle should not consume (unknown = noise, never evidence), except a typed usage limit. needs_input becomes
  *  COUNT+reason on the hooks rung — never an activity value (the taxonomy's binding
  *  exclusion); the turn's working/idle stays whatever other evidence says. */
 export function evidenceFromHookActivity(input: {
@@ -76,6 +77,12 @@ export function evidenceFromHookActivity(input: {
   if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime, input.activity.communityRunner === true)) {
     return { ...base, activity: "unknown", needsInput: { count: 0, reason: null } };
   }
+  // A typed usage limit (#2917, #99) is evidence, not noise: it ends the turn, and it never counts as waiting on a person.
+  // The oracle holds it until a newer turn starts, so an older working report can't outlast it.
+  if (isClaudeRateLimitHook(input.runtime, input.activity.rawEvent, input.activity.rawSubtype)) {
+    return { ...base, activity: "unknown", needsInput: { count: 0, reason: null },
+      usageLimit: { resetsAt: input.activity.resetsAt ?? null } };
+  }
   switch (input.activity.state) {
     case "running":
       return { ...base, activity: "working", needsInput: { count: 0, reason: null },
@@ -107,6 +114,24 @@ export function restoredRunnerHookEvidence(
     ...(isWorkingLivenessBeat(latest.rawEvent, latest.rawSubtype)
       ? { workingLivenessSeconds: workingLivenessSeconds(latest.livenessSeconds) } : {}),
     activity: { ...latest, state }, seq: 0 });
+}
+
+/** The typed usage limit a seat still held when the daemon stopped, as the oracle evidence its live report was, for
+ *  restoring after a restart: Claude's is its hook evidence again, and Codex's banner is held on the sampling rung that
+ *  read it from the pane. Null when none is in force; the store's own read throws when it can't be read, or when a limit
+ *  may be in force but its occupant can't be shown. */
+export function restoredUsageLimitEvidence(
+  store: Pick<AgentActivityStore, "latestHeldUsageLimit">,
+  seat: { seatNodeId: string; sessionName: string },
+  runtime: string,
+): ActivityEvidence | null {
+  const held = store.latestHeldUsageLimit({ nodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime });
+  if (!held) return null;
+  if (runtime === "codex") {
+    return { seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, rung: "window-sampling", sourceId: "codex:limit-banner",
+      seq: 0, observedAt: held.eventAt ?? held.sampledAt, usageLimit: { resetsAt: null } };
+  }
+  return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime, activity: held, seq: 0 });
 }
 
 /** The relay route a hook post names: "plugin" or "managed". An untagged post (an older relay) stays untagged; any
