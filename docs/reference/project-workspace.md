@@ -52,6 +52,12 @@ keeps an entry for the workspace root beside the bundle's, under the id from the
 workspace's own `project.yaml` (`default` when it declares none); if that id is the
 bundle's project id, install reports a conflict and writes no catalog.
 
+## Project scope IDs
+
+The optional `scope.idPrefix` in `project.yaml` sets this project's mission and slice ID prefix: two or three uppercase
+letters, defaulting to `OPR`. For a project nested in another's workspace, choose a different prefix so its generated
+IDs don't repeat the enclosing project's. The setting does not guarantee globally unique IDs.
+
 ## Project-world install
 
 `project.yaml` may select project context and managed skills together:
@@ -166,6 +172,15 @@ or by working directory, but never counts as unclaimed in step 5. A rig listed u
 deepest root, leave the choice to `--project`. Step 3 reads the seat's
 `OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
 that chose the project as `position.selectedBy`.
+
+With no explicit project, `rig scope`, `rig proof add` and daemon-backed
+`rig proof show`/`judge` use the one project whose `workspace.yaml` entry lists
+the caller's rig under `rigs`, and say which. `rig scope` and `rig proof add`
+skip this for an explicit `--workspace`, `OPENRIG_WORK_ROOT` or absolute target
+path, and `rig proof show`/`judge` for `--project` or a `<project>:` prefix;
+those two refuse `--workspace` and use the daemon's own workspace. When no
+project lists the rig, they use the configured default; when several do, or the
+one that does can't be used, they warn and use the configured default.
 
 ## TUI project selection
 
@@ -362,3 +377,9 @@ If Project shows a mission discovery warning:
 
 No daemon restart is required for most config reads. Restart when changing
 startup-time roots such as `files.allowlist` or progress scan roots.
+
+Setting or resetting `files.allowlist` or `progress.scan_roots` through the
+daemon's settings API (`POST`/`DELETE /api/config/<key>`, as the web settings
+page does) attempts to record a `settings.changed` event (the key, set or reset)
+after the write; the write stands even if recording fails. `rig config set` and
+direct edits write the config file and record no event.

@@ -25,11 +25,14 @@ export const DEFAULT_MARKER = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
  *       "on"?: "user" | "tool_result" | "any", // what the request's last turn must be (default "user")
  *       "when"?: "<regex source>",            // matched against that turn's text; absent matches any
  *       "times"?: <n>,                        // how many requests this rule answers; absent is unlimited
+ *       "within"?: "history",                 // match `when` against every user item in the request, not the last turn
  *       "gate"?: "<name>",                    // hold the answer until the case releases this gate; {{marker}}
  *                                             //   in the name becomes the turn's first marker, a gate per turn
  *       "delayMs"?: <n>,                      // wait before the first byte
  *       // then exactly one action:
- *       "say"?: "<text>",                     // a streamed text reply; {{marker}} is the turn's first marker
+ *       "say"?: "<text>",                     // a streamed text reply; {{marker}} is the turn's first marker, and
+ *                                             //   {{when:<name>}} the named group `when` captured (also in tool input)
+ *       "usage"?: { "input_tokens"?: <n> },   // the usage the reply reports (Claude's statusline reads it)
  *       "chunks"?: <n>, "chunkDelayMs"?: <n>, //   split into n deltas with a pause between them (a long turn)
  *       "tool"?: { "name": "<tool>", "input": { ... } },  // a tool call, in this program's own tool shape
  *       "error"?: { "status": <n>, "headers"?: { ... }, "body"?: <json> },  // an HTTP error answer
@@ -72,11 +75,11 @@ function packument(name, version, origin) {
 }
 
 /** The rule that answers a turn, consuming one of its `times`; null when none fits. */
-export function selectRule(script, used, turn) {
+export function selectRule(script, used, turn, history = "") {
   for (const [index, rule] of script.rules.entries()) {
     const on = rule.on ?? "user";
     if (on !== "any" && on !== turn.kind) continue;
-    if (script.when[index] && !script.when[index].test(turn.text)) continue;
+    if (script.when[index] && !script.when[index].test(rule.within === "history" ? history : turn.text)) continue;
     if (rule.times !== undefined && (used.get(index) ?? 0) >= rule.times) continue;
     used.set(index, (used.get(index) ?? 0) + 1);
     return { index, rule };
@@ -86,6 +89,15 @@ export function selectRule(script, used, turn) {
 
 export function fallbackRule(turn) {
   return { index: null, rule: turn.kind === "tool_result" ? { say: "done" } : { say: "ok {{marker}}" } };
+}
+
+/** A rule with every `{{when:<name>}}` in its reply (say, tool input) replaced by that named capture of its `when`
+ *  pattern; an absent capture becomes an empty string. */
+export function fillCaptures(rule, groups) {
+  const fill = (value) => typeof value === "string" ? value.replace(/\{\{when:([A-Za-z0-9_]+)\}\}/g, (_, name) => groups[name] ?? "")
+    : Array.isArray(value) ? value.map(fill)
+      : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, fill(v)])) : value;
+  return { ...rule, ...(rule.say !== undefined ? { say: fill(rule.say) } : {}), ...(rule.tool ? { tool: { ...rule.tool, input: fill(rule.tool.input ?? {}) } } : {}) };
 }
 
 export function fillMarker(text, marker) {
@@ -224,7 +236,13 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     }
 
     const turn = protocol.turnOf(body);
-    const picked = selectRule(loaded, used, turn) ?? protocol.fallback?.(turn, body) ?? fallbackRule(turn);
+    // A rule `within: "history"` matches its `when` against every user item in the request, not only the last turn.
+    const history = protocol.historyText?.(body) ?? turn.text;
+    const chosen = selectRule(loaded, used, turn, history) ?? protocol.fallback?.(turn, body) ?? fallbackRule(turn);
+    // `{{when:<name>}}` in a rule's reply takes the named group its `when` pattern captured from this turn.
+    const groups = chosen.index !== null && loaded.when[chosen.index]
+      ? loaded.when[chosen.index].exec(chosen.rule.within === "history" ? history : turn.text)?.groups ?? {} : {};
+    const picked = { ...chosen, rule: fillCaptures(chosen.rule, groups) };
     const marker = turn.text.match(loaded.marker)?.[0] ?? null;
     log({ ...entry, body, request: protocol.describe?.(body) ?? null, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
       action: Object.keys(picked.rule).find((k) => ["say", "tool", "error", "failInStream"].includes(k)) });

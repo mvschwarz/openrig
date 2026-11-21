@@ -28,6 +28,7 @@ import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { SlackAskSettlement } from "./settled-asks.js";
+import { SlackNoticeContentDedup } from "./notice-content-dedup.js";
 import { abortableSleep, POSSIBLY_POSTED_CLASS, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
@@ -94,8 +95,9 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does.
+   *  `identityPrincipal`: the replying person's registered entity id, which a direct ask's close records. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean; identityPrincipal?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -110,7 +112,8 @@ export function makeHumanReplyResolver(
   contract: HumanReplyActionPort | undefined,
   home?: string,
 ): NonNullable<SlackWireOpts["resolveHumanReply"]> {
-  return async (input) => {
+  // The replying person's identity reaches only the direct ask's close below; every other path reads the input as before.
+  return async ({ identityPrincipal, ...input }) => {
     const source = queueRepo.getById(input.qitemId);
     if (source?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
@@ -177,7 +180,9 @@ export function makeHumanReplyResolver(
       // correlated inbound row. Closing the request here records the durable
       // disposition; the inbound create is already the one wake back to the
       // source, so a second nudge here would duplicate attention.
-      return queueRepo.resolveDirectHumanReply(input) ? "resolved" : "not-applicable";
+      // The close records who answered, as the Slack answer row does (`queue-access`), when the sender is a registered person.
+      return queueRepo.resolveDirectHumanReply({ ...input,
+        ...(identityPrincipal ? { identityProvenance: "gateway:slack:v1", identityPrincipal } : {}) }) ? "resolved" : "not-applicable";
     }
   };
 }
@@ -640,6 +645,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   // Late-bound so deliver can release the driver's in-flight guard (built after the wire).
   let releaseRef: (qitemId: string) => void = () => {};
+  const noticeDedup = new SlackNoticeContentDedup({ queue: opts.queueRepo, token: bot ?? "", fetchImpl: opts.fetchImpl,
+    signal: runCtl.signal, log, seen: (key) => { outboundSeen.mark(key, "marked-identical-content"); releaseRef(key); } });
   // The wire's own dispatcher, bound once the wire exists: a delivery step that must mint a new durable decision.
   let selfDispatch: (decisionId: string, payload: unknown) => { ok: boolean; error?: string } = () => ({ ok: false, error: "wire not built" });
 
@@ -790,6 +797,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
+          const root = threadMap.resolveByConversation(p.qitemId);
+          if (root) noticeDedup.posted(p, messageTs, root.channel, threadTs);
           // v3 digest branch: transport truth first — every member receipt is
           // stamped HERE, after the real post, digest-tokened and episode-keyed.
           const digest = (p as unknown as { deliveryDigestPost?: boolean; digestId?: string; memberReceipts?: Array<{ qitemId: string; notificationKey: string; level: string; kind: string }> });
@@ -919,7 +928,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   };
 
   const targetDeliverFor = (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload): SubsystemDeliverFn => {
-    if (!isRelayDecision(decision, p)) return deliver;
+    if (!isRelayDecision(decision, p)) {
+      // De-duplicate the payload that is ACTUALLY delivered: later stages (the
+      // quiet-hours path adds `quietUnreadable`) deliver a spread copy, and the
+      // dedup must see that payload — not the pre-flag `p` captured here.
+      return (d) => noticeDedup.deliver((d.payload ?? p) as OutboundPostPayload, () => deliver(d));
+    }
     return (d) => {
       const carry = (d.payload ?? {}) as RelayPayloadCarry;
       const readyDecision = carry.relayConnectorRef && carry.relayEnvelope ? d : prepareDecision(d);
@@ -976,7 +990,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // after quiet. A decision that goes straight to delivery skips this.
   const resolveEarlierAttempt = async (decision: Parameters<SubsystemDeliverFn>[0]): Promise<Awaited<ReturnType<SubsystemDeliverFn>> | null> => {
     const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<unknown> }).landing(decision) : "unattempted";
-    if (landing === "found" || landing === "partial") return deliver(decision);
+    if (landing === "found" || landing === "partial") {
+      return noticeDedup.deliver(decision.payload as OutboundPostPayload, () => deliver(decision), true);
+    }
     return null;
   };
 
@@ -1148,7 +1164,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // An earlier attempt of this decision found in Slack goes to delivery, which records it.
       const landing = attemptLogUnreadable ? "maybe"
         : !relay && "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
-      if (landing === "found" || landing === "partial") return targetDeliver(decision);
+      if (landing === "found" || landing === "partial") return noticeDedup.deliver(p, () => deliver(decision), true);
       const regForVerdict = registrySurface.loadHumanRegistry(opts.home);
       const alertsForVerdict =
         regForVerdict.ok || regForVerdict.noHumans

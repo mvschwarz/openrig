@@ -1270,11 +1270,12 @@ members:
   `.claude/settings.local.json`, so seats sharing a folder can choose different intervals and `rig down` has nothing
   more to take back. A status line command of your own in that file wins: the launch then skips the throttle and says so.
 - It takes effect at the seat's next launch, resume or restore. A relaunch that reuses the running process's own
-  launch settings (a provider or account switch that keeps them) keeps its throttle as it was. `rig seat
-  set-statusline-throttle <seat> --seconds N` (or `--clear`) changes it without editing the spec; `rig export` carries
-  the stored value. A launch rebuilt from the spec (a persisted fresh launch, or the fresh branch of a restore) writes
-  the spec's `statusline_throttle` again over a later `rig seat set-statusline-throttle`, as it does for
-  `process_limits`; change the spec too to keep the new value there.
+  launch settings (a provider or account switch that keeps them) keeps its throttle as it was.
+  `rig seat set-statusline-throttle <seat> --seconds N --reason <text>` (or `--clear --reason <text>`) changes it
+  without editing the spec; `rig export` carries the stored value. A launch rebuilt from the spec (a persisted fresh
+  launch, or the fresh branch of a restore) writes the spec's `statusline_throttle` again over a later
+  `rig seat set-statusline-throttle`, as it does for `process_limits`; change the spec too to keep the new value
+  there.
 
 ### Seat pool (`pool`)
 
@@ -1321,6 +1322,9 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
   that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
   `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
   A fresh launch of the seat from its recorded launch keeps the stored block.
+- **Export and bundles:** `rig spec export` leaves the pool's agents out and writes the model member with its block;
+  an edge touching a pool agent is left out and named in a "Not carried" line. `rig bundle create` doesn't count pool
+  agents as drift, so `--allow-drift` isn't needed for them.
 - **Older daemons:** `pool` is a new member key. A daemon from 0.7.18 or earlier refuses a spec that has it, as it
   refuses any unknown member key.
 

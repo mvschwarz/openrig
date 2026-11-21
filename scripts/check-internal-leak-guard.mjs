@@ -13,6 +13,13 @@ import { LEAK_GUARD_RULES_ENV, leakGuardRulesPath, readTermRules } from "./leak-
 export function main(argv = process.argv.slice(2)) {
   const options = parseArguments(argv);
   if (!options.rules) {
+    if (options.requireRules) {
+      process.stderr.write(
+        `No leak-guard rules file (--rules or ${LEAK_GUARD_RULES_ENV}): refusing to report a clean scan ` +
+        `whose term checks never ran.\n`,
+      );
+      return 1;
+    }
     process.stderr.write(`No leak-guard rules file (--rules or ${LEAK_GUARD_RULES_ENV}): the term checks are skipped.\n`);
   }
   const rules = readTermRules(options.rules);
@@ -37,15 +44,22 @@ export function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
+/** Flags that carry no value of their own; every other `--name` is followed by one. */
+const VALUELESS_FLAGS = new Set(["require-rules"]);
+
 function parseArguments(argv) {
   const values = {};
-  for (let index = 0; index < argv.length; index += 2) {
+  for (let index = 0; index < argv.length; index++) {
     const key = argv[index];
-    const value = argv[index + 1];
-    if (!key?.startsWith("--") || value === undefined) {
-      throw new Error(`Invalid argument near ${key ?? "<end>"}`);
+    if (!key?.startsWith("--")) throw new Error(`Invalid argument near ${key ?? "<end>"}`);
+    const name = key.slice(2);
+    if (VALUELESS_FLAGS.has(name)) {
+      values[name] = "true";
+      continue;
     }
-    values[key.slice(2)] = value;
+    const value = argv[++index];
+    if (value === undefined) throw new Error(`Invalid argument near ${key}: it needs a value`);
+    values[name] = value;
   }
   if (!values.repo || !values.mode) {
     throw new Error("--repo and --mode are required");
@@ -66,6 +80,7 @@ function parseArguments(argv) {
     ...values,
     repo: resolve(values.repo),
     rules: values.rules ? resolve(values.rules) : leakGuardRulesPath(),
+    requireRules: values["require-rules"] === "true",
     ...(values.tree ? { tree: resolve(values.tree) } : {}),
     ...(values["files-manifest"] ? { filesManifest: resolve(values["files-manifest"]) } : {}),
     ...(values.report ? { report: resolve(values.report) } : {}),

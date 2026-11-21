@@ -17,13 +17,15 @@ because a person's own ask or deny rules can still make that check ask for
 approval.
 
 - **If `rig gateway participants` says no person is registered,** put its offer
-  in your greeting, after the welcome, in a sentence or two: registering gives
-  OpenRig its own way to reach them with questions no agent is bringing them,
-  such as a team seat's permission prompt or another machine asking to pair. Ask
-  the name to use, and register them only on their yes, with the command it
-  prints. On a no or not now, register nothing and say those questions can't
-  reach them until someone is registered; it isn't a no to anything else. If a
-  person is registered, don't offer.
+  in your greeting, after the welcome, in a sentence or two: registering records
+  them as the person for questions no agent is bringing them, such as a team
+  seat's permission prompt or another machine asking to pair. Without a
+  connector such as Slack, those reach them only in the TUI's Feed and Steering,
+  so say so if they won't have the TUI open. Ask the name to use, and register
+  them only on their yes, with the command it prints. On a no or not now,
+  register nothing and say those questions can't reach them until someone is
+  registered; it isn't a no to anything else. If a person is registered, don't
+  offer.
 
 - **No rig but `kernel`:** write a short welcome in plain words, for example:
 

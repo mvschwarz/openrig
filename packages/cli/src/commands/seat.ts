@@ -81,6 +81,8 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
+  lifecycle_state?: string;
   launch_cwd?: string | null;
   permissions_to?: string | null;
   runner?: boolean;
@@ -316,7 +318,9 @@ function printHuman(status: SeatStatusResponse): void {
     else if (mode === "off") console.log("Off: automatic input types as it arrives.");
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
-  console.log(`Session: ${display(status.session_status, "unknown")}`);
+  // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
+  console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
+    ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
     console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
@@ -644,6 +648,12 @@ Between off (always interrupt) and hold (full quiet):
                   as held on the row (the open rows already are the reminder);
                   other notices are held. A cold row wakes nobody: a person or
                   the seat's next turn picks it up.
+
+For a Claude seat you type in, the opt-in hook bridge can deliver ordinary messages
+at a turn boundary without typing into its input box; it takes effect at the next
+launch or restore. See rig seat set-hook-bridge --help and:
+https://github.com/mvschwarz/openrig/blob/main/docs/reference/seat-delivery.md#claude-hook-bridge-opt-in
+
 What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and

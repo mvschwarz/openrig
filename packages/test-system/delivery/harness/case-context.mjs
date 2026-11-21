@@ -137,6 +137,13 @@ export function caseContext(cell, { caseId, kind, version }) {
       cell.record({ step: "person-keys", caseId, keys });
       await cell.tmux(["send-keys", "-t", cell.session, ...keys]);
     },
+    /** Keys the fixture itself presses to leave a state it set up (a scripted operator action, never a person's
+     *  answer); recorded as such in the steps and the verdict. */
+    async operatorKeys(why, ...keys) {
+      cell.record({ step: "fixture-operator-keys", caseId, keys, why });
+      verdict.info(`fixture operator action (scripted, not a person): ${why}`, keys);
+      await cell.tmux(["send-keys", "-t", cell.session, ...keys]);
+    },
     composer: () => composerText(kind, screen.last()?.screen ?? ""),
     composerOf: (text) => composerText(kind, text ?? ""),
 
@@ -154,10 +161,11 @@ export function caseContext(cell, { caseId, kind, version }) {
     async leaveCopyMode() { cell.record({ step: "person-leaves-copy-mode", caseId }); await cell.tmux(["send-keys", "-t", cell.session, "-X", "cancel"]); },
     async inMode() { return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{pane_in_mode}"])).trim() === "1"; },
 
-    /** Arm the logging tmux to type `text` as a person into the seat's pane between OpenRig's last read of the input
-     *  box and its next paste there (once). */
-    armDraftInjection(text) {
-      const spec = { pane: cell.paneId, text, bufferPrefix: "openrig_" };
+    /** Arm the logging tmux to type `text` as a person into the seat's pane once, at OpenRig's next paste there:
+     *  `at: "pre-paste"` (default) types it after OpenRig's last read of the input box and before the paste;
+     *  `at: "pre-enter"` lets the paste finish first and types it before OpenRig's read that precedes its Enter. */
+    armDraftInjection(text, { at = "pre-paste" } = {}) {
+      const spec = { pane: cell.paneId, text, bufferPrefix: "openrig_", at };
       writeFileSync(join(cell.env.DELIVERY_INJECT_DIR, "arm.json"), JSON.stringify(spec));
       cell.record({ step: "arm-injection", caseId, ...spec });
     },
