@@ -99,6 +99,21 @@ describe("queue routes", () => {
     temporaryWorkspace = undefined;
   });
 
+  it("`POST /:qitemId/fallback` keeps today's behaviour: it passes no guard, moves the row as before, and stages no fallback wake.", async () => {
+    const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+    const spy = vi.spyOn(queueRepo, "routeToFallback");
+    // Guard and wake fields in the body are not read by the route: the row is pending, not in-progress, and moves.
+    const res = await app.request(`/api/queue/${row.qitemId}/fallback`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fallbackDestination: "c@r", reason: "b@r unreachable", expectState: "in-progress", expectDestination: "z@r", wake: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ qitemId: row.qitemId, state: "pending", destinationSession: "c@r", chainOfRecord: ["fallback-from:b@r"] });
+    expect(spy.mock.calls).toEqual([[row.qitemId, "c@r", "b@r unreachable"]]);
+    const wakes = db.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-fallback-%'").all(row.qitemId);
+    expect(wakes).toEqual([]);
+  });
+
   it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
     queueRepo = new QueueRepository(db, bus, {
       destinationAdvisory: () => { throw Object.assign(new Error("membership unavailable"), { code: "SQLITE_BUSY" }); },

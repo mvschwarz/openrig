@@ -15,6 +15,8 @@ type: `openrig-urgent`, `urgent-only`, `sends-only` and `queue-only`. Sibling se
 | `queue-only` | For a seat a person types in. Deliberate sends from people and agents type, urgent or not, never over a draft; OpenRig's own notices never type, urgent ones included | A watchdog reminder reaches the seat's queue instead (below); other notices from OpenRig are held with their urgency, and held messages stay readable |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
+For a Claude seat you type in, the opt-in [hook bridge](#claude-hook-bridge-opt-in) can deliver ordinary messages at a turn boundary without typing into its input box; it takes effect at the next launch or restore.
+
 Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`. At `queue-only` it goes ahead: the
 level only changes how OpenRig's notices reach the seat, so managed compaction and its restore still run there, and the
 seat still compacts when its context runs out. Each write they make is checked as at `draft-aware`, so it never types
@@ -116,7 +118,21 @@ status output in a transcript or file. Evidence shares the observation's
 five-minute lifetime and existing seat/actor limits, is discarded lazily on the
 next observation/status read after expiry, and is lost on restart. No rule,
 permission/configuration write, hook decision, edited input, prompt submission
-or new attention/delivery behavior is produced.
+or new attention or delivery behavior is produced. Its one other use follows.
+
+**Send context.** When a direct send starts and the seat's main session has a
+request newer than its latest activity hook, not yet settled by that session's
+later tool batch, the send's result carries an `inputRequest` notice saying so,
+and `rig send` and `rig broadcast` print it. The send goes exactly as it would
+without the request: the notice changes no readiness, refusal or timing, and a
+prompt answer (`--dangerously-interact`) gets none. The request isn't evidence
+that a dialog is open: a hook or host can decide a permission request, or
+answer an MCP elicitation, with nothing displayed, and the notice says so. A
+subagent's request, a settled or expired observation and a replaced occupant
+give no notice. Claude's `Elicitation` hook works the same way, settled by
+`ElicitationResult` or a later tool batch. Neither event changes activity or
+attention, and only the actor and time are kept: no server message, form field
+or response.
 
 Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
 is treated as main, a valid ID identifies a subagent or in-process teammate, and
@@ -125,10 +141,11 @@ no live PermissionRequest capture qualifies that convention on an installed nati
 version. A hook denial without a source-bound guard receipt has unknown origin.
 This diagnostic adds no guard collector, permission decision or attention policy.
 
-The new PermissionRequest diagnostic is optional for activity-hook readiness.
+The PermissionRequest diagnostic and the `Elicitation`/`ElicitationResult` pair
+are optional for activity-hook readiness.
 Every preexisting required event, relay asset and explicit hook-disable check
 still applies. An older installed plugin at the same manifest version retains
-its bytes and may not send this event: plugin-only delivery needs a future normal
+its bytes and may not send these events: plugin-only delivery needs a future normal
 maintainer release refresh, and managed delivery needs normal reprojection. A
 manifest or green readiness check does not prove live hook execution. Raw tool
 arguments and provider reason text are withheld; diagnostic evidence is bounded,

@@ -152,7 +152,8 @@ describe("request-local proof-policy reuse", () => {
     expect(accepted.readiness.state).toBe("ready");
     expect(accepted.readiness).toEqual(readSliceReadiness(dir));
     expect(judge(next, "new")).toMatchObject({ replayed: true, judgment: accepted.judgment, readiness: accepted.readiness });
-    f.write(f.projectFile, { proofPolicy: { judges: ["new", "second"] } });
+    // #3621: adding a judge alone keeps the receipt current; turning everyJudge on is a policy change it can't certify.
+    f.write(f.projectFile, { proofPolicy: { judges: ["new", "second"], everyJudge: true } });
     const replay = judge(next, "new");
     expect(replay.replayed).toBe(true); expect(replay.readiness.state).toBe("unknown");
     expect(replay.readiness).toEqual(readSliceReadiness(dir));
