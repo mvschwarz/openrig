@@ -12,8 +12,8 @@ import { ProviderServiceImpl } from "../src/domain/provider/provider-service-imp
 import { accountRefUses, ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
 import type { AssignmentApplyRequest, ClaudeSeatRelaunch } from "../src/domain/provider/provider-service.js";
 import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
-import { readCurrentSeatActivity } from "../src/domain/node-inventory.js";
-import type { AgentActivity } from "../src/domain/types.js";
+import { readSeatActivityAsRigPs } from "../src/domain/node-inventory.js";
+import type { AgentActivity, SeatActivity } from "../src/domain/types.js";
 import type { StructuralObservation } from "../src/domain/seat-structural-activity-service.js";
 
 // #3625 slice 3: the daemon applies a plan only while its digest matches, one apply per rig, stores the assignment and
@@ -111,28 +111,34 @@ describe("applying an assignment on the daemon", () => {
     expect(JSON.stringify(result)).not.toContain(CONTENT);
   });
 
-  it("reads each seat's activity as rig ps does: a working hook, else the pane; the plan notes a busy seat and the apply stores it", async () => {
-    seat("hook"); seat("pane"); seat("quiet");
+  it("reads each seat's activity as rig ps shows it: a working hook, else the pane, and fresh motion; the plan notes a busy seat and the apply stores it", async () => {
+    seat("hook"); seat("pane"); seat("moving"); seat("quiet");
     // hook: its hook says it's working (the pane's idle frame doesn't outrank it). pane: no hook, and the cached pane
-    // reading is working. quiet: neither, so unknown.
-    const hooks: Record<string, AgentActivity> = { "hook@fleet": { state: "running", reason: "user_prompt_submit", evidenceSource: "runtime_hook", sampledAt: "t", stale: false } as AgentActivity };
+    // reading is working. moving: its last turn's idle hook is still the newest, but the terminal moved just now, which
+    // rig ps reads as working. quiet: none of these, so unknown.
+    const now = new Date("2026-11-21T07:00:00.000Z");
+    const hooks: Record<string, AgentActivity> = { "hook@fleet": { state: "running", reason: "user_prompt_submit", evidenceSource: "runtime_hook", sampledAt: "t", stale: false } as AgentActivity,
+      "moving@fleet": { state: "idle", reason: "stop", evidenceSource: "runtime_hook", sampledAt: "t", stale: false } as AgentActivity };
+    const moved: Record<string, SeatActivity> = { "moving@fleet": { paneId: "moving@fleet", isActiveWithinWindow: true, silenceWindowSeconds: 30,
+      lastObservedAt: now.toISOString(), lastActivityAt: new Date(now.getTime() - 2_000).toISOString() } as SeatActivity };
     const panes: Record<string, StructuralObservation> = {
       "hook@fleet": { state: "agent_idle", reason: "idle_prompt", evidence: null, observedAt: "t" },
       "pane@fleet": { state: "agent_active", reason: "esc_to_interrupt", evidence: "esc to interrupt", observedAt: "t" } };
-    const seatActivity = (s: string) => readCurrentSeatActivity({ hooks: { getLatestForNode: ({ sessionName }) => hooks[sessionName ?? ""] ?? null },
-      structural: { getStructuralActivity: (n) => panes[n] ?? null }, runtimeOf: () => "claude-code" }, s).activity;
+    const seatActivity = (s: string) => readSeatActivityAsRigPs({ hooks: { getLatestForNode: ({ sessionName }) => hooks[sessionName ?? ""] ?? null },
+      structural: { getStructuralActivity: (n) => panes[n] ?? null }, motion: { getSeatActivity: (n) => moved[n] ?? null },
+      runtimeOf: () => "claude-code", now: () => now }, s);
     svc = new ProviderServiceImpl({ db, listRigs: () => db.prepare("SELECT id FROM rigs ORDER BY id").all() as Array<{ id: string }>,
       env: { HOME: dir }, platform: "linux", now: () => "2026-11-21T07:00:00.000Z", seatActivity,
       claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
     const claude = stoppedClaude();
     const planned = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
     expect(planned.ok && planned.plan.rows.map((r) => [r.seat, r.activity, (r.notes ?? []).some((n) => n.startsWith("busy (working)"))]))
-      .toEqual([["hook@fleet", "running", true], ["pane@fleet", "running", true], ["quiet@fleet", "unknown", false]]);
+      .toEqual([["hook@fleet", "running", true], ["moving@fleet", "running", true], ["pane@fleet", "running", true], ["quiet@fleet", "unknown", false]]);
     // The activity isn't in the digest, so the apply acts on the same plan, and each result stores what the seat was doing.
     const result = await svc.applyAssignment(request("max-2", planned.ok ? planned.plan.digest : ""), { claudeSeat: claude });
     expect(result.ok).toBe(true);
     expect(new ProviderAccountAssignmentsRepository(db).results("rig-fleet", "claude").map((r) => [r.seat, r.kind, r.activity]).sort())
-      .toEqual([["hook@fleet", "switched", "running"], ["pane@fleet", "switched", "running"], ["quiet@fleet", "switched", "unknown"]]);
+      .toEqual([["hook@fleet", "switched", "running"], ["moving@fleet", "switched", "running"], ["pane@fleet", "switched", "running"], ["quiet@fleet", "switched", "unknown"]]);
     // Status shows it with the seat's last result.
     const model = await svc.getReadModel();
     expect(model.bindings.find((b) => b.seatSession === "hook@fleet")!.assignment?.applied).toMatchObject({ kind: "switched", activity: "running" });
