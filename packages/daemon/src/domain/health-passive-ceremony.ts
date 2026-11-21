@@ -3,7 +3,7 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { QueueRepository } from "./queue-repository.js";
 import { CONTINUATION_MARKER } from "./queue-transition-log.js";
-import { DELIVERED_PREFIX, FAILED_PREFIX, HELD_PREFIX, REFUSED_PREFIX, RESERVE_PREFIX } from "./policies/parked-owner-consumer.js";
+import { CLOSE_PREFIX, DELIVERED_PREFIX, FAILED_PREFIX, HELD_PREFIX, REFUSED_PREFIX, RESERVE_PREFIX } from "./policies/parked-owner-consumer.js";
 import type { HealthCheckpointSource } from "./health-checkpoints.js";
 import type { OperatingPostureService } from "./rig-mode/operating-posture.js";
 import { readHealthArtifact, healthSelectedContext } from "./health-context.js";
@@ -58,6 +58,9 @@ function coordinationTransitions<T extends { qitemId: string; state: string; act
   for (const t of window) {
     const prev = previous.get(t.qitemId);
     previous.set(t.qitemId, t);
+    // A state change or a closed parked-owner episode ends the remembered park even when the row is
+    // bookkeeping and never counts: the next park is a new one, not an acknowledgement of the old wait.
+    if (t.state !== "blocked" || t.transitionNote?.startsWith(CLOSE_PREFIX)) lastPark.delete(t.qitemId);
     if (!isCoordinationTransition(t)) continue;
     const park = lastPark.get(t.qitemId);
     if (t.state !== "blocked" || !t.transitionNote?.startsWith(CONTINUATION_MARKER)) lastPark.delete(t.qitemId);

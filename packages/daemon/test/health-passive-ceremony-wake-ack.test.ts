@@ -105,3 +105,13 @@ it("a parked-owner wake note is a wake: the owner's unchanged acknowledgement is
   const reminder: Step = { state: "blocked", actor: "owner@rig", note: "parked-owner wake delivered: reminder sent", target: BLOCKER };
   expect(await counted(18, [park(), reminder, park()])).toBeNull();
 });
+
+it("a park on the same blocker after a closed episode and a new wake counts, not the old episode's acknowledgement", async () => {
+  const closed: Step = { state: "blocked", actor: "owner@rig", note: "parked-owner episode closed: wait ended", target: BLOCKER };
+  expect(await counted(18, [park(), wake, park(), closed, wake, park()])).toHaveLength(20);
+});
+
+it("a park after a system state change and a new wake counts as a new park", async () => {
+  const released: Step = { state: "pending", actor: "queue@system", note: "released" };
+  expect(await counted(18, [park(), wake, park(), released, wake, park()])).toHaveLength(20);
+});
