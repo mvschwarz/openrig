@@ -2557,6 +2557,7 @@ export class QueueRepository {
         refuse("Name the exact question and, for a choice, a valid option on that question.");
       }
       let journal: RelayJournal = ask.relayedAnswers ?? { relays: [], corrections: [], returnId: null };
+      const directAnswersAtEntry = journal.directAnswers?.length ?? 0;
       let direct = ask.humanAnswers ?? {};
       const relayedQuestions = () => questions.filter(q => journal.relays.some(answer => answer.questionId === q.id));
       const openQuestions = () => unansweredQuestions(questions.filter(q => !journal.relays.some(r => r.questionId === q.id)), direct);
@@ -2665,14 +2666,24 @@ export class QueueRepository {
         }
       }
       const completed = !unplacedId && ask.state === "pending" && unanswered().length === 0;
-      if (completed && !journal.returnId) {
-        // First completion only. After a deliberate reopen, the journal still names the
-        // original return row; re-inserting the same deterministic id would roll back the
-        // correction and its linked reply on a duplicate primary key, so reuse that row.
-        const returnId = humanAnswerId(ask.qitemId, "relayed-answer");
-        deliver(returnId, `Answers recorded with a RELAY: ${ask.summary ?? ask.qitemId}`,
-          `${renderRelayedAnswers(journal, questions, direct)}\n\nIn reply to: ${ask.qitemId} (see its answer history).`, "relayed-answer");
-        journal = { ...journal, returnId };
+      if (completed) {
+        if (!journal.returnId) {
+          // First completion only. After a deliberate reopen, the journal still names the
+          // original return row; re-inserting the same deterministic id would roll back the
+          // correction and its linked reply on a duplicate primary key, so reuse that row.
+          const returnId = humanAnswerId(ask.qitemId, "relayed-answer");
+          deliver(returnId, `Answers recorded with a RELAY: ${ask.summary ?? ask.qitemId}`,
+            `${renderRelayedAnswers(journal, questions, direct)}\n\nIn reply to: ${ask.qitemId} (see its answer history).`, "relayed-answer");
+          journal = { ...journal, returnId };
+        } else if ((journal.directAnswers?.length ?? 0) > directAnswersAtEntry) {
+          // A reopened ask whose direct answer changed: the stored return keeps its first
+          // words, so the changed answer must still reach the asker as a linked correction.
+          // An exact retry returns at the replay check above and never reaches this branch.
+          const added = (journal.directAnswers ?? []).slice(directAnswersAtEntry);
+          const updateId = humanAnswerId(ask.qitemId, `relay-return-update:${journal.corrections.length + added.length}`);
+          deliver(updateId, `Direct answer changed on a reopened ask: ${ask.summary ?? ask.qitemId}`,
+            `Direct answer from ${input.actorSession} on ${ask.qitemId} changed after reopen. The stored return keeps its id and history; the words now stand as:\n\n${added.map(a => `${a.questionId ?? "general"}: ${a.text}`).join("\n")}\n\nIn reply to: ${ask.qitemId}.`, "human-answer-correction");
+        }
       }
       this.db.prepare("UPDATE queue_items SET relayed_answers = ?, human_answers = ?, ts_updated = ? WHERE qitem_id = ?")
         .run(JSON.stringify(journal), Object.keys(direct).length ? JSON.stringify(direct) : null, at, ask.qitemId);

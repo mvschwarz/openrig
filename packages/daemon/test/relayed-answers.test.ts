@@ -233,3 +233,26 @@ it("reuses the existing return when a reopened ask completes again", async () =>
   expect(f.repo.getById(returnId ?? "")).not.toBeNull();
   expect(f.history()).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "direct-correction" })]));
 });
+
+it("returns a changed direct answer to the asker after a reopen, without duplicating the return", async () => {
+  const f = await fixture(true);
+  expect((await f.relay({ questionId: "first", optionId: "no" })).status).toBe(200);
+  expect((await f.correct({ questionId: "second", optionId: "yes", decision: "A." })).status).toBe(200);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  const returnId = f.history().find(answer => answer.kind === "relayed-answer")?.qitemId;
+  expect(returnId).toBeTruthy();
+  expect((await f.post(`/api/queue/${f.ask.qitemId}/update`, relaySeat,
+    { state: "pending", reopen: true, transitionNote: "revisit the second question" })).status).toBe(200);
+  expect((await f.correct({ questionId: "second", decision: "B." })).status).toBe(200);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  // The stored return keeps its first words; the changed words reach the asker as a linked row.
+  expect(f.repo.getById(returnId ?? "")?.body).not.toContain("B.");
+  const updates = f.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND body LIKE ?")
+    .all(asker, "%changed after reopen%");
+  expect(updates.length).toBe(1);
+  // An exact retry returns at the replay check and adds no duplicate.
+  expect((await f.correct({ questionId: "second", decision: "B." })).status).toBe(200);
+  const after = f.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND body LIKE ?")
+    .all(asker, "%changed after reopen%");
+  expect(after).toEqual(updates);
+});
