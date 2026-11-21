@@ -162,6 +162,9 @@ describe("web UI default off (ui.enabled)", () => {
       const a = await request(offPort, path, headers), b = await request(onPort, path, headers);
       expect(a.status, `${path} ${JSON.stringify(headers)}`).toBe(b.status);
     }
-    expect((await request(offPort, "/api/terminal/views")).status).toBe(401);
+    const denied = await request(offPort, "/api/terminal/views");
+    expect(denied.status).toBe(401);
+    // A browser without the token learns the UI's way to take it.
+    expect(JSON.parse(denied.body).hint).toContain("#termToken=<token>");
   });
 });

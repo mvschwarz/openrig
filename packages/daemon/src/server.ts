@@ -1001,8 +1001,8 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
-    // The page is served as built. The UI takes its tokens from its address (?termToken=…&mcToken=…), given once by the
-    // person who holds them, and keeps them in that browser.
+    // The page is served as built. The UI takes its tokens from its address's fragment (#termToken=…&mcToken=…), given
+    // once by the person who holds them, and keeps them in that browser.
     return c.html(fs.readFileSync(uiIndexPath, "utf-8"));
   });
 
