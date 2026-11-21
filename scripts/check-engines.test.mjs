@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const LTS_ENGINE = "^22 || ^24";
+const LTS_ENGINE = "^22.14.0 || ^24";
 const CLI_ENGINE = ">=22";
 
 const LTS_PACKAGE_PATHS = [
