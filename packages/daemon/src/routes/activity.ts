@@ -118,7 +118,8 @@ export function restoredRunnerHookEvidence(
 
 /** The typed usage limit a seat still held when the daemon stopped, as the oracle evidence its live report was, for
  *  restoring after a restart: Claude's is its hook evidence again, and Codex's banner is held on the sampling rung that
- *  read it from the pane. Null when none is in force; the store's own read throws when it can't be read. */
+ *  read it from the pane. Null when none is in force; the store's own read throws when it can't be read, or when a limit
+ *  may be in force but its occupant can't be shown. */
 export function restoredUsageLimitEvidence(
   store: Pick<AgentActivityStore, "latestHeldUsageLimit">,
   seat: { seatNodeId: string; sessionName: string },

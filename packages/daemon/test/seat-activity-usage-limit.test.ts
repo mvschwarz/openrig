@@ -104,6 +104,25 @@ describe("a Claude seat at its usage-limit notice", () => {
     expect(seat().usageLimit?.resetsAt).toBe(RESET);
   });
 
+  it("doesn't arm a limit older than Claude's own busy status already seen, delivered after it", () => {
+    clock.now = T0 + 21_000;
+    claudeStatus("busy", T0 + 20_000);
+    usageLimit(T0 + 10_000); // the relay delivers the older limit hook after the newer status
+    expect(seat().usageLimit).toBeNull();
+    expect(seat().display).toBe("working");
+  });
+
+  it("doesn't arm a limit older than a turn already seen, even after that turn's idle prompt, and a later limit still arms", () => {
+    clock.now = T0 + 31_000;
+    promptSubmitted(T0 + 20_000);
+    idlePrompt(T0 + 25_000);
+    usageLimit(T0 + 10_000); // dated before the turn that started at t20, delivered after it
+    expect(seat().usageLimit).toBeNull();
+    usageLimit(T0 + 30_000); // after that turn: the rule is unchanged
+    expect(seat().usageLimit?.resetsAt).toBe(RESET);
+    expect(seat().display).toBe("unknown");
+  });
+
   it("isn't inherited by a new occupant", () => {
     promptSubmitted(T0);
     usageLimit(T0 + 1_000);

@@ -73,9 +73,11 @@ function fixture() {
         hookEvent, subtype, sessionId: conversation, occurredAt: new Date(clock.now).toISOString(), ...over }) });
     expect(response.status).toBe(200);
   }
-  /** A daemon restart: the in-memory ladder is gone; the first sweep declares each seat again. */
-  async function restart(restore: "store" | "unreadable" = "store") {
+  /** A daemon restart: the in-memory ladder is gone; the first sweep declares each seat again, unless a hook reaches the
+   *  route first (`beforeSweep`) and declares it there. */
+  async function restart(restore: "store" | "unreadable" = "store", beforeSweep?: () => Promise<void>) {
     oracle = newOracle(restore);
+    await beforeSweep?.();
     await oracle.pollAllRunningTmuxSeats(db);
   }
   /** Claude's own status file, read by the real self-report reader. */
@@ -118,6 +120,62 @@ describe("a seat at its usage limit, across a daemon restart and on Codex", () =
     expect(state.decidedBy).toBe("lifecycle-hooks");
     expect(state.needsInput.count).toBe(0);
     expect(state.usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(turnStart + 1_000).toISOString(), resetsAt: f.reset });
+  });
+
+  it("restores the held limit when a hook reaches the route before the first sweep after a restart", async () => {
+    const f = fixture();
+    await f.post("UserPromptSubmit", null);
+    f.clock.now += 1_000;
+    const limitAt = f.clock.now;
+    await f.post("StopFailure", "rate_limit", { resetsAt: f.reset });
+    f.clock.now += 3600_000;
+    // Claude's idle notification arrives first and declares the seat; an idle prompt isn't a new turn.
+    await f.restart("store", () => f.post("Notification", "idle_prompt"));
+    expect(f.seat(f.claude.id).display).toBe("unknown");
+    expect(f.seat(f.claude.id).usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(limitAt).toISOString(), resetsAt: f.reset });
+    f.clock.now += 1_000;
+    await f.post("UserPromptSubmit", null); // a newer turn still ends it
+    expect(f.seat(f.claude.id).usageLimit).toBeNull();
+  });
+
+  it("restores a limit recorded before a no-launch adoption: the same process, under its earlier generation", async () => {
+    const f = fixture();
+    await f.post("UserPromptSubmit", null);
+    f.clock.now += 1_000;
+    const limitAt = f.clock.now;
+    await f.post("StopFailure", "rate_limit", { resetsAt: f.reset });
+    const recorded = f.generation(f.claude.id);
+    f.sessions.mintOccupantTenure(f.claude.id, "adopt"); // reconcile, bind or self-attach registers the live process again
+    expect(f.generation(f.claude.id)).not.toBe(recorded);
+    f.clock.now += 3600_000;
+    await f.restart();
+    expect(f.seat(f.claude.id).usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(limitAt).toISOString(), resetsAt: f.reset });
+  });
+
+  it("doesn't let another occupant's later record end this occupant's limit", async () => {
+    const f = fixture();
+    const prior = f.generation(f.claude.id);
+    f.sessions.mintOccupantTenure(f.claude.id, "fresh"); // a launch: the earlier generation is a prior tenure now
+    f.clock.now += 1_000;
+    const limitAt = f.clock.now;
+    await f.post("StopFailure", "rate_limit", { resetsAt: f.reset });
+    f.clock.now += 1_000;
+    await f.post("UserPromptSubmit", null, { generation: prior }); // the prior tenure's late post, dated after the limit
+    f.clock.now += 3600_000;
+    await f.restart();
+    expect(f.seat(f.claude.id).usageLimit).toEqual({ rung: "lifecycle-hooks", observedAt: new Date(limitAt).toISOString(), resetsAt: f.reset });
+  });
+
+  it("reads unknown, claiming no limit, when a held limit's occupant can't be shown at a restart", async () => {
+    const f = fixture();
+    const before = f.clock.now;
+    f.clock.now += 1_000;
+    await f.post("StopFailure", "rate_limit", { resetsAt: f.reset, generation: "generation-not-in-the-ledger" });
+    f.clock.now += 3600_000;
+    await f.restart();
+    f.claudeStatus("busy", before); // an older report must not decide
+    expect(f.seat(f.claude.id).display).toBe("unknown");
+    expect(f.seat(f.claude.id).usageLimit).toBeNull();
   });
 
   it("doesn't restore a limit that a newer turn already ended", async () => {

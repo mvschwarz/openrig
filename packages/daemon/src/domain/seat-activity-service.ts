@@ -117,7 +117,8 @@ export interface SeatActivityServiceDeps {
    *  daemon restart). Null when nothing qualifies: another generation or session, or nothing recorded. */
   restoreHookEvidence?: (seat: { seatNodeId: string; sessionName: string }, runtime: string) => ActivityEvidence | null;
   /** The typed usage limit a seat still held when the daemon stopped, as the evidence its live report was, read when its
-   *  inventory is declared (after a restart). Null when none is in force; a throw means the store couldn't be read. */
+   *  inventory is declared (after a restart). Null when none is in force; a throw means the store couldn't be read, or a limit
+   *  may be in force but its occupant can't be shown. */
   restoreUsageLimitEvidence?: (seat: { seatNodeId: string; sessionName: string }, runtime: string) => ActivityEvidence | null;
 }
 
@@ -393,6 +394,8 @@ export class SeatActivityService {
     seat.claudeToolBatches.clear();
     seat.permissionEvidence = null;
     seat.usageLimit = null;
+    seat.lastWorkAt = null;
+    seat.usageLimitRestored = false;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -454,8 +457,9 @@ export class SeatActivityService {
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
           this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
-          this.restoreUsageLimit({ seatNodeId: r.node_id, sessionName: r.session_name }, r.runtime);
         }
+        // Once per current occupant, whichever path declared its inventory (a hook can arrive before the first sweep).
+        this.restoreUsageLimit({ seatNodeId: r.node_id, sessionName: r.session_name }, r.runtime);
         if (r.runtime === "codex") {
           // The occupant as OpenRig records it, from the identity reconciler's last verdict for this session: the
           // binding's pane it checked, and the pane process it verified as this session's Codex there. It follows
@@ -585,11 +589,16 @@ export class SeatActivityService {
       seat.sources.delete(`${runtime}:permission-prompt`);
     }
     // A typed usage limit holds until a strictly newer turn starts: a working boundary from the hooks or the seat's own
-    // status. An idle prompt, a redraw or the limit's own menu is not a new turn.
-    if (evidence.usageLimit) seat.usageLimit = { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
-    else if (seat.usageLimit && evidence.activity === "working"
-        && (evidence.rung === "lifecycle-hooks" || evidence.rung === "self-report")
-        && Date.parse(evidence.observedAt) > Date.parse(seat.usageLimit.observedAt)) seat.usageLimit = null;
+    // status. An idle prompt, a redraw or the limit's own menu is not a new turn. The rule holds in either arrival order:
+    // a limit older than a working boundary already seen never arms (relay posts can arrive out of order).
+    if (evidence.usageLimit) {
+      if (!this.newerWorkSeen(seat, evidence.observedAt)) {
+        seat.usageLimit = { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
+      }
+    } else if (evidence.activity === "working" && (evidence.rung === "lifecycle-hooks" || evidence.rung === "self-report")) {
+      if (!seat.lastWorkAt || Date.parse(evidence.observedAt) > Date.parse(seat.lastWorkAt)) seat.lastWorkAt = evidence.observedAt;
+      if (seat.usageLimit && Date.parse(evidence.observedAt) > Date.parse(seat.usageLimit.observedAt)) seat.usageLimit = null;
+    }
     seat.sources.set(evidence.sourceId, {
       latest: evidence,
       latestActivity: evidence.activity !== undefined ? evidence : prior?.latestActivity ?? null,
@@ -634,6 +643,7 @@ export class SeatActivityService {
     seat.claudeToolBatches.clear();
     seat.permissionEvidence = null;
     seat.usageLimit = null;
+    seat.lastWorkAt = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -742,6 +752,8 @@ export class SeatActivityService {
         permissionPolling: false,
         permissionEvidence: null,
         usageLimit: null,
+        lastWorkAt: null,
+        usageLimitRestored: false,
         trust: new Map(),
         promotion: new Map(),
         contradictionSinceMs: null,
@@ -874,14 +886,17 @@ export class SeatActivityService {
         && evidence.rung === "lifecycle-hooks") this.reportEvidence({ ...evidence, seq: 0 });
   }
 
-  /** After a daemon restart, a typed usage limit still in force holds again, as it did live: a hook-rung limit is its hook
-   *  evidence again (seq 0, so any live hook outranks it), any other rung's is held directly. A store that can't be read
-   *  leaves the seat unknown until a newer turn, never working on an older report. Only Claude and Codex seats post a typed
-   *  limit, and only they have a newer turn or a banner to end that hold, so no other seat reads the store for one. */
+  /** After a daemon restart, a typed usage limit still in force holds again, as it did live. It's read once per seat,
+   *  whichever path declared its inventory, and held directly unless a strictly newer working boundary was already seen. A
+   *  store that can't be read, or a limit whose occupant can't be shown, leaves the seat unknown until a newer turn, never
+   *  working on an older report. Only Claude and Codex seats post a typed limit, and only they have a newer turn or a
+   *  banner to end that hold, so no other seat reads the store for one. */
   private restoreUsageLimit(seat: { seatNodeId: string; sessionName: string }, seatRuntime: string | null): void {
     const ladder = this.ladder.get(seat.seatNodeId);
     if (!this.restoreUsageLimitEvidence || (seatRuntime !== "claude-code" && seatRuntime !== "codex") || !ladder
-        || ladder.usageLimit) return;
+        || ladder.retired || ladder.sessionName !== seat.sessionName || ladder.usageLimitRestored) return;
+    ladder.usageLimitRestored = true;
+    if (ladder.usageLimit) return; // a live limit already arrived
     let evidence: ActivityEvidence | null;
     try {
       evidence = this.restoreUsageLimitEvidence(seat, seatRuntime);
@@ -891,11 +906,16 @@ export class SeatActivityService {
       return;
     }
     if (!evidence?.usageLimit || evidence.seatNodeId !== seat.seatNodeId || evidence.sessionName !== seat.sessionName) return;
-    if (evidence.rung !== "lifecycle-hooks") {
-      this.holdUsageLimit(seat.sessionName, { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt });
-    } else if (!this.latestByRung(ladder, "lifecycle-hooks")) {
-      this.reportEvidence({ ...evidence, seq: 0 });
-    }
+    // Held directly, as a live limit is, unless a strictly newer working boundary has already been seen; a newer idle hook
+    // isn't recovery. (Reporting it as seq-0 hook evidence would be dropped behind any live hook.)
+    if (this.newerWorkSeen(ladder, evidence.observedAt)) return;
+    ladder.usageLimit = { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
+    this.arbitrate(ladder);
+  }
+
+  /** Whether the seat has already accepted a working boundary (hooks or its own status) strictly newer than `at`. */
+  private newerWorkSeen(seat: SeatLadderState, at: string): boolean {
+    return seat.lastWorkAt !== null && Date.parse(seat.lastWorkAt) > Date.parse(at);
   }
 
   /** A typed usage limit read outside the hook relay (Codex's banner, which the pane shows), held as a hook-rung limit is:
@@ -1191,6 +1211,10 @@ interface SeatLadderState {
   permissionEvidence: ArbitratedSeatState["needsInputEvidence"];
   /** The typed usage limit that ended the last turn, held until a newer turn starts (see reportEvidence). */
   usageLimit: { rung: EvidenceRungId; observedAt: string; resetsAt: string | null; unread?: true } | null;
+  /** The newest working boundary accepted from the hooks or the seat's own status: a limit older than it never arms. */
+  lastWorkAt: string | null;
+  /** Whether the current occupant's held limit has been read back after a restart (once, whoever declared first). */
+  usageLimitRestored: boolean;
   /** When the last applied pane read of the permission requests began; read only by `codexPermissionState`. */
   permissionReadStartedAt?: string;
   sessionName: string;
