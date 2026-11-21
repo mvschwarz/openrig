@@ -18,7 +18,7 @@ export async function noticeRosterReady(queue: Pick<QueueRepository, "create">, 
         tags: ["roster-ready", `rig:${rigId}`],
       });
     } catch (error) {
-      warnings.push(`Roster-ready notice to ${session} was not recorded: ${error instanceof Error ? error.message : String(error)}`);
+      warnings.push(`Roster-ready notice to ${session} is unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return warnings;

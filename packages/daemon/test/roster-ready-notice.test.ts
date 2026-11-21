@@ -20,7 +20,7 @@ describe("roster-ready notice", () => {
     const create = vi.fn().mockRejectedValueOnce(new Error("disk error")).mockResolvedValue({});
     const warnings = await noticeRosterReady({ create }, "rig-one", ["a@team", "b@team"]);
     expect(create).toHaveBeenCalledTimes(2);
-    expect(warnings).toEqual(["Roster-ready notice to a@team was not recorded: disk error"]);
+    expect(warnings).toEqual(["Roster-ready notice to a@team is unconfirmed: disk error"]);
   });
 
   it("persists a single queue item on retry", async () => {

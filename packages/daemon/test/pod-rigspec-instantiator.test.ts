@@ -176,8 +176,37 @@ describe("PodRigInstantiator", () => {
     try {
       const outcome = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
       expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+      if (outcome.ok) expect(outcome.result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("dev.impl -> dev.qa (delegates_to) could not be recorded")]));
       expect(notice).not.toHaveBeenCalled();
     } finally { db.close(); }
+  });
+
+  it.each(["lookup", "callback"])("keeps a successful launch when roster notification %s fails", async failure => {
+    const notice = vi.fn(async () => {
+      if (failure === "callback") throw new Error("notice callback failed");
+      return [];
+    });
+    const adapter = mockAdapter();
+    adapter.launchHarness = vi.fn(async () => ({ ok: true, warnings: ["prior launch warning"] }));
+    const { db, rigRepo, eventBus, inst, tmux } = setup(undefined, { "claude-code": adapter }, undefined, undefined, undefined, { rosterReadyNotice: notice });
+    try {
+      if (failure === "lookup") {
+        const emit = eventBus.emit.bind(eventBus);
+        vi.spyOn(eventBus, "emit").mockImplementation(event => {
+          const result = emit(event);
+          if (event.type === "rig.imported") vi.spyOn(rigRepo, "getRig").mockImplementation(() => { throw new Error("roster lookup failed"); });
+          return result;
+        });
+      }
+      const outcome = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+      expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.result.nodes[0]?.status).toBe("launched");
+      expect(outcome.result.warnings).toEqual(expect.arrayContaining([expect.stringContaining(failure === "lookup" ? "roster lookup failed" : "notice callback failed")]));
+      expect(outcome.result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("prior launch warning")]));
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      if (failure === "lookup") expect(notice).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); db.close(); }
   });
 
   it("does not send roster notices for a failed build", async () => {

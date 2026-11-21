@@ -36,8 +36,9 @@ command. `rig ps --nodes` shows it under "Startup details (<seat>)", and
 During a fresh team build, a seat can see `rosterState: "building"` in
 `rig whoami`. Once all declared seats and edges are recorded, OpenRig queues a
 roster-ready notice for each agent that started, prompting it to check again.
-The queue records the notice even when a wake cannot reach the seat; a failure
-to record a notice appears as a launch warning. Terminal-only seats are excluded.
+The queue records the notice even when a wake cannot reach the seat; an
+unconfirmed notice appears as a launch warning. If an edge could not be recorded,
+the launch warning names it and no roster-ready notice is sent. Terminal-only seats are excluded.
 
 The attention codes that stop startup this way are `trust_gate`,
 `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,

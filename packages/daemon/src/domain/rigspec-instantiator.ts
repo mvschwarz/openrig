@@ -1498,11 +1498,15 @@ export class PodRigInstantiator {
       for (const rigId of marked) unmarkRigBuilding(this.db, rigId);
     }
     if (outcome.ok && rosterComplete && this.deps.rosterReadyNotice) {
-      const nodes = this.deps.rigRepo.getRig(outcome.result.rigId)!.nodes;
-      const agents = new Set(nodes.filter(node => node.runtime !== "terminal").map(node => node.logicalId));
-      const sessions = outcome.result.nodes.flatMap(node => node.status === "launched" && node.sessionName && agents.has(node.logicalId) ? [node.sessionName] : []);
-      const warnings = await this.deps.rosterReadyNotice(outcome.result.rigId, sessions);
-      if (warnings.length) outcome.result.warnings = [...(outcome.result.warnings ?? []), ...warnings];
+      try {
+        const nodes = this.deps.rigRepo.getRig(outcome.result.rigId)!.nodes;
+        const agents = new Set(nodes.filter(node => node.runtime !== "terminal").map(node => node.logicalId));
+        const sessions = outcome.result.nodes.flatMap(node => node.status === "launched" && node.sessionName && agents.has(node.logicalId) ? [node.sessionName] : []);
+        const warnings = await this.deps.rosterReadyNotice(outcome.result.rigId, sessions);
+        if (warnings.length) outcome.result.warnings = [...(outcome.result.warnings ?? []), ...warnings];
+      } catch (error) {
+        outcome.result.warnings = [...(outcome.result.warnings ?? []), `Roster-ready notification is unconfirmed: ${error instanceof Error ? error.message : String(error)}`];
+      }
     }
     return outcome;
   }
@@ -1854,11 +1858,18 @@ export class PodRigInstantiator {
       for (const edge of pod.edges) {
         const fromId = nodeIdMap[`${pod.id}.${edge.from}`];
         const toId = nodeIdMap[`${pod.id}.${edge.to}`] ?? (edge.kind === "escalates_to" && isEscalationTargetRef(edge.to) ? edge.to : undefined);
+        const targetLabel = edge.kind === "escalates_to" && isEscalationTargetRef(edge.to) ? edge.to : `${pod.id}.${edge.to}`;
         if (fromId && toId) {
           try {
             this.deps.rigRepo.addEdge(rigId, fromId, toId, edge.kind);
-          } catch { edgesRecorded = false; }
-        } else edgesRecorded = false;
+          } catch (error) {
+            edgesRecorded = false;
+            podInstantiateWarnings.push(`Roster incomplete: edge ${pod.id}.${edge.from} -> ${targetLabel} (${edge.kind}) could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        } else {
+          edgesRecorded = false;
+          podInstantiateWarnings.push(`Roster incomplete: edge ${pod.id}.${edge.from} -> ${targetLabel} (${edge.kind}) could not be recorded because an endpoint is missing.`);
+        }
       }
     }
 
@@ -1869,8 +1880,14 @@ export class PodRigInstantiator {
       if (fromId && toId) {
         try {
           this.deps.rigRepo.addEdge(rigId, fromId, toId, edge.kind);
-        } catch { edgesRecorded = false; }
-      } else edgesRecorded = false;
+        } catch (error) {
+          edgesRecorded = false;
+          podInstantiateWarnings.push(`Roster incomplete: edge ${edge.from} -> ${edge.to} (${edge.kind}) could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        edgesRecorded = false;
+        podInstantiateWarnings.push(`Roster incomplete: edge ${edge.from} -> ${edge.to} (${edge.kind}) could not be recorded because an endpoint is missing.`);
+      }
     }
 
     if (edgesRecorded && Object.keys(nodeIdMap).length === rigSpec.pods.reduce((count, pod) => count + pod.members.length, 0)) {
