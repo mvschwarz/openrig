@@ -687,9 +687,9 @@ export const PLAIN_WORDING: Readonly<Record<string, { title: string; replaces: s
  *  communication with seats) reach a team within the caller's scope; workspace tools read the work tree and context when
  *  the caller's grant includes them; owner tools administer the instance (launch, stop, snapshot and restore, discover and
  *  bind, add seats, validate or inspect local files by path, the event log) and are offered only to an owner grant for now.
- *  A local caller (stdio, or HTTP with no auth configured) is the owner. Person tools act for the person an external grant
- *  names (the team's questions to them) and are offered only to such a grant: no other caller, the owner included, has a
- *  person to act for. */
+ *  A local caller (stdio, or HTTP with no auth configured) is the owner. Person tools act for the person a grant explicitly
+ *  names (the team's questions to them): an external grant's person, or a token-file grant bound to one with
+ *  `rig mcp token add --person`. No other caller, the owner included, has a person to act for. */
 export type McpAccessClass = "work" | "workspace" | "owner" | "person";
 
 /** An authenticated HTTP caller: the seat it acts as comes with it (the DaemonClient built for it); this is what it may
@@ -697,6 +697,9 @@ export type McpAccessClass = "work" | "workspace" | "owner" | "person";
  *  destination is. An external grant (`external`) is narrower: see externalScope. */
 export type McpAccess = {
   principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
+  /** A token-file grant's person (`rig mcp token add --person`): the gateway entity id of the registered person this
+   *  connection may answer the team's questions for. Never inferred from the seat or the owner flag. */
+  person?: string;
   /** An external caller's grant: the object/action pairs it names (openrig.grant/v1 `objects`), the grant it answered
    *  with, `person`, the gateway entity id of the person the grant service vouches owns this connection, and `throttle`,
    *  the service's fair-use limit on new work for this request: the seconds before a new create is accepted again. */
@@ -711,6 +714,10 @@ const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>>
   artifact: { read: "rig_artifact_read" },
   question: { read: "rig_question_list", answer: "rig_question_answer" },
 };
+
+/** The person a caller's grant names: an external grant's, or a token-file grant's own binding. */
+const personOf = (access: McpAccess | undefined): string | undefined =>
+  access?.external ? access.external.person : access?.person;
 
 /** A person tool (access class `person`) acts for the person an external grant names, so a grant without a person isn't
  *  offered it, whatever its objects say. The caller's seat is never taken for a person. */
@@ -876,8 +883,14 @@ function externalInboxInstructions(tools: ReadonlySet<string>): string {
   ].join("\n");
 }
 
+/** For a token-file grant bound to a person: the same rule as an external grant's person, beside the member's instructions. */
+const FILE_PERSON_INSTRUCTION = "This connection is bound to a person: the team's questions to them are in rig_question_list. Submit only the answer they explicitly give you, with rig_question_answer (the qitemId, the revision you showed them, and the options they chose or exactly what they typed), and never choose for them.";
+
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
-  if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
+  if (!access?.external) {
+    const base = frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
+    return access?.person ? `${base}\n${FILE_PERSON_INSTRUCTION}` : base;
+  }
   const tools = externalTools(access.external);
   const workflow = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
@@ -1160,7 +1173,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const offered = (tool: string): boolean => {
     if (external) return external.has(tool);
     const kind = accessClass.get(tool);
-    if (kind === "person") return false;
+    // Only a token-file grant explicitly bound to a person is offered the person tools; a local caller and the owner aren't.
+    if (kind === "person") return Boolean(access?.person);
     if (!access || access.owner) return true;
     return kind === "work" || (kind === "workspace" && access.workspace);
   };
@@ -2472,7 +2486,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   // them are what Steering shows them as answerable, read from Steering's own view of them, and answered through
   // Steering's write path (answer for an ask, resolve for a park), as them, through their own client. The caller's seat
   // is only the route the answer came by.
-  const person = access?.external?.person;
+  const person = personOf(access);
   const personAddress = person ? `${person}@external` : undefined;
   type Answerable = { qitemId: string; verb: "answer" | "approve" | "resolve"; item: Record<string, any> };
   const answerable = async (): Promise<Answerable[] | TextResult> => {
@@ -2599,7 +2613,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // The route the answer came by, recorded beside it: never the person, and never the caller's own judgment.
         const grant = access?.external?.grant;
-        const route = { route: "external-assistant", assistantSeat: seatOf(), principal: access?.principal, ...(grant ? { grant: grant.id, grantVersion: grant.version } : {}), person: personAddress };
+        const route = { route: access?.external ? "external-assistant" : "file-grant", assistantSeat: seatOf(), principal: access?.principal, ...(grant ? { grant: grant.id, grantVersion: grant.version } : {}), person: personAddress };
         // One operation per submission, one id per step: a retry of the same answer to the same revision is recognised by
         // these ids, never by equal answers.
         const operation = `assistant:${createHash("sha256").update(JSON.stringify([grant?.id ?? access?.principal, qitemId, revision, choices ?? null, words ?? null])).digest("hex").slice(0, 24)}`;
