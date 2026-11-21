@@ -18,6 +18,8 @@ import {
   getNodeInventoryWithContext,
   attachAgentActivity,
   attachTerminalActivityAndWork,
+  countAssignedWorkForEntry,
+  readAssignedWorkBySession,
 } from "../domain/node-inventory.js";
 import { projectionLane } from "../domain/projection-lane.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -143,9 +145,10 @@ rigsRoutes.get("/summary", (c) => {
   return projectionLane.run(() => {
     const summaries = repo.getRigSummaries({ includeArchived, archivedOnly });
     const invByRig = getNodeInventoryForRigs(repo.db, new Set(summaries.map((s) => s.id)));
+    const assignedByDest = readAssignedWorkBySession(repo.db);
     const enriched = summaries.map((s) => {
       const inventory = invByRig.get(s.id) ?? [];
-      const lifecycleState = deriveRigLifecycleFromInventory(inventory);
+      const lifecycleState = deriveRigLifecycleFromInventory(inventory, (node) => countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount);
       // Restore eligibility still accounts for every seat, including intentional stops.
       const restoreLifecycleState = deriveRigLifecycleState(inventory.map((entry) => entry.lifecycleState));
       const agents = inventory.filter((e) => e.nodeKind === "agent");

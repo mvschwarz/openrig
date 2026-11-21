@@ -161,3 +161,24 @@ it("#3253: a pod seat's first start whose limit can't be applied keeps the refus
       body: { ok: false, code: `process_limits_${kind}`, retryable: kind === "unverified", processLimits: problem } });
   }
 });
+
+// #3395, spec section 5, "Stored": the first start launches from the seat's stored settings, so it reads the stored
+// pool block from the node.
+it("The first start of a never-occupied model seat reports its stored pool block that can't be used once in its warnings", async () => {
+  const advisory = "dev.lead pool.max: must be a whole number of 0 or more; pool not used";
+  const f = await fixture(false);
+  const node = f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.logicalId === "dev.lead")!;
+  // Stored as a re-apply writes a block that can't be used: as authored.
+  expect(f.rigRepo.setNodePool(node.id, { raw: { max: -1 } })).toBe(true);
+  const response = await f.app.request(`/api/rigs/${f.rigId}/nodes/dev.lead/launch`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  const body = await response.json() as { ok: boolean; warnings?: string[] };
+  expect({ status: response.status, body }, JSON.stringify(body)).toMatchObject({ status: 201, body: { ok: true, logicalId: "dev.lead" } });
+  expect(body.warnings?.filter(w => w === advisory)).toHaveLength(1);
+  expect(JSON.stringify(body).split(advisory).length - 1).toBe(1);
+  expect(f.adapter.launchHarness).toHaveBeenCalledTimes(1);
+  // A seat whose node stores no block says nothing about a pool.
+  const other = f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.logicalId === "dev.build")!;
+  const plain = await f.podInstantiator.launchFirstMaterializedNode(f.rigId, other.id);
+  expect(plain).toMatchObject({ ok: true });
+  expect(JSON.stringify(plain)).not.toContain("pool not used");
+});
