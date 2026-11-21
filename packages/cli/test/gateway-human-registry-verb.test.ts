@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { createProgram } from "../src/index.js";
 // The registry module is home-state owned by the daemon; the verb (and this test) reach
 // it via the narrow @openrig/daemon/gateway-human-registry subpath (the C3/crash-cart rail).
@@ -14,15 +15,20 @@ import { REGISTRATION_OFFER } from "../src/person-registration-offer.js";
 describe("rig gateway human add verb (post-relocate)", () => {
   let home: string;
   let prevHome: string | undefined;
+  let prevUrl: string | undefined;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "a3-verb-"));
     prevHome = process.env.OPENRIG_HOME;
     process.env.OPENRIG_HOME = home;
+    // add reads the daemon's seats for its name warning: a closed port keeps these tests off any live daemon.
+    prevUrl = process.env.OPENRIG_URL;
+    process.env.OPENRIG_URL = "http://127.0.0.1:9";
     process.exitCode = undefined;
   });
   afterEach(() => {
     vi.restoreAllMocks();
     if (prevHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = prevHome;
+    if (prevUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = prevUrl;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -130,6 +136,35 @@ describe("rig gateway human add verb (post-relocate)", () => {
     await bound.parseAsync(["node", "rig", "gateway", "human", "add", "mike", "--display-name", "Mike", "--binding", "slack:main:vault://slack/mike:primary", "--delivery-class", "B"]);
     expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).not.toHaveProperty("delivery");
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it("warns when a seat's member name is the new person's id, since that seat is then treated as the person", async () => {
+    const server = createServer((req, res) => {
+      const body = req.url === "/api/ps" ? [{ rigId: "r1" }]
+        : req.url === "/api/rigs/r1/nodes" ? [{ canonicalSessionName: "mike@team" }, { canonicalSessionName: "ops-lead@team" }, { canonicalSessionName: null }]
+        : null;
+      res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(body ?? {}));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const add = createProgram(); add.exitOverride();
+      await add.parseAsync(["node", "rig", "gateway", "human", "add", "mike", "--display-name", "Mike", "--binding", "slack:main:vault://slack/mike:primary", "--delivery-class", "B"]);
+      expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true, entityId: "mike" });
+      expect(error.mock.calls.map((call) => String(call[0]))).toEqual([
+        "warning: mike@team is a seat whose member name is mike, so work and messages addressed to it are treated as addressed to the person mike. "
+          + "That's intended for the person's own pane; otherwise rename the seat or choose another id.",
+      ]);
+      expect(process.exitCode).toBeUndefined();
+      // No seat shares the name: nothing is said.
+      error.mockClear();
+      const other = createProgram(); other.exitOverride();
+      await other.parseAsync(["node", "rig", "gateway", "human", "add", "ana", "--display-name", "Ana", "--binding", "slack:main:vault://slack/ana:primary", "--delivery-class", "B"]);
+      expect(error).not.toHaveBeenCalled();
+    } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
   });
 
   it("A6 v3: an OPTIONAL handle= token parses alongside a ':'-bearing secretsRef (inbound-resolvable)", async () => {

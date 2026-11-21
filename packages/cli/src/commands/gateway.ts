@@ -123,6 +123,25 @@ export async function daemonHumanReadiness(entityId: string): Promise<HumanReadi
   }
 }
 
+/** The seats on this daemon whose session names `isPerson` reads as a registered person, for add's warning: a seat
+ *  whose member name is a person's id is treated as that person. Best effort: none when the daemon can't be read. */
+export async function seatsReadAsPerson(isPerson: (session: string) => boolean): Promise<string[]> {
+  try {
+    const { DaemonClient } = await import("../client.js");
+    const client = new DaemonClient();
+    const rigs = await client.get<Array<{ rigId?: string }>>("/api/ps");
+    if (rigs.status !== 200 || !Array.isArray(rigs.data)) return [];
+    const seats: string[] = [];
+    for (const rig of rigs.data) {
+      if (!rig.rigId) continue;
+      const nodes = await client.get<Array<{ canonicalSessionName?: string | null }>>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
+      if (nodes.status !== 200 || !Array.isArray(nodes.data)) continue;
+      for (const node of nodes.data) if (node.canonicalSessionName && isPerson(node.canonicalSessionName)) seats.push(node.canonicalSessionName);
+    }
+    return seats;
+  } catch { return []; }
+}
+
 /** Default queue-row half of the remove guard: non-terminal rows addressed to the human,
  *  via the daemon. ok:false carries the reason the board COULD NOT BE CHECKED. */
 export async function daemonQueueRows(address: string): ReturnType<HumanRowsLookup> {
@@ -251,6 +270,8 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
         const noConnector = result.value.fragment.connectorBindings.length === 0;
         console.log(JSON.stringify({ ok: !failed, entityId, path: result.value.path, receipt: result.receipt, ...(noConnector ? { delivery: "Feed and Steering only" } : {}), ...followUps }));
         if (noConnector) console.error(`${entityId} has no connector binding, so messages and questions reach them only in the TUI's Feed and Steering until one is added: rerun rig gateway human add ${entityId} --replace with the same options plus --binding <kind:connectorRef:secretsRef:primary[:handle=<id>]> (rig gateway human set's binding.<n> changes only a binding that exists).`);
+        const sharing = await seatsReadAsPerson((session) => registry.resolveRegisteredHumanAddress(session, [result.value.fragment]) !== null);
+        if (sharing.length) console.error(`warning: ${sharing.join(", ")} ${sharing.length === 1 ? "is a seat whose member name is" : "are seats whose member names are"} ${entityId}, so work and messages addressed to ${sharing.length === 1 ? "it" : "them"} are treated as addressed to the person ${entityId}. That's intended for the person's own pane; otherwise rename the seat or choose another id.`);
         if (failed) { console.error(`the person was registered, but part of their placement wasn't saved; fix it with rig gateway human set ${entityId} … or rig gateway default ${entityId}`); process.exitCode = 1; }
       } catch (error) { console.error(`refused: ${(error as Error).message}`); process.exitCode = 1; }
     })

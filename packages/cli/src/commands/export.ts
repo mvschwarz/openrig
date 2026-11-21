@@ -32,7 +32,11 @@ function copyCulture(file: string, root: string, outDir: string): void {
     return;
   }
   let parent = nodePath.dirname(target);
-  while (!fs.existsSync(parent)) parent = nodePath.dirname(parent);
+  while (!fs.existsSync(parent)) {
+    // The root's dirname is itself: a missing drive or share root ends the walk instead of looping.
+    if (nodePath.dirname(parent) === parent) throw new Error("culture destination resolves outside the export folder");
+    parent = nodePath.dirname(parent);
+  }
   const outputRoot = fs.realpathSync(outDir), realParent = fs.realpathSync(parent);
   if (realParent !== outputRoot && !inside(outputRoot, realParent)) throw new Error("culture destination resolves outside the export folder");
   fs.mkdirSync(nodePath.dirname(target), { recursive: true });
