@@ -855,7 +855,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // Only a boot in progress (no verdict, no gate, a label that proves nothing) is worth waiting for; a real
       // gate (login, trust or MCP approval, auto-mode identity) won't clear itself.
       const booting = probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
-      if (slowStart && !booting) {
+      // Claude's process with nothing of its screen drawn yet keeps waiting here too, as in the first window: its first
+      // frame (its trust dialog, say) can come next. The final read still takes it, with its warning.
+      if (slowStart && !booting && probe.basis !== "process") {
         slowStart = false;
         break;
       }
@@ -902,10 +904,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
 
     // A gate Claude draws once its process is up (workspace trust, project MCP approval) waits on a person, as the resume
-    // adapter reads it. A different occupant keeps main's result, as below.
+    // adapter reads it. A different occupant keeps main's result, as below, and so does a shell that's provably back and
+    // idle: the gate's text above it is what Claude left when it exited.
+    let returned: boolean | undefined;
+    const returnedToShell = async () => returned ??= await this.paneReturnedToShell(binding, finalCommand);
     const gate = finalProbe.code === "trust_gate" || finalProbe.code === "mcp_gate";
     if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required"
-      || (gate && await this.paneOccupant(binding, false) !== "another")) {
+      || (gate && !await returnedToShell() && await this.paneOccupant(binding, false) !== "another")) {
       return {
         ok: false,
         probe: probeEvidence,
@@ -926,7 +931,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    if (await this.paneReturnedToShell(binding, finalCommand)) {
+    if (await returnedToShell()) {
       const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
       const refusal = notFound || !mayShowSideloadRefusal(finalContent) ? null
         : claudeSideloadRefusalLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);

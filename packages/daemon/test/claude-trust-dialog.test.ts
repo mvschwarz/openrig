@@ -16,6 +16,9 @@ const frames = [
   { id: "dialog-on-yes", pane: yesFocused, current: true },
   { id: "dialog-answered-composer-below", pane: `${dialog}\n${composer}`, current: false },
   { id: "reply-quoting-the-heading", pane: `● The restore stopped at:\n  Accessing workspace:\n  /home/user\n\n${composer}`, current: false },
+  // A resume redraws history before its composer: a reply quoting the heading, with no composer drawn under it yet.
+  { id: "reply-quoting-the-heading-before-a-composer", pane: "● The restore stopped at:\n  Accessing workspace:\n  /home/user", current: false },
+  { id: "dialog-drawn-after-an-earlier-reply", pane: `● Done.\n\n${heading}`, current: true },
 ];
 
 describe("Claude's workspace trust dialog, from its heading on", () => {

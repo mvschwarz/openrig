@@ -1049,10 +1049,11 @@ describe("Claude Code runtime adapter", () => {
     const WAIT_MS = 6_000;
 
     // `screen(read)` is the pane text on the nth capture; `rows(read)` the process list at that point.
-    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
+    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string;
+      command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
       let reads = 0;
       const tmux = mockTmux();
-      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue(opts.paneCommand ?? "sh");
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => opts.command?.(reads) ?? opts.paneCommand ?? "sh");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => (opts.screen ?? (() => ""))(reads++));
       (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
       const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: opts.autoDrive, readinessTimeoutMs: "readinessTimeoutMs" in opts ? opts.readinessTimeoutMs : WAIT_MS,
@@ -1072,6 +1073,27 @@ describe("Claude Code runtime adapter", () => {
       const { result } = await run({ paneCommand: "claude", screen: (read) => (read < 2 ? "" : dialog) });
       expect(result).toMatchObject({ ok: false, recovery: "attention_required",
         error: "Claude is waiting for workspace trust approval before the session can become interactive." });
+    });
+
+    it("keeps the longer wait on Claude's process alone too, so a trust dialog drawn after it is still met", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      // The first window passes on the launch script; then Claude's process shows with nothing drawn, then its trust dialog.
+      const { result } = await run({ command: (read) => (read < 20 ? "sh" : "claude"),
+        rows: (read) => (read < 20 ? [{ ...pane, tpgid: 11 }, launchScript] : occupied), screen: (read) => (read < 23 ? "" : dialog) });
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+        error: "Claude is waiting for workspace trust approval before the session can become interactive." });
+    });
+
+    it("lets a shell proven idle keep the shell result when the trust dialog's text is left above it", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      // Claude exited (its dialog answered "No, exit", say) and its last frame stayed above the shell.
+      const { result } = await run({ rows: () => [pane], screen: () => `${dialog}\n$ ` });
+      expect(result).toEqual({
+        ok: false,
+        probe: probeEvidence,
+        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        recovery: "retry_fresh",
+      });
     });
 
     it("meets the project MCP approval Claude draws after its process starts the same way", async () => {
@@ -1290,6 +1312,18 @@ describe("Claude Code runtime adapter", () => {
             screen: (read) => (read < 20 ? "" : read < 22 ? heading : read < 24 ? oneOption : read < 27 ? trust : tui) });
           expect(result).toMatchObject({ ok: true });
           expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+        });
+
+        it("takes its key from the options under the new heading, never from an earlier prompt's options above it", async () => {
+          // An earlier prompt (its focus on Yes) stayed above the shell; the new launch's heading is drawn, then its options.
+          const above = `${trust}\n$ claude --resume abc-123\nAccessing workspace:\n/fixture`;
+          const onNo = `${above}\n  1. Yes, I trust this folder\n❯ 2. No, exit`;
+          const onYes = `${above}\n❯ 1. Yes, I trust this folder\n  2. No, exit`;
+          const { result, tmux } = await run({ autoDrive: true,
+            screen: (read) => (read < 20 ? "" : read < 23 ? above : read < 25 ? onNo : read < 27 ? onYes : tui) });
+          expect(result).toMatchObject({ ok: true });
+          // After the launch command's own Enter: Down on the new prompt's "No, exit", then Enter on its "Yes".
+          expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.slice(1).map(call => call[1][0])).toEqual(["Down", "Enter"]);
         });
 
         it("from this launch's own Claude is answered, and the seat resumes", async () => {

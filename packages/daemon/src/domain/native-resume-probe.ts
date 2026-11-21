@@ -661,10 +661,16 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
  *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current,
  *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
+  return claudeCurrentScreen(paneContent).rows;
+}
+
+/** claudeCurrentRows, and whether they start right under a reply's ● row rather than under a header or an input frame. */
+function claudeCurrentScreen(paneContent: string): { rows: string[]; afterReply: boolean } {
   const rows = claudeWithoutDrafts(paneContent.trimEnd().split(/\r?\n/));
   // A header-like row inside a trust dialog's content is the dialog's text, not Claude's header: it never ends the dialog.
   const scan = rows.map((row, at) => isClaudeVersionHeader(row) && insideClaudeTrustDialog(rows, at) ? "" : row);
   let current = rows;
+  let afterReply = false;
   // Walking up, the first row whose suffix has Claude's own UI (claudeDrawnAfter(scan.slice(at))) is the row where that
   // UI starts: a header, a reply, or the opening rule of an input frame whose closing rule is below. Testing only that
   // row keeps the walk linear on a tall screen.
@@ -677,11 +683,23 @@ function claudeCurrentRows(paneContent: string): string[] {
     const framed = CLAUDE_INPUT_RULE.test(rows[at]!) && /^\s*❯/.test(rows[at + 1] ?? "");
     const closing = framed ? rows.findIndex((row, index) => index > at + 1 && CLAUDE_INPUT_RULE.test(row)) : -1;
     current = rows.slice((closing >= 0 ? closing : at) + 1);
+    afterReply = !framed && /^[●⏺]/.test(scan[at]!);
     break;
   }
   // An input frame still being drawn (its opening rule and the ❯ row, no closing rule yet) holds a draft, not a dialog.
   const opening = current.findIndex((row, index) => CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(current[index + 1] ?? ""));
-  return opening >= 0 ? current.slice(0, opening) : current;
+  return { rows: opening >= 0 ? current.slice(0, opening) : current, afterReply };
+}
+
+/** The current rows Claude's trust dialog can be on. Rows that start right under a reply begin with that reply's own
+ *  continuation (blank rows and rows indented two columns or more), which is its text even when it quotes the dialog;
+ *  the dialog starts under its own full-width rule, one column in. A dialog drawn straight under a reply, with no rule
+ *  between and a reply's indentation, can't be told apart from a quote by this shape. */
+function claudeTrustRows(paneContent: string): string[] {
+  const { rows, afterReply } = claudeCurrentScreen(paneContent);
+  if (!afterReply) return rows;
+  const own = rows.findIndex(row => row.trim() !== "" && !/^ {2,}\S/.test(row));
+  return own < 0 ? [] : rows.slice(own);
 }
 
 /** These rows with the text of every draft in Claude's input frames blanked (the ❯ kept), so a rule, a reply or a
@@ -714,13 +732,17 @@ function claudeFocusedOption(paneContent: string): string | null {
   return focused.at(-1)?.[2] ?? null;
 }
 
-/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from its last 12 drawn rows. An allowlist:
+/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from the rows after the current screen's last
+ *  trust heading, so options an earlier prompt left above it never count. An allowlist:
  *  "yes" or "no" only when the prompt's options are exactly "No, exit" and "Yes, I trust this folder" (in either
  *  order, numbered or not) and one of them carries the cursor (❯ or ›): "yes" on "Yes, I trust this folder", "no" on
- *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": another option set (the
- *  gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
+ *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": no current heading, another
+ *  option set (the gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
 export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unknown" {
-  const rows = paneContent.trimEnd().split(/\r?\n/).filter(row => row.trim()).slice(-12);
+  const current = claudeTrustRows(paneContent);
+  const heading = current.map(isClaudeTrustHeading).lastIndexOf(true);
+  if (heading < 0) return "unknown";
+  const rows = current.slice(heading + 1).filter(row => row.trim());
   const options = rows.map(row => CLAUDE_TRUST_OPTION_ROW.exec(row)).filter(match => match !== null);
   const labels = options.map(match => match[2]);
   if (labels.length !== 2 || !labels.includes(CLAUDE_TRUST_YES) || !labels.includes(CLAUDE_TRUST_EXIT)) return "unknown";
@@ -732,8 +754,8 @@ export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unk
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
   // #2820 item 2: read on Claude's current screen only, and a screen with the backstop's marks is never the plain
   // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit. The heading alone
-  // counts: Claude draws it before the options.
-  const current = claudeCurrentRows(paneContent);
+  // counts: Claude draws it before the options. A reply quoting it isn't it.
+  const current = claudeTrustRows(paneContent);
   return current.some(isClaudeTrustHeading) && !hasClaudeGatedGrantsMark(current);
 }
 
@@ -742,8 +764,8 @@ const isClaudeTrustHeading = (row: string) => row.trim().startsWith("Accessing w
 /** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and fewer than
  *  its two options are drawn below it, so claudeTrustPromptFocus can't read the focus yet. */
 export function claudeTrustPromptDrawing(paneContent: string): boolean {
-  const current = claudeCurrentRows(paneContent);
-  const heading = current.findIndex(isClaudeTrustHeading);
+  const current = claudeTrustRows(paneContent);
+  const heading = current.map(isClaudeTrustHeading).lastIndexOf(true);
   return heading >= 0 && current.slice(heading + 1).filter(row => CLAUDE_TRUST_OPTION_ROW.test(row)).length < 2;
 }
 
