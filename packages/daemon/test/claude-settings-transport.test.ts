@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { transportClaudeSettings, ownClaudeSettings } from "../src/adapters/claude-settings-transport.js";
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import { resumedClaudeArguments, sentClaudeAutoMode } from "../src/domain/claude-continuation-launch.js";
@@ -52,14 +52,41 @@ describe("Claude settings file transport", () => {
     const context = seat();
     const args = (n: number) => ["--settings", JSON.stringify({ text: String(n).repeat(70000) })];
     const live = transportClaudeSettings(args(1), context, []);
-    const stale = transportClaudeSettings(args(2), context, [], live);
+    const edited = transportClaudeSettings(args(2), context, [], live)[1]!;
+    fs.writeFileSync(edited, '{"changed":true}');
+    const stale = transportClaudeSettings(args(3), context, [], live);
     const foreign = path.join(path.dirname(live[1]!), "operator.json");
     fs.writeFileSync(foreign, "untouched");
-    const current = transportClaudeSettings(args(3), context, [], live);
+    const current = transportClaudeSettings(args(4), context, [], live);
     expect(fs.existsSync(live[1]!)).toBe(true);
     expect(fs.existsSync(current[1]!)).toBe(true);
     expect(fs.existsSync(stale[1]!)).toBe(false);
+    expect(fs.readFileSync(edited, "utf8")).toBe('{"changed":true}');
     expect(fs.readFileSync(foreign, "utf8")).toBe("untouched");
+  });
+
+  it("publishes a complete file on retry after a partial write fails", () => {
+    const context = seat(), warnings: string[] = [];
+    const value = JSON.stringify({ text: "x".repeat(70000) });
+    const args = ["--settings", value];
+    const write = fs.writeFileSync;
+    const failure = vi.spyOn(fs, "writeFileSync").mockImplementationOnce((file, _data, options) => {
+      write(file, value.slice(0, 100), options);
+      throw new Error("injected storage failure after a partial write");
+    });
+    try {
+      expect(transportClaudeSettings(args, context, warnings)).toEqual(args);
+      expect(warnings).toEqual([expect.stringContaining("injected storage failure")]);
+    } finally {
+      failure.mockRestore();
+    }
+
+    const retryWarnings: string[] = [];
+    const [, published] = transportClaudeSettings(args, context, retryWarnings);
+    expect(published).not.toBe(value);
+    expect(ownClaudeSettings(published!, context)).toBe(value);
+    expect(fs.readdirSync(path.dirname(published!))).toEqual([path.basename(published!)]);
+    expect(retryWarnings).toEqual([]);
   });
 
   it("falls back inline with size and failed-write warnings, without including settings content", () => {

@@ -257,8 +257,9 @@ not establish support by every Claude version.
 
 After composition, launches and resumes keep settings of at most 64 KiB inline, byte-identical.
 Larger JSON values go through Claude's native `--settings` file form: a content-addressed 0600
-file under OpenRig's seat-specific `state/claude-settings/` storage. Each write prunes older generated
-files while keeping the current files and files named by captured live arguments. Continuations
+file under OpenRig's seat-specific `state/claude-settings/` storage. OpenRig publishes the complete
+file atomically and prunes older files only when their bytes still match their digest. It keeps
+the current files and files named by captured live arguments. Continuations
 can rewrite OpenRig's own unchanged files to apply the selected auto-mode block; foreign files stay
 opaque. A failed write falls back inline with a warning naming the size and failure, never a size
 refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.

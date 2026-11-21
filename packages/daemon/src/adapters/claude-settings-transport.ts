@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
 
 export interface ClaudeSettingsSeat { openrigHome?: string | null; session: string }
-const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 // A transport margin, not a settings limit: large values use Claude's native file form on every platform.
 const INLINE_MARGIN_BYTES = 64 * 1024;
 const ownedName = /^[a-f0-9]{64}\.json$/;
@@ -15,9 +15,25 @@ export function ownClaudeSettings(value: string, seat?: ClaudeSettingsSeat): str
   if (!seat || path.dirname(value) !== directory(seat) || !ownedName.test(path.basename(value))) return undefined;
   try {
     if (!fs.lstatSync(value).isFile()) return undefined;
-    const text = fs.readFileSync(value, "utf8");
-    return `${digest(text)}.json` === path.basename(value) ? text : undefined;
+    const bytes = fs.readFileSync(value);
+    return `${digest(bytes)}.json` === path.basename(value) ? bytes.toString("utf8") : undefined;
   } catch { return undefined; }
+}
+
+function publishSettings(file: string, value: string): void {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    try {
+      fs.writeFileSync(fd, value);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(temporary, file);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch { /* keep the original publication error */ }
+    throw error;
+  }
 }
 
 type SettingsEntry = { at: number; inline: boolean; value: string };
@@ -42,7 +58,7 @@ export function transportClaudeSettings(args: string[], seat: ClaudeSettingsSeat
     const file = path.join(dir, `${digest(entry.value)}.json`);
     try {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (ownClaudeSettings(file, seat) !== entry.value) fs.writeFileSync(file, entry.value, { flag: "wx", mode: 0o600 });
+      if (ownClaudeSettings(file, seat) !== entry.value) publishSettings(file, entry.value);
       else fs.chmodSync(file, 0o600);
       result[entry.inline ? entry.at : entry.at + 1] = entry.inline ? `--settings=${file}` : file;
       wrote = true;
@@ -55,7 +71,7 @@ export function transportClaudeSettings(args: string[], seat: ClaudeSettingsSeat
     try {
       for (const name of fs.readdirSync(dir)) {
         const file = path.join(dir, name);
-        if (ownedName.test(name) && !keep.has(file) && fs.lstatSync(file).isFile()) fs.unlinkSync(file);
+        if (!keep.has(file) && ownClaudeSettings(file, seat) !== undefined) fs.unlinkSync(file);
       }
     } catch (error) { warnings.push(`Claude settings file pruning failed: ${(error as Error).message}`); }
   }
