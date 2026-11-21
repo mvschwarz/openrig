@@ -10,6 +10,41 @@ import type { PeerReport } from "../seat-restart-in-place.js";
 import type { ClaudeSeatTokenRef } from "../claude-seat-token.js";
 import type { CredentialPrecedence } from "../claude-credential-precedence.js";
 import type { LaunchEffortSelection } from "../seat-effort.js";
+import type { AssignmentPlan } from "./assignment-plan.js";
+import type { AccountRefProvider } from "./provider-account-refs.js";
+
+/** #3625: a plan for moving one rig's seats of one provider to an account this daemon knows by label. */
+export interface AssignmentPlanRequest {
+  rig: string;
+  provider: AccountRefProvider;
+  label: string;
+  includeOverrides: boolean;
+  accountHome?: string;
+  /** Where it applies: this daemon's host id. */
+  daemon: string;
+}
+
+export type AssignmentPlanResult =
+  | { ok: true; plan: AssignmentPlan }
+  | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string };
+
+/** #3625 slice 3: apply the plan whose digest the person saw. */
+export interface AssignmentApplyRequest extends AssignmentPlanRequest {
+  digest: string;
+  requestedBy: string | null;
+}
+
+export type AssignmentApplyResult =
+  | { ok: true; report: import("./assignment-apply.js").AssignmentApplyReport }
+  | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable" | "plan_changed" | "apply_in_progress"; message: string; digest?: string };
+
+/** What an apply borrows from the route for one call: the seat's restart, Claude's relaunch, and the account-home switch. */
+export interface AssignmentApplyTools {
+  seatRestart?: SeatRestart;
+  claudeSeat?: ClaudeSeatRelaunch;
+  successorCheck?: (seat: string, accountHome: string) => Promise<import("./assignment-plan.js").PlanCheck>;
+  successor?: (seat: string, accountHome: string) => Promise<import("./assignment-apply.js").SuccessorResult>;
+}
 
 export interface ProviderPrecheckInput {
   seat: string;
@@ -122,6 +157,12 @@ export interface ProviderService {
   /** Precheck-gated switch; returns an explicit business outcome (never a transport error). With the seat's restart it
    *  moves that seat to a login saved in the Codex home it runs on. */
   switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<ProviderSwitchResult>;
+  /** #3625: the plan for an assignment; read only. Optional so older or stub services answer 503. */
+  /** `successorCheck` is the account-home dry run for a seat moving to a prepared home as a fresh successor. */
+  assignmentPlan?(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch,
+    successorCheck?: (seat: string, accountHome: string) => Promise<import("./assignment-plan.js").PlanCheck>): Promise<AssignmentPlanResult>;
+  /** Carries out the plan if its digest still matches: one seat at a time, each result stored as it lands. */
+  applyAssignment?(input: AssignmentApplyRequest, tools: AssignmentApplyTools): Promise<AssignmentApplyResult>;
   /** Slice 01: one bounded native read of the usage windows (coalesced); `disabled` while the switch is off. */
   refreshUsage?(provider: "codex" | "claude", token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }>;
 }

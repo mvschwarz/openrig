@@ -903,7 +903,7 @@ It drives the maintained OpenShell reference; see the [OpenShell example](../ref
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig provider` | — | — |
-| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--claude-token-file <path>`<br>`--credential-label <label>`<br>`--all-hosts`<br>`--hosts <ids>` |
+| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--claude-token-file <path>`<br>`--credential-label <label>`<br>`--all-hosts`<br>`--hosts <ids>`<br>`--host <id>` |
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
@@ -911,6 +911,11 @@ It drives the maintained OpenShell reference; see the [OpenShell example](../ref
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--reason <text>`<br>`--model <id>`<br>`--codex-config-profile <name>`<br>`--dry-run`<br>`--json` |
 | `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
 | `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
+| `rig provider account` | — | — |
+| `rig provider account add <label>` | — | `--provider <p>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--codex-home <dir>`<br>`--login <name>`<br>`--host <id>`<br>`--json` |
+| `rig provider account list` | — | `--provider <p>`<br>`--host <id>`<br>`--json` |
+| `rig provider account remove <label>` | — | `--provider <p>`<br>`--host <id>`<br>`--json` |
+| `rig provider assign <rig>` | — | `--provider <p>`<br>`--account <label>`<br>`--include-overrides`<br>`--account-home <dir>`<br>`--apply`<br>`--plan <digest>`<br>`--host <id>`<br>`--json` |
 
 ### usage
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { providerCommand } from "../src/commands/provider.js";
-import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -422,5 +422,475 @@ describe("rig provider switch --seat tells the person what follows", () => {
     const kept = switchDeps(async () => ({ status: 200, data: { outcome: "rebind_in_progress", message: "Relaunched dev-a@rig in its own pane.",
       seat: { account: "work", tokenFile: "/tokens/work", conversation: "conv-1", loginChanged: true, tokenApplied: true, effort, undo: null, peers: [] } } }));
     expect((await run(["switch", "--seat", "dev-a@rig", "--to-account", "work", "--token-file", "/tokens/work"], kept)).logs).toContain(`effort: ${effort}`);
+  });
+});
+
+describe("rig provider account add|list|remove (#3625)", () => {
+  let server: http.Server;
+  let port: number;
+  const seen: Array<{ url: string; method: string; body: string }> = [];
+  const TOKEN = { provider: "claude", label: "max-1", kind: "claude_token_file", file: "/keys/max-1", codexHome: null, login: null, createdAt: "2026-11-20T21:00:00.000Z" };
+  const CODEX = { provider: "codex", label: "work", kind: "codex_saved_login", file: null, codexHome: "/homes/codex-a", login: "work", createdAt: "2026-11-20T21:00:00.000Z" };
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        seen.push({ url: req.url ?? "", method: req.method ?? "", body });
+        const reply = (status: number, data: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+        if (req.method === "GET" && req.url?.startsWith("/api/provider/account-refs")) {
+          return reply(200, { accounts: req.url.includes("provider=codex") ? [CODEX] : req.url.includes("empty") ? [] : [TOKEN, CODEX] });
+        }
+        if (req.method === "POST" && req.url === "/api/provider/account-refs") {
+          const sent = JSON.parse(body) as { provider: string; label: string; apiKeyFile?: string };
+          if (sent.label === "open") return reply(400, { ok: false, code: "reference_unusable", message: "the API-key file must be private (0600 or 0400) and at most 8192 bytes. Nothing was stored." });
+          if (sent.label === "loose") return reply(201, { ok: true, account: { ...TOKEN, label: "loose", file: "/keys/loose" },
+            warnings: ["the token file /keys/loose can be read by group or others (mode 0644); 0600 or 0400 is recommended"] });
+          if (sent.apiKeyFile) return reply(201, { ok: true, account: { ...TOKEN, label: "api", kind: "claude_api_key_file", file: "/keys/api" } });
+          return reply(201, { ok: true, account: sent.provider === "codex" ? CODEX : TOKEN });
+        }
+        if (req.method === "DELETE" && req.url === "/api/provider/account-refs/claude/max-1") return reply(200, { ok: true, account: TOKEN });
+        if (req.method === "DELETE" && req.url === "/api/provider/account-refs/claude/assigned") {
+          return reply(200, { ok: true, account: { ...TOKEN, label: "assigned" }, assignedTo: ["rig fleet (claude)"], warning: "assigned was assigned to rig fleet (claude). Those seats and their credentials are as they were, and status shows the reference as missing until the label is added again or another account is assigned (rig provider assign <rig> --provider claude --account <label>)." });
+        }
+        if (req.method === "DELETE") return reply(404, { ok: false, code: "not_found", message: "There's no claude account labelled nope." });
+        reply(404, { error: "not found" });
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as { port: number }).port;
+  });
+  afterAll(() => server.close());
+
+  it("add sends the label and reference, and says it was checked, not read", async () => {
+    const claude = await run(["account", "add", "max-1", "--provider", "claude", "--token-file", "/keys/max-1"], runningDeps(port));
+    expect(claude.exitCode).toBeFalsy();
+    expect(seen.at(-1)).toMatchObject({ method: "POST", url: "/api/provider/account-refs" });
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "claude", label: "max-1", tokenFile: "/keys/max-1" });
+    expect(claude.logs).toEqual(["Added the claude account max-1: the token file /keys/max-1.", "Checked that the file exists and isn't empty; it wasn't read."]);
+
+    const loose = await run(["account", "add", "loose", "--provider", "claude", "--token-file", "/keys/loose"], runningDeps(port));
+    expect(loose.exitCode).toBeFalsy();
+    expect(loose.logs).toEqual(["Added the claude account loose: the token file /keys/loose.", "Checked that the file exists and isn't empty; it wasn't read.",
+      "Warning: the token file /keys/loose can be read by group or others (mode 0644); 0600 or 0400 is recommended."]);
+
+    const key = await run(["account", "add", "api", "--provider", "claude", "--api-key-file", "/keys/api"], runningDeps(port));
+    expect(key.exitCode).toBeFalsy();
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "claude", label: "api", apiKeyFile: "/keys/api" });
+    expect(key.logs.at(-1)).toBe("Checked that the file exists, is private and isn't empty; it wasn't read.");
+
+    const codex = await run(["account", "add", "work", "--provider", "codex", "--codex-home", "/homes/codex-a", "--login", "work", "--json"], runningDeps(port));
+    expect(codex.exitCode).toBeFalsy();
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ provider: "codex", label: "work", codexHome: "/homes/codex-a", login: "work" });
+    expect(JSON.parse(codex.logs[0]!)).toEqual({ ok: true, account: CODEX });
+  });
+
+  it("a refused add prints the daemon's reason and exits 1, in JSON too", async () => {
+    const human = await run(["account", "add", "open", "--provider", "claude", "--api-key-file", "/keys/open"], runningDeps(port));
+    expect(human.exitCode).toBe(1);
+    expect(human.logs).toEqual(["the API-key file must be private (0600 or 0400) and at most 8192 bytes. Nothing was stored."]);
+    const json = await run(["account", "add", "open", "--provider", "claude", "--api-key-file", "/keys/open", "--json"], runningDeps(port));
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.logs[0]!)).toMatchObject({ ok: false, code: "reference_unusable" });
+  });
+
+  it.each([
+    [[], "Name the provider"],
+    [["--provider", "pi", "--token-file", "/k"], "--provider must be claude or codex"],
+    [["--provider", "claude"], "one of --token-file <path> or --api-key-file <path>"],
+    [["--provider", "claude", "--token-file", "/k", "--api-key-file", "/k"], "one of --token-file <path> or --api-key-file <path>"],
+    [["--provider", "claude", "--token-file", "/k", "--login", "w"], "not --codex-home or --login"],
+    [["--provider", "codex", "--codex-home", "/h"], "needs --codex-home <dir> and --login <name>"],
+    [["--provider", "codex", "--codex-home", "/h", "--login", "w", "--token-file", "/k"], "not a token or API-key file"],
+  ])("add checks its own options before anything goes out: %j", async (flags, message) => {
+    const before = seen.length;
+    const result = await run(["account", "add", "x", ...flags], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain(message);
+    expect(result.logs.join("\n")).toContain("Nothing was stored.");
+    expect(seen.length).toBe(before);
+  });
+
+  it("list prints one line per account with its reference, filters by provider, and says when there are none", async () => {
+    const all = await run(["account", "list"], runningDeps(port));
+    expect(all.logs).toEqual(["claude  max-1  the token file /keys/max-1", "codex  work  the login work saved in /homes/codex-a"]);
+    const codex = await run(["account", "list", "--provider", "codex", "--json"], runningDeps(port));
+    expect(seen.at(-1)!.url).toBe("/api/provider/account-refs?provider=codex");
+    expect(JSON.parse(codex.logs[0]!)).toEqual({ accounts: [CODEX] });
+    expect((await run(["account", "list", "--provider", "pi"], runningDeps(port))).exitCode).toBe(1);
+  });
+
+  it("remove names the provider, says the file is left alone, and an unknown label exits 1", async () => {
+    const removed = await run(["account", "remove", "max-1", "--provider", "claude"], runningDeps(port));
+    expect(removed.exitCode).toBeFalsy();
+    expect(seen.at(-1)).toMatchObject({ method: "DELETE", url: "/api/provider/account-refs/claude/max-1" });
+    expect(removed.logs[0]).toBe("Removed the claude account max-1. Its file is left as it is, and seats already switched to it keep their own reference.");
+    const assigned = await run(["account", "remove", "assigned", "--provider", "claude"], runningDeps(port));
+    expect(assigned.exitCode).toBeFalsy();
+    expect(assigned.logs).toEqual(["Removed the claude account assigned. Its file is left as it is, and seats already switched to it keep their own reference.",
+      "Warning: assigned was assigned to rig fleet (claude). Those seats and their credentials are as they were, and status shows the reference as missing until the label is added again or another account is assigned (rig provider assign <rig> --provider claude --account <label>)."]);
+    const unknown = await run(["account", "remove", "nope", "--provider", "claude"], runningDeps(port));
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.logs).toEqual(["There's no claude account labelled nope."]);
+    const before = seen.length;
+    expect((await run(["account", "remove", "max-1"], runningDeps(port))).exitCode).toBe(1);
+    expect(seen.length).toBe(before);
+  });
+
+  it("--help says only the reference is kept, how adding checks it, and what --host does", async () => {
+    const help = providerCommand(runningDeps(port)).commands.find((c) => c.name() === "account")!;
+    let text = "";
+    help.configureOutput({ writeOut: (s) => (text += s) });
+    help.outputHelp();
+    expect(text).toContain("Only the reference is kept");
+    expect(text).toContain("A refusal says why and stores nothing");
+    expect(text).toContain("With --host, the command runs on that registered machine");
+    expect(text).toMatch(/add \[options\] <label>/);
+  });
+});
+
+describe("rig provider assign (#3625 slices 2 and 3: the plan, and applying it)", () => {
+  let server: http.Server;
+  let port: number;
+  const seen: string[] = [];
+  const PLAN = {
+    daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", kind: "codex_saved_login", reference: "the login team saved in /homes/a" },
+    includeOverrides: false,
+    rows: [
+      { seat: "c1@fleet", runtime: "codex", current: "the login in /homes/a", effect: "change", precheck: { safe: true, reasons: [] },
+        continuity: "in place: the seat restarts on the same conversation", activity: "running", notes: ["busy (working): a switch interrupts work in flight"] },
+      { seat: "c2@fleet", runtime: "codex", current: "saved login other (seat registry)", effect: "kept_override", override: "the saved login other (seat registry)", activity: "idle" },
+      { seat: "c3@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "idle" },
+      { seat: "cl@fleet", runtime: "claude-code", current: "the login in /h/.claude", effect: "not_affected", activity: "idle", notes: ["a claude-code seat: a codex assignment doesn't touch it"] },
+    ],
+    codexHomes: [{ home: "/homes/a", seats: [{ seat: "c1@fleet", rig: "fleet", effect: "would restart" }, { seat: "p@other", rig: "other", effect: "not restarted; needs rig seat restart p@other" }] }],
+    intent: { label: "team", reference: "the login team saved in /homes/a", requestedBy: "lead@fleet", at: "2026-11-21T07:00:00.000Z" },
+    digest: "0123456789ab",
+    note: "A plan only: nothing was changed.",
+  };
+  PLAN.rows[2] = { ...PLAN.rows[2]!, lastResult: { kind: "switched", label: "team", detail: "restarted in place", at: "2026-11-21T07:00:00.000Z" } } as never;
+  const REPORT = { daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", reference: "the login team saved in /homes/a" }, digest: "0123456789ab",
+    results: [
+      { seat: "c1@fleet", kind: "switched", detail: "Restarted c1@fleet in place on \"team\"", activity: "running", at: "t" },
+      { seat: "c2@fleet", kind: "unchanged", detail: "kept (seat override): the saved login other (seat registry)", activity: "idle", at: "t" },
+      { seat: "c4@fleet", kind: "unknown", detail: "skipped: home outcome unknown", recovery: "rig seat restart c4@fleet --keep-conversation", activity: "idle", at: "t" },
+    ],
+    otherRigPeers: [{ seat: "p@other", rig: "other", home: "/homes/a", command: "rig seat restart p@other --keep-conversation" }],
+  };
+  const posted: unknown[] = [];
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      const reply = (status: number, data: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+      if (req.url?.includes("account=nope")) return reply(404, { ok: false, code: "unknown_account", message: "There's no codex account labelled nope on this daemon (rig provider account list --provider codex lists them)." });
+      if (req.url?.startsWith("/api/provider/assignment-plan")) return reply(200, { ok: true, plan: PLAN });
+      if (req.url === "/api/provider/assignment-apply") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => {
+          const parsed = JSON.parse(body) as { plan: string };
+          posted.push(parsed);
+          if (parsed.plan === "ffffffffffff") return reply(409, { ok: false, code: "plan_changed", digest: "0123456789ab", message: "The plan for rig fleet changed since plan ffffffffffff was shown. Nothing changed." });
+          reply(200, { ok: true, report: REPORT });
+        });
+        return;
+      }
+      reply(404, { error: "not found" });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as { port: number }).port;
+  });
+  afterAll(() => server.close());
+
+  it("asks the daemon for the plan and prints each seat, the shared home's peers and that nothing changed", async () => {
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--include-overrides", "--account-home", "/prepared"], runningDeps(port));
+    expect(result.exitCode).toBeFalsy();
+    expect(seen.at(-1)).toBe("GET /api/provider/assignment-plan?rig=fleet&provider=codex&account=team&includeOverrides=1&accountHome=%2Fprepared");
+    expect(result.logs).toEqual([
+      "Plan 0123456789ab on host-a: rig fleet's codex seats to team (the login team saved in /homes/a).",
+      "The rig's codex assignment: team (the login team saved in /homes/a), applied 2026-11-21T07:00:00.000Z by lead@fleet.",
+      "c1@fleet: from the login in /homes/a; precheck safe; in place: the seat restarts on the same conversation; activity running",
+      "  busy (working): a switch interrupts work in flight",
+      "c2@fleet: kept (seat override): the saved login other (seat registry); --include-overrides moves it too",
+      "c3@fleet: unchanged, already on team",
+      "  last applied: switched (team, 2026-11-21T07:00:00.000Z): restarted in place",
+      "cl@fleet: not affected (a claude-code seat: a codex assignment doesn't touch it)",
+      "Codex home /homes/a: one switch; every seat on it:",
+      "  c1@fleet (rig fleet): would restart",
+      "  p@other (rig other): not restarted; needs rig seat restart p@other",
+      "A plan only: nothing was changed. Apply exactly this plan with: rig provider assign fleet --provider codex --account team --include-overrides --account-home /prepared --apply --plan 0123456789ab",
+    ]);
+  });
+
+  it("--json is the daemon's answer; an unknown label exits 1 with the reason", async () => {
+    const json = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--json"], runningDeps(port));
+    expect(JSON.parse(json.logs[0]!)).toEqual({ ok: true, plan: PLAN });
+    const unknown = await run(["assign", "fleet", "--provider", "codex", "--account", "nope"], runningDeps(port));
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.logs).toEqual(["There's no codex account labelled nope on this daemon (rig provider account list --provider codex lists them)."]);
+  });
+
+  it.each([
+    [["--account", "team"], "Name the provider"],
+    [["--provider", "codex"], "Name the account"],
+    [["--provider", "claude", "--account", "a", "--account-home", "/h"], "--account-home is for Codex seats"],
+  ])("checks its own options before asking: %j", async (flags, message) => {
+    const before = seen.length;
+    const result = await run(["assign", "fleet", ...flags], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain(message);
+    expect(seen.length).toBe(before);
+  });
+
+  it("--apply --plan applies the reviewed plan and prints each seat's result; a failed or unknown seat exits 1", async () => {
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], runningDeps(port));
+    expect(posted.at(-1)).toEqual({ rig: "fleet", provider: "codex", account: "team", plan: "0123456789ab" });
+    expect(result.logs).toEqual([
+      "Applied plan 0123456789ab on host-a: rig fleet's codex seats to team (the login team saved in /homes/a).",
+      'c1@fleet: switched: Restarted c1@fleet in place on "team"',
+      "  it was working when it was reached: work in flight, including background commands, didn't carry over",
+      "c2@fleet: unchanged: kept (seat override): the saved login other (seat registry)",
+      "c4@fleet: unknown: skipped: home outcome unknown",
+      "  recovery: rig seat restart c4@fleet --keep-conversation",
+      "p@other (rig other): not restarted; it shares /homes/a, so restart it yourself: rig seat restart p@other --keep-conversation",
+      "Each result is reported on its own: nothing was rolled back or retried.",
+    ]);
+    expect(result.exitCode).toBe(1);
+    const json = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab", "--json"], runningDeps(port));
+    expect(JSON.parse(json.logs[0]!)).toEqual({ ok: true, report: REPORT });
+  });
+
+  it("a plan that changed is refused with the daemon's reason, and nothing changed", async () => {
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "ffffffffffff"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs).toEqual(["The plan for rig fleet changed since plan ffffffffffff was shown. Nothing changed."]);
+  });
+
+  it.each([
+    [["--apply"], "--apply needs --plan <digest>"],
+    [["--plan", "0123456789ab"], "--plan names the plan to apply: add --apply"],
+    [["--apply", "--plan", "abc"], "--plan is the 12-character digest the plan showed"],
+  ])("checks --apply and --plan before asking: %j", async (flags, message) => {
+    const before = seen.length;
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", ...flags], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain(message);
+    expect(seen.length).toBe(before);
+  });
+
+  it("waits 120 s for each seat that changes or restarts on a switching home; a timeout says the apply may still be running, and how to see its results", async () => {
+    let waited: number | undefined;
+    // c1 changes; c3 is already on the account but shares c1's home, so it restarts too. p@other isn't restarted.
+    const shown = { ...PLAN, codexHomes: [{ home: "/homes/a", seats: [...PLAN.codexHomes[0]!.seats, { seat: "c3@fleet", rig: "fleet", effect: "would restart" }] }] };
+    const deps = { ...runningDeps(1), clientFactory: () => ({
+      get: async () => ({ status: 200, data: { ok: true, plan: shown } }),
+      post: async (_p: string, _b: unknown, o?: { timeoutMs?: number }) => { waited = o?.timeoutMs; throw new DaemonTimeoutError("timed out"); },
+    }) as never };
+    const result = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], deps);
+    expect(waited).toBe(2 * 120_000 + 30_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain("The apply may still be running, seat by seat, so don't run it again");
+    expect(result.logs.join("\n")).toContain("rig provider assign fleet --provider codex --account team");
+    // With --json, stdout carries the outcome too.
+    const stdout: string[] = [];
+    const origLog = console.log, origErr = console.error;
+    console.log = (...a: unknown[]) => stdout.push(a.join(" "));
+    console.error = () => {};
+    try { await providerCommand(deps).parseAsync(["node", "rig", "assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab", "--json"]); }
+    finally { console.log = origLog; console.error = origErr; process.exitCode = undefined; }
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ ok: false, code: "apply_outcome_unknown", digest: "0123456789ab", check: "rig provider assign fleet --provider codex --account team" });
+  });
+
+  // Review findings on #3679: what the apply's output says, the printed command, --host, and a lost connection.
+  const fake = (post: () => Promise<unknown>, plan: unknown = PLAN) => ({ ...runningDeps(1), clientFactory: () => ({
+    get: async () => ({ status: 200, data: { ok: true, plan } }), post }) as never });
+  const reportWith = (results: unknown[]) => async () => ({ status: 200, data: { ok: true, report: { ...REPORT, results, otherRigPeers: [] } } });
+
+  it("says work didn't carry over only for a seat it relaunched or restarted, and may not have for an unknown one", async () => {
+    const result = (seat: string, kind: string, activity: string) => ({ seat, kind, detail: "d", activity, at: "t" });
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"], fake(reportWith([
+      result("kept@fleet", "unchanged", "running"), result("refused@fleet", "failed_before_effect", "needs_input"), result("mac@fleet", "unsupported", "running"),
+      result("moved@fleet", "switched", "running"), result("lost@fleet", "unknown", "needs_input")])));
+    expect(logs.filter((l) => l.startsWith("  it was"))).toEqual([
+      "  it was working when it was reached: work in flight, including background commands, didn't carry over",
+      "  it was waiting for input when it was reached: work in flight, including background commands, may not have carried over",
+    ]);
+    expect(logs[logs.indexOf("moved@fleet: switched: d") + 1]).toMatch(/^  it was working/);
+  });
+
+  it("quotes a value with a space in the apply command it prints", async () => {
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--account-home", "/homes/My Team"], fake(async () => undefined));
+    expect(logs.at(-1)).toBe("A plan only: nothing was changed. Apply exactly this plan with: rig provider assign fleet --provider codex --account team --account-home '/homes/My Team' --apply --plan 0123456789ab");
+  });
+
+  it("with --host, the plan is that machine's, and the apply command from here keeps --host; the remote command never gets it", async () => {
+    const argvs: Array<readonly string[]> = [];
+    const remote = { host: { hostRegistryLoader: () => ({ ok: true as const, registry: { hosts: [{ id: "vm-a", transport: "ssh" as const, target: "vm-a.local" }] } }),
+      crossHostRun: async (_h: unknown, argv: readonly string[]) => { argvs.push(argv); return { ok: true as const, failedStep: "none" as const, stdout: "", stderr: "", remoteExitCode: 0 }; },
+      selfHostId: async () => undefined } } as never;
+    const runOn = async (args: string[]) => {
+      const logs: string[] = [];
+      const origLog = console.log, origErr = console.error;
+      console.log = (...a: unknown[]) => logs.push(a.join(" ")); console.error = () => {};
+      try { await providerCommand(runningDeps(1), remote).parseAsync(["node", "rig", ...args]); }
+      finally { console.log = origLog; console.error = origErr; process.exitCode = undefined; }
+      return logs;
+    };
+    expect(await runOn(["assign", "fleet", "--provider", "codex", "--account", "team", "--host", "vm-a"])).toEqual([
+      "This plan is on vm-a. To apply it from this machine: rig provider assign fleet --provider codex --account team --host vm-a --apply --plan <the digest above>"]);
+    expect(argvs.at(-1)).toEqual(["rig", "provider", "assign", "fleet", "--provider", "codex", "--account", "team"]);
+    expect(await runOn(["assign", "fleet", "--provider", "codex", "--account", "team", "--host", "vm-a", "--json"])).toEqual([]);
+  });
+
+  it("a connection lost after the apply was sent is an unknown outcome; one refused before it left is a plain failure", async () => {
+    const lost = await run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"],
+      fake(async () => { throw new DaemonConnectionError("socket hang up", "ECONNRESET"); }));
+    expect(lost.exitCode).toBe(1);
+    expect(lost.logs.join("\n")).toContain("The CLI lost the connection to the daemon before its answer. The apply may still be running, seat by seat, so don't run it again");
+    await expect(run(["assign", "fleet", "--provider", "codex", "--account", "team", "--apply", "--plan", "0123456789ab"],
+      fake(async () => { throw new DaemonConnectionError("connect ECONNREFUSED", "ECONNREFUSED"); }))).rejects.toThrow("ECONNREFUSED");
+  });
+});
+
+describe("rig provider status shows each seat against its rig's assignment (#3625 slice 4)", () => {
+  const intended = { label: "max-2", reference: "the token file /keys/max-2", requestedBy: "lead@fleet", at: "2026-11-21T08:00:00.000Z" };
+  const switched = { kind: "switched", label: "max-2", detail: "Relaunched a@fleet on max-2", at: "2026-11-21T08:00:00.000Z" };
+  const seatRow = (seatSession: string, assignment: unknown, configured: unknown = { source: "claude_token", label: "max-2", note: "n" }) =>
+    ({ accountId: null, seatSession, rigName: "fleet", boundAt: null, bindingSource: null, runtime: "claude-code", configured, anomalies: [], assignment });
+  const MODEL = { accounts: [], signals: [], asOf: "2026-11-21T08:01:00.000Z", bindings: [
+    seatRow("a@fleet", { provider: "claude", state: "follows", intended, applied: switched }),
+    seatRow("b@fleet", { provider: "claude", state: "override", intended, applied: { ...switched, detail: "Relaunched b@fleet on max-2" },
+      override: 'its own token file /keys/max-3 ("max-3")' }, { source: "claude_token", label: "max-3", note: "n" }),
+    seatRow("c@fleet", { provider: "claude", state: "not_applied", intended, applied: null }),
+    seatRow("u@fleet", { provider: "claude", state: "not_applied", intended,
+      applied: { kind: "unknown", label: "max-2", detail: "didn't report a resumed conversation", at: "t", recovery: "rig launch fleet dev.u --snapshot-id s1" } }),
+    { ...seatRow("h@fleet", { provider: "codex", state: "follows", intended, applied: switched, asApplied: true }, { source: "default_login", home: "/homes/a", homeNote: "n" }), runtime: "codex" },
+    seatRow("e@fleet", { provider: "claude", state: "not_applied", intended, applied: { ...switched, label: "max-1", detail: "Relaunched e@fleet on max-1" } }),
+    seatRow("f@fleet", { provider: "claude", state: "not_applied", intended,
+      applied: { kind: "failed_before_effect", label: "max-2", detail: "relaunch_no_pane: no pane", at: "t" } }),
+    { ...seatRow("x@other", { provider: "claude", state: "no_assignment", intended: null, applied: null }), rigName: "other" },
+  ] };
+  const deps = (get: (path: string) => unknown) => ({ ...runningDeps(1), clientFactory: () => ({ get: async (p: string) => ({ status: 200, data: get(p) }) }) as never });
+
+  it("prints the rig's assignment, where each seat's configuration stands against it, and its last result; a seat with none prints nothing", async () => {
+    const { logs } = await run(["status"], deps(() => MODEL));
+    const at = logs.indexOf("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
+    expect(at).toBeGreaterThan(-1);
+    const rig = "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; ";
+    expect(logs.slice(at + 1)).toEqual([
+      "  a@fleet  claude-code  configured: token max-2 (its credential file, as the rig is assigned)",
+      `${rig}this seat is configured as assigned`,
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
+      "  b@fleet  claude-code  configured: token max-3 (the seat's own credential file)",
+      `${rig}this seat is configured with its own choice: its own token file /keys/max-3 ("max-3")`,
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched b@fleet on max-2",
+      "  c@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}not applied to this seat yet`,
+      "  u@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat isn't known to be configured as assigned: its last result is unknown and may have moved it (see its recovery)`,
+      "    last applied: unknown (max-2, t): didn't report a resumed conversation",
+      "      recovery: rig launch fleet dev.u --snapshot-id s1",
+      "  h@fleet  codex  configured: default login (/homes/a)",
+      "    assignment: rig fleet's codex seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is still as the apply of max-2 left its home",
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
+      "  e@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat isn't configured as assigned yet: its last result moved it to max-1, an earlier assignment`,
+      "    last applied: switched (max-1, 2026-11-21T08:00:00.000Z): Relaunched e@fleet on max-1",
+      "  f@fleet  claude-code  configured: token max-2 (the seat's own credential file)",
+      `${rig}this seat isn't configured as assigned: its last result didn't move it`,
+      "    last applied: failed-before-effect (max-2, t): relaunch_no_pane: no pane",
+    ]);
+    // A label is the operator's name for a reference: never worded as the login a session uses.
+    expect(logs.join("\n")).not.toMatch(/signed in|logged in|is using|running on|runs as/i);
+  });
+
+  it("says when the assigned label's reference has been removed", async () => {
+    const model = { ...MODEL, bindings: [seatRow("a@fleet", { provider: "claude", state: "follows", intended, applied: switched, referenceMissing: true })] };
+    const { logs } = await run(["status"], deps(() => model));
+    expect(logs.slice(logs.findIndex((l) => l.startsWith("  a@fleet")) + 1)).toEqual([
+      "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned",
+      "    reference missing: max-2 was removed from this daemon's claude accounts, so this seat is compared only with what an apply left it; add the label again or assign another account",
+      "    last applied: switched (max-2, 2026-11-21T08:00:00.000Z): Relaunched a@fleet on max-2",
+    ]);
+  });
+
+  it("with the seat accounts served (usage windows on), the same lines sit under each seat; --json is the daemon's answer, assignment included", async () => {
+    const withSeats = { ...MODEL, seatAccounts: MODEL.bindings.slice(0, 1).map((b) => ({ seatSession: b.seatSession, rigName: b.rigName, runtime: b.runtime,
+      configured: b.configured, allowance: { linked: false, reason: "not linked" }, assignment: b.assignment })) };
+    const { logs } = await run(["status"], deps(() => withSeats));
+    expect(logs).not.toContain("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
+    const seat = logs.indexOf("  a@fleet  claude-code  configured: token max-2 (its credential file, as the rig is assigned) · allowance not linked");
+    expect(logs.slice(seat + 1, seat + 4)).toEqual(["    n", "    allowance not linked: not linked",
+      "    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned"]);
+    const json = await run(["status", "--json"], deps(() => MODEL));
+    expect(JSON.parse(json.logs[0]!)).toEqual(MODEL);
+  });
+
+  it("an assignment set from a caller that isn't a seat says so in the readable lines; --json keeps the daemon's null", async () => {
+    const unnamed = { ...intended, requestedBy: null };
+    const model = { ...MODEL, bindings: [seatRow("a@fleet", { provider: "claude", state: "follows", intended: unnamed, applied: switched })] };
+    const { logs } = await run(["status"], deps(() => model));
+    expect(logs).toContain("    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by a caller that isn't a seat; this seat is configured as assigned");
+    const json = await run(["status", "--json"], deps(() => model));
+    expect(JSON.parse(json.logs[0]!).bindings[0].assignment.intended.requestedBy).toBeNull();
+    const plan = { daemon: "host-a", rig: "fleet", provider: "claude", account: { label: "max-2", reference: "the token file /keys/max-2" }, includeOverrides: false,
+      rows: [], codexHomes: [], digest: "0123456789ab", note: "", intent: unnamed };
+    const planned = await run(["assign", "fleet", "--provider", "claude", "--account", "max-2"], deps(() => ({ ok: true, plan })));
+    expect(planned.logs).toContain("The rig's claude assignment: max-2 (the token file /keys/max-2), applied 2026-11-21T08:00:00.000Z by a caller that isn't a seat.");
+  });
+
+  it("a seat that follows the assignment in its own file or home reads as the assignment, not as its own choice", async () => {
+    const home = { source: "default_login", home: "/homes/succ", homeFrom: "account-switch", homeNote: "n" };
+    const model = { ...MODEL, bindings: [
+      { ...seatRow("p@fleet", { provider: "codex", state: "follows", intended, applied: { ...switched, kind: "pending_successor" } }, home), runtime: "codex" },
+      { ...seatRow("q@fleet", { provider: "codex", state: "override", intended, applied: null, override: "its account home /homes/succ" }, home), runtime: "codex" }] };
+    const { logs } = await run(["status"], deps(() => model));
+    expect(logs).toContain("  p@fleet  codex  configured: the seat's home (/homes/succ, from its account-switch env, as the rig is assigned)");
+    expect(logs).toContain("  q@fleet  codex  configured: the seat's own home (/homes/succ, from its account-switch env)");
+  });
+
+  it("--all-hosts prints each host's seats with their assignment, and an ssh host points at status --host", async () => {
+    const view = { hosts: [
+      { hostId: "local", status: "ok", usage: "served", readAt: "t" },
+      { hostId: "vm-a", status: "unsupported-transport", usage: "unavailable", usageReason: "not read", readAt: null,
+        error: "host 'vm-a' is ssh-declared; usage across hosts needs an http registry entry (url; bearer optional). Its seats and assignments: rig provider status --host vm-a" },
+    ], items: [], skipped: [], registry: { state: "read" },
+    seatAccounts: [{ hostId: "local", seats: [{ seatSession: "a@fleet", rigName: "fleet", runtime: "claude-code", configured: { source: "claude_token", label: "max-2", note: "n" },
+      allowance: { linked: false, reason: "not linked" }, assignment: { provider: "claude", state: "follows", intended, applied: switched } }] }] };
+    const { logs } = await run(["status", "--all-hosts"], deps((p) => (String(p).startsWith("/api/provider/usage/hosts") ? view : {})));
+    expect(logs.join("\n")).toContain("Its seats and assignments: rig provider status --host vm-a");
+    expect(logs).toContain("SEATS on local (configured account; not proof of the login a running session uses)");
+    expect(logs).toContain("    assignment: rig fleet's claude seats to max-2 (the token file /keys/max-2), set 2026-11-21T08:00:00.000Z by lead@fleet; this seat is configured as assigned");
+  });
+
+  it("the plan words a seat that's unchanged only as an apply left its home, not as already on the account", async () => {
+    const plan = { daemon: "host-a", rig: "fleet", provider: "codex", account: { label: "team", reference: "the login team saved in /homes/a" }, includeOverrides: false,
+      rows: [{ seat: "h@fleet", runtime: "codex", current: "the login in /homes/a", effect: "unchanged", activity: "idle", asApplied: true,
+        notes: ["the login active in /homes/a isn't read: if it was switched since (by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again"] },
+        { seat: "r@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "idle" },
+        { seat: "x@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "idle",
+          precheck: { safe: false, reasons: ["seat_restart_refused"], message: "pane_unverified: no bound pane" } }],
+      codexHomes: [], digest: "0123456789ab", note: "" };
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team"], deps(() => ({ ok: true, plan })));
+    expect(logs).toContain("h@fleet: unchanged: still as the apply of team left its home");
+    // What the plan can't see for that seat is said under it.
+    expect(logs[logs.indexOf("h@fleet: unchanged: still as the apply of team left its home") + 1]).toBe("  the login active in /homes/a isn't read: if it was switched since (by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again");
+    expect(logs).toContain("r@fleet: unchanged, already on team");
+    // An unchanged seat that restarts with its switched home shows its restart's precheck when it's unsafe.
+    const x = logs.indexOf("x@fleet: unchanged, already on team");
+    expect(logs.slice(x + 1, x + 3)).toEqual(["  precheck UNSAFE: seat_restart_refused", "  pane_unverified: no bound pane"]);
+    expect(logs[logs.indexOf("r@fleet: unchanged, already on team") + 1]).not.toMatch(/precheck/);
+  });
+
+  it("--host doesn't combine with --all-hosts or --hosts, and asks nothing", async () => {
+    const get = vi.fn();
+    for (const extra of [["--all-hosts"], ["--hosts", "b"]]) {
+      const result = await run(["status", "--host", "vm-a", ...extra], { ...runningDeps(1), clientFactory: () => ({ get }) as never });
+      expect(result.exitCode).toBe(1);
+      expect(result.logs.join("\n")).toContain("--host runs status on one machine");
+    }
+    expect(get).not.toHaveBeenCalled();
   });
 });

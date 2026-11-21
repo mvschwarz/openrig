@@ -24,6 +24,8 @@ import type { CodexUsageWindows } from "./codex-usage-windows.js";
 import type { ClaudeUsageWindows } from "./claude-usage-windows.js";
 import type { UsageRefreshResult } from "./usage-windows.js";
 import type {
+  AssignmentApplyRequest, AssignmentApplyResult, AssignmentApplyTools, AssignmentPlanRequest,
+  AssignmentPlanResult,
   ProviderService,
   ProviderPrecheckInput,
   ProviderSwitchInput,
@@ -34,7 +36,12 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
-import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
+import { assignmentStanding, planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
+import { applyAssignment } from "./assignment-apply.js";
+import { ProviderAccountAssignmentsRepository, type AssignmentResult } from "./provider-account-assignments.js";
+import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef, type AccountRefProvider } from "./provider-account-refs.js";
+import type { AgentActivity } from "../types.js";
+import type { FourBlockReadModel, PrecheckResult, ProviderSignal, SeatAccountConfiguration, SeatAssignment } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
 
@@ -68,6 +75,23 @@ const codexHomeLogins: CodexHomeLogins = {
 /** One seat switch at a time per Codex home in this daemon: a switch's save, activation and restart finish before the
  *  next switch on that home starts, so each restart loads the login its receipt names. */
 const switchesByHome = new Map<string, Promise<unknown>>();
+/** #3625: the rigs an assignment is being applied to now. In memory, so a daemon restart can't leave a rig locked. */
+const applying = new Set<string>();
+
+/** #3625: the switches this daemon has made of each Codex home (keyed by its resolved path), and the seat that made the
+ *  last. An apply uses it to tell that a home it switched was switched again while it restarted the home's other seats.
+ *  In memory, and only this daemon's switches: a `rig auth switch` run by hand isn't counted. */
+const homeSwitches = new Map<string, { count: number; seat: string }>();
+
+/** The switches this daemon has made of a Codex home so far, and the seat that made the last; null for none. */
+export function homeSwitchesOf(home: string): { count: number; seat: string } | null {
+  return homeSwitches.get(resolvedHome(home)) ?? null;
+}
+
+/** A home's path with symlinks resolved, or its absolute path when it can't be resolved. */
+function resolvedHome(home: string): string {
+  try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); }
+}
 
 function oneSwitchPerHome<T>(home: string, run: (waited: boolean) => Promise<T>): Promise<T> {
   let key = home;
@@ -91,6 +115,13 @@ function withRestartSteps(peers: PeerReport[], account: string): SeatSwitchRepor
     ? { ...peer, step: `rig seat restart ${peer.sessionName} --keep-conversation ${movedReason(account)}` } : peer);
 }
 
+/** The per-seat precheck input for moving a seat to this account. */
+function precheckFor(seat: string, account: AccountRef): ProviderPrecheckInput {
+  if (account.provider === "codex") return { seat, toAccount: account.login! };
+  return account.kind === "claude_api_key_file" ? { seat, toAccount: account.label, apiKeyFile: account.file! }
+    : { seat, toAccount: account.label, tokenFile: account.file! };
+}
+
 export interface ProviderServiceImplDeps {
   db: Database.Database;
   /** The rig universe (rigRepo.listRigs()) — each rig's node-inventory contributes seats. */
@@ -99,6 +130,9 @@ export interface ProviderServiceImplDeps {
   collectClaudeSignals?: () => ProviderSignal[];
   /** Slice-04 C4: the shipped structured activity detector. Undefined keeps the reactive lane empty. */
   agentActivityStore?: Pick<AgentActivityStore, "getLatestForNode">;
+  /** #3625: a seat's activity as rig ps reads it (readCurrentSeatActivity: a live hook, else the cached pane reading),
+   *  for the assignment plan's busy note and the activity each applied result stores. Undefined reads unknown. */
+  seatActivity?: (sessionName: string) => AgentActivity | null;
   /** W2a tap: operator-visible disposition sink. Observability only; never a verification producer. */
   warn?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
@@ -109,23 +143,40 @@ export interface ProviderServiceImplDeps {
   codexLogins?: CodexHomeLogins;
   /** What would outrank a Claude seat's own token; without it, Claude seats aren't moved. */
   claudePrecedence?: ClaudeCredentialPrecedence;
+  /** Where a Codex seat can switch in place (Linux); tests pin it. */
+  platform?: NodeJS.Platform;
 }
 
 export class ProviderServiceImpl implements ProviderService {
   constructor(private readonly deps: ProviderServiceImplDeps) {}
 
-  async getReadModel(): Promise<FourBlockReadModel> {
+  /** The daemon's own homes: the CODEX_HOME and Claude config dir a seat launches with when it declares none. */
+  private homes() {
     const env = this.deps.env ?? process.env;
-    const asOf = (this.deps.now ?? (() => new Date().toISOString()))();
-    let auth: CodexAuthMetadata | undefined;
-    let seats: ProviderSeat[] | undefined;
-    const readAuth = () => auth ??= readCodexAuthMetadata(env);
-    const listSeats = () => seats ??= this.listSeats();
-    const homes = {
+    return {
       codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
       claudeConfigDir: env.CLAUDE_CONFIG_DIR,
       home: env.HOME ?? os.homedir(),
     };
+  }
+
+  async getReadModel(): Promise<FourBlockReadModel> {
+    const env = this.deps.env ?? process.env;
+    const asOf = (this.deps.now ?? (() => new Date().toISOString()))();
+    let auth: CodexAuthMetadata | undefined;
+    let entries: ReturnType<ProviderServiceImpl["seatEntries"]> | undefined;
+    let seats: ProviderSeat[] | undefined;
+    const readAuth = () => auth ??= readCodexAuthMetadata(env);
+    const listEntries = () => entries ??= this.seatEntries();
+    const listSeats = () => seats ??= listEntries().map(({ seat }) => seat);
+    const homes = this.homes();
+    // Configuration only (names and references, no usage or samples), so it's computed on every read.
+    let configuredList: SeatAccountConfiguration[] | undefined;
+    const configuredOf = () => configuredList ??= configuredSeatAccounts({ seats: listSeats(), auth: readAuth(), usage: [], claudeSamples: null, ...homes })
+      .map((seat) => seat.configured);
+    // #3625: read from what applies stored; nothing is written.
+    let statuses: Array<SeatAssignment | undefined> | undefined;
+    const assignmentsOf = () => statuses ??= this.assignmentStatuses(listEntries(), configuredOf());
     const collectReactiveSignals = (): ProviderSignal[] => {
       if (!this.deps.agentActivityStore) return [];
       const result = collectReactiveEventSignals({
@@ -148,9 +199,8 @@ export class ProviderServiceImpl implements ProviderService {
         ...(this.deps.collectClaudeSignals?.() ?? []),
         ...collectReactiveSignals(),
       ],
-      // Configuration only (names and references, no usage or samples), so it's computed on every read.
-      configuredAccounts: (all) => configuredSeatAccounts({ seats: all, auth: readAuth(), usage: [], claudeSamples: null, ...homes })
-        .map((seat) => seat.configured),
+      configuredAccounts: () => configuredOf(),
+      assignments: () => assignmentsOf(),
       now: () => asOf,
     });
     // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
@@ -172,7 +222,7 @@ export class ProviderServiceImpl implements ProviderService {
       usage: allUsage,
       claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
       ...homes,
-    });
+    }).map((row, i) => (assignmentsOf()[i] ? { ...row, assignment: assignmentsOf()[i]! } : row));
     return { ...model, usage: allUsage, seatAccounts };
   }
 
@@ -193,7 +243,12 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   private listSeats(): ProviderSeat[] {
-    const seats: ProviderSeat[] = [];
+    return this.seatEntries().map(({ seat }) => seat);
+  }
+
+  /** Every seat on this daemon with its node, as the read model lists them. */
+  private seatEntries(): Array<{ nodeId: string; rigId: string; seat: ProviderSeat }> {
+    const seats: Array<{ nodeId: string; rigId: string; seat: ProviderSeat }> = [];
     for (const rig of this.deps.listRigs()) {
       for (const entry of getNodeInventory(this.deps.db, rig.id)) {
         if (!entry.canonicalSessionName) continue;
@@ -203,17 +258,212 @@ export class ProviderServiceImpl implements ProviderService {
           : {};
         // The launch's own reader says whether the seat has a token reference; #3148's resolver names its label.
         const tokenRef = runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, entry.nodeId) : null;
-        seats.push({
+        seats.push({ nodeId: entry.nodeId, rigId: rig.id, seat: {
           seatSession: entry.canonicalSessionName,
           rigName: entry.rigName ?? "",
           runtime,
           lifecycleState: entry.lifecycleState,
           ...(runtimeHome.home || runtimeHome.ignored ? { runtimeHome } : {}),
           ...(tokenRef && entry.configuredAccount ? { claudeToken: { label: entry.configuredAccount, ...(tokenRef.kind ? { kind: tokenRef.kind } : {}) } } : {}),
-        });
+        } });
       }
     }
     return seats;
+  }
+
+  /** #3625: the plan for moving a rig's seats of one provider to an account this daemon knows by label. Read only: the
+   *  per-seat precheck it runs reads the seat (a Codex seat's restart plan stops nothing). */
+  async assignmentPlan(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch,
+    successorCheck?: (seat: string, accountHome: string) => Promise<PlanCheck>): Promise<AssignmentPlanResult> {
+    const planned = await this.planFor(input, { seatRestart, claudeSeat, successorCheck });
+    return planned.ok ? { ok: true, plan: planned.plan } : planned;
+  }
+
+  /** #3625 slice 3: the plan again, and if its digest is the one the person saw, each seat through the existing switch.
+   *  One apply per rig at a time; the assignment is stored with the first seat that's on the account or may be (switched,
+   *  pending successor, unknown, or already on it), and each result as it lands. */
+  async applyAssignment(input: AssignmentApplyRequest, tools: AssignmentApplyTools): Promise<AssignmentApplyResult> {
+    // The rig is held before the plan is computed again: its prechecks wait, and an apply that ran meanwhile would leave
+    // this one comparing the reviewed digest with seats read before that apply changed them.
+    const rigKey = (this.deps.db.prepare("SELECT id FROM rigs WHERE name = ?").get(input.rig) as { id: string } | undefined)?.id ?? `name:${input.rig}`;
+    if (applying.has(rigKey)) {
+      return { ok: false, code: "apply_in_progress", message: `An assignment is already being applied to rig ${input.rig} on this daemon. Nothing changed; its results show in the plan as they land.` };
+    }
+    applying.add(rigKey);
+    try {
+      const planned = await this.planFor(input, tools);
+      if (!planned.ok) return planned;
+      const { plan, account, rigId, nodeOf } = planned;
+      if (plan.digest !== input.digest) {
+        return { ok: false, code: "plan_changed", digest: plan.digest,
+          message: `The plan for rig ${input.rig} changed since plan ${input.digest} was shown (it's ${plan.digest} now): a seat, its account, a precheck or a shared home is different. `
+            + `Nothing changed. Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+      }
+      // The label was read before the prechecks were awaited. If it was removed and added again meanwhile naming another
+      // reference, the plan's digest is of the earlier one: refuse before any seat changes. Nothing is awaited from here to
+      // the first seat's switch call. A label edited after that leaves the seats on the reference reviewed, which their
+      // results record, so status and the next plan don't read them as on the label's new one.
+      const current = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
+      if (!current || current.kind !== account.kind || current.file !== account.file || current.codexHome !== account.codexHome || current.login !== account.login) {
+        return { ok: false, code: "plan_changed",
+          message: `The account ${input.label} ${current ? "names another reference" : "was removed"} since this apply computed its plan. Nothing changed. `
+            + `Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+      }
+      const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
+      const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
+      // The rig's assignment is stored once a seat is on the account or may be: switched, pending successor, unknown, or
+      // unchanged because it was already on it. An apply where every seat was refused, failed before effect or kept its
+      // own override leaves the rig's earlier assignment as it was, so it doesn't hold that label against removal.
+      let stored = false;
+      const keptOverride = new Set(plan.rows.filter((r) => r.effect === "kept_override").map((r) => r.seat));
+      const tookEffect = (kind: string, seat: string) => kind === "switched" || kind === "pending_successor" || kind === "unknown"
+        || (kind === "unchanged" && !keptOverride.has(seat));
+      const report = await applyAssignment(plan, account, {
+        switchSeat: (seat) => this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat),
+        restartPeer: async (seat, reason) => {
+          if (!tools.seatRestart) return { ok: false, code: "restart_unavailable", message: "The seat's restart isn't available here." };
+          const r = await tools.seatRestart.run(seat, reason);
+          return r.ok ? { ok: true, ...("outcome" in r && r.outcome ? { outcome: r.outcome } : {}), message: r.message,
+            ...("recoveryCommand" in r && typeof r.recoveryCommand === "string" ? { recoveryCommand: r.recoveryCommand } : {}),
+            ...("remainingStep" in r && typeof r.remainingStep === "string" ? { remainingStep: r.remainingStep } : {}) }
+            : { ok: false, code: r.code, message: r.message };
+        },
+        ...(tools.successor ? { successor: tools.successor } : {}),
+        homeSwitches: homeSwitchesOf,
+        activityOf: (seat) => this.activityOf(seat),
+        save: (result, applied) => {
+          if (!stored && tookEffect(result.kind, result.seat)) {
+            assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
+            stored = true;
+          }
+          assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
+          label: input.label, kind: result.kind, detail: result.detail, recovery: result.recovery ?? null, activity: result.activity, at: result.at,
+          ...(applied ? { applied: { ...applied, account: { kind: account.kind, file: account.file, codexHome: account.codexHome, login: account.login } } } : {}) });
+        },
+        now,
+      });
+      return { ok: true, report };
+    } finally {
+      applying.delete(rigKey);
+    }
+  }
+
+  private activityOf(session: string): PlanSeatFacts["activity"] {
+    return this.deps.seatActivity?.(session)?.state ?? "unknown";
+  }
+
+  /** #3625: what the plan and status know about each seat's account choices, one per entry. A seat whose configuration is
+   *  still what an apply gave it follows its rig's assignment, so it isn't the seat's own override: this is the one
+   *  definition both read. `resultOf` gives the seat's latest result where it counts. */
+  private assignmentFacts(entries: Array<{ nodeId: string; seat: ProviderSeat }>, configured: Array<SeatAccountConfiguration | null | undefined>,
+    resultOf: (nodeId: string, seat: ProviderSeat) => AssignmentResult | undefined): Array<Omit<PlanSeatFacts, "running" | "activity">> {
+    const homes = this.homes();
+    return entries.map(({ nodeId, seat }, index) => {
+      const own = Object.hasOwn(RUNTIME_HOME_VAR, seat.runtime) ? seatRuntimeHome(this.deps.db, nodeId, seat.runtime as HomeRuntime) : {};
+      const claudeRef = seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null;
+      const seatConfigured = configured[index] ?? null;
+      const ownHome = own.home && own.source ? { home: own.home, source: own.source } : null;
+      const last = resultOf(nodeId, seat);
+      const a = last?.applied;
+      const follows = !!a && ((claudeRef !== null && a.file === claudeRef.tokenFile && (a.fileKind === "api-key") === (claudeRef.kind === "api-key"))
+        || (ownHome?.source === "account-switch" && a.codexHome !== null && a.codexLogin === null && resolvedHome(a.codexHome) === resolvedHome(ownHome.home))
+        // A saved login is a name within its Codex home: the same name in another home is another login.
+        || (seatConfigured?.source === "registry" && a.codexLogin !== null && seatConfigured.profileRef === a.codexLogin
+          && a.codexHome !== null && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome))
+        // A seat with no saved login of its own uses its home's active login, which the apply switched in place.
+        || (seat.runtime === "codex" && seatConfigured?.source === "default_login" && a.codexLogin !== null && a.codexHome !== null
+          && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
+      return {
+        session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
+        configured: seatConfigured, claudeRef, ownHome,
+        codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
+        ...(follows ? { followsAssignment: true, ...(a?.label ? { appliedLabel: a.label } : {}), appliedAccount: a?.account ?? null } : {}),
+        ...(last ? { lastResult: { kind: last.kind, label: last.label, detail: last.detail, at: last.at } } : {}),
+      };
+    });
+  }
+
+  /** #3625: each seat against its rig's assignment for its provider, for status: read only, from what applies stored. */
+  private assignmentStatuses(entries: Array<{ nodeId: string; rigId: string; seat: ProviderSeat }>,
+    configured: Array<SeatAccountConfiguration | null | undefined>): Array<SeatAssignment | undefined> {
+    const providerOf = (runtime: string): AccountRefProvider | null => (runtime === "claude-code" ? "claude" : runtime === "codex" ? "codex" : null);
+    const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
+    const intents = new Map(assignments.allIntents().map((i) => [`${i.rigId}\0${i.provider}`, i]));
+    const results = new Map(assignments.allResults().map((r) => [`${r.nodeId}\0${r.provider}`, r]));
+    const resultOf = (nodeId: string, seat: ProviderSeat) => { const p = providerOf(seat.runtime); return p ? results.get(`${nodeId}\0${p}`) : undefined; };
+    // Only a seat whose rig has an assignment for its provider is compared with it: the read model runs every tick, so the
+    // others read "no assignment" (with any result they have) without reading their homes.
+    const compared = entries.flatMap((e, index) => {
+      const p = providerOf(e.seat.runtime);
+      return p && intents.has(`${e.rigId}\0${p}`) ? [index] : [];
+    });
+    const comparedFacts = this.assignmentFacts(compared.map((i) => entries[i]!), compared.map((i) => configured[i]), resultOf);
+    const facts = new Map(compared.map((entryIndex, k) => [entryIndex, comparedFacts[k]!]));
+    const refs = new ProviderAccountRefsRepository(this.deps.db);
+    const accounts = new Map<string, AccountRef | null>();
+    const accountOf = (provider: AccountRefProvider, label: string) => {
+      const key = `${provider}\0${label}`;
+      if (!accounts.has(key)) accounts.set(key, refs.get(provider, label));
+      return accounts.get(key)!;
+    };
+    return entries.map(({ nodeId, rigId, seat }, index): SeatAssignment | undefined => {
+      const provider = providerOf(seat.runtime);
+      if (!provider) return undefined;
+      const last = resultOf(nodeId, seat);
+      const applied = last ? { kind: last.kind, label: last.label, detail: last.detail, at: last.at, ...(last.recovery ? { recovery: last.recovery } : {}),
+        ...(last.activity ? { activity: last.activity } : {}) } : null;
+      const intent = intents.get(`${rigId}\0${provider}`);
+      if (!intent) return { provider, state: "no_assignment", intended: null, applied };
+      const intended = { label: intent.label, reference: intent.reference, requestedBy: intent.requestedBy, at: intent.at };
+      const account = accountOf(provider, intent.label);
+      const standing = assignmentStanding({ ...facts.get(index)!, running: null, activity: "unknown" }, account, intent, resolvedHome);
+      return { provider, state: standing.state, intended, applied, ...(standing.override ? { override: standing.override } : {}),
+        ...(standing.asApplied ? { asApplied: true as const } : {}), ...(account ? {} : { referenceMissing: true as const }) };
+    });
+  }
+
+  private async planFor(input: AssignmentPlanRequest, tools: AssignmentApplyTools): Promise<
+    | { ok: true; plan: AssignmentPlan; account: AccountRef; rigId: string; nodeOf: Map<string, { nodeId: string; runtime: string }> }
+    | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string }> {
+    const { seatRestart, claudeSeat, successorCheck } = tools;
+    const account = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
+    if (!account) {
+      return { ok: false, code: "unknown_account", message: `There's no ${input.provider} account labelled ${input.label} on this daemon (rig provider account list --provider ${input.provider} lists them).` };
+    }
+    // Checked again now, not only when it was added: a file may have changed or gone, or a link may point elsewhere.
+    const problem = accountRefProblem(account.provider === "codex"
+      ? { provider: "codex", label: account.label, codexHome: account.codexHome!, login: account.login! }
+      : account.kind === "claude_api_key_file" ? { provider: "claude", label: account.label, apiKeyFile: account.file! }
+      : { provider: "claude", label: account.label, tokenFile: account.file! });
+    if (problem) return { ok: false, code: "reference_unusable", message: `${input.label}'s reference no longer checks out: ${problem.message.replace(/ Nothing was stored\.$/, "")}` };
+    const entries = this.seatEntries();
+    const inRig = entries.find(({ seat }) => seat.rigName === input.rig);
+    if (!inRig) {
+      return { ok: false, code: "unknown_rig", message: `There's no rig named ${input.rig} with seats on this daemon (rig ps lists them).` };
+    }
+    const rigId = (this.deps.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(inRig.nodeId) as { rig_id: string }).rig_id;
+    const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
+    const results = new Map(assignments.results(rigId, input.provider).map((r) => [r.nodeId, r]));
+    const configured = configuredSeatAccounts({ seats: entries.map(({ seat }) => seat), auth: readCodexAuthMetadata(this.deps.env ?? process.env),
+      usage: [], claudeSamples: null, ...this.homes() }).map((c) => c.configured);
+    const nodeOf = new Map<string, { nodeId: string; runtime: string }>();
+    for (const { nodeId, seat } of entries) if (seat.rigName === input.rig) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
+    const facts = this.assignmentFacts(entries, configured, (nodeId, seat) => (seat.rigName === input.rig ? results.get(nodeId) : undefined));
+    const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => ({
+      ...facts[index]!,
+      running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
+      activity: this.activityOf(seat.seatSession),
+    }));
+    const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
+      ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
+      resolveHome: resolvedHome,
+      intent: assignments.intent(rigId, input.provider) },
+    // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
+    (seat) => input.accountHome && account.provider === "codex"
+      ? successorCheck ? successorCheck(seat.session, input.accountHome)
+        : Promise.resolve({ safe: false, reasons: ["successor_not_checked"], message: "The account-home dry run isn't available here, so the move wasn't checked." })
+      : this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat));
+    return { ok: true, plan, account, rigId, nodeOf };
   }
 
   async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {
@@ -311,6 +561,8 @@ export class ProviderServiceImpl implements ProviderService {
         message: `The login "${input.toAccount}" couldn't be activated in ${home} (${activated.reason}); nothing was restarted.` };
     }
     report.loginChanged = true;
+    const key = resolvedHome(home);
+    homeSwitches.set(key, { count: (homeSwitches.get(key)?.count ?? 0) + 1, seat: input.seat });
     const restart = await seatRestart.run(input.seat, `rig provider switch --to-account ${input.toAccount}`);
     if (!restart.ok) {
       return { outcome: "failed_safely", reasons: ["login_changed_seat_not_restarted"], seat: report,
