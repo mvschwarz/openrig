@@ -156,6 +156,10 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     // handed, not which model runs.
     const model = found.preset.passesModel ? binding.model?.trim() || undefined : undefined;
     if (found.preset.passesModel) launcherPrefix = model ? `/usr/bin/env OPENRIG_MODEL=${shellQuote(model)} ${launcherPrefix}` : `/usr/bin/env -u OPENRIG_MODEL ${launcherPrefix}`;
+    if (found.preset.passesModel) {
+      const effort = binding.effort?.trim();
+      launcherPrefix = effort ? `/usr/bin/env OPENRIG_EFFORT=${shellQuote(effort)} ${launcherPrefix}` : `/usr/bin/env -u OPENRIG_EFFORT ${launcherPrefix}`;
+    }
     launcherPrefix = found.preset.runner && resolvedWrapper
       ? `/usr/bin/env OPENRIG_LAUNCH_WRAPPER=${shellQuote(JSON.stringify(resolvedWrapper))} ${launcherPrefix}`
       : `/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER ${launcherPrefix}`;

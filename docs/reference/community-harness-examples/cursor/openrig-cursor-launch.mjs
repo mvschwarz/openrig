@@ -180,7 +180,8 @@ async function createChat([program, ...prefix]) {
       const line = stdout.split(/\r?\n/)[0]?.trim();
       if (line) finish(line);
     }, 50);
-    const timer = setTimeout(() => finish(null), 60_000);
+    // Leave time for the owned process to close and the pane to spawn before the daemon's 20s receipt deadline.
+    const timer = setTimeout(() => finish(null), 15_000);
     child.on("error", () => finish(null));
     child.on("exit", () => finish(stdout.split(/\r?\n/)[0]?.trim() || null));
   });
@@ -188,9 +189,10 @@ async function createChat([program, ...prefix]) {
 
 /** Start the agent and stay its parent, so the pane's foreground process is this launcher for the seat's lifetime.
  *  The terminal is inherited: a TUI renders only when it owns the pane outright. */
-function runAgent(agent, args) {
+function runAgent(agent, args, nativeRef) {
   const [program, ...prefix] = agent;
   const child = spawn(program, [...prefix, ...args], { env, windowsHide: false, stdio: "inherit" });
+  child.once("spawn", () => report({ nativeRef }));
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => { try { child.kill(signal); } catch { /* the child may already be gone */ } });
   }
@@ -222,8 +224,7 @@ if (resumeRef) {
     process.stderr.write(`openrig-cursor-launch: Cursor has no chat ${resumeRef} in ${env.CURSOR_CONFIG_DIR} for ${process.cwd()}; starting nothing\n`);
     process.exit(1);
   }
-  report({ nativeRef: resumeRef });
-  runAgent(agent, ["--resume", resumeRef, ...modelArgs()]);
+  runAgent(agent, ["--resume", resumeRef, ...modelArgs()], resumeRef);
 } else {
   const created = await createChat(agent);
   if (!plainId(created.id)) {
@@ -232,7 +233,6 @@ if (resumeRef) {
     process.stderr.write(`openrig-cursor-launch: create-chat gave no usable id${detail}\n`);
     process.exitCode = 1;
   } else {
-    report({ nativeRef: created.id });
-    runAgent(agent, ["--resume", created.id, ...modelArgs()]);
+    runAgent(agent, ["--resume", created.id, ...modelArgs()], created.id);
   }
 }

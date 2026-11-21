@@ -662,8 +662,29 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
 
   cmd
     .option("--json", "JSON output for agents")
+    .option("--community-harnesses", "Check installed community harness presets on the daemon")
     .option("--spec <path>", "Rig spec to check against the running rig of the same name (spec-vs-live topology)")
-    .action(async (opts: { json?: boolean; spec?: string }) => {
+    .action(async (opts: { json?: boolean; spec?: string; communityHarnesses?: boolean }) => {
+      if (opts.communityHarnesses) {
+        const config = (depsOverride?.configStore ?? new ConfigStore()).resolve();
+        const base = `http://${formatDaemonHostForUrl(config.daemon.host ?? "127.0.0.1")}:${config.daemon.port ?? DEFAULT_PORT}`;
+        const { data } = await new DaemonClient(base).get<{
+          dir: string;
+          harnesses: Array<{ name: string; path: string; usable: boolean; problem?: string; command?: string; limits?: string[] }>;
+        }>("/api/community-harnesses");
+        const healthy = data.harnesses.every((preset) => preset.usable);
+        if (opts.json) console.log(JSON.stringify({ healthy, ...data }, null, 2));
+        else {
+          console.log(`Community harness presets in ${data.dir}`);
+          for (const preset of data.harnesses) {
+            console.log(`  [${preset.usable ? "OK" : "FAIL"}] ${preset.name} (${preset.path}): ${preset.problem ?? preset.command}`);
+            for (const limit of preset.limits ?? []) console.log(`    Limit: ${limit}`);
+          }
+          console.log("Preset validation reads the daemon's configuration. It does not launch the command.");
+        }
+        if (!healthy) process.exitCode = 1;
+        return;
+      }
       const deps: DoctorDeps = depsOverride ?? {
         exists: existsSync,
         baseDir: import.meta.dirname,

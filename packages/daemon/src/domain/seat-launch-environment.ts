@@ -16,7 +16,7 @@ import { windowsCommunityCommand } from "./windows-community-command.js";
 // Only the literal /usr/bin/env prefixes emitted by the community adapter.
 // Interpret their data as child environment fields, never as a Windows program.
 const COMMUNITY_LAUNCH_ENV = new Set([
-  "OPENRIG_FIRST_INPUT", "OPENRIG_MODEL", "OPENRIG_LAUNCH_RESULT",
+  "OPENRIG_FIRST_INPUT", "OPENRIG_MODEL", "OPENRIG_EFFORT", "OPENRIG_LAUNCH_RESULT",
   "OPENRIG_LAUNCH_ATTEMPT", "OPENRIG_RESUME_REF", "OPENRIG_CONVERSATION",
   "OPENRIG_LAUNCH_WRAPPER",
 ]);

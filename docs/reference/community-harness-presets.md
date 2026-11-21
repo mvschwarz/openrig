@@ -107,7 +107,7 @@ stops and asks, as it did before (re-run it with `--fresh <seat>` only if you wa
 resume says it's unsupported, and a new conversation starts only where the caller allows a fresh start.
 
 **Good to know:**
-- **The variables are passed with `/usr/bin/env`,** so `launch_result` needs a POSIX system.
+- **Launch variables** use `/usr/bin/env` on POSIX. The native Windows backend passes them in the launch environment.
 - **A launcher that never writes its record** adds up to 20 seconds to each launch, while OpenRig waits for it.
 - **Records are kept,** one small file per attempt, under `$OPENRIG_HOME/state/launch-results/<session>/`. A record
   larger than 64 KiB isn't read.
@@ -296,7 +296,8 @@ CLI.
   `<unknown sender>`; that doesn't mean the receiving Cursor seat lost its identity.
 
 On Windows, use the [Windows preset](community-harness-examples/cursor/cursor-windows.yaml) and
-[Node launcher](community-harness-examples/cursor/openrig-cursor-launch.mjs). Set the preset command to the full launcher
+[Node launcher](community-harness-examples/cursor/openrig-cursor-launch.mjs). Install the preset as
+`$OPENRIG_HOME/community-harnesses/cursor.yaml` and set its command to the full launcher
 path and set `OPENRIG_DAEMON_DIST` to the Windows-native daemon's built `dist` directory in the seat environment.
 The launcher locates a per-user Cursor Agent installation or takes its location from `OPENRIG_CURSOR_AGENT`.
 It uses the daemon's Windows Job for the finite chat-creation process, then opens Cursor in the pane with the seat's
