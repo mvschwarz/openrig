@@ -246,8 +246,9 @@ export async function resolveLiveCodexThreadId(
     if (threadId) { ids.add(threadId); readStarts.set(pid, startedAt); }
   }
   // A process can end, and its PID be reused, while its read awaits (an OS open-file read is the longest). A census begun
-  // after the reads must still give each PID that yielded a thread the start it was read with. Starts resolve to the
-  // second, so a replacement started in the same second still passes.
+  // after the reads must still give each PID that yielded a thread the start it was read with. Only a lister that honours
+  // `fresh` (the record routes') takes a new census here; a cycle lister returns its one census for the pass. Starts
+  // resolve to the second, so a replacement started in the same second still passes.
   if (readStarts.size) {
     const after = await deps.listProcesses({ fresh: true });
     for (const [pid, startedAt] of readStarts) {

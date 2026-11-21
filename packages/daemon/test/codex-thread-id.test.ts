@@ -67,6 +67,16 @@ it("follows the open database home only when the declared home holds none of the
   expect(openDatabaseHomeByPid).not.toHaveBeenCalled();
 });
 
+it("an open database home whose state databases weren't all read stays unknown, though one joins a thread", async () => {
+  const declared = fixture(), actual = fixture();
+  actual.thread("moved-thread"); actual.log("moved-thread"); actual.finish(); declared.finish();
+  const actualHome = path.join(actual.home, ".codex");
+  // A second state database that can't be read could join another of the process's threads.
+  fs.writeFileSync(path.join(actualHome, "state_6.sqlite"), "not a database");
+  const resolver = new CodexThreadIdResolver({ codexHome: path.join(declared.home, ".codex"), openDatabaseHomeByPid: () => actualHome });
+  expect(await resolver.resolveWithHome(60422, identity, true)).toEqual({});
+});
+
 it("an fd link that fails to read for a reason other than closing leaves the open database home unknown", async () => {
   const fds = (code: string) => ({
     readdir: async () => ["3", "4"],

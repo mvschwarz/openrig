@@ -170,8 +170,9 @@ export class CodexThreadIdResolver {
   /** The home of the positive PID/start-time log read, carried with its thread. With `followOpenDatabases` (a verified
    *  native process), once the explicit home is shown to hold none of this process's rows, it reads the one home whose
    *  Codex databases this process holds open, as the OS reports it, with the same gate: a process relaunched under another
-   *  CODEX_HOME, or with its own sqlite_home, logs there. Ambiguous, unjoined or unreadable proof, an incomplete discovery,
-   *  or no explicit home (whose search doesn't record discovery) stays unknown. Never a search of other homes. */
+   *  CODEX_HOME, or with its own sqlite_home, logs there; that read too must find and read every logs and state database.
+   *  Ambiguous, unjoined or unreadable proof, an incomplete discovery, or no explicit home (whose search doesn't record
+   *  discovery) stays unknown. Never a search of other homes. */
   async resolveWithHome(pid: number, identity: string, followOpenDatabases = false): Promise<{ thread?: string; codexHome?: string }> {
     let codexHome: string | undefined;
     const misses: CodexCaptureDiagnostic[] = [];
@@ -183,8 +184,10 @@ export class CodexThreadIdResolver {
     if (declared.thread || declared.reason !== "no_log_row" || !declared.fullyReadable) return {};
     const open = await this.openDatabaseHome(pid);
     if (!open || sameDirectory(open, this.opts.codexHome)) return {};
-    const opened = readCodexThreadIdFromLogs(pid, "", undefined, lstartToMinTs(identity), open);
-    return opened ? { thread: opened, codexHome: open } : {};
+    // A lone joined conversation isn't the one when a database there went unread or unfound: it could hold another.
+    const readability: Readability = { complete: true, unreadable: false };
+    const opened = readCodexThreadIdFromLogs(pid, "", undefined, lstartToMinTs(identity), open, undefined, "exclude", readability);
+    return opened && readability.complete ? { thread: opened, codexHome: open } : {};
   }
 
   /** The one directory whose Codex logs or state databases `pid` holds open, or undefined when there's none, several,
