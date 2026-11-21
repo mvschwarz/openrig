@@ -1353,20 +1353,29 @@ export class RestoreOrchestrator {
           ...notStarted };
       }
     }
-    // R2b (#2829 review): the same protection for a snapshot that has no occupant for the
-    // seat at all. A seat that started after the snapshot was taken has a live session
-    // newer than every snapshot session; fresh-launching here would silently replace that
-    // conversation with a new one, so the seat parks for a decision instead.
+    // R2b/C (#2829 review): the same protection for a snapshot that has no occupant for
+    // the seat. Two ways a cold start would silently replace a conversation the seat had:
+    //   R2b — the seat started after the snapshot was taken, so a live session is newer
+    //   than everything the snapshot records; and
+    //   C — the snapshot explicitly recorded the occupant absent but retained the seat's
+    //   conversation history under resume_if_possible with no token, which the
+    //   resume-history guard skips. Both park for a decision instead of fresh-launching;
+    //   explicit history selection and --fresh deliberately override.
     if (opts?.requireCurrentOccupant && occupantResolution.kind === "none" && !selectedHistory && !freshRequested) {
+      const seatSessions = data.sessions.filter(row => row.nodeId === nodeId);
       const latestLive = this.sessionRegistry.getSessionsForRig(rigId)
         .filter(row => row.nodeId === nodeId)
         .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
-      const newestSnapshotId = data.sessions
-        .filter(row => row.nodeId === nodeId)
-        .reduce<string | null>((newest, row) => !newest || row.id > newest ? row.id : newest, null);
-      if (latestLive && (newestSnapshotId === null || latestLive.id > newestSnapshotId)) {
+      const newestSnapshotId = seatSessions.reduce<string | null>((newest, row) => !newest || row.id > newest ? row.id : newest, null);
+      const ranAfterSnapshot = latestLive !== null && (newestSnapshotId === null || latestLive.id > newestSnapshotId);
+      const newestSnapshotRow = seatSessions.reduce<(typeof seatSessions)[number] | null>((newest, row) => !newest || row.id > newest.id ? row : newest, null);
+      const retainedResumeHistory = newestSnapshotRow?.restorePolicy === "resume_if_possible";
+      if (ranAfterSnapshot || retainedResumeHistory) {
+        const why = ranAfterSnapshot
+          ? `The seat has a session newer than the snapshot's, and the snapshot records no occupant for it.`
+          : `The snapshot records no active occupant for the seat but retains its conversation history under resume_if_possible.`;
         return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
-          error: `The seat has a session newer than the snapshot's, and the snapshot records no occupant for it. No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          error: `${why} No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
           ...notStarted };
       }
     }

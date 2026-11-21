@@ -116,8 +116,7 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     sessionRegistry.updateStatus(implSessionId(), "exited");
   }
 
-  function orchestratorWith(pi: PiResumeAdapter): RestoreOrchestrator {
-    const tmux = tmuxWithLivePeer();
+  function orchestratorWith(pi: PiResumeAdapter, tmux: TmuxAdapter = tmuxWithLivePeer()): RestoreOrchestrator {
     tmux.deliveryGuard = deliveryGuard;
     return new RestoreOrchestrator({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -235,19 +234,40 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     expect((db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n).toBe(sessionsBefore);
   });
 
-// #3173 review round 2: a seat that started AFTER the snapshot was taken has a live
-// session newer than everything the snapshot records, and the snapshot names no occupant
-// for it. Fresh-launching there would silently replace that newer conversation — the seat
-// must park as awaiting-decision instead (R2b).
+// #3173 review round 2 (repaired per round 3): the snapshot must NOT contain the target
+// (the old fixture captured it running, which takes the resolved-occupant path instead),
+// and the createSession spy must sit on the tmux instance the orchestrator actually uses.
 it("parks when the seat ran after the snapshot and the snapshot records no occupant", async () => {
   // Snapshot before the seat's current session existed: only the peer is in it.
+  db.prepare("DELETE FROM sessions WHERE node_id = ?").run(implNodeId);
   snapshotCapture.captureSnapshot(rigId, "manual");
   const later = sessionRegistry.registerSession(implNodeId, SEAT_SESSION);
   sessionRegistry.updateStatus(later.id, "exited"); // exited without intent → dormant, revivable
   const pi = { canResume: () => false, resume: vi.fn() } as unknown as PiResumeAdapter;
   const tmux = tmuxWithLivePeer();
   const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
-  const orchestrator = orchestratorWith(pi);
+  const orchestrator = orchestratorWith(pi, tmux);
+  const starter = starterFor(orchestrator);
+
+  starter.notify(SEAT_SESSION);
+  await vi.waitFor(() => expect(ledger()).toBeDefined());
+
+  expect(ledger()).toContain("awaiting_decision");
+  expect(pi.resume).not.toHaveBeenCalled();
+  expect(createSession).not.toHaveBeenCalled();
+});
+
+// #3173 review round 3 (C): a snapshot that explicitly records the occupant absent while
+// retaining the seat's resume_if_possible history with NO token used to fall through both
+// guards to a fresh launch, replacing a conversation the seat had. It must park.
+it("parks an explicitly-absent snapshot occupant that retains resume history without a token", async () => {
+  // The seat ran under resume_if_possible but its capture carries no resume token.
+  db.prepare("UPDATE sessions SET status = 'exited', restore_policy = 'resume_if_possible' WHERE node_id = ?").run(implNodeId);
+  snapshotCapture.captureSnapshot(rigId, "manual");
+  const pi = { canResume: () => false, resume: vi.fn() } as unknown as PiResumeAdapter;
+  const tmux = tmuxWithLivePeer();
+  const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
+  const orchestrator = orchestratorWith(pi, tmux);
   const starter = starterFor(orchestrator);
 
   starter.notify(SEAT_SESSION);

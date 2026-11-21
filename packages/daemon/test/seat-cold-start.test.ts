@@ -424,7 +424,8 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.deps.probeSession = probe;
     f.starter.notify("dev.impl@fleet");
     await vi.waitFor(() => expect(f.launches).toHaveLength(1));
-    expect(probe).toHaveBeenCalledTimes(7);
+    // 7 in the pre-lease proof plus the 6-peer in-lease recheck (B).
+    expect(probe).toHaveBeenCalledTimes(13);
     expect(probe).toHaveBeenLastCalledWith("dev-rev@fleet");
     f.db.close();
   });
@@ -599,5 +600,67 @@ it("does not count pre-launch lifecycle refusals as failed launches", async () =
   expect(row?.last_outcome).toContain("refused:draft_aware_lifecycle");
   // A refusal is not a launch: the door never ran.
   expect(f.launches).toHaveLength(0);
+  f.db.close();
+});
+
+// #3173 review round 3 (A): a person's fix-and-relaunch creates a session newer than the
+// ledger's last attempt — that must clear the cap, or the seat stays cold-start-blocked
+// for good (eligibility never observes a seat a person launched while it runs).
+it("clears the failure cap when a newer session shows a person relaunched the seat", async () => {
+  const f = fixture();
+  f.deps.launchSingleNode = async () => ({ ok: false, code: "no_usable_snapshot", message: "no snapshot" });
+  const starter = new SeatColdStarter(f.deps);
+  const startedAt = Date.now();
+  for (let round = 0; round < 4; round++) {
+    f.deps.now = () => new Date(startedAt + round * COLD_START_MIN_INTERVAL_MS);
+    // Age the last attempt backward past the interval gate so each round counts a failure.
+    f.db.prepare("UPDATE seat_cold_starts SET last_attempt_at = ? WHERE node_id = 'n1'")
+      .run(new Date(startedAt + round * COLD_START_MIN_INTERVAL_MS - 2 * COLD_START_MIN_INTERVAL_MS).toISOString());
+    starter.notify("dev.impl@fleet");
+    await flush();
+  }
+  expect(f.ledger()?.consecutive_failures).toBe(3);
+
+  // The person repairs and relaunches: a session newer than the last attempt appears.
+  f.db.prepare(`INSERT INTO sessions(id,node_id,session_name,status,created_at)
+    VALUES ('sn','n1','dev-impl@fleet','exited', datetime('now', '+10 minutes'))`).run();
+  f.deps.now = () => new Date(startedAt + 5 * COLD_START_MIN_INTERVAL_MS);
+  f.deps.launchSingleNode = async () => ({ ok: true, launched: [{ logicalId: "dev.impl", status: "resumed" }] });
+  starter.notify("dev.impl@fleet");
+  await flush();
+  // The cap no longer refuses: the launch went through.
+  expect(f.ledger()?.last_outcome).toBe("resumed");
+  f.db.close();
+});
+
+// #3173 review round 3 (B): the live-peer proof ran before the lease, and the attempt can
+// wait behind queued sends. A `rig down` in that window must not leave a reviving seat in
+// a rig that was taken down — the positive eligibility is rechecked under the lease.
+it("refuses when the rig goes down while the attempt waits under the lease", async () => {
+  const f = fixture();
+  let peerLive = true;
+  let probes = 0;
+  f.deps.probeSession = async (name: string) => {
+    probes += 1;
+    // The target is absent throughout; the peer is live for the pre-lease proof only.
+    if (name !== "dev-rev@fleet") return { state: "absent" };
+    return { state: peerLive ? "present" : "absent" };
+  };
+  const startedAt = Date.now();
+  f.deps.now = () => new Date(startedAt);
+  // Park the launch behind a draft-sized lease: the guard holds the lease while the
+  // "down" happens (peerLive flips after the pre-lease proof consumed its probe).
+  const inner = f.deps.deliveryGuard.lifecycle.bind(f.deps.deliveryGuard);
+  f.deps.deliveryGuard = {
+    lifecycle: async (ids, fn) => inner(ids, async () => {
+      peerLive = false;
+      return fn();
+    }),
+  } as never;
+  void probes;
+  f.starter.notify("dev.impl@fleet");
+  await flush();
+  expect(f.launches).toHaveLength(0);
+  expect(f.logs.some(line => line.includes("rig down"))).toBe(true);
   f.db.close();
 });
