@@ -411,6 +411,7 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
     claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
     occurredAt: now().toISOString(),
+    ...remoteControlFields(runtime, env),
   };
 }
 

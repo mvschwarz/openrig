@@ -1,13 +1,17 @@
 // #3513: a Claude seat's own hooks report its Remote Control session (CLAUDE_CODE_BRIDGE_SESSION_ID), and the node read
 // shows the last one seen, bound to the current occupant and conversation. The shipped relay builds each post from a
 // synthetic Claude hook stdin; the real activity route, SQLite store and node inventory route receive and serve it.
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { serve } from "@hono/node-server";
 import { expect, it } from "vitest";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { parseRemoteControlReport } from "../src/domain/remote-control-observations.js";
 
-const relay = createRequire(import.meta.url)(path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs")) as {
+const relayPath = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
+const relay = createRequire(import.meta.url)(relayPath) as {
   buildOpenRigPayload(p: unknown, env: Record<string, string>, now?: () => Date): Record<string, unknown> | null;
 };
 const conversation = "11111111-1111-4111-8111-111111111111";
@@ -16,14 +20,14 @@ const linkA = "session_01AbCdEfGhIjKlMnOpQrStUv";
 const linkB = "session_01ZyXwVuTsRqPoNmLkJiHgFe";
 const name = "dev-impl@rig-a";
 
-function seat() {
+function seat(initialConversation: string | null = conversation) {
   const db = createFullTestDb();
   const t = createTestApp(db, { activityHookToken: "fixture" });
   const rig = t.rigRepo.createRig("rig-a");
   const node = t.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work/repo" });
   const session = t.sessionRegistry.registerSession(node.id, name);
   t.sessionRegistry.updateStatus(session.id, "running");
-  t.sessionRegistry.updateResumeToken(session.id, "claude_id", conversation, "hook");
+  if (initialConversation) t.sessionRegistry.updateResumeToken(session.id, "claude_id", initialConversation, "hook");
   const generation = t.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? "";
   const env = (extra: Record<string, string> = {}) => ({ OPENRIG_SESSION_NAME: name, OPENRIG_NODE_ID: node.id,
     OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: generation, CLAUDE_PROJECT_DIR: "/work/repo", ...extra });
@@ -43,8 +47,44 @@ function seat() {
     const [row] = await res.json() as Array<Record<string, unknown>>;
     return row!.remoteControl;
   };
-  return { t, db, node, session, generation, hook, read };
+  return { t, db, node, session, generation, env, hook, read };
 }
+
+it.each([null, conversation])("shows Remote Control after the real two-post SessionStart with prior conversation %s", async prior => {
+  const s = seat(prior);
+  const posts: Array<{ kind: unknown; postedAt: unknown; status: number; reply: unknown; observation: unknown }> = [];
+  let server: ReturnType<typeof serve> | undefined;
+  try {
+    const port = await new Promise<number>(resolve => {
+      server = serve({
+        hostname: "127.0.0.1", port: 0,
+        fetch: async request => {
+          const payload = await request.clone().json() as Record<string, unknown>;
+          const response = await s.t.app.fetch(request);
+          posts.push({ kind: payload.eventFamily ?? payload.hookEvent, postedAt: payload.occurredAt,
+            status: response.status, reply: await response.clone().json(), observation: await s.read() });
+          return response;
+        },
+      }, info => resolve(info.port));
+    });
+    const child = spawn(process.execPath, [relayPath], {
+      env: s.env({ OPENRIG_URL: `http://127.0.0.1:${port}`, OPENRIG_ACTIVITY_HOOK_TOKEN: "fixture",
+        CLAUDE_CODE_BRIDGE_SESSION_ID: linkB }),
+      stdio: ["pipe", "ignore", "inherit"], timeout: 4000,
+    });
+    const closed = once(child, "close");
+    child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", source: prior ? "clear" : "startup",
+      session_id: otherConversation, transcript_path: `/fixture/${otherConversation}.jsonl` }));
+    expect(await closed).toEqual([0, null]);
+    expect(posts.map(post => post.kind)).toEqual(["SessionStart", "session_identity"]);
+    expect(posts[0]).toMatchObject({ status: 200, observation: null });
+    expect(posts[1]).toMatchObject({ status: 200, reply: { tokenPersisted: true },
+      observation: { sessionId: linkB, observedAt: posts[1]?.postedAt } });
+  } finally {
+    if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    s.db.close();
+  }
+});
 
 it("the relay reports a well-formed id, null when unset, and nothing for a malformed value or another runtime", () => {
   const base = { OPENRIG_SESSION_NAME: name, OPENRIG_RUNTIME: "claude-code" };

@@ -729,6 +729,8 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
     const tokenPersisted = validation.ok
       && (persistHook(validation.resumeType, validation.token)
         || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
+    // SessionStart posts activity first. The accepted identity can be the first record of this conversation.
+    if (tokenPersisted) observeRemoteControl(c, store, body);
     eventBus.emit({
       type: "agent.session_identity",
       rigId: resolved.rigId,
@@ -770,7 +772,8 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
 
   // #2702: a turn, stop or notification from another runtime started inside the seat is that harness's, not the seat's.
   if (reportedByAnotherRuntime(body)) return c.json({ ok: true, ignored: "transcript_not_this_session" });
-  // #3513: before the permission and PostToolBatch branches return, so every hook of the seat's own Claude counts.
+  // #3513: take reports before the permission and PostToolBatch branches return. The fixed PermissionRequest
+  // diagnostic carries no conversation or Remote Control fields.
   observeRemoteControl(c, store, body);
 
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
@@ -842,11 +845,11 @@ function observeRemoteControl(c: Context, store: AgentActivityStore, body: Recor
   const conversationId = stringOrNull(body.sessionId);
   const occurredAt = stringOrNull(body.occurredAt);
   if (!generation || !conversationId || !occurredAt || !Number.isFinite(Date.parse(occurredAt))) return;
-  const sessionName = stringOrNull(body.sessionName);
-  const seat = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId) });
-  if (!seat || seat.runtime !== "claude-code" || (sessionName && sessionName !== seat.sessionName)
-    || (body.nodeId != null && body.nodeId !== seat.nodeId)) return;
   try {
+    const sessionName = stringOrNull(body.sessionName);
+    const seat = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId) });
+    if (!seat || seat.runtime !== "claude-code" || (sessionName && sessionName !== seat.sessionName)
+      || (body.nodeId != null && body.nodeId !== seat.nodeId)) return;
     new RemoteControlObservationStore(store.db).record({ nodeId: seat.nodeId, generation, conversationId, report,
       observedAt: new Date(occurredAt).toISOString(), isCurrentOccupant: continuesCurrentOccupant(c, store, seat.nodeId) });
   } catch { /* An optional observation never affects the event's own recording. */ }
