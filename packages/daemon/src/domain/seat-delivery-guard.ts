@@ -23,7 +23,8 @@ interface Lease {
   config?: TypingGuardConfig;
   humanEpoch: number;
   inputFrame?: string;
-  staged?: { text: string; collapsedPaste: string | null };
+  /** `pastedAt`: when notePasted saw the paste go in (epoch ms). */
+  staged?: { text: string; collapsedPaste: string | null; pastedAt?: number };
   /** #2429: the delivery's own check found the paste this guard left unsubmitted, then the adapter submitted it. */
   ownLeftover?: "recognized" | "submitted";
   /** A lifecycle lease at queue-only: each write is checked as draft-aware, without draft-aware's lifecycle refusal. */
@@ -532,8 +533,9 @@ export class SeatDeliveryGuard {
     let input = await read();
     // Claude may still be redrawing this lease's own paste, or showing its paste hint: bounded re-reads before refusing
     // its Enter. Each read checks this lease again, so input from a person through OpenRig still ends the wait.
+    let rereads = 0;
     for (let waited = 0; submit && lease.staged && (!input || input.state === "unknown") && waited < OWN_PASTE_REREAD_LIMIT_MS; waited += OWN_INPUT_REREAD_MS) {
-      await this.sleep(OWN_INPUT_REREAD_MS); input = await read();
+      await this.sleep(OWN_INPUT_REREAD_MS); input = await read(); rereads++;
     }
     if (!input || input.state === "unknown") {
       // No Enter was sent, so the paste stays there unsubmitted, and the next delivery may recognize it as OpenRig's.
@@ -571,6 +573,14 @@ export class SeatDeliveryGuard {
         && lease.inputFrame === input.frame && ownCollapsedPaste(input, lease.staged.text);
       const label = late ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(late) : null;
       const collapsed = !!late && !(label && label[1] === undefined);
+      // Past the first re-read, a late counted label could be a person's own paste of the same line count, typed at the
+      // terminal where no OpenRig input shows it. It's ours only if no writable client was active since our paste;
+      // otherwise the paste stays, recorded as a leftover, with no Enter.
+      if (collapsed && rereads > 1 && await this.clientActiveSince(target, lease.staged!.pastedAt)) {
+        this.leftovers.set(target.nodeId, { target: lease.target, humanEpoch: lease.humanEpoch, ...lease.staged! });
+        throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't confirm the collapsed paste is still its own: a terminal client was active since it was pasted. Automatic delivery is held.",
+          inputReadDiagnostic("draft-aware", input, "client_activity_since_paste"));
+      }
       const owned = lease.staged && (composerContainsOwnedText(input, lease.staged.text)
         || !!collapsed || !!lease.staged.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === lease.staged.collapsedPaste);
       if (!owned) throw new DeliveryGuardError("draft_input_changed", "The input no longer contains only this delivery's staged text. Enter was not sent.");
@@ -620,6 +630,16 @@ export class SeatDeliveryGuard {
     return again;
   }
 
+  /** Whether a writable client of the seat was active since `since` (epoch ms). tmux reports whole seconds, so activity
+   *  in that second counts, and so does a time tmux can't report or a paste time that wasn't seen. With no activity
+   *  reader, as before a paste, there's nothing to check. */
+  private async clientActiveSince(target: GuardTarget, since: number | undefined): Promise<boolean> {
+    if (!this.inputActivity) return false;
+    if (since === undefined) return true;
+    const last = await this.inputActivity(target).then(at => ({ at }), () => null);
+    return !last || (last.at !== null && last.at + CLIENT_ACTIVITY_PRECISION_MS >= since);
+  }
+
   /** A leftover paste is OpenRig's only while it's exactly there: the same occupant, no person's input through OpenRig
    * since, and its text or the label recorded for it. A label first seen later proves nothing (#1871). */
   private ownsLeftover(target: GuardTarget, input: ComposerInput): boolean {
@@ -645,7 +665,7 @@ export class SeatDeliveryGuard {
       if (!this.needsInputCheck(name)) return;
       const target = this.target(name);
       const lease = this.scope.getStore()!.get(target.nodeId)!;
-      lease.staged = { text, collapsedPaste: null };
+      lease.staged = { text, collapsedPaste: null, pastedAt: Date.now() };
       const input = await this.inspectInput?.(target, lease.inputFrame ? { text, frame: lease.inputFrame } : undefined).catch(() => null) ?? null;
       if (input) lease.staged.collapsedPaste = ownCollapsedPaste(input, text);
     } catch { /* Observation cannot turn a completed paste into a claimed no-write failure. */ }

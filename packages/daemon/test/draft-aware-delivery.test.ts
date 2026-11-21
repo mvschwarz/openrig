@@ -1627,7 +1627,8 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
   });
 
   // A notice the reader doesn't know keeps the hint's frame unreadable until the hint goes back to the mode bar. Reads
-  // while staged: notePasted's, the Enter's first, then one per re-read; re-read 27 is the last within 8 s.
+  // while staged: notePasted's, the Enter's first, then one per re-read; re-read 27 is the last (27 waits of 300 ms, about
+  // 8.1 s with the reads).
   it.each([1, 7, 27])("submits its own paste when an unknown notice's hint gives way to the mode bar on re-read %i", async clearsOn => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     let stagedReads = 0;
@@ -1642,6 +1643,33 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
     expect(f.submissions).toEqual([reminder]);
     expect(stagedReads).toBe(clearsOn + 2);
+  });
+
+  // Past the first re-read, a late counted label could be a person's own paste of the same line count at the terminal,
+  // which no OpenRig input shows. The same cell with no client activity is re-read 7 above.
+  it("holds a same-count label the hint gives way to on re-read 7 when a terminal client was active since the paste", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    let stagedReads = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const staged = f.bodies.a === reminder;
+      // Someone at the terminal is active once our paste is in.
+      if (staged) f.hooks.clients = () => `0|${Math.floor(Date.now() / 1000)}\n`;
+      const snapshot = frame(staged ? "[Pasted text #1 +6 lines]" : f.bodies.a ?? "");
+      const hint = staged && stagedReads++ < 7 + 1;
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${hint ? "paste again to expand  ✦ a notice no list has" : "⏵⏵ bypass permissions on (shift+tab to cycle)"}\n`);
+      return snapshot;
+    });
+    const result = await f.send("active-client", reminder, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    expect(result.error).toContain("a terminal client was active since it was pasted");
+    expect(stagedReads).toBe(7 + 2);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(reminder);
+    // As when the input can't be read: the paste stays, and with no label recorded for it, the next wake holds it as a draft.
+    f.advance();
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ sent: false, reason: "draft_input_busy" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(reminder);
   });
 
   it("stops re-reading after about 8 s and leaves its paste unsubmitted when the hint stays", async () => {
