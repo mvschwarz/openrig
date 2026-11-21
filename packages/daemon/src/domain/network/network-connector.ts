@@ -108,7 +108,10 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
     hub = await (deps.connect ?? connectMcpHub)(binding.hubUrl, token, deadline.signal);
     // Work goes to the seat at its current address. With no session there's nobody to give it to, so nothing is taken.
     const destination = currentSession(deps.db, binding.nodeId);
-    if (destination) {
+    // Taking work needs the hub's queue list. A grant for sending only (team, create and show) doesn't offer it; there's
+    // no inbound work to take then, and the answers to the seat's requests are still read below.
+    const inbound = await hub.offers("rig_queue_list");
+    if (destination && inbound) {
       // What this participant already holds (claimed before a restart, or through an earlier binding) comes first.
       for (const held of await hub.listOwned("in-progress", PAGE * MAX_PAGES)) {
         if (!live()) break;
@@ -135,9 +138,15 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
     // Report back what happened locally, for the items this binding holds. A revoked binding never gets here.
     if (live()) await reportBack(deps, binding, hub, now, result);
     // Then the requests this seat sent through the hub: a create whose answer was lost, and each answer that arrived.
-    if (live()) await reconcileNetworkRequests(deps, binding, hub, now, live);
+    const unread = live() ? await reconcileNetworkRequests(deps, binding, hub, now, live) : null;
     deps.bindings.recordContact(binding.id, now());
-    if (!destination) {
+    // The hub stopped answering while requests were read: the work done stands, and the pass reads unavailable, so the
+    // next one backs off.
+    if (unread) {
+      deps.bindings.recordError(binding.id, unread.message);
+      return { ...result, error: "unavailable" };
+    }
+    if (!destination && inbound) {
       deps.bindings.recordError(binding.id, `${binding.localSession} has no session here, so its hub items stay pending until it has one.`);
       return { ...result, error: "no_session" };
     }

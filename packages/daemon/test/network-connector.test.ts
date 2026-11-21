@@ -36,8 +36,10 @@ class FakeHub {
   readonly failNote = new Set<string>();
   /** Shows of these ids wait until the pass closes its connection. */
   readonly stallShow = new Set<string>();
-  /** Runs while a show is waiting on the hub, before it answers. */
-  duringShow: ((id: string) => void) | null = null;
+  /** Runs while a show is waiting on the hub, before it answers; the show waits for what it returns. */
+  duringShow: ((id: string) => void | Promise<void>) | null = null;
+  /** Runs right after a create stores a new item, before it answers. */
+  afterCreate: ((id: string) => void) | null = null;
   /** Runs while a connection is being set up, before it's ready. */
   duringConnect: (() => void) | null = null;
   /** Someone else closes these items just as ours arrives: the hub keeps theirs and answers ours as done. */
@@ -74,7 +76,7 @@ class FakeHub {
         if (this.loseClaimAnswer.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
       },
       show: async (id) => {
-        this.duringShow?.(id);
+        await this.duringShow?.(id);
         if (this.stallShow.has(id)) {
           await new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new HubError("unavailable", "The hub couldn't be reached: closed")), { once: true }));
         }
@@ -111,10 +113,12 @@ class FakeHub {
         if (!this.seats.has(input.destination)) throw new HubError("refused", `No seat here is named '${input.destination}', so nothing was written.`, "destination_not_found");
         this.items.set(input.qitemId, { qitemId: input.qitemId, sourceSession: PARTICIPANT, destinationSession: input.destination, state: "pending",
           body: input.body, summary: input.summary ?? null, resolution: null, closureReason: null, notes: [] });
+        this.afterCreate?.(input.qitemId);
         if (this.loseCreateAnswer.delete(input.qitemId)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
         const { notes: _createdNotes, ...created } = this.items.get(input.qitemId)!;
         return { ...created };
       },
+      offers: async () => true,
       end: async () => {},
     };
     return session;
@@ -932,6 +936,178 @@ describe("network connector", () => {
       expect((await send(b.id, "req-16")).state).toBe("refused");
       expect(repo.getById("req-16")!.state).toBe("failed");
       expect(repo.getById("req-16")!.resolution).toContain("qitem_body_not_saved");
+    });
+
+    it("a command retry and a pass that both find the hub item missing: the create that loses to a rerouted one reads it back, and its answer closes the request", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-30");
+      hub.down = true;
+      expect((await send(b.id, "req-30")).state).toBe("unknown");
+      hub.down = false;
+      // Both shows answer not-found only once both have asked; the first create to land is rerouted there at once.
+      let asked = 0, release!: () => void;
+      const both = new Promise<void>((resolve) => { release = resolve; });
+      hub.duringShow = async (id) => { if (id !== hubId) return; if (++asked === 2) release(); await both; };
+      hub.afterCreate = (id) => { if (id === hubId) answer(hubId, { destinationSession: `relief-${PEER}` }); };
+      const [retry, passed] = await Promise.all([send(b.id, "req-30"), pass(b.id)]);
+      hub.duringShow = null; hub.afterCreate = null;
+      expect(retry.state).toBe("sent");
+      expect(passed.error).toBeUndefined();
+      expect(hub.creates).toBe(2);
+      expect([...hub.items.keys()].filter((id) => id === hubId)).toHaveLength(1);
+      expect(repo.getById("req-30")!.state).toBe("blocked");
+      expect(outcome("req-30")).toEqual({ outcome: null });
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Done by the relief." });
+      await pass(b.id);
+      expect(repo.getById("req-30")).toMatchObject({ state: "done", resolution: "Done by the relief." });
+      expect(repo.listTransitions("req-30").filter((t) => t.transitionNote?.startsWith("Answered by"))).toHaveLength(1);
+    });
+
+    it("a taken id whose item can't be read back leaves the request unknown and open, not failed", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-31");
+      hub.add(hubId, "another seat's item", PEER);
+      hub.duringShow = (id) => { if (id === hubId) throw new HubError("refused", "Item is outside what this connection may reach.", "out_of_scope"); };
+      expect((await send(b.id, "req-31")).state).toBe("unknown");
+      expect(repo.getById("req-31")!.state).toBe("blocked");
+      expect(outcome("req-31")).toEqual({ outcome: null });
+    });
+
+    it("a lost create reply, then a command retry the hub refuses with 401: the request stays open and unknown, and a new binding reads its answer once", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-32");
+      hub.loseCreateAnswer.add(hubId);
+      expect((await send(b.id, "req-32")).state).toBe("unknown");
+      hub.revoked = true;
+      const unknownNote = (t: { transitionNote?: string | null }) => t.transitionNote?.startsWith("The hub refused this binding's credential");
+      for (let retry = 0; retry < 2; retry++) {
+        expect(await send(b.id, "req-32")).toMatchObject({ state: "unknown", hubQitemId: hubId });
+        expect(repo.getById("req-32")!.state).toBe("blocked");
+        expect(outcome("req-32")).toEqual({ outcome: null });
+      }
+      expect(repo.listTransitions("req-32").filter(unknownNote)).toHaveLength(1);
+      expect((await pass(b.id)).error).toBe("revoked");
+      hub.revoked = false;
+      const again = bindings.create({ session: b.localSession, hubUrl: b.hubUrl, hubSeat: b.hubSeat, token: "tok-2" });
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Ran while you were away." });
+      await pass(again.id);
+      expect(repo.getById("req-32")).toMatchObject({ state: "done", resolution: "Ran while you were away." });
+      expect(hub.creates).toBe(1);
+      expect(repo.listTransitions("req-32").filter((t) => t.transitionNote?.startsWith("Answered by"))).toHaveLength(1);
+    });
+
+    it("a new request the hub refuses with 401 is refused: nothing was ever accepted", async () => {
+      const b = bind();
+      hub.revoked = true;
+      expect((await send(b.id, "req-33")).state).toBe("refused");
+      expect(repo.getById("req-33")!.state).toBe("failed");
+      expect(outcome("req-33")).toEqual({ outcome: "refused" });
+    });
+
+    it("a hub that stops answering while requests are read makes the pass unavailable and back off; the request stays open, and a later pass reads its answer", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-34");
+      await send(b.id, "req-34");
+      const hangUp = (which: string) => { hub.duringShow = (id) => { if (id === which) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up"); }; };
+      let now = new Date("2026-11-21T23:00:00.000Z");
+      const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+      hangUp(hubId);
+      await service.round();
+      expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 60_000, lastPass: expect.objectContaining({ error: "unavailable" }) });
+      expect(bindings.get(b.id)!.lastError).toBe("The hub couldn't be reached: socket hang up");
+      expect(repo.getById("req-34")!.state).toBe("blocked");
+      // The same on the followed successor of an item handed on there.
+      hub.add("hub-next-34", "Review the release notes", PEER);
+      answer(hubId, { state: "handed-off", successor: "hub-next-34" });
+      hangUp("hub-next-34");
+      now = new Date(now.getTime() + 60_001);
+      await service.round();
+      expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 120_000, lastPass: expect.objectContaining({ error: "unavailable" }) });
+      expect(repo.getById("req-34")!.state).toBe("blocked");
+      hub.duringShow = null;
+      answer("hub-next-34", { state: "done", closureReason: "no-follow-on", resolution: "Reviewed." });
+      now = new Date(now.getTime() + 120_001);
+      await service.round();
+      expect(repo.getById("req-34")).toMatchObject({ state: "done", resolution: "Reviewed." });
+      expect(service.snapshot().bindings[0]!.backoffMs).toBe(30_000);
+      expect(bindings.get(b.id)!.lastError).toBeNull();
+    });
+
+    /** A hub whose grant offers only `offered`, over MCP's Streamable HTTP. As OpenRig's hub does for an external grant
+     *  (packages/cli/src/mcp-server.ts, externalTools and offered), a tool the grant doesn't name isn't listed, and a call
+     *  to it gets the answer McpServer gives an unknown tool (the SDK's server/mcp.js: "Tool <name> not found", as a tool
+     *  error). */
+    async function grantHub(offered: string[]) {
+      const { createServer } = await import("node:http");
+      const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
+      const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
+      const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+      const items = new Map<string, HubItem>();
+      const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+      const refused = (text: string, code?: string) => ({ isError: true, content: [{ type: "text" as const, text }], ...(code ? { structuredContent: { code } } : {}) });
+      const tools: Record<string, (args: Record<string, unknown>) => unknown> = {
+        rig_team: () => json({ rig: "team", seats: [{ session: PEER }] }),
+        rig_queue_create: (args) => {
+          const id = String(args.qitemId);
+          if (!items.has(id)) items.set(id, { qitemId: id, sourceSession: PARTICIPANT, destinationSession: String(args.destination), state: "pending",
+            body: String(args.body), summary: null, resolution: null, closureReason: null });
+          return json(items.get(id));
+        },
+        rig_queue_show: (args) => { const item = items.get(String(args.qitemId)); return item ? json({ item }) : refused(`qitem ${String(args.qitemId)} not found`, "qitem_not_found"); },
+        rig_queue_list: (args) => json([...items.values()].filter((item) => item.destinationSession === PARTICIPANT && item.state === args.state)),
+        rig_queue_claim: (args) => {
+          const item = items.get(String(args.qitemId));
+          if (item?.state !== "pending") return refused("That item can't be claimed.");
+          item.state = "in-progress";
+          return json(item);
+        },
+        rig_queue_update: (args) => {
+          const item = items.get(String(args.qitemId));
+          if (!item) return refused("No such item.", "qitem_not_found");
+          if (typeof args.state === "string") Object.assign(item, { state: args.state, resolution: args.resolution ?? null, closureReason: args.closureReason ?? null });
+          return json(item);
+        },
+      };
+      const server = createServer((req, res) => {
+        const mcp = new Server({ name: "grant hub", version: "1" }, { capabilities: { tools: {} } });
+        mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: offered.map((name) => ({ name, inputSchema: { type: "object" as const } })) }));
+        mcp.setRequestHandler(CallToolRequestSchema, async (request) => (offered.includes(request.params.name)
+          ? tools[request.params.name]!(request.params.arguments ?? {})
+          : refused(`MCP error -32602: Tool ${request.params.name} not found`)) as never);
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        res.on("close", () => { void transport.close(); void mcp.close(); });
+        void mcp.connect(transport).then(() => transport.handleRequest(req, res));
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+      return { items, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`,
+        close: () => new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+    }
+
+    it.each([
+      ["sending only (team, create and show)", ["rig_team", "rig_queue_create", "rig_queue_show"]],
+      ["both ways", ["rig_team", "rig_queue_create", "rig_queue_show", "rig_queue_list", "rig_queue_claim", "rig_queue_update"]],
+    ])("a grant for %s sends a request and reads its answer back into it, through a real MCP hub", async (_grant, offered) => {
+      const real = await grantHub(offered);
+      try {
+        const first = bind();
+        bindings.disconnect(first.id);
+        const b = bindings.create({ session: first.localSession, hubUrl: real.url, hubSeat: PARTICIPANT, token: "tok-grant", allowHttp: true });
+        const viaHub = { ...deps, connect: connectMcpHub };
+        const hubId = networkHubRequestId(b, "req-40");
+        expect(await originateNetworkRequest(viaHub, bindings.get(b.id)!, { peer: PEER, requestId: "req-40", body: "Review the release notes" })).toMatchObject({ state: "sent" });
+        // Work for the participant, which only a grant with the queue's list, claim and update can take.
+        real.items.set("hub-in-40", { qitemId: "hub-in-40", sourceSession: PEER, destinationSession: PARTICIPANT, state: "pending", body: "Summarize the notes",
+          summary: "Summarize the notes", resolution: null, closureReason: null });
+        Object.assign(real.items.get(hubId)!, { state: "done", closureReason: "no-follow-on", resolution: "Looks good." });
+        const passed = await runNetworkBindingPass(viaHub, bindings.get(b.id)!);
+        expect(passed.error).toBeUndefined();
+        expect(bindings.get(b.id)!.lastError).toBeNull();
+        expect(repo.getById("req-40")).toMatchObject({ state: "done", resolution: "Looks good." });
+        expect(runs("hub-in-40")).toHaveLength(offered.includes("rig_queue_list") ? 1 : 0);
+        expect(real.items.get("hub-in-40")!.state).toBe(offered.includes("rig_queue_list") ? "in-progress" : "pending");
+      } finally {
+        await real.close();
+      }
     });
   });
 

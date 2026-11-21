@@ -163,9 +163,19 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
     pass, and creates it there under the same id if it's missing.
   - `refused`: the hub refused it with a reason, such as `destination_not_found`. The local item closes failed with the
     hub's words, and `request` exits 1.
+  - **Two cases that read `unknown`, not `refused`:**
+    - A create the hub answers with `qitem_id_reuse`. Another create of the same request, such as a retry and a pass at
+      once, may have landed first and been moved on there, so the hub item is read back by its id. If it can't be read,
+      the outcome stays unknown.
+    - A retry of a request whose earlier create wasn't confirmed, when the hub refuses the binding's credential. The
+      earlier create may still be on the hub, so the local item stays open with a note saying so, for a new binding for
+      the same seat, hub and participant to read. A new request whose credential is refused is `refused`.
 
-**Reading the answer:** on each pass, the connector reads every open request's hub item. When the hub item closes, the
-local item closes the same way:
+**Reading the answer:** on each pass, the connector reads every open request's hub item. A grant for sending only (team
+list, queue create and show, without the queue's list) is enough: the connector takes inbound work only when the hub offers
+the queue's list, and reads the answers either way. If the hub stops answering while requests are read, the pass reads
+unavailable and backs off, and the requests stay open for the next one. When the hub item closes, the local item closes
+the same way:
 - done with the hub's resolution and its closure reason. A reason that needs a closure target here (`escalation`) reads
   `no-follow-on`, with the hub's reason in the note;
 - canceled or denied as itself;

@@ -161,7 +161,8 @@ function requestPayload(local: QueueItem, receipt: RequestRow): { body: string; 
 /** A hub item that was handed on there: handed off, or closed done by a handoff-and-complete. Its answer is its successor's. */
 const handedOn = (item: HubItem): boolean => item.state === "handed-off" || (item.state === "done" && item.closureReason === "handed_off_to");
 
-type CreateOutcome = { kind: "created"; item: HubItem } | { kind: "refused"; error: HubError } | { kind: "unknown"; error: HubError };
+type CreateOutcome = { kind: "created"; item: HubItem } | { kind: "found"; item: HubItem } | { kind: "refused"; error: HubError }
+  | { kind: "unknown"; error: HubError };
 
 /** Create the request on the hub under its derived id. A refusal with the hub's own code, or the hub holding a different
  *  request under that id, is definite; anything else (a timeout, a lost connection, an answer that can't be read) leaves
@@ -173,6 +174,17 @@ async function createOnHub(hub: HubSession, receipt: RequestRow, payload: { body
     return { kind: "created", item: created };
   } catch (error) {
     if (!(error instanceof HubError) || error.kind === "revoked") throw error;
+    // The id is taken: another create of this request (a command retry and a pass can overlap) may have landed first and
+    // been moved on there since. That isn't a refusal of this request, so it's read back by the same id; if it can't be
+    // read, the outcome stays unknown.
+    if (error.kind === "refused" && error.code === "qitem_id_reuse") {
+      try {
+        return { kind: "found", item: await hub.show(receipt.hub_qitem_id) };
+      } catch (shown) {
+        if (!(shown instanceof HubError) || shown.kind === "revoked") throw shown;
+        return { kind: "unknown", error: shown };
+      }
+    }
     return { kind: error.kind === "refused" && error.code ? "refused" : "unknown", error };
   }
 }
@@ -192,7 +204,7 @@ function beforeCreate(deps: NetworkRequestDeps, bindingId: string, receipt: Requ
   return payload ? { kind: "ready", payload } : { kind: "stopped", stop: "erased" };
 }
 
-type Reached = CreateOutcome | { kind: "found"; item: HubItem } | { kind: "stopped"; stop: CreateStop };
+type Reached = CreateOutcome | { kind: "stopped"; stop: CreateStop };
 
 /** The request's hub item, read before any create. With `showFirst` (a request the hub may already hold), it's shown by
  *  its id first, and only a refusal with qitem_not_found, for a request the hub never confirmed, goes on to the create
@@ -299,7 +311,14 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     outcome = await withHub(deps, binding, token, (hub) => reachOnHub(deps, hub, binding.id, receipt, !!existing));
   } catch (error) {
     if (!(error instanceof HubError)) throw error;
-    // The credential refused is definite here too: nothing can be sent through this binding.
+    // The credential refused: nothing can be sent through this binding. For a new request that's definite. One whose
+    // earlier create wasn't confirmed may still be on the hub, so it stays open and unknown, for a new binding for the
+    // same seat, hub and participant to read.
+    if (error.kind === "revoked" && existing) {
+      const note = `The hub refused this binding's credential, so whether it holds hub item ${hubId} is unknown. This item stays open; a new binding for the same seat, hub and participant reads it.`;
+      if (receipt.last_error !== note && writeLocal(deps, receipt, now, () => deps.queueRepo.update({ qitemId: requestId, actorSession: OPENRIG_SENDER, transitionNote: note }))) noteError(deps, receipt, note);
+      return result(receipt, "unknown", `${note} (${error.message})`);
+    }
     outcome = error.kind === "revoked" ? { kind: "refused", error } : { kind: "unknown", error };
   }
   if (outcome.kind === "stopped") {
@@ -363,9 +382,10 @@ function refuse(deps: NetworkRequestDeps, receipt: RequestRow, error: HubError, 
 /** One pass's reading of this binding's open requests, on the pass's hub session. Open requests of an ended binding for
  *  the same seat, hub and participant are taken over first. A refusal on one request is recorded on it and the rest go
  *  on; a hub that stops answering leaves the rest for the next pass; a revoked credential ends the pass, as the
- *  connector's own calls do. A local write the queue refuses never stops the pass. */
+ *  connector's own calls do. A local write the queue refuses never stops the pass. Returns the hub's unavailable answer
+ *  that stopped the reading, if one did, for the pass to report and back off on. */
 export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding: NetworkBinding, hub: HubSession,
-  now: () => Date = deps.now ?? (() => new Date()), live: () => boolean = () => true): Promise<void> {
+  now: () => Date = deps.now ?? (() => new Date()), live: () => boolean = () => true): Promise<HubError | null> {
   deps.db.prepare(`UPDATE network_requests SET binding_id = ? WHERE node_id = ? AND hub_url = ? AND hub_seat = ? AND settled_at IS NULL AND binding_id != ?`)
     .run(binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, binding.id);
   const open = deps.db.prepare(`SELECT * FROM network_requests WHERE binding_id = ? AND settled_at IS NULL
@@ -389,7 +409,7 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
     if (reached.kind === "unknown") {
       noteError(deps, receipt, reached.error.message);
       // The hub stopped answering partway: the rest wait for the next pass, and the work taken in this pass stands.
-      if (reached.error.kind === "unavailable") break;
+      if (reached.error.kind === "unavailable") return reached.error;
       continue;
     }
     const shown = reached.item;
@@ -398,16 +418,16 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
     }
     // A hub item handed on there: its answer is its successor's, followed while this participant can read it.
     let end: HubItem | null = shown;
-    let stopped = false;
+    let stopped: HubError | null = null;
     for (let hop = 0; hop < 20 && end && handedOn(end); hop++) {
       if (!end.successor) { end = null; break; }
       try { end = await hub.show(end.successor); } catch (error) {
         if (!(error instanceof HubError) || error.kind === "revoked") throw error;
-        if (error.kind === "unavailable") { noteError(deps, receipt, error.message); stopped = true; }
+        if (error.kind === "unavailable") { noteError(deps, receipt, error.message); stopped = error; }
         end = null;
       }
     }
-    if (stopped) break;
+    if (stopped) return stopped;
     if (!end || handedOn(end)) {
       if (receipt.last_error !== HANDED_ON_UNREADABLE && writeLocal(deps, receipt, now,
         () => deps.queueRepo.update({ qitemId: local.qitemId, actorSession: OPENRIG_SENDER, transitionNote: HANDED_ON_UNREADABLE }))) {
@@ -429,6 +449,7 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
       settle(deps, receipt, end.state, now);
     }
   }
+  return null;
 }
 
 /** A binding the hub ended: each open request sent through it says once, on its local item, that its answer can't be read

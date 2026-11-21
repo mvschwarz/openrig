@@ -44,6 +44,9 @@ export interface HubSession {
   /** Create an item for a peer under an id the caller chose. The hub answers a retry of one that landed with the stored
    *  item, and `createWarning` when the retry's body wasn't saved. */
   create(input: { qitemId: string; destination: string; body: string; summary?: string | null }): Promise<HubItem & { createWarning?: string }>;
+  /** Whether the hub offers this participant the tool, as its tool list says. A grant offers only the tools its
+   *  object/action pairs name; one it doesn't name isn't served at all. */
+  offers(tool: string): Promise<boolean>;
   end(): Promise<void>;
 }
 
@@ -157,6 +160,19 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
         ...(input.summary ? { summary: input.summary } : {}) }) as Record<string, unknown>;
       const warning = (created?.createWarning ?? null) as { code?: unknown } | null;
       return { ...item(created), ...(typeof warning?.code === "string" ? { createWarning: warning.code } : {}) };
+    },
+    offers: async (tool) => {
+      try {
+        let cursor: string | undefined;
+        do {
+          const page = await client.listTools(cursor === undefined ? undefined : { cursor });
+          if (page.tools.some((listed) => listed.name === tool)) return true;
+          cursor = page.nextCursor;
+        } while (cursor);
+        return false;
+      } catch (error) {
+        throw hubFailure(error);
+      }
     },
     end: async () => { signal?.removeEventListener("abort", close); await client.close().catch(() => {}); },
   };
