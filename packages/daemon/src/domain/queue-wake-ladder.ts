@@ -203,8 +203,10 @@ export interface WakeLadderDeps {
   status?: WakeLadderStatus;
   /** Attempt a wake to `target` for `qitemId`; returns the outcome in the queue nudge
    *  grammar (verified | delivered-ack-pending | indeterminate:* | failed:*). Default
-   *  rides maybeNudge — the wake is the envelope pointer, never the content. */
-  attemptWake?: (qitemId: string, target: string) => Promise<string>;
+   *  rides maybeNudge — the wake is the envelope pointer, never the content. `occurrence` names the one event a wake is
+   *  for (a new permission prompt); the default joins it to the wake text, so each occurrence is its own delivery and a
+   *  repeat of one keeps its delivery identity. */
+  attemptWake?: (qitemId: string, target: string, occurrence?: string) => Promise<string>;
   resolveOrchestrator?: (session: string) => string | null;
   retryIntervalSeconds?: number;
   retryCap?: number;
@@ -697,19 +699,21 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       });
     const sendWake =
       deps.attemptWake ??
-      (async (qitemId: string, target: string): Promise<string> => {
+      (async (qitemId: string, target: string, occurrence?: string): Promise<string> => {
         // A ladder retry is OpenRig's own scheduling on the row, whoever created it.
         // It is sent as OpenRig (daemon@kernel); the row's original source stays visible in the body.
         const row = deps.queueRepo.getById(qitemId);
-        const bodyOverride = `${renderQueueHandoffNudge(qitemId, null)}${row?.sourceSession ? ` Row source: ${row.sourceSession}.` : ""}`;
+        // The delivery ID derives from this text, so an occurrence in it makes that occurrence's own delivery.
+        const bodyOverride = `${renderQueueHandoffNudge(qitemId, null)}${row?.sourceSession ? ` Row source: ${row.sourceSession}.` : ""}`
+          + `${occurrence ? ` ${occurrence}` : ""}`;
         await deps.queueRepo.maybeNudge(qitemId, target, true, OPENRIG_SENDER, bodyOverride, "openrig");
         return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
 
-    const attemptWake = async (id: string, target: string): Promise<string> => {
+    const attemptWake = async (id: string, target: string, occurrence?: string): Promise<string> => {
       const row = deps.queueRepo.getById(id);
       if ((row && deliveryHeld(deps.queueRepo, row)) || deps.queueRepo.deliveryDrains.holds(target)) return "deferred:rig_delivery_drain";
-      return sendWake(id, target);
+      return sendWake(id, target, occurrence);
     };
 
     const actions: WakeLadderAction[] = [];
@@ -1326,7 +1330,7 @@ async function advancePromptRefusals(
   intervalS: number,
   graceS: number,
   resolveOrch: (destination: string) => string | null,
-  attemptWake: (qitemId: string, target: string) => Promise<string>,
+  attemptWake: (qitemId: string, target: string, occurrence?: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
   const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean; hookReview?: string; permissionHook?: string;
@@ -1732,10 +1736,12 @@ async function advancePromptRefusals(
     if (!aggregate || deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     const row = deps.queueRepo.getById(aggregate.qitemId);
     // A prompt the alert hasn't carried, after an earlier prompt it has: its owner hears of it once, owner-held included.
-    // Only prompts told apart by their own start count; a generation key keeps today's behaviour.
+    // Only prompts told apart by their own start count; a generation key keeps today's behaviour. While the orchestrator
+    // rung below still owes the owner its first wake, that rung owns the new prompt: the membership update adds its key,
+    // and the rung's one wake covers it.
     const permissionPrefix = `${PROMPT_EPISODE_TAG}${dest}|permission-hook:`;
     if (row && group.permissionHook?.includes("|prompt:") && !row.tags?.includes(group.permissionHook)
-      && row.tags?.some(t => t.startsWith(permissionPrefix) && t.includes("|prompt:"))) {
+      && row.tags?.some(t => t.startsWith(permissionPrefix) && t.includes("|prompt:")) && !firstOwnerWakeOwed(deps, row, toOperator)) {
       // Re-read the seat first, as the send boundary below does: the observation came before the awaited hook-review read,
       // and its prompt may have cleared or changed since. Only a positive read lets the prompt be marked handled: clear, or
       // blocked at a prompt whose start reads. A read that throws, finds no seat, or returns unknown or blocked without a
@@ -1858,11 +1864,12 @@ async function advancePromptRefusals(
  *  in one transition either way. The key on the alert marks the prompt handled. A person, the prompted seat or an address
  *  with no session here isn't woken; this adds no notice to a person. */
 async function wakeOwnerForNewPrompt(deps: WakeLadderDeps, row: QueueItem, dest: string, key: string,
-  attemptWake: (qitemId: string, target: string) => Promise<string>): Promise<"deferred" | "recorded"> {
+  attemptWake: (qitemId: string, target: string, occurrence?: string) => Promise<string>): Promise<"deferred" | "recorded"> {
   const owner = row.destinationSession;
   const notWoken = owner === dest ? "it is the prompted seat" : knownPerson(deps, owner) ? "it is a person"
     : !deps.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(owner) ? "it has no session on this host" : null;
-  const outcome = notWoken ? null : await attemptWake(row.qitemId, owner);
+  // The prompt's key names this occurrence: a later prompt is a new delivery, and a retry of this one is the same delivery.
+  const outcome = notWoken ? null : await attemptWake(row.qitemId, owner, `New permission prompt on this alert: ${key}.`);
   if (outcome === "deferred:rig_delivery_drain") return "deferred"; // the caller leaves the prompt for the next tick
   const tags = [...(row.tags ?? []), key];
   deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(tags), row.qitemId);
@@ -1870,6 +1877,15 @@ async function wakeOwnerForNewPrompt(deps: WakeLadderDeps, row: QueueItem, dest:
   appendMarker(deps.queueRepo, row, notWoken ? `${PROMPT_NEW_NOTE}; ${owner} not woken: ${notWoken}`
     : `${PROMPT_NEW_NOTE}; woke ${owner} outcome=${outcome}`, true);
   return "recorded";
+}
+
+/** The alert's orchestrator rung hasn't woken its owner yet and is the path that will (an open alert routed to a seat,
+ *  with no rung, exhaustion or operator delivery): that one wake covers every prompt the alert carries. An owner hold,
+ *  a rung already taken or an operator route leaves a new prompt's wake to wakeOwnerForNewPrompt. */
+function firstOwnerWakeOwed(deps: WakeLadderDeps, row: QueueItem, toOperator: boolean): boolean {
+  if (toOperator || row.state === "blocked") return false;
+  const view = readLadder(deps.db, row.qitemId, 0);
+  return !view.orchRung && !view.exhausted && !view.opEngineDispatched && !(deps.deliveryEngine?.hasAcceptedEscalation?.(row) ?? false);
 }
 
 /** Open rows with a return route and the seat each is stuck on: its own holder, or for a blocked row the seat it's blocked on,

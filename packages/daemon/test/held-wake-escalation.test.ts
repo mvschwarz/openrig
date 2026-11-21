@@ -673,7 +673,7 @@ function promptEpisodeFixture() {
   const alerts = () => repo.list({ limit: 100 }).filter(r => r.tags?.includes("wake-prompt-refusal"));
   const newPromptNotes = (id: string) => repo.listTransitions(id)
     .filter(t => t.transitionNote?.startsWith("prompt escalation: a new permission prompt joined this alert"));
-  return { f, repo, lead, read, woken, tick, later, alerts, newPromptNotes };
+  return { f, repo, lead, leadNode, read, woken, tick, later, alerts, newPromptNotes };
 }
 
 it.each(["open", "owner-held"])("a second permission prompt at a seat whose alert is %s wakes the alert's owner once, with one transition and no new row", async hold => {
@@ -881,4 +881,58 @@ it("a new prompt's wake that a drain defers stays owed on a pending alert, and g
   expect(newPromptNotes(id)).toHaveLength(1);
   expect(newPromptNotes(id)[0]!.transitionNote).toContain(`woke ${lead} outcome=verified`);
   expect(attempts.slice(before)).toContain(lead);
+});
+
+// The production wake path, through the repository's delivery ID to a transport that keeps native input's receipt rule: a
+// known delivery ID returns its earlier receipt and offers no new input.
+it("each new prompt's owner wake is its own delivery, and a repeat of one prompt's wake reuses that delivery", async () => {
+  const { f, repo, lead, leadNode, read, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  new SessionRegistry(f.db).updateBinding(leadNode.id, { tmuxSession: lead });
+  const sends: string[] = [], inputs = new Set<string>();
+  repo.attachTransport({ send: async (_session, _text, opts) => {
+    sends.push(opts!.deliveryId!);
+    inputs.add(opts!.deliveryId!);
+    return { ok: true, verified: true };
+  } });
+  const tick = () => runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+    resolveOrchestrator: () => lead, readPermissionPrompts: read, retryIntervalSeconds: 1 });
+  await later(0, "Notification", "permission_prompt");
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  expect(inputs.size).toBe(1); // the orchestrator rung, for the first prompt
+  const second = await later(14_000, "Notification", "permission_prompt");
+  await tick();
+  await tick();
+  expect(newPromptNotes(id)).toHaveLength(1);
+  expect(inputs.size).toBe(2); // new input, not the first wake's receipt
+  // The second prompt's handled mark is lost (a crash between its send and its tag write), so its wake goes again.
+  const tags = repo.getById(id)!.tags!.filter(t => !t.includes(`|prompt:${second}|`));
+  f.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(tags), id);
+  await tick();
+  expect(sends).toHaveLength(3);
+  expect(sends[2]).toBe(sends[1]);
+  expect(inputs.size).toBe(2);
+});
+
+it("after a drain defers the first rung, a new prompt on the pending alert gets one wake in the tick, from the rung", async () => {
+  const { f, repo, lead, read, later, alerts, newPromptNotes } = promptEpisodeFixture();
+  let draining = true;
+  const attempts: string[] = [];
+  const tick = () => runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+    resolveOrchestrator: () => lead, readPermissionPrompts: read, retryIntervalSeconds: 1,
+    attemptWake: async (_id, target) => { if (draining) return "deferred:rig_delivery_drain"; attempts.push(target); return "verified"; } });
+  await later(0, "Notification", "permission_prompt");
+  await tick();
+  const id = alerts()[0]!.qitemId;
+  expect(attempts).toEqual([]);
+  expect(repo.getById(id)!.state).toBe("pending");
+  const second = await later(14_000, "Notification", "permission_prompt");
+  draining = false;
+  await tick();
+  expect(attempts).toEqual([lead]);
+  expect(newPromptNotes(id)).toEqual([]);
+  expect(repo.getById(id)!.tags!.some(t => t.includes(`|prompt:${second}|`))).toBe(true);
+  expect(repo.listTransitions(id).some(t => t.transitionNote?.startsWith(`escalation-rung: orchestrator -> ${lead} outcome=verified`))).toBe(true);
+  await tick();
+  expect(attempts).toEqual([lead]);
 });
