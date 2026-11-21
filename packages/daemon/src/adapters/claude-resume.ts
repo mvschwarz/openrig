@@ -104,6 +104,8 @@ export class ClaudeResumeAdapter {
     launchWrapper?: readonly string[],
     continuation?: ClaudeContinuationLaunch,
     claudeAutoMode?: ClaudeAutoModeChoice,
+    /** The reserved occupant for this restore; the kept tmux pane may still carry its predecessor's value. */
+    occupantGeneration?: string,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -125,7 +127,9 @@ export class ClaudeResumeAdapter {
       try {
         if (!nodeId || !this.options.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.options.claudeManagedLaunch!.prepare({ nodeId: nodeId!, cwd, session: tmuxSessionName,
-          ...(executable ? { executable } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}), ...(continuation?.configDir !== undefined ? { continuationConfigDir: continuation.configDir } : {}) }, selectedPermissionMode);
+          ...(executable ? { executable } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}),
+          ...(occupantGeneration ? { generation: occupantGeneration } : {}),
+          ...(continuation?.configDir !== undefined ? { continuationConfigDir: continuation.configDir } : {}) }, selectedPermissionMode);
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
     }
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
@@ -160,7 +164,8 @@ export class ClaudeResumeAdapter {
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
     const configPrefix = continuation?.configDir != null && this.options.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(continuation.configDir)} ` : "";
-    const classicCommand = configPrefix + (continuation?.args && executable
+    const generationPrefix = occupantGeneration ? `OPENRIG_OCCUPANT_GENERATION=${shellQuote(occupantGeneration)} ` : "";
+    const classicCommand = generationPrefix + configPrefix + (continuation?.args && executable
       ? `${claudeResumeLaunchPrefix(resumeToken!)}exec ${wrapperPrefix}${shellQuote(executable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && continuation?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(continuation, posture, model));
@@ -181,6 +186,7 @@ export class ClaudeResumeAdapter {
         return assertSelected ? this.tmux.sendText(tmuxSessionName, classicCommand, assertSelected) : this.tmux.sendText(tmuxSessionName, classicCommand);
       }
       const staged = await this.options.seatLaunchEnvironment.command(tmuxSessionName, classicCommand, { runtime: "claude-code", nodeId,
+        ...(occupantGeneration ? { generation: occupantGeneration } : {}),
         ...(launchWrapper?.length ? { launchWrapper } : {}), ...(executable && launchWrapper?.length ? { claudeShellLookup: false as const } : {}),
         ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
@@ -194,6 +200,10 @@ export class ClaudeResumeAdapter {
         : this.tmux.sendShellCommand(tmuxSessionName, staged, undefined, shellOptions);
     };
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Claude resume preparation; no native command was sent." };
+    if (occupantGeneration) {
+      try { await this.tmux.setSessionEnv(tmuxSessionName, "OPENRIG_OCCUPANT_GENERATION", occupantGeneration); }
+      catch { tokenWarnings.push("The tmux session environment could not be updated; the resumed process still receives the current occupant generation."); }
+    }
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, beforeManagedInput) : await sendClassic();
     if (!textResult.ok) {
       // sendText failed — nothing in the buffer, no cleanup needed

@@ -26,6 +26,7 @@ function mockTmux(overrides?: {
     getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "claude"),
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     getPanePid: overrides?.getPanePid ?? vi.fn(async () => null),
+    setSessionEnv: vi.fn(async () => {}),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -121,18 +122,19 @@ describe("ClaudeResumeAdapter", () => {
     });
     const wrapper = ["/wrapper", "--"];
     await adapter.resume("seat@rig", "claude_id", "original", "/repo", "floor", undefined, managed ? "acceptEdits" : undefined, "node",
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper);
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper, undefined, undefined, "successor-generation");
 
     if (managed) {
-      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper }, "acceptEdits");
+      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper, generation: "successor-generation" }, "acceptEdits");
       expect(command).not.toHaveBeenCalled();
     } else {
       expect(command).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec '/wrapper' '--' '/native tools/claude'"), {
-        runtime: "claude-code", nodeId: "node", launchWrapper: wrapper, claudeShellLookup: false,
+        runtime: "claude-code", nodeId: "node", generation: "successor-generation", launchWrapper: wrapper, claudeShellLookup: false,
       });
       expect(prepare).not.toHaveBeenCalled();
     }
     expect(tmux.sendShellCommand).toHaveBeenCalledOnce();
+    expect(tmux.setSessionEnv).toHaveBeenCalledWith("seat@rig", "OPENRIG_OCCUPANT_GENERATION", "successor-generation");
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
