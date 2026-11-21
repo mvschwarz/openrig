@@ -1072,8 +1072,8 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   },
   "daemon.identity_poll_interval_ms": (raw, value) => {
     // Startup-only: the identity reconciler reads it once when the daemon starts. Only slower than the 5 s default, up to
-    // the ceiling that bounds how late a stopped seat's verdict and grant revocation can be
-    // (seat-identity-reconciler.ts MAX_IDENTITY_POLL_INTERVAL_MS).
+    // a cap on the cadence of sweep attempts, not a freshness deadline (see the MAX_IDENTITY_POLL_INTERVAL_MS comment in
+    // seat-identity-reconciler.ts).
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 5000 || value > 30000) {
       throw new Error("Invalid daemon.identity_poll_interval_ms: must be a whole number of milliseconds in [5000, 30000]");
     }

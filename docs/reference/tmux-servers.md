@@ -266,8 +266,10 @@ The cost is staleness. A longer interval can delay the sweep noticing a stopped 
 pane process, updating the seat's identity verdict, and revoking the activity grants that go with
 it. The verdict feeds the running and active views, and sends and reads that name an expected
 identity (and resume of the original conversation) need a verified one: a seat that `rig up` has
-just launched answers those with `expected_identity_unavailable` until its first sweep. The delay
-is one interval plus the time the sweep takes; a sweep that runs past the next tick makes that
-tick skip, so it can approach two intervals, and after a daemon start the first sweep runs one
-interval in. Keep the default unless the reconciler's reads are a measured share of the daemon's
-load.
+just launched answers those with `expected_identity_unavailable` until a sweep verifies it.
+The setting caps the cadence: the first scheduled sweep comes one interval after daemon start,
+and then at most one sweep starts per interval. It is not a freshness deadline. A tick that
+comes due while a sweep's reads are still pending is skipped (more than one can be), and a
+change seen after a sweep began waits for a later sweep, so a successful verification, or a
+revocation, can take longer than one interval. Keep the default unless the reconciler's reads
+are a measured share of the daemon's load.

@@ -23,11 +23,12 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 export const DEFAULT_IDENTITY_POLL_INTERVAL_MS = 5000;
 /** daemon.identity_poll_interval_ms only slows the reconciler down: below the default it would cost more, not less. */
 export const MIN_IDENTITY_POLL_INTERVAL_MS = DEFAULT_IDENTITY_POLL_INTERVAL_MS;
-/** The ceiling of daemon.identity_poll_interval_ms (the settings store's bound too). Stored verdicts carry no age limit
- *  in the running/active projection, so the interval sets how long a stopped or replaced pane process can keep its last
- *  verdict, how long a sweep's grant revocation can wait, and how long a seat launched without a verdict waits for its
- *  first verified one: one interval plus the sweep's own time, near two when a sweep overruns and the next tick is
- *  skipped (reconcileAll). The ceiling keeps that delay bounded. */
+/** The ceiling of daemon.identity_poll_interval_ms (the settings store's bound too): a cap on the cadence, the time
+ *  between scheduled sweep attempts; start schedules the first one interval in. It is not a freshness deadline: stored
+ *  verdicts carry no age limit in the running/active projection, reconcileAll skips every tick that comes due while a
+ *  sweep's reads are still pending, and a change seen after a sweep began waits for a later sweep, so noticing a
+ *  stopped or replaced pane process, revoking its grants, or verifying a seat launched without a verdict can take
+ *  longer than one interval. */
 export const MAX_IDENTITY_POLL_INTERVAL_MS = 30_000;
 /** The setting behind the cadence: `daemon.identity_poll_interval_ms`, mapped from OPENRIG_IDENTITY_POLL_INTERVAL_MS. */
 export const IDENTITY_POLL_INTERVAL_KEY = "daemon.identity_poll_interval_ms";
@@ -39,8 +40,8 @@ type ReadIdentityPollSetting = () => { value: unknown; source?: string };
  *  longer interval can delay the sweep noticing a stopped seat or a changed pane process, updating its identity verdict,
  *  and performing the grant revocation that goes with it. Unset keeps the 5 s default. The settings store validates
  *  the value: `rig config set` refuses one outside MIN..MAX, and an env value outside it is dropped with a warning on
- *  stderr (the default is used). A value that still reaches here outside MIN..MAX (a hand-edited config.json the store
- *  could not check) keeps the default, with a warning. */
+ *  stderr (a valid config.json value is used, otherwise the default). A value that still reaches here outside MIN..MAX
+ *  (a hand-edited config.json the store could not check) keeps the default, with a warning. */
 export function resolveIdentityPollIntervalMs(
   read: ReadIdentityPollSetting = () => new SettingsStore().resolveOne(IDENTITY_POLL_INTERVAL_KEY as never),
   warn: (message: string) => void = (message) => console.warn(message),

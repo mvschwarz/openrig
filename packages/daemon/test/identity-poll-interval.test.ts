@@ -1,7 +1,8 @@
 // daemon.identity_poll_interval_ms (OPENRIG_IDENTITY_POLL_INTERVAL_MS): the cadence of the seat identity reconciler.
 // On a large fleet its fixed 5 s sweep (tmux pane reads for every running seat, process-table reads for some) had no
 // knob to trade identity freshness for that load. The default is unchanged; the setting only slows the reconciler
-// down, up to a ceiling that bounds how late a stopped seat's verdict and grant revocation can be.
+// down, up to a cap on the cadence of sweep attempts (not a freshness deadline; see the MAX_IDENTITY_POLL_INTERVAL_MS
+// comment in seat-identity-reconciler.ts).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_IDENTITY_POLL_INTERVAL_MS, IDENTITY_POLL_INTERVAL_KEY, MAX_IDENTITY_POLL_INTERVAL_MS,
