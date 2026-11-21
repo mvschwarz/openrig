@@ -119,7 +119,7 @@ export function workflowRoutes(): Hono {
         // instantiate (spec/rig mismatch → 400); bound_rig_not_found = a
         // persisted bound rig vanished mid-run (live state-vs-instance
         // conflict → 409, the harness_pin/instance_version_conflict class).
-        : err.code === "bound_rig_unknown" || err.code === "bound_rig_role_uncovered" ? 400
+        : err.code === "bound_rig_unknown" || err.code === "bound_rig_role_uncovered" || err.code === "bound_pod_unknown" || err.code === "bound_pod_invalid" ? 400
         : err.code === "bound_rig_not_found" ? 409
         : err.code === "packet_not_found" ? 404
         : 500;
@@ -127,7 +127,7 @@ export function workflowRoutes(): Hono {
     }
     if (err instanceof QueueRepositoryError) {
       const status =
-        err.code === "unknown_destination_rig" ? 400
+        err.code === "unknown_destination_rig" || err.code === "unbound_destination_pod" ? 400
         : err.code === "qitem_not_found" ? 404
         : err.code === "workflow_frontier_packet" ? 400
         : 500;
@@ -213,6 +213,7 @@ export function workflowRoutes(): Hono {
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
         targetRig?: string;
+        targetPod?: string;
         /** Scope stamped on every packet the instance creates (migration 110). One that cannot be applied is
          *  ignored with an advisory; bare project/mission/slice/tags fields keep their old meaning: ignored. */
         scope?: { project?: unknown; mission?: unknown; slice?: unknown; tags?: unknown };
@@ -221,6 +222,7 @@ export function workflowRoutes(): Hono {
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
+    if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
       // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
       // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
@@ -252,6 +254,7 @@ export function workflowRoutes(): Hono {
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
+        targetPod: body.targetPod,
         ...(scope ? { scope } : {}),
       });
       const notes: string[] = [];

@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -44,7 +44,7 @@ const BRIDGE_SCRIPT = resolve(
 );
 const APPEND_MARKER = "Operator-configured post-compaction restore instruction";
 
-function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.ProcessEnv = {}): { stdout: string; stderr: string; status: number | null } {
+function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.ProcessEnv = {}, hook = HOOK_SCRIPT): { stdout: string; stderr: string; status: number | null } {
   const fixtureRoot = dirname(openrigHome);
   const transcript = join(fixtureRoot, "transcript.jsonl");
   if (withTranscript) writeFileSync(transcript, `${JSON.stringify({
@@ -52,7 +52,7 @@ function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.Pr
     cwd: fixtureRoot,
     message: { role: "user", content: "Resume the private compaction fixture." },
   })}\n`);
-  const result = spawnSync(process.execPath, [HOOK_SCRIPT], {
+  const result = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({ cwd: fixtureRoot, ...(withTranscript ? { transcript_path: transcript } : {}) }),
     encoding: "utf8",
     env: {
@@ -316,6 +316,26 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(existsSync(join(markerDir, "test-seat@kernel.expected.json"))).toBe(true);
     expect(existsSync(join(markerDir, "test-seat@kernel.json"))).toBe(false);
     expect(existsSync(join(tmpDir, "packets"))).toBe(false);
+  });
+
+  it("asks a restore that runs past its time limit to stop, and gives the manual-route note once it has", () => {
+    // The hook runs restore-from-jsonl.mjs from its own folder, so a copy beside a slow stand-in tests the time limit
+    // without a multi-GB transcript.
+    const scripts = join(tmpDir, "skill", "scripts");
+    mkdirSync(scripts, { recursive: true });
+    copyFileSync(HOOK_SCRIPT, join(scripts, "precompact-hook.mjs"));
+    writeFileSync(join(scripts, "restore-from-jsonl.mjs"), "setTimeout(() => {}, 60_000);\n");
+    const started = Date.now();
+    const { stdout, status } = runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "500" }, join(scripts, "precompact-hook.mjs"));
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(status).toBe(0);
+    const payload = JSON.parse(stdout);
+    expect(payload.continue).toBe(true);
+    expect(payload.systemMessage).toContain("Claude compaction restore packet generation failed: asked to stop after 0.5 s, to try to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer). After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.");
+    // Only the expected sentinel, written first; no marker points at a packet that wasn't made.
+    const pending = readdirSync(join(openrigHome, "compaction", "restore-pending"));
+    expect(pending.length).toBe(1);
+    expect(pending[0]!.endsWith(".expected.json")).toBe(true);
   });
 });
 

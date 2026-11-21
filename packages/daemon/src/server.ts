@@ -241,6 +241,9 @@ export interface AppDeps {
   /** S01 — the wake-or-escalate ladder's heartbeat + open-escalations count (ADDITIVE on
    *  healthz; absent = legacy body). Part of the operator rung's stated delivery floor. */
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
+  /** #3315 — whether the daemon reaches its tmux server(s), a separate axis from the daemon being up: healthz keeps
+   *  `status: "ok"` and adds `terminals` (ADDITIVE; absent = legacy body). */
+  terminalReachability?: import("./domain/terminal-server-reachability.js").TerminalServerReachability;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
   shadowCapture?: import("./domain/shadow-capture.js").ShadowCapture;
@@ -793,8 +796,11 @@ export function createApp(deps: AppDeps): Hono {
     // S01 — the wake ladder's heartbeat is half of the operator rung's honest delivery
     // floor (escalation view + daemon-health); same additive contract.
     const wakeLadder = deps.wakeLadderStatus ? { wakeLadder: deps.wakeLadderStatus.snapshot() } : {};
+    // #3315 — the daemon answering (status "ok") is not its terminals answering: `terminals` says whether its tmux
+    // server is reachable, from memory, without calling tmux. ADDITIVE; absent = legacy body.
+    const terminals = deps.terminalReachability ? { terminals: deps.terminalReachability.snapshot() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -808,6 +814,7 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...terminals,
     });
   });
 

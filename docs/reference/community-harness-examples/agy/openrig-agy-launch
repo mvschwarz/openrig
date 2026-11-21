@@ -1,0 +1,81 @@
+#!/bin/sh
+# A reference launcher for the Antigravity CLI (agy) as an OpenRig community harness. Copy it, own it, change it:
+# OpenRig doesn't ship or run it. It follows docs/reference/community-harness-presets.md (launch_result + resume).
+#   - agy cannot be given a conversation id, and it allocates none until the first prompt. So a new launch first runs one
+#     headless turn (`agy -p ... --output-format json`), reads `conversation_id` from its JSON, reports it, then opens that
+#     conversation interactively with `agy --conversation <id>`. That costs one small model turn per fresh launch.
+#   - a resume (OPENRIG_RESUME_REF): `agy --conversation <unknown id>` does NOT fail (headless prints a "not found" warning
+#     and starts a NEW conversation), so the launcher checks that conversations/<id>.db exists, else reports "missing".
+# These agy facts come from one checked run with Antigravity CLI 1.5.13.
+set -eu
+
+# Managed run authority belongs to the parent runner, never this native TUI or its probes.
+# Keep legacy hook-only environments unchanged.
+if [ "${OPENRIG_RUN_ID+x}" = x ]; then
+  unset OPENRIG_RUN_ID OPENRIG_ACTIVITY_HOOK_TOKEN
+fi
+
+producer="openrig-agy-launch 1"
+# The seat's agy login and state live in AGY_HOME (a HOME-style folder); agy keeps them under .gemini/antigravity-cli.
+# The preset's `command` carries setup as arguments (the seat's pane has only the daemon's minimal environment):
+#   openrig-agy-launch [--agy-home DIR] [--agy PATH] [--rig-path DIR] [--key-file FILE] [--model ID]
+# On a Gemini API key (modelProvider "gemini" in the agy home's settings.json), --key-file names the file holding the key:
+# it's read here and given to agy alone as GEMINI_API_KEY, never its arguments or output, and never this launcher's own
+# helpers (the parse, the report). --model pins the model (agy's default on a key is Gemini 3.1 Pro (Low)) for the first
+# headless turn and for the terminal UI.
+AGY_HOME="${AGY_HOME:-$HOME}"; AGY_BIN="${OPENRIG_AGY:-agy}"; AGY_EXTRA_PATH="${AGY_EXTRA_PATH:-}"; KEY_FILE=""; MODEL=""; agy_key=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agy-home) AGY_HOME="$2"; shift 2 ;;
+    --agy) AGY_BIN="$2"; shift 2 ;;
+    --rig-path) AGY_EXTRA_PATH="$2"; shift 2 ;;
+    --key-file) KEY_FILE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+store="$AGY_HOME/.gemini/antigravity-cli"
+[ -n "${AGY_EXTRA_PATH:-}" ] && PATH="$AGY_EXTRA_PATH:$PATH" && export PATH   # so the agent can run `rig`
+export HOME="$AGY_HOME"
+if [ -n "$KEY_FILE" ]; then
+  agy_key="$(cat "$KEY_FILE" 2>/dev/null)" || { echo "openrig-agy-launch: the key file couldn't be read; starting nothing" >&2; exit 2; }
+fi
+# The key stays unexported: it's set on agy's own command, and exported only at the exec that makes this launcher agy.
+keyed() { if [ -n "$KEY_FILE" ]; then GEMINI_API_KEY="$agy_key" "$@"; else "$@"; fi; }
+exec_agy() { if [ -n "$KEY_FILE" ]; then GEMINI_API_KEY="$agy_key"; export GEMINI_API_KEY; fi; exec "$AGY_BIN" "$@"; }
+
+report() {
+  [ -n "${OPENRIG_LAUNCH_RESULT:-}" ] || return 0
+  tmp="$OPENRIG_LAUNCH_RESULT.$$.tmp"; printf '%s\n' "$1" > "$tmp"; mv "$tmp" "$OPENRIG_LAUNCH_RESULT"
+}
+plain_id() { case "$1" in ''|*[!A-Za-z0-9-]*) return 1 ;; *) return 0 ;; esac; }
+
+if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
+  id="$OPENRIG_RESUME_REF"
+  plain_id "$id" || { echo "openrig-agy-launch: refusing an unusual conversation id" >&2; exit 2; }
+  if [ ! -f "$store/conversations/$id.db" ]; then
+    report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy-plain}\",\"error\":\"missing\",\"producer\":\"$producer\"}"
+    echo "openrig-agy-launch: agy holds no conversation $id in $store; starting nothing" >&2
+    exit 1
+  fi
+else
+  # agy keeps a conversation in the project it was created in, and a resume uses that project (its Projects docs).
+  # So the probe that creates it gets the same --project as the interactive agy below.
+  project=""; prev=""
+  for arg in "$@"; do
+    [ "$prev" = --project ] && project="$arg"
+    case "$arg" in --project=*) project="${arg#--project=}" ;; esac
+    prev="$arg"
+  done
+  out=$(keyed "$AGY_BIN" ${MODEL:+--model "$MODEL"} ${project:+--project "$project"} -p "Reply with exactly: ready" --output-format json </dev/null 2>/dev/null) || out=""
+  if command -v jq >/dev/null 2>&1; then
+    id=$(printf '%s' "$out" | jq -r '.conversation_id // empty' 2>/dev/null) || id=""
+  else
+    # agy 1.5.13 prints conversation_id as the first key; any other shape yields no id.
+    id=$(printf '%s' "$out" | sed -n 's/^{"conversation_id":"\([A-Za-z0-9-]*\)".*/\1/p' | head -n 1)
+  fi
+  # No usable id: report nothing (identity shows unavailable) and start agy on its own conversation.
+  plain_id "$id" || exec_agy ${MODEL:+--model "$MODEL"} "$@"
+fi
+report "{\"format\":1,\"attempt\":\"${OPENRIG_LAUNCH_ATTEMPT:-}\",\"harness\":\"${OPENRIG_RUNTIME:-agy-plain}\",\"nativeRef\":\"$id\",\"producer\":\"$producer\"}"
+exec_agy ${MODEL:+--model "$MODEL"} --conversation "$id" "$@"

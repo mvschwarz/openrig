@@ -159,6 +159,27 @@ it("at queue-only, managed compaction and its restore wait for a draft to go, th
   expect(f.effects().compactPastes).toBe(1);
 });
 
+// #3418 follow-up: a manual rig compact at queue-only sends its preparation under the same lifecycle lease as managed
+// compaction, so it's lifecycle work there, not a notice held for the person; with a draft, it still never types over it.
+it("at queue-only, a manual compaction's preparation goes out under the lifecycle lease, never held", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true });
+  f.e.cancelPreparation(seat);
+  expect(outcome).toMatchObject({ preparation: { delivery: "delivered", compact: "not_sent" } });
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 1, enters: 1 });
+  expect(f.rows().filter(r => r.kind === "prep" && r.state === "held")).toEqual([]);
+});
+
+it("at queue-only, a manual compaction's preparation does not type over a draft", async () => {
+  const f = await fixture({ pane: "%1", mode: "queue-only" });
+  f.draft("an unsent message");
+  const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true });
+  f.e.cancelPreparation(seat);
+  expect(outcome).toMatchObject({ triggered: false });
+  expect(f.body()).toBe("an unsent message");
+  expect(f.writes).toEqual([]);
+});
+
 it("checks the composer after buffer setup, immediately before the preparation paste", async () => {
   const f = await fixture({ pane: "%1", mode: "draft-aware", footer: true });
   f.onStage(() => f.draft("typed while the buffer was prepared"));

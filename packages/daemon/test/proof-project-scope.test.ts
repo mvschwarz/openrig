@@ -40,7 +40,7 @@ function fixture(alphaMissions = "missions") {
     await next();
   });
   app.route("/api/proof", proofRoutes());
-  const get = (query: string) => app.request(`/api/proof?${query}`);
+  const get = (query: string, session?: string) => app.request(`/api/proof?${query}`, session ? { headers: { "X-OpenRig-Session": session } } : undefined);
   const judge = async (scope: string, extra: Record<string, unknown> = {}, readDir = alpha.slice) => {
     const item = readSliceReadiness(readDir).items[0]!;
     return app.request("/api/proof/judge", {
@@ -53,6 +53,140 @@ function fixture(alphaMissions = "missions") {
 }
 
 describe("project-qualified proof scope (#132)", () => {
+  it("warns and uses the workspace for an unreadable catalog even for an unassociated caller", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), "projects: [broken\n");
+    const res = await f.get("scope=m0/slices/01-t001", "judge@elsewhere");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.items[0].text).toContain("Prove legacy.");
+    expect(body.warnings[0]).toMatch(/--project/);
+  });
+  // Windows filesystems do not permit ':' in a directory name.
+  it.skipIf(process.platform === "win32")("resolves a literal colon path in the caller's rig project before a catalog prefix", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const trial = join(f.beta.missions, "alpha:trial"), slice = join(trial, "slices", "01-t001");
+    write(join(trial, "mission.yaml"), { kind: "mission", metadata: { name: "alpha:trial", status: "active" }, composition: { slices: [{ ref: "slices/01-t001/slice.yaml", order: 1, active: true }] } });
+    write(join(slice, "slice.yaml"), { kind: "slice", metadata: { id: "01-t001", status: "draft" } });
+    write(join(slice, "SPEC.md"), "---\nid: 01-t001\n---\n# trial\n\n## Proof contract\n- [ ] Prove beta trial.\n");
+    write(join(slice, "proof/evidence.md"), "Observed.\n");
+    const scope = "alpha:trial/slices/01-t001";
+    const response = await f.get(`scope=${encodeURIComponent(scope)}`, "judge@rig");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.project).toMatchObject({ id: "beta", selectedBy: "rig" });
+    expect(body.items[0].text).toContain("Prove beta trial.");
+    const judged = await f.judge(scope, {}, slice);
+    expect(judged.status).toBe(201);
+    expect(fs.existsSync(join(slice, "proof/judgments/00000001.md"))).toBe(true);
+    expect(fs.existsSync(join(f.alpha.slice, "proof/judgments"))).toBe(false);
+    const explicit = await (await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`, "judge@rig")).json();
+    expect(explicit.items[0].text).toContain("Prove alpha.");
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const ambiguousDefault = await (await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`, "judge@rig")).json();
+    expect(ambiguousDefault.items[0].text).toContain("Prove alpha.");
+  });
+  it("defaults the caller's rig to its associated project while explicit targets win", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta", rigs: ["other"] },
+    ] });
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    expect(view.project).toMatchObject({ id: "alpha", root: join(f.workspace, "alpha"), selectedBy: "rig" });
+    expect(view.items[0].text).toContain("Prove alpha.");
+    const explicit = await (await f.get("project=beta&scope=m0/slices/01-t001", "judge@rig")).json();
+    expect(explicit.project).toMatchObject({ id: "beta", selectedBy: "explicit" });
+    expect(explicit.items[0].text).toContain("Prove beta.");
+    const judged = await f.judge("m0/slices/01-t001");
+    expect(judged.status).toBe(201);
+    expect((await judged.json()).project).toMatchObject({ id: "alpha", selectedBy: "rig" });
+    expect(fs.existsSync(join(f.alpha.slice, "proof/judgments/00000001.md"))).toBe(true);
+    expect(fs.existsSync(join(f.legacy.slice, "proof/judgments"))).toBe(false);
+  });
+
+  it("warns and falls back for an ambiguous rig association", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const ambiguous = await f.get("scope=m0/slices/01-t001", "judge@rig");
+    expect(ambiguous.status).toBe(200);
+    const fallback = await ambiguous.json();
+    expect(fallback.items[0].text).toContain("Prove legacy.");
+    expect(fallback.warnings[0]).toMatch(/several projects.*--project/);
+    const unbound = await (await f.get("scope=m0/slices/01-t001", "judge@elsewhere")).json();
+    expect(unbound.project).toBeUndefined();
+    expect(unbound.selection).toMatchObject({ selectedBy: "workspace" });
+    expect(unbound.items[0].text).toContain("Prove legacy.");
+  });
+
+  it("judges the prepared project when the rig association changes", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
+    ] });
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id, expectedMissionsRoot: view.project.missionsRoot, preparationReceipt: view.preparationReceipt });
+    expect(res.status).toBe(201);
+    expect((await res.json()).warnings[0]).toMatch(/changed since preparation/);
+    expect(fs.existsSync(join(f.alpha.slice, "proof/judgments/00000001.md"))).toBe(true);
+    expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
+  });
+
+  it("rejects a forged prepared root even with a receipt for another root", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
+    ] });
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: "beta", projectRoot: join(f.workspace, "beta"), expectedMissionsRoot: f.beta.missions, preparationReceipt: view.preparationReceipt }, f.beta.slice);
+    expect(res.status).toBe(409);
+    expect((await res.json()).message).toMatch(/receipt is invalid/);
+    expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a symlink changed after preparation", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
+    ] });
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    fs.renameSync(f.alpha.missions, `${f.alpha.missions}-saved`);
+    fs.symlinkSync(f.beta.missions, f.alpha.missions, "dir");
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id, expectedMissionsRoot: view.project.missionsRoot, preparationReceipt: view.preparationReceipt }, f.beta.slice);
+    expect(res.status).toBe(409);
+    expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
+  });
+
+  it("keeps a prepared workspace when a newly associated project appears", async () => {
+    const f = fixture();
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
+    ] });
+    expect(view.selection).toMatchObject({ selectedBy: "workspace", missionsRoot: f.legacy.missions });
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: view.selection.missionsRoot, preparationReceipt: view.preparationReceipt }, f.legacy.slice);
+    expect(res.status).toBe(201);
+    expect((await res.json()).warnings[0]).toMatch(/changed since preparation/);
+  });
+
+  it("rejects a prepared missions root that no longer exists", async () => {
+    const f = fixture();
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: join(f.workspace, "missing", "missions") }, f.legacy.slice);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("project_changed");
+  });
   it("show resolves `<project>:<scope>` and `project=` through the catalog, not the selected slices root", async () => {
     const f = fixture();
     const qualified = await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`);
@@ -133,20 +267,22 @@ describe("project-qualified proof scope (#132)", () => {
     for (const scope of ["C:\\Users\\x\\missions\\m0\\slices\\01-t001", "C:/Users/x/missions/m0/slices/01-t001"]) {
       const res = await f.get(`scope=${encodeURIComponent(scope)}`);
       // resolved against the selected workspace like any unqualified scope (there it doesn't exist), never as project "C"
-      expect(await res.json(), scope).toMatchObject({ error: "scope_missing" });
+      expect(await res.json(), scope).toMatchObject({ error: process.platform === "win32" ? "path_escape" : "scope_missing" });
     }
     // a one-letter prefix with a relative scope is a project only when the catalog has it; here it hasn't
-    expect(await (await f.get(`scope=${encodeURIComponent("C:m0")}`)).json()).toMatchObject({ error: "scope_missing" });
+    const relative = await (await f.get(`scope=${encodeURIComponent("C:m0")}`)).json();
+    // Windows resolves a drive-relative path against that drive's cwd, which may be outside the workspace.
+    expect(process.platform === "win32" ? ["scope_missing", "path_escape"] : ["scope_missing"]).toContain(relative.error);
   });
 
   it("catalog-project reads report the source watcher as unavailable/unverified and name the project; workspace reads don't", async () => {
     const f = fixture();
     const qualified = await (await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`)).json();
     expect(qualified.sourceObservation).toEqual({ state: "unavailable", revision: "unverified" });
-    expect(qualified.project).toEqual({ id: "alpha", root: join(f.workspace, "alpha") });
+    expect(qualified.project).toEqual({ id: "alpha", root: join(f.workspace, "alpha"), missionsRoot: f.alpha.missions, selectedBy: "explicit" });
     const whole = await (await f.get("project=beta")).json();
     expect(whole.sourceObservation).toEqual({ state: "unavailable", revision: "unverified" });
-    expect(whole.project).toEqual({ id: "beta", root: join(f.workspace, "beta") });
+    expect(whole.project).toEqual({ id: "beta", root: join(f.workspace, "beta"), missionsRoot: f.beta.missions, selectedBy: "explicit" });
     const workspace = await (await f.get("scope=m0/slices/01-t001")).json();
     expect(workspace.project).toBeUndefined();
     expect(workspace.sourceObservation).toEqual({ state: "watching", revision: "workspace-1" });
@@ -282,7 +418,7 @@ describe("project-qualified proof scope (#132)", () => {
     expect(viaScopes.readiness.items[0].revision).toBe(viaProof.items[0].revision);
   });
 
-  it("an unqualified scope whose mission folder has a colon still resolves as written, even when the prefix is a catalogued project", async () => {
+  it.skipIf(process.platform === "win32")("an unqualified scope whose mission folder has a colon still resolves as written, even when the prefix is a catalogued project", async () => {
     const f = fixture();
     // the selected workspace has a mission folder "alpha:trial"; "alpha" is also a catalogued project
     const trial = join(f.legacy.missions, "alpha:trial"), slice = join(trial, "slices", "01-t001");

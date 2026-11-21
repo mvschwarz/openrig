@@ -85,6 +85,26 @@ describe("provider routes", () => {
     expect(bnd.bindings[0].seatSession).toBe("seat-1");
   });
 
+  it("bindings?provider= goes by the seat's runtime, so Claude seats are found; a row without one goes by its account", async () => {
+    const unknown = { state: "unknown" as const, reason: "r" };
+    const model: FourBlockReadModel = {
+      ...MODEL,
+      bindings: [
+        { accountId: "cdx-a", seatSession: "cx@r", rigName: "r", boundAt: "t", bindingSource: "codex_auth_seat_registry", anomalies: [], runtime: "codex", launched: unknown, verified: unknown },
+        { accountId: null, seatSession: "cl@r", rigName: "r", boundAt: null, bindingSource: null,
+          anomalies: [], runtime: "claude-code",
+          configured: { source: "claude_token", label: "team-a", note: "n" }, launched: unknown, verified: unknown },
+        { accountId: null, seatSession: "cx2@r", rigName: "r", boundAt: null, bindingSource: null,
+          anomalies: [], runtime: "codex", launched: unknown, verified: unknown },
+        { accountId: "cdx-a", seatSession: "older@r", rigName: "r", boundAt: "t", bindingSource: "adopt", anomalies: [] },
+      ],
+    };
+    const app = appWith({ ...stubService, getReadModel: async () => model });
+    const seats = async (q: string) => ((await (await app.request(`/api/provider/bindings?${q}`)).json()).bindings as Array<{ seatSession: string }>).map((b) => b.seatSession);
+    expect(await seats("provider=claude")).toEqual(["cl@r"]);
+    expect(await seats("provider=codex")).toEqual(["cx@r", "cx2@r", "older@r"]);
+  });
+
   it("rejects a malformed provider enum at the edge (400)", async () => {
     const res = await appWith(stubService).request("/api/provider/accounts?provider=bad");
     expect(res.status).toBe(400);

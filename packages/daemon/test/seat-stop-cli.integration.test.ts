@@ -100,7 +100,7 @@ describe("intentional seat stop CLI journey", () => {
       expect(start.code, JSON.stringify({ selection, ...start })).toBe(1);
       const result = JSON.parse(start.stdout);
       expect(result.candidates).toEqual([{ rigName, lifecycleState: "degraded" }]);
-      expect(result.restoredRigs).toEqual([{ rigName, status: "rig_not_stopped", nodes: [] }]);
+      expect(result.restoredRigs).toEqual([{ rigId: initial.rigId, rigName, status: "rig_not_stopped", nodes: [], error: expect.any(String) }]);
       expect(sessions()).toEqual([worker]);
     }
 

@@ -81,6 +81,8 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
+  lifecycle_state?: string;
   launch_cwd?: string | null;
   permissions_to?: string | null;
   runner?: boolean;
@@ -318,7 +320,9 @@ function printHuman(status: SeatStatusResponse): void {
     else if (mode === "off") console.log("Off: automatic input types as it arrives.");
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
-  console.log(`Session: ${display(status.session_status, "unknown")}`);
+  // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
+  console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
+    ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
     console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
@@ -646,6 +650,12 @@ Between off (always interrupt) and hold (full quiet):
                   as held on the row (the open rows already are the reminder);
                   other notices are held. A cold row wakes nobody: a person or
                   the seat's next turn picks it up.
+
+For a Claude seat you type in, the opt-in hook bridge can deliver ordinary messages
+at a turn boundary without typing into its input box; it takes effect at the next
+launch or restore. See rig seat set-hook-bridge --help and:
+https://github.com/mvschwarz/openrig/blob/main/docs/reference/seat-delivery.md#claude-hook-bridge-opt-in
+
 What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and
@@ -907,7 +917,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-statusline-throttle" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -1112,6 +1122,62 @@ Examples:
         const running = data["running"] === "yes" ? "running now" : data["running"] === "no" ? "not running now" : `running state unknown (${String(data["runningDetail"] ?? "probe failed")})`;
         console.log(`Seat ${running}. Emitted at launch: not yet. Native effort: not observed.`);
         if (data["warning"]) console.log(`Warning: ${String(data["warning"])}`);
+      });
+    });
+
+  cmd
+    .command("set-statusline-throttle")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--seconds <n>", "Run the context collector at most once every <n> seconds (1 to 120)")
+    .option("--clear", "Remove the throttle: the collector runs on every status line update again")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.statusline_throttle_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Throttle one Claude seat's status line collector from its next launch (audited); no restart")
+    .addHelpText("after", `
+Claude Code runs the seat's status line on each update of the conversation, and
+each run starts Node for OpenRig's context collector. With a throttle, a short
+shell check reads the update first and skips the collector when the last
+collection was under <n> seconds ago in the same conversation and the context
+isn't below that collection's reading; a reading below the last collected one
+(a compaction), a new conversation, or an update the check can't read collects
+at once. No throttle is the default. The spec key is statusline_throttle (0
+clears it on a re-apply).
+
+What a throttle costs: while the seat works, the context reading OpenRig keeps
+can be up to <n> seconds behind, so managed compaction can see the seat cross its
+threshold that much later; a seat that goes idle right after a skipped update
+keeps the earlier reading until its next turn. The reading always keeps its real
+sample time: nothing shows a skipped update as a current reading. The value is
+capped at 120 seconds, well inside the 10 minutes after which a reading counts as
+stale.
+
+The throttle goes into the seat's own launch settings, never into the folder's
+.claude/settings.local.json; a status line command of your own there wins, and the
+launch says the throttle wasn't applied. It takes effect at the seat's next launch,
+resume or restore; the running process is unchanged, and so is a relaunch that
+reuses its launch settings (a provider or account switch that keeps them). A
+launch rebuilt from the spec (a persisted fresh launch, or a restore's fresh
+branch) writes the spec's statusline_throttle again over this value, as it does
+for process limits: change the spec too to keep it.
+Examples:
+  rig seat set-statusline-throttle dev-impl@my-rig --seconds 30 --reason "90 seats on one host"
+  rig seat set-statusline-throttle dev.impl --clear --reason "watching context closely" --json`)
+    .action(async (seat: string, opts: { seconds?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if (Boolean(opts.clear) === (opts.seconds !== undefined)) {
+        console.error("Pass exactly one of --seconds <n> or --clear.");
+        process.exitCode = 1;
+        return;
+      }
+      const seconds = opts.seconds === undefined ? undefined : /^[0-9]+$/.test(opts.seconds) ? Number(opts.seconds) : Number.NaN;
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator } : { seconds, reason: opts.reason, operator: opts.operator };
+      await runLifecycleVerb("set-statusline-throttle", seat, body, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const name = `${s?.logicalId}@${s?.rigName}`;
+        const to = data["to"] as number | null;
+        const state = to === null ? "no throttle" : `at most once every ${to} s`;
+        console.log(data["changed"] === false ? `Status line throttle for ${name} is already ${state}. No change recorded.` : `Status line throttle for ${name}: ${state}.`);
+        console.log(String(data["effect"]));
       });
     });
 

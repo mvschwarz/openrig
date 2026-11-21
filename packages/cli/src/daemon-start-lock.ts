@@ -3,8 +3,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/** #3315 — what the child record carries so a later stop can confirm the reservation still names that process. */
+export interface ReservedChildIdentity {
+  /** `processStartToken` of the child, read right after the spawn; undefined where the OS gives none. */
+  startToken?: string;
+  /** The launcher's pid namespace (the reservation's PIDs are numbered in it). */
+  pidNamespace?: string;
+  /** Where the child was told to listen (the launch's health endpoint). */
+  host: string;
+  port: number;
+}
+
 export interface DaemonStartLock {
-  recordChild(pid: number): void;
+  recordChild(pid: number, identity?: ReservedChildIdentity): void;
   release(preserve?: boolean): void;
   /** Where a reservation left from before this boot was archived, when this launch did so. */
   archived?: string;
@@ -70,7 +81,7 @@ export function acquireDaemonStartLock(home: string, stale?: StaleLockCheck): Da
     throw error;
   }
   return {
-    recordChild: (pid) => { fs.writeSync(fd, JSON.stringify({ childPid: pid }) + "\n"); },
+    recordChild: (pid, identity) => { fs.writeSync(fd, JSON.stringify({ childPid: pid, ...identity }) + "\n"); },
     release,
     ...(archived ? { archived } : {}),
   };
@@ -161,5 +172,69 @@ function archiveIfBeforeBoot(file: string, stale: StaleLockCheck): string | unde
     return undefined;
   }
   fs.unlinkSync(file);
+  return target;
+}
+
+/** #3315 — a token that names one process for as long as it lives: on Linux its start time in clock ticks since boot
+ *  (/proc/<pid>/stat field 22, which no wall-clock step moves); elsewhere the `ps lstart` string (LC_ALL=C, to the
+ *  second). A later process with the same PID gets a different token unless it started within that resolution (one
+ *  clock tick, or the same second), and a userspace read is not atomic with a later kill(2). Undefined when it can't be
+ *  read. Compare tokens only for equality, within one boot. */
+export function processStartToken(pid: number): string | undefined {
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      // The command name (field 2) may hold spaces and parentheses: the fields after it follow the last ')'.
+      const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+      return ticks && /^\d+$/.test(ticks) ? `linux:${ticks}` : undefined;
+    }
+    if (process.platform === "win32") return undefined;
+    const start = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C" } })
+      .trim().replace(/\s+/g, " ");
+    return start ? `lstart:${start}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** #3315 — releases a reservation that `rig daemon stop` found spent (its launcher and child gone after a clean
+ *  shutdown): only while it still holds exactly `expected`, it is archived under its inode by link(2), which never
+ *  replaces an existing name, and only the winner removes the old name, so a concurrent stop or a reservation that
+ *  changed meanwhile is left alone. Returns the archive's path, or undefined when nothing was released. */
+export function archiveSpentReservation(file: string, expected: string): string | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r");
+  } catch {
+    return undefined;
+  }
+  let inspected: fs.Stats;
+  let text: string;
+  try {
+    inspected = fs.fstatSync(fd);
+    text = fs.readFileSync(fd, "utf8");
+  } catch {
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (text !== expected) return undefined;
+  const target = `${file}.stopped-${inspected.ino}`;
+  try {
+    fs.linkSync(file, target);
+  } catch {
+    return undefined;
+  }
+  try {
+    const linked = fs.statSync(target);
+    if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
+      fs.unlinkSync(target);
+      return undefined;
+    }
+    fs.unlinkSync(file);
+  } catch {
+    // Left for the operator; the caller warns that the reservation was not released.
+    return undefined;
+  }
   return target;
 }

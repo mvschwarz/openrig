@@ -1,6 +1,7 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import { effectiveProcessLimits } from "./process-limits.js";
+import { memberPoolBlock, storedPoolAdvisories } from "./seat-pool-spec.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -97,7 +98,7 @@ export class RigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflightResult = await this.preflight.check(spec);
+    const preflightResult = await this.preflight.check(spec, false);
     if (!preflightResult.ready) {
       return { ok: false, code: "preflight_failed", errors: preflightResult.errors, warnings: preflightResult.warnings };
     }
@@ -138,6 +139,7 @@ export class RigInstantiator {
             codexPermissions: specNode.codexPermissions,
             launchWrapper: specNode.launchWrapper,
             processLimits: effectiveProcessLimits(specNode.processLimits),
+            statuslineThrottle: specNode.statuslineThrottle || null,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -203,7 +205,7 @@ export class RigInstantiator {
       return {
         ok: false,
         code: "instantiate_error",
-        message: "all node launches failed",
+        message: `all node launches failed — ${nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "failure reason unavailable"}`).join("; ")}`,
       };
     }
 
@@ -327,7 +329,7 @@ export class RigInstantiator {
 // -- Pod-aware instantiator (AgentSpec reboot) --
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
+import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS, poolAdvisories } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
@@ -656,19 +658,21 @@ export class PodRigInstantiator {
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
+    // #3395: the pool advisories join this launch path's warnings once (the structured preflight does not add them)
+    const warnings = [...preflight.warnings, ...poolAdvisories(raw)];
     if (!preflight.ready) {
-      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
+      return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings };
     }
     // A pod added to a running rig inherits the rig's layers; stop before it exists if a required one is gone,
     // when at least one added member reads startup files.
     if (opts?.targetRigId && targetRig && rigSpec.pods.some((pod) => pod.members.some((m) => this.runtimeTakesStartupFiles(m.runtime)))) {
       const missingInherited = this.inheritedStartupFileErrors(opts.targetRigId, targetRig.rig.name);
       if (missingInherited.length > 0) {
-        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings: preflight.warnings };
+        return { ok: false, code: "preflight_failed", errors: missingInherited, warnings };
       }
     }
 
-    return this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, opts);
+    return this.materializeValidatedSpec(rigSpec, rigRoot, warnings, opts);
   }
 
   /**
@@ -961,6 +965,8 @@ export class PodRigInstantiator {
           processLimits: live.processLimitsError ? undefined : live.processLimits ? { ...live.processLimits } : {},
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
+          // #3395: the first start keeps the stored pool block, as an ordinary launch does.
+          pool: undefined, unusablePool: undefined,
           permissionPolicy: undefined },
         effortChoice: live.effortChoice ?? null, env: this.deps.rigRepo.getRigEnv(rigId),
         policyRef: live.permissionPolicy ?? null, rigPolicyRef: this.deps.rigRepo.getRigPermissionPolicy(rigId),
@@ -997,6 +1003,9 @@ export class PodRigInstantiator {
     if (!launched.ok) return failure(launched.code, "message" in launched ? launched.message : launched.errors.join("; "));
     const result = launched.result.nodes[0]!;
     if (changes.length) preflight.warnings.push(`First start uses the seat's current saved ${changes.join(", ")} instead of the materialized declaration.`);
+    // #3395: the first start launches from the seat's stored settings, so a stored pool block that can't be used is
+    // reported from the node (the synthetic member above leaves the pool out).
+    preflight.warnings.push(...storedPoolAdvisories(node.logicalId, this.deps.rigRepo.getNodePool(nodeId)));
     return { ok: result.status === "launched", rigId, nodeId, logicalId: node.logicalId,
       // #3253: a refusal for the seat's limit keeps its own code (the route maps it), not the generic status
       ...(result.status !== "launched" ? { code: result.code ?? result.status, error: result.error } : {}),
@@ -1030,7 +1039,11 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
-    return this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+    const launched = await this.launchValidatedSpec(rigSpec, rigRoot, targetRigId);
+    // #3395: the pool advisories join this launch path's warnings once (the shared launch core does not add them)
+    const pool = poolAdvisories(raw);
+    if (!launched.ok || pool.length === 0) return launched;
+    return { ...launched, result: { ...launched.result, warnings: [...(launched.result.warnings ?? []), ...pool] } };
   }
 
   /**
@@ -1213,6 +1226,8 @@ export class PodRigInstantiator {
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
     });
+    // #3395: the pool advisories join this launch path's warnings once, here; the launch half below does not add them
+    preflight.warnings.push(...poolAdvisories(rawSpec));
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -1376,7 +1391,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1433,7 +1448,10 @@ export class PodRigInstantiator {
         ...(result.processLimits ? { processLimits: result.processLimits } : {}) };
     }
     // The preflight above covers the whole rig and isn't returned; this member's agent spec advisories are.
-    const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved), ...(result.warnings ?? [])];
+    // #3395: the retry launches from the seat's stored settings (the fragment can't carry `pool`), so a stored pool
+    // block that can't be used is reported from the node, as the first start does.
+    const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved),
+      ...storedPoolAdvisories(node.logicalId, this.deps.rigRepo.getNodePool(nodeId)), ...(result.warnings ?? [])];
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: warnings.length ? warnings : result.warnings };
   }
 
@@ -1503,7 +1521,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, includeModelWarnings: false, cwdOverride: opts?.cwdOverride, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -1751,6 +1769,8 @@ export class PodRigInstantiator {
             codexPermissions: member.codexPermissions,
             launchWrapper: member.launchWrapper,
             processLimits: effectiveProcessLimits(member.processLimits),
+            statuslineThrottle: member.statuslineThrottle || null,
+            pool: memberPoolBlock(member),
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2057,6 +2077,7 @@ export class PodRigInstantiator {
           label: member.label,
           // #3253: stored with the node, as for agent members, so a seat that never launches still shows its request.
           processLimits: effectiveProcessLimits(member.processLimits),
+          pool: memberPoolBlock(member),
         });
         recordCreated?.(rigId, node.id);
         return node.id;
@@ -2152,6 +2173,8 @@ export class PodRigInstantiator {
       codexPermissions: input.member.codexPermissions,
       launchWrapper: input.member.launchWrapper,
       processLimits: effectiveProcessLimits(input.member.processLimits),
+      statuslineThrottle: input.member.statuslineThrottle || null,
+      pool: memberPoolBlock(input.member),
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2302,6 +2325,9 @@ export class PodRigInstantiator {
       // #3253: an unreadable stored value stays as stored (undefined keeps it, {} would clear it).
       processLimits: node.processLimitsError ? undefined : node.processLimits ? { ...node.processLimits } : {},
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
+      // #3395: a launch from the recipe never re-applies the recipe's pool block over the one stored since.
+      pool: undefined,
+      unusablePool: undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
       ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
@@ -2663,6 +2689,14 @@ export class PodRigInstantiator {
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
     }
+    // #3416 (3): the launch reads the throttle, so the authored value is written first; 0 clears; absent keeps.
+    if (input.member.statuslineThrottle !== undefined) {
+      this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
+    }
+    // #3395: the pool block is stored where re-applied settings are; `{}` clears it, a block that can't be used is kept
+    // as authored (it holds that pool), and an absent key leaves it unchanged.
+    const pool = memberPoolBlock(input.member);
+    if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
       ...(input.createCwd ? { createCwd: true } : {}),
@@ -2954,7 +2988,9 @@ export class PodRigInstantiator {
       }
     }
 
-    if (startupResult.ok && this.deps.continuityPolicyMaterializer) {
+    // A start held at a trust dialog or another attention state leaves a live session that is cleared later, so it is armed
+    // as a ready start is. A failed start is not.
+    if ((startupResult.ok || startupResult.startupStatus === "attention_required") && this.deps.continuityPolicyMaterializer) {
       try {
         this.deps.continuityPolicyMaterializer.arm({
           compactionStrategy: configResult.config.compactionStrategy as CompactionStrategy,
@@ -3028,6 +3064,14 @@ export class PodRigInstantiator {
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
     }
+    // #3416 (3): the launch reads the throttle, so the authored value is written first; 0 clears; absent keeps.
+    if (input.member.statuslineThrottle !== undefined) {
+      this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
+    }
+    // #3395: the pool block is stored where re-applied settings are; `{}` clears it, a block that can't be used is kept
+    // as authored (it holds that pool), and an absent key leaves it unchanged.
+    const pool = memberPoolBlock(input.member);
+    if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, ...(input.createCwd ? { createCwd: true } : {}),
       ...(input.launchCwd ? { cwd: input.launchCwd } : {}), env: input.envOverride,
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });
@@ -3369,4 +3413,3 @@ export class PodRigInstantiator {
     });
   }
 }
-

@@ -1,3 +1,4 @@
+import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
@@ -7,6 +8,7 @@ import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
+import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
@@ -193,6 +195,9 @@ export interface SeatRefusal {
     | "selection_changed"
     | "stop_uncertain"
     | "missing_permissions_to"
+    | "invalid_statusline_throttle"
+    | "statusline_throttle_unsupported_runtime"
+    | "statusline_throttle_unavailable"
     /** #3253: an explicit fresh launch whose process limit can't be applied, refused before anything is stopped. */
     | ProcessLimitsCode
     | "runtime_home_unsupported"
@@ -258,6 +263,11 @@ export interface EffortReport {
   precedence: { decided: boolean; detail: string };
   summary: string;
 }
+
+/** #3416 (3): the result of `rig seat set-statusline-throttle`. */
+export type SetStatuslineThrottleResult =
+  | { ok: true; seat: SeatDescriptor; from: number | null; to: number | null; changed: boolean; effect: string }
+  | SeatRefusal;
 
 export type SetEffortResult =
   | {
@@ -762,6 +772,49 @@ export class SeatLifecycleService {
       emitted: "not_yet", observed: "not_observed", effect,
       ...(unknownLevelWarning(runtime, requested) ? { warning: unknownLevelWarning(runtime, requested) } : {}),
     };
+  }
+
+  /** #3416 (3): save (or, with null, clear) a Claude seat's status line throttle for its next launch, resume or restore.
+   *  Validated and written with an audited event in one transaction; it never restarts the seat. */
+  setStatuslineThrottle(input: SeatSettingTarget & { seconds: number | null; reason: string; operator?: string | null }): SetStatuslineThrottleResult {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    if (input.seconds !== null) {
+      try { validateStatuslineThrottle(input.seconds, "--seconds"); }
+      catch (error) { return { ok: false, code: "invalid_statusline_throttle", message: (error as Error).message }; }
+    }
+    const resolved = this.resolveSettingTarget(input);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const runtime = resolved.entry.runtime ?? "unknown";
+    if (runtime !== "claude-code") {
+      return { ok: false, code: "statusline_throttle_unsupported_runtime", message: `Seat "${this.settingTargetLabel(input)}" runs ${runtime}; the status line throttle applies to claude-code seats only.` };
+    }
+    const from = this.rigRepo.getNodeStatuslineThrottle(seat.nodeId);
+    let changed = false;
+    if (from !== input.seconds) {
+      let persisted: PersistedEvent | null = null;
+      let saveError: string | null = null;
+      this.db.transaction(() => {
+        try { changed = this.rigRepo.setNodeStatuslineThrottle(seat.nodeId, input.seconds); }
+        catch (error) { saveError = (error as Error).message; return; }
+        if (!changed) return;
+        persisted = this.eventBus.persistWithinTransaction({
+          type: "node.statusline_throttle_changed", rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId,
+          from, to: input.seconds, reason: input.reason.trim(), operator: input.operator ?? null,
+        });
+      })();
+      if (saveError) return { ok: false, code: "statusline_throttle_unavailable", message: `${saveError}; nothing was saved.` };
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      if (!changed) {
+        return { ok: false, code: "statusline_throttle_unavailable", message: `The status line throttle for seat "${this.settingTargetLabel(input)}" was not saved (no node row was updated); nothing changed.` };
+      }
+    }
+    const effect = (input.seconds === null
+      ? "Cleared: the seat's status line runs the context collector on every update again"
+      : `Saved: the seat's status line runs the context collector at most once every ${input.seconds} s`)
+      + " from its next launch, resume or restore. The running process is unchanged; nothing was restarted.";
+    return { ok: true, seat, from, to: input.seconds, changed, effect };
   }
 
   /** OPR.0.7.0.7 — requested, saved, emitted at launch and observed in the native session, each from
@@ -1708,7 +1761,9 @@ export class SeatLifecycleService {
     ).all(node.id) as Array<{ id: string }>).map((row) => row.id);
     const retiringGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
-    const viewWarnings: string[] = [];
+    // #3395: a fresh launch of an existing seat starts from its stored settings: a stored pool block that can't be used
+    // is reported once, from the node.
+    const viewWarnings: string[] = [...storedPoolAdvisories(node.logicalId, this.rigRepo.getNodePool(node.id))];
     let canonicalProbe = await this.probeLiveness(
       canonicalSessionName,
       "fresh launch refuses rather than overwrite a possibly-live canonical session",

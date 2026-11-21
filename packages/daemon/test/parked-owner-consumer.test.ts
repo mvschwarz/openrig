@@ -12,6 +12,7 @@ import {
   RESERVE_PREFIX,
   CLOSE_PREFIX,
   DELIVERED_PREFIX,
+  ESCALATED_PREFIX,
   REFUSED_PREFIX,
   FAILED_PREFIX,
   openPromptRefusals,
@@ -689,6 +690,102 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
 // #1933 — a seat that just handed work off, or just asked a person, has only started waiting. The first reminder
 // waits until its arbitrated waiting state has been unchanged for a grace; a seat still holding the work after it is
 // reminded as before, an unknown start keeps the reminder, and a seat at a prompt gets no grace.
+describe("a delivered reminder whose rows stay unclaimed reaches someone who can act, once", () => {
+  // The rows are pending (never claimed); each sent wake is recorded delivered, as the engine records it.
+  const unclaimedSeat = (state = "pending") => parkedSeat({
+    obligations: { items: ROW_IDS.map((qitemId) => ({ qitemId, state, summary: null })), held: [] },
+  });
+  type Escalation = { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string };
+  const harness = (state = "pending", escalate: (input: Escalation) => Promise<string[]> = async () => [SEAT2]) => {
+    const store = new RowStore();
+    const history: WatchdogHistoryEntry[] = [];
+    const told: Escalation[] = [];
+    let now = Date.parse("2026-10-11T00:00:00.000Z");
+    const evaluate = async (seat: ParkedSeatDiagnosisView) => {
+      const result = await makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store, history), now: () => now,
+        escalateUnclaimed: async (input) => { told.push(input); return escalate(input); } }).evaluate(makeJob());
+      if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: String(result.notes?.["primaryRow"]) }));
+      return result;
+    };
+    return { store, told, advance: (ms: number) => { now += ms; },
+      wake: () => evaluate(unclaimedSeat(state)), resume: () => evaluate(parkedSeat({ parked: false })) };
+  };
+
+  it("escalates once when the delivered reminder is older than the bound and its rows are still pending", async () => {
+    const { store, told, advance, wake, resume } = harness();
+    const first = await wake();
+    expect(first.action).toBe("send");
+    await resume();
+    advance(14 * 60_000);
+    await wake();
+    expect(told).toHaveLength(0);
+    advance(2 * 60_000);
+    const repeat = await wake();
+    expect(repeat.action).toBe("skip");
+    expect(told).toEqual([{ seat: SEAT, qitemIds: ROW_IDS, episodeKey: String(first.notes?.["episodeKey"]),
+      deliveredAt: store.transitions.get(String(first.notes?.["primaryRow"]))!.find((t) => t.transitionNote?.startsWith(DELIVERED_PREFIX))!.ts }]);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX)).map((a) => a.note))
+      .toEqual([`${ESCALATED_PREFIX} ${String(first.notes?.["episodeKey"])} to ${SEAT2}`]);
+    // The seat itself isn't woken again, and its reminder isn't reopened.
+    expect(store.appended.filter((a) => a.note.startsWith(RESERVE_PREFIX))).toHaveLength(1);
+  });
+
+  it("doesn't escalate rows the seat claimed", async () => {
+    const { told, advance, wake, resume } = harness("in-progress");
+    await wake();
+    await resume();
+    advance(30 * 60_000);
+    await wake();
+    expect(told).toHaveLength(0);
+  });
+
+  const failureOf = (result: { notes?: Record<string, unknown> }) =>
+    ((result.notes?.["skippedSeats"] as Array<{ escalationFailure?: unknown }> | undefined) ?? []).map((s) => s.escalationFailure).filter(Boolean);
+
+  it("says in the pass's notes when no one can be resolved to tell, marks nothing escalated, and tries again later", async () => {
+    const noPerson = Object.assign(new Error("Workflow human fallback needs one registered human"), { code: "no_registered_person" });
+    const { store, told, advance, wake, resume } = harness("pending", async () => { throw noPerson; });
+    const first = await wake();
+    await resume();
+    advance(16 * 60_000);
+    const failed = await wake();
+    expect(failed.action).toBe("skip");
+    expect(failureOf(failed)).toEqual([{ episodeKey: String(first.notes?.["episodeKey"]), failure: "no_registered_person" }]);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(0);
+    await wake();
+    expect(told).toHaveLength(2);
+  });
+
+  it("records exactly one escalation once a write that failed succeeds on a later pass", async () => {
+    let calls = 0;
+    const { store, advance, wake, resume } = harness("pending", async () => {
+      if (++calls === 1) throw new Error("SQLITE_BUSY: database is locked");
+      return [SEAT2];
+    });
+    await wake();
+    await resume();
+    advance(16 * 60_000);
+    expect(failureOf(await wake())).toEqual([expect.objectContaining({ failure: "Error" })]);
+    expect(failureOf(await wake())).toEqual([]);
+    await wake();
+    expect(calls).toBe(2);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(1);
+  });
+
+  it("doesn't repeat the escalation on a later tick", async () => {
+    const { store, told, advance, wake, resume } = harness();
+    await wake();
+    await resume();
+    advance(16 * 60_000);
+    await wake();
+    advance(60 * 60_000);
+    await wake();
+    await wake();
+    expect(told).toHaveLength(1);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(1);
+  });
+});
+
 describe("#1933: the first reminder waits a grace after the seat starts waiting", () => {
   const NOW = Date.parse("2026-10-25T03:00:00.000Z");
   const GRACE_MS = 5 * 60_000;
@@ -1094,5 +1191,24 @@ describe("a wake escalation about the seat's own prompt is not that seat's work"
     expect(seat.parked).toBe(true);
     expect(seat.obligations.held.map((r) => r.qitemId)).toEqual([held]);
     expect(seat.obligations.unhealthyHeldCount).toBe(1);
+  });
+});
+
+describe("#3315 a parked owner on a tmux server the daemon can't reach", () => {
+  it("reserves nothing and skips quietly while the server is gone, whatever else the seat reads as, and reminds after", async () => {
+    const store = new RowStore();
+    let gone = true;
+    const policy = (seat = parkedSeat()) => makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store),
+      terminalServerUnreachable: () => gone } as ParkedOwnerConsumerDeps);
+    for (let i = 0; i < 100; i++) {
+      expect(await policy().evaluate(makeJob())).toMatchObject({ action: "skip", reason: "terminal-server-unreachable" });
+    }
+    // A seat whose process went with the server reads indeterminate: still the quiet terminal skip, not a loud one.
+    expect(await policy(parkedSeat({ parked: "indeterminate" })).evaluate(makeJob()))
+      .toMatchObject({ action: "skip", reason: "terminal-server-unreachable" });
+    expect(store.appended).toEqual([]);
+    expect(store.nudges).toEqual([]);
+    gone = false;
+    expect((await policy().evaluate(makeJob())).action).toBe("send");
   });
 });

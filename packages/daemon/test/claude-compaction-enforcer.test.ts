@@ -21,9 +21,10 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { reportRestoreDeliveryFailure } from "../src/domain/compaction-restore-notice.js";
 import type { RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
@@ -119,6 +120,19 @@ describe("ClaudeCompactionEnforcer", () => {
 
     expect(outcome).toEqual({ triggered: false, reason: "disabled" });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("#3416 (3): names the sample's time instead of calling the usage current when the sample time is known", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+    const prep = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 82, sampledAt: "2026-11-17T12:00:00.000Z",
+    });
+    expect(prep).toEqual({ triggered: true });
+    const prompt = send.mock.calls[0]![1] as string;
+    expect(prompt).toContain("Context usage was 82% in the latest sample, taken at 2026-11-17T12:00:00.000Z; configured compaction threshold is 80%");
+    expect(prompt).not.toContain("Current context usage");
   });
 
   it("HG-2 + HG-3: threshold crossing first sends the pre-compaction prep prompt, then /compact on the next high-usage tick", async () => {
@@ -340,6 +354,156 @@ describe("ClaudeCompactionEnforcer", () => {
       await expect(enforcer.drainPendingPostCompactStage(input)).resolves.toMatchObject({ reason: "no_pending_stage" });
       expect(completion).toHaveBeenCalledTimes(1);
     } finally { warning.mockRestore(); }
+  });
+
+  describe("a delivered restore whose uptake can't be seen", () => {
+    const seat = deriveCanonicalSessionName("claude", "seat", "rig");
+    async function toDone(opts: Record<string, unknown> = {}) {
+      // The clock starts at the wall clock's time: the post-restore cooldown is set from Date.now().
+      const doneAt = Date.now();
+      let now = doneAt;
+      const { transport } = makeSessionTransport();
+      const unknown = vi.fn(async () => {});
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, dedupWindowMs: 0, now: () => now, onRestoreUptakeUnknown: unknown, ...opts,
+      } as never);
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const { attemptId, mapPath } = enforcer.getPreparationState(seat)!;
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 3; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      expect(enforcer.getOwedRestore(seat)).toBeNull();
+      return { enforcer, unknown, attemptId, mapPath, doneAt, advance: (ms: number) => { now += ms; },
+        poll: () => enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }) };
+    }
+    // The seat's RESTORED note, written after its map.
+    const writeNote = (mapPath: string) => {
+      const file = join(dirname(mapPath), "RESTORED-20261121-0400.md");
+      writeFileSync(file, "restored\n");
+      const later = new Date(statSync(mapPath).mtimeMs + 1_000);
+      utimesSync(file, later, later);
+    };
+    const settled = () => new Promise(resolve => setImmediate(resolve));
+
+    it("gives no notice when the seat's RESTORED note appears beside the map in time", async () => {
+      const f = await toDone();
+      f.advance(10 * 60_000);
+      writeNote(f.mapPath);
+      await f.poll();
+      f.advance(25 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    it("gives exactly one notice when no note appears within the wait, naming the attempt and its map", async () => {
+      const f = await toDone();
+      f.advance(29 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+      f.advance(2 * 60_000);
+      await f.poll(); await f.poll(); await settled();
+      expect(f.unknown).toHaveBeenCalledTimes(1);
+      expect(f.unknown).toHaveBeenCalledWith({ sessionName: seat, attemptId: f.attemptId, mapPath: f.mapPath,
+        doneAt: new Date(f.doneAt).toISOString(), waitedMinutes: 30 });
+      // A note written late changes nothing: the check already ended.
+      writeNote(f.mapPath);
+      f.advance(60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops the check when a new attempt starts", async () => {
+      const f = await toDone();
+      f.advance(60_000);
+      await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const next = f.enforcer.getPreparationState(seat);
+      expect(next).not.toBeNull();
+      expect(next!.attemptId).not.toBe(f.attemptId);
+      f.advance(30 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    it("drops the check when the seat's compaction is cancelled", async () => {
+      const f = await toDone();
+      f.enforcer.cancelPreparation(seat);
+      f.advance(31 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    it("gives no notice when a cancel runs after the poll queued it, before its turn", async () => {
+      const f = await toDone();
+      f.advance(31 * 60_000);
+      // The poll's synchronous part queues the notice; a cancel resuming ahead of it in the same turn of the queue replaces the check.
+      const poll = f.poll();
+      f.enforcer.cancelPreparation(seat);
+      await poll; await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    // Seven hours is past the six-hour restart window that bounds resuming restore input; this check sends none.
+    it.each([31, 7 * 60])("keeps the check across a daemon restart, from the done record (%i minutes later)", async (minutes) => {
+      const home = mkdtempSync(join(tmpdir(), "compaction-uptake-restart-")); fixtureHomes.push(home);
+      const f = await toDone({ openrigHome: home, daemonInstance: "before-restart" });
+      const unknown = vi.fn(async () => {});
+      const restarted = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), makeSessionTransport().transport, {
+        openrigHome: home, daemonInstance: "after-restart", now: () => f.doneAt + minutes * 60_000, onRestoreUptakeUnknown: unknown,
+      } as never);
+      await restarted.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+      expect(unknown).toHaveBeenCalledTimes(1);
+      expect(unknown).toHaveBeenCalledWith(expect.objectContaining({ attemptId: f.attemptId, mapPath: f.mapPath }));
+    });
+
+    it("keeps a cancel after done across a daemon restart", async () => {
+      const home = mkdtempSync(join(tmpdir(), "compaction-uptake-cancel-")); fixtureHomes.push(home);
+      const f = await toDone({ openrigHome: home, daemonInstance: "before-restart" });
+      f.enforcer.cancelPreparation(seat);
+      const unknown = vi.fn(async () => {});
+      const restarted = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), makeSessionTransport().transport, {
+        openrigHome: home, daemonInstance: "after-restart", now: () => f.doneAt + 31 * 60_000, onRestoreUptakeUnknown: unknown,
+      } as never);
+      await restarted.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+      expect(unknown).not.toHaveBeenCalled();
+    });
+
+    it("keeps the check when the map's stat fails as the attempt reaches done, and gives one notice", async () => {
+      let now = Date.now();
+      const { transport, send } = makeSessionTransport();
+      const unknown = vi.fn(async () => {});
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, now: () => now, onRestoreUptakeUnknown: unknown } as never);
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const { mapPath } = enforcer.getPreparationState(seat)!;
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 2; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      // The map is there, but its folder can't be searched, so its stat fails with EACCES, not ENOENT.
+      chmodSync(dirname(mapPath), 0o000);
+      try {
+        await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        expect(enforcer.getOwedRestore(seat)).toBeNull();
+        const sends = send.mock.calls.length;
+        now += 31 * 60_000;
+        await enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" });
+        await enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+        expect(unknown).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls.length).toBe(sends);
+      } finally { chmodSync(dirname(mapPath), 0o700); }
+    });
+
+    it("tries a notice that failed again on the next poll, and stops once one is recorded", async () => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const unknown = vi.fn(async () => {}).mockRejectedValueOnce(new Error("queue unavailable"));
+        const f = await toDone({ onRestoreUptakeUnknown: unknown });
+        f.advance(31 * 60_000);
+        await f.poll(); await settled();
+        expect(unknown).toHaveBeenCalledTimes(1);
+        expect(warning).toHaveBeenCalledWith("[compaction] restore uptake notice failed", expect.objectContaining({ attemptId: f.attemptId, errorClass: "Error" }));
+        await f.poll(); await settled();
+        await f.poll(); await settled();
+        expect(unknown).toHaveBeenCalledTimes(2);
+      } finally { warning.mockRestore(); }
+    });
   });
 
   it("publishes one target-generation-keyed width receipt callback after restore compliance", async () => {

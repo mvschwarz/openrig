@@ -8,7 +8,7 @@ import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent, RunnerObservation, RunnerObservations } from "./types.js";
-import { PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
+import { ELICITATION_DESCRIPTOR, PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
@@ -88,6 +88,7 @@ const SOURCE_ORDER_WINDOW = 200;
 
 export class AgentActivityStore {
   private readonly permissionStops: PermissionStopObservations;
+  private readonly elicitations: PermissionStopObservations;
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
@@ -102,6 +103,7 @@ export class AgentActivityStore {
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
     this.permissionStops = new PermissionStopObservations(this.now);
+    this.elicitations = new PermissionStopObservations(this.now, undefined, new Set([ELICITATION_DESCRIPTOR]));
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
     this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
@@ -122,18 +124,49 @@ export class AgentActivityStore {
 
   getPermissionStopForNode(nodeId: string, sessionName: string): PermissionStopStatus {
     try {
-      const generation = this.resolveOccupantGeneration?.(nodeId);
-      const session = this._resolveSession({ nodeId, sessionName });
-      const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
-        WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
-      if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
-        || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
-        || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) {
+      const generation = this.currentClaudeOccupantGeneration(nodeId, sessionName);
+      if (!generation) {
         this.permissionStops.forget(nodeId);
         return unavailablePermissionStop();
       }
       return this.permissionStops.read(nodeId, generation);
     } catch { return unavailablePermissionStop(); }
+  }
+
+  /** An MCP elicitation reaching the seat's Claude (`completed` for its result or a later tool batch). Only the actor
+   *  and time are kept, with the same occupant checks as a permission request. No event, attention or activity. */
+  observeElicitation(input: { nodeId: string; sessionName: string; generation: string; actor: unknown; at: unknown;
+    completed: boolean }): void {
+    try {
+      if (this.currentClaudeOccupantGeneration(input.nodeId, input.sessionName) !== input.generation) return;
+      this.elicitations.observe({ ...input, command: ELICITATION_DESCRIPTOR });
+    } catch { /* Optional observation failure cannot change hook behavior. */ }
+  }
+
+  /** The newest permission or elicitation request from this occupant's main session that nothing settled yet, as an
+   *  ISO time, else null. Evidence a request reached that path, never that a dialog is open; a subagent's request
+   *  isn't tied to the main pane, so it doesn't count. */
+  getUnsettledInputRequestForNode(nodeId: string, sessionName: string): string | null {
+    try {
+      const generation = this.currentClaudeOccupantGeneration(nodeId, sessionName);
+      if (!generation) return null;
+      const times = [this.permissionStops, this.elicitations]
+        .map(observations => observations.unsettledRequestAt(nodeId, generation, null))
+        .filter((at): at is number => at !== null);
+      return times.length ? new Date(Math.max(...times)).toISOString() : null;
+    } catch { return null; }
+  }
+
+  /** The current registered generation of a running, unretired Claude occupant bound to this session, else null. */
+  private currentClaudeOccupantGeneration(nodeId: string, sessionName: string): string | null {
+    const generation = this.resolveOccupantGeneration?.(nodeId);
+    const session = this._resolveSession({ nodeId, sessionName });
+    const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
+    if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
+      || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
+      || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) return null;
+    return generation;
   }
 
   /** #99: whether a hook's Claude session id is the seat's own Claude session (its current resume token). A helper
@@ -350,6 +383,40 @@ export class AgentActivityStore {
       if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation };
     }
     return earliest;
+  }
+
+  /** When the permission prompt the seat waits at started, read from this occupant's unbroken run of permission hooks that
+   *  ends at its latest hook: the nearest PermissionRequest in that run, or with none, the newest `permission_prompt`
+   *  notification. Claude sends PermissionRequest when it asks and the notification about six seconds later, so every
+   *  notification that follows a request in the run is that request's. A confirmation read from the
+   *  pane joins the run without starting a prompt. Null when another hook, or another occupant's, ends the run before a
+   *  prompt hook: then one prompt can't be told from the next. Read in the emitter's order, as the latest hook is. */
+  findPermissionPromptStart(input: { sessionName: string; generation: string }): string | null {
+    if (!input.generation) return null;
+    const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
+    if (!nodeId) return null;
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).all(nodeId) as EventPayloadRow[];
+    let start: AgentActivity | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity || activity.generation !== input.generation) break;
+      const request = activity.rawEvent === "PermissionRequest";
+      if (!request && !(activity.rawEvent === "Notification" && activity.rawSubtype === "permission_prompt")) {
+        if (activity.rawEvent === "PermissionPromptConfirmed") continue;
+        break;
+      }
+      // The nearest request owns every notification after it in the run, however many; with no request before the run's
+      // boundary, the newest notification stands for the prompt, so notification-only prompts stay apart.
+      if (request) { start = activity; break; }
+      start ??= activity;
+    }
+    return start?.eventAt ?? null;
   }
 
   getLatestForNode(input: {
@@ -627,7 +694,7 @@ export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubt
 
 /** What the store's latest hook for a seat says: its current state, or, past the freshness window, what its
  *  retained raw event means. Generation-mismatched or unresolvable evidence says nothing ("unknown"). */
-function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+export function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
   if (activity?.evidenceSource !== "runtime_hook") return "unknown";
   if (activity.stale !== true) return activity.state;
   return activity.reason === "stale_runtime_hook"

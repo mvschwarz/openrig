@@ -39,6 +39,7 @@ import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
+import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -197,9 +198,11 @@ function backlogKeyParts(key: string): { seat: string; parent: string | null } {
   return at < 0 ? { seat: key, parent: null } : { seat: key.slice(0, at), parent: key.slice(at + PARENT_BACKLOG_SEPARATOR.length) };
 }
 
+type StuckSweepOutcome = "clean" | "findings" | "partial" | "failed";
+
 export interface StuckSweepStatusSnapshot {
   lastSweepAt: string | null;
-  lastOutcome: "clean" | "findings" | "failed" | null;
+  lastOutcome: StuckSweepOutcome | null;
   lastError: string | null;
   consecutiveFailures: number;
   /** Findings newly created (routed to a seat) since the daemon started. An open finding a later pass finds again
@@ -208,6 +211,8 @@ export interface StuckSweepStatusSnapshot {
   /** Finding rows still open after the last pass that finished (found again, suppressed or newly created): a gauge,
    *  replaced every pass, never accumulated. A pass that throws keeps the previous value. */
   findingsOpen: number;
+  /** Findings left without a route in the last completed pass, not a cumulative error count. */
+  findingsUndelivered: number;
   /** Start of the pass in flight, or null between passes: a pass that never ends shows here, not only as a stale
    *  lastSweepAt. */
   runningSince: string | null;
@@ -216,7 +221,7 @@ export interface StuckSweepStatusSnapshot {
 }
 
 export interface StuckSweepStatus {
-  record(outcome: "clean" | "findings" | "failed", detail?: { error?: string; created?: number; open?: number }): void;
+  record(outcome: StuckSweepOutcome, detail?: { error?: string; created?: number; open?: number; undelivered?: number }): void;
   /** The scheduler's one-pass-at-a-time state, mirrored for /healthz. */
   pass(state: { runningSince: string | null; skippedTicks: number }): void;
   snapshot(): StuckSweepStatusSnapshot;
@@ -232,6 +237,7 @@ export function createStuckSweepStatus(): StuckSweepStatus {
     consecutiveFailures: 0,
     findingsRouted: 0,
     findingsOpen: 0,
+    findingsUndelivered: 0,
     runningSince: null,
     skippedTicks: 0,
   };
@@ -243,6 +249,7 @@ export function createStuckSweepStatus(): StuckSweepStatus {
       state.consecutiveFailures = outcome === "failed" ? state.consecutiveFailures + 1 : 0;
       if (detail?.created) state.findingsRouted += detail.created;
       if (detail?.open !== undefined) state.findingsOpen = detail.open;
+      if (detail?.undelivered !== undefined) state.findingsUndelivered = detail.undelivered;
     },
     pass(pass) {
       state.runningSince = pass.runningSince;
@@ -323,11 +330,13 @@ export interface StuckSweepFindingAction {
   /** The stuck row; for an unclaimed-backlog notice, the seat it stands for. */
   qitemId: string;
   findingQitemId: string;
-  action: "created" | "refreshed" | "closed";
+  action: "created" | "refreshed" | "closed" | "unreported";
+  /** For `unreported`, the original destination the sweep could not route to. */
+  destination?: string;
 }
 
 export interface StuckSweepResult {
-  outcome: "clean" | "findings" | "failed";
+  outcome: StuckSweepOutcome;
   findings: StuckSweepFindingAction[];
   error?: string;
 }
@@ -640,7 +649,8 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
       `After a registered-host read confirms a target, record its note on the closed row so the sweep stops asking. ` +
       `The note starts with "custody-verified:"; its first word that names one of these targets exactly is what it verifies. ` +
       `Name several in one comma-list word (a,b), or write one note each.\n` +
-      `Do not rewrite historical custody from this local observation; the note is the separate record of the verification.`
+      `Do not rewrite historical custody from this local observation; the note is the separate record of the verification.\n` +
+      `This is a diagnostic about ${c.row.qitemId}, not a second assignment: the checks and notes above settle it, and closing this finding alone doesn't.`
     );
   }
   return (
@@ -650,7 +660,8 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
     `age: ${c.ageMinutes} min\n` +
     `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
     `why: ${c.why}\n` +
-    `Resolve the underlying row; the sweep closes this finding itself once the row is no longer stuck.`
+    `This is a diagnostic about ${c.row.qitemId}, not a second assignment. Read ${c.row.qitemId} and act on it: pick it up, resume, route or park it, as fits; ` +
+    `the sweep closes this finding itself once ${c.row.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${c.row.qitemId}.`
   );
 }
 
@@ -1462,9 +1473,67 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const liveDedupTags = new Set<string>();
     const candidateIds = new Set(candidates.map((c) => c.row.qitemId));
     const drainDeferredIds = new Set<string>();
-    // A finding that could not be created (a row whose destination no longer resolves, say) must not
-    // stop the others: it is reported, its row stays detected, and the pass is still a failure.
     const failedCreates: string[] = [];
+    const unknownRig = (err: unknown): boolean => err instanceof QueueRepositoryError && err.code === "unknown_destination_rig";
+    const missingRig = (seat: string): boolean => parseSessionName(seat).kind === "canonical" && !deps.queueRepo.acceptsDestination(seat);
+    const sourceAgent = (source: string, destination: string): string | null =>
+      source !== destination && parseSessionName(source).kind === "canonical" && !isHumanSeatSessionRef(source)
+      && !isMachinerySession(source) && deps.queueRepo.acceptsDestination(source) && !sessionMissing(source)
+      && !deps.queueRepo.isHumanDestination(source) && !isBoundTerminalSeat(deps.db, source) ? source : null;
+    const gapNote = (source: string, destination: string): string =>
+      `stuck-sweep routing gap: ${destination} references an unknown rig; no route to originating agent ${source}`;
+    const hasGap = deps.db.prepare(`SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND actor_session = 'daemon@system' AND transition_note = ? LIMIT 1`);
+    const reportGap = (action: { row: QueueItem; kind: StuckFindingKind; destination: string; findingQitemId?: string }): void => {
+      const { row, kind, destination, findingQitemId = "" } = action;
+      const note = gapNote(row.sourceSession, destination);
+      if (!hasGap.get(row.qitemId, note)) {
+        // A same-state daemon note is bookkeeping, not work progress or a new recovery episode.
+        deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "daemon@system", transitionNote: note });
+        log(`[stuck-sweep] ${row.qitemId}: ${note}`);
+      }
+      findings.push({ kind, qitemId: row.qitemId, findingQitemId, action: "unreported", destination });
+    };
+    const recordFailure = (context: string, err: unknown): void => {
+      const message = `${context}: ${err instanceof Error ? err.message : String(err)}`;
+      log(`[stuck-sweep] ${message}`);
+      failedCreates.push(message);
+    };
+    // Selected by the finding tag alone: a handoff gives its successor an ordinary qitem id while keeping the tags, so
+    // an id-prefix filter would miss a finding handed to a source whose origin rig is later deleted.
+    const pendingFindings = deps.db.prepare<[string], { qitem_id: string; destination_session: string }>(`
+      SELECT qitem_id, destination_session FROM queue_items
+      WHERE state = 'pending' AND claimed_at IS NULL AND tags LIKE ?`)
+      .all(`%"${STUCK_SWEEP_FINDING_TAG}"%`);
+    const perRowKinds: readonly StuckFindingKind[] = ["overdue-claim", "undelivered-wake", "undelivered-human-notice",
+      "unclaimed-obligation", "dangling-closure", "stalled-after-claim", "unconsumed-wait", "parked-owner-no-input"];
+    for (const ref of pendingFindings) {
+      if (dueToYield()) await yieldLoop();
+      if (!missingRig(ref.destination_session)) continue;
+      const row = indexed(() => deps.queueRepo.getById(ref.qitem_id, { waiting: false }));
+      if (!row || row.state !== "pending" || row.claimedAt || row.destinationSession !== ref.destination_session || deliveryHeld(row)) continue;
+      const kind = perRowKinds.find((kind) => kind === findingKindOf(row)?.replace(/^successor-verification-required$/, "dangling-closure"));
+      if (!kind || !isFindingRow(row)) continue;
+      const target = sourceAgent(row.sourceSession, row.destinationSession);
+      if (target) {
+        try {
+          const { created } = await deps.queueRepo.handoff({
+            qitemId: row.qitemId, fromSession: "stuck-sweep@system", toSession: target,
+            body: `${row.body}\n\nOriginal finding destination ${row.destinationSession} references a missing rig. This finding was handed back to the originating agent.`,
+            summary: row.summary, evidenceRef: row.evidenceRef,
+          });
+          othersMayHaveRun();
+          findings.push({ kind, qitemId: row.qitemId, findingQitemId: created.qitemId, action: "created" });
+          continue;
+        } catch (err) {
+          othersMayHaveRun();
+          if (!unknownRig(err)) {
+            recordFailure(`orphaned finding ${row.qitemId} not handed off`, err);
+            continue;
+          }
+        }
+      }
+      reportGap({ row, kind, destination: row.destinationSession, findingQitemId: row.qitemId });
+    }
     // #2430: an unclaimed row whose finding would go back to its own agent seat (no delegation parent and no escalates_to
     // route declared) tells that seat nothing: it already holds the row. A seat that reads its rows without claiming
     // them, a person's front door, got one such finding per row. Those rows share one standing notice per seat instead
@@ -1548,7 +1617,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const unclaimedBacklog = new Map<string, Candidate[]>();
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       if (dueToYield()) await yieldLoop();
-      if (deps.queueRepo.deliveryDrains.hasActive()
+      // #3315: a terminal server can be lost during the pass too, with no maintenance drain active.
+      if (deps.queueRepo.deliveryDrains.anyHeld()
         && deliveryHeld(deps.queueRepo.getById(c.row.qitemId, { waiting: false }) ?? c.row)) {
         drainDeferredIds.add(c.row.qitemId);
         continue;
@@ -1643,21 +1713,53 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           // OpenRig's own finding, whoever created the stuck row.
           wakeTrigger: "openrig" as const,
         };
-        try {
-          const created = await deps.queueRepo.create(input);
-          othersMayHaveRun();
+        const createFinding = async (payload: typeof input): Promise<void> => {
+          const created = await deps.queueRepo.create(payload);
           // An existing row with this id, same source and destination, comes back as an idempotent retry: a closed one is
           // no finding for the row now, so it's reported, never counted as created.
           if (!["pending", "in-progress", "blocked"].includes(created.state)) {
             throw new Error(`${created.qitemId} already exists and is ${created.state}`);
           }
           findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
-        } catch (err) {
-          const message = `${c.kind} finding for ${c.row.qitemId} to ${now_.route} not created: ${err instanceof Error ? err.message : String(err)}`;
-          othersMayHaveRun();
-          log(`[stuck-sweep] ${message}`);
-          failedCreates.push(message);
+        };
+        const failure = `${c.kind} finding for ${c.row.qitemId} to ${now_.route} not created`;
+        if (!missingRig(now_.route) && !(hasGap.get(c.row.qitemId, gapNote(now_.row.sourceSession, now_.route))
+          && !deps.queueRepo.acceptsDestination(now_.route))) {
+          try {
+            await createFinding(input);
+            othersMayHaveRun();
+            continue;
+          } catch (err) {
+            othersMayHaveRun();
+            if (!unknownRig(err)) {
+              recordFailure(failure, err);
+              continue;
+            }
+          }
         }
+        routeNotes.delete(c.row.qitemId);
+        routed.delete(c.row.qitemId);
+        const live = freshCandidate(c.kind, c.row.qitemId, c.jobId);
+        if (!live || deliveryHeld(live.row) || recoveries.find(c.row.qitemId)) continue;
+        routeCandidate(live);
+        if (live.route !== now_.route) continue;
+        const target = sourceAgent(live.row.sourceSession, now_.route);
+        if (target) {
+          try {
+            await createFinding({ ...input, destinationSession: target,
+              tags: input.tags.filter((tag) => tag !== ESCALATION_HOP_TAG || live.row.tags?.includes(tag)),
+              body: `${evidenceBody(deps.db, live)}\nOriginal finding destination ${now_.route} references a missing rig. This finding goes to the originating agent.` });
+            othersMayHaveRun();
+            continue;
+          } catch (err) {
+            othersMayHaveRun();
+            if (!unknownRig(err)) {
+              recordFailure(`${failure} (source fallback to ${target})`, err);
+              continue;
+            }
+          }
+        }
+        reportGap({ row: live.row, kind: live.kind, destination: now_.route });
       }
     }
 
@@ -2045,14 +2147,16 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
+    const undelivered = findings.filter((finding) => finding.action === "unreported").length;
+    const counts = { ...findingCounts(deps.db, findings), undelivered };
     if (failedCreates.length > 0) {
       // Not a clean or complete pass: say so, while keeping the findings that were made.
       const error = failedCreates.join("; ");
-      status?.record("failed", { error, ...findingCounts(deps.db, findings) });
+      status?.record("failed", { error, ...counts });
       return { outcome: "failed", findings, error };
     }
-    const outcome = findings.length > 0 ? "findings" : "clean";
-    status?.record(outcome, findingCounts(deps.db, findings));
+    const outcome = undelivered > 0 ? "partial" : findings.length > 0 ? "findings" : "clean";
+    status?.record(outcome, counts);
     return { outcome, findings };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

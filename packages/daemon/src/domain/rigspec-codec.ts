@@ -1,5 +1,6 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { processLimitsToSpec } from "./process-limits.js";
+import { serializePoolBlock } from "./seat-pool-spec.js";
 import type {
   RigSpec,
   LegacyRigSpec,
@@ -173,6 +174,9 @@ export class RigSpecCodec {
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
         if (m.processLimits !== undefined) member["process_limits"] = processLimitsToSpec(m.processLimits);
+        if (m.statuslineThrottle !== undefined) member["statusline_throttle"] = m.statuslineThrottle;
+        // #3395: a usable block, or `{}` (the clear); a block that can't be used is never written back.
+        if (m.pool !== undefined) member["pool"] = m.pool === null ? {} : serializePoolBlock(m.pool);
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;
@@ -260,6 +264,7 @@ export class LegacyRigSpecCodec {
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
         if (node.processLimits !== undefined) n["process_limits"] = processLimitsToSpec(node.processLimits);
+        if (node.statuslineThrottle !== undefined) n["statusline_throttle"] = node.statuslineThrottle;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

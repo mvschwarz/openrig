@@ -17,6 +17,8 @@ type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault
   managedCompaction?: boolean;
   /** Slice 13: the seat opted in to its hook bridge, so this launch adds the bridge's hooks. */
   hookBridge?: boolean;
+  /** #3416 (3): the throttled status line of a seat that opted in, set in this launch's --settings value. */
+  statusLine?: Record<string, unknown>;
 };
 
 /** Slice 13: an opted-in Claude seat's hook bridge, merged into the session's one --settings value beside any hooks
@@ -93,6 +95,10 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
         return { ...settings, permissions: { ...permissions,
           allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } };
       });
+    }
+    if (choice.statusLine !== undefined) {
+      const statusLine = choice.statusLine;
+      args = withSettings(args, settings => ({ ...settings, statusLine }));
     }
     const { block } = claudeAutoModeForLaunch(choice.claudeAutoMode);
     if (block !== undefined) {

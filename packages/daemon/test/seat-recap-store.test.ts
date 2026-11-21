@@ -8,11 +8,12 @@
 // flag for review, never gate a handover (the D2 pattern: prose shape must not
 // block a boundary).
 
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeSeatRecap, listRecapChain, validateRecapContract } from "../src/domain/context-packs/seat-recap-store.js";
+import { writeSeatRecap, writeSeatRecapAt, resolveAuthoredRecapPointer, listRecapChain, validateRecapContract } from "../src/domain/context-packs/seat-recap-store.js";
+import { buildRestorePacket } from "../src/domain/seat-handover-service.js";
 
 const GOOD_RECAP = [
   "## Recent Decisions",
@@ -133,6 +134,30 @@ describe("validateRecapContract — the CHECKABLE subset, advisory findings (Q2 
 // The safety floor is preserved: unresolved/mismatched refs fail with a
 // LABELED path, never a fuzzy match onto another seat.
 describe("resolveAuthoredRecapPointer — one-home seat-ref parsing (canonical parseSessionName)", () => {
+  it("reports a missing tree in the actual handover packet and the write path creates it", () => {
+    const rigDir = join(seatDir, "rigs", "r1");
+    const expectedDir = join(rigDir, "seats", "s1");
+    mkdirSync(rigDir, { recursive: true });
+    const result = resolveAuthoredRecapPointer("s1@r1", seatDir);
+    expect(result).toHaveProperty("absentReason");
+    if (!("absentReason" in result)) throw new Error("expected absent recap");
+    const packet = buildRestorePacket({ seatRef: "s1@r1", reason: "handover", departingSession: "s1@r1", handoverAt: "2026-01-01T00:00:00Z", capturedContext: "", authoredRecapAbsentReason: result.absentReason });
+    expect(packet).toContain(`no seat tree at ${expectedDir}`);
+    expect(packet).toContain("rig context recap-write");
+    expect(packet).not.toContain("predecessor never wrote");
+    writeSeatRecapAt({ topologyRoot: seatDir, rig: "r1", seat: "s1", content: GOOD_RECAP });
+    expect(resolveAuthoredRecapPointer("s1@r1", seatDir)).toEqual({ address: "seat:RECAP.md", chainLength: 0 });
+  });
+
+  it("distinguishes an existing tree with a missing recap without claiming its history", () => {
+    const expectedDir = join(seatDir, "rigs", "r1", "seats", "s1");
+    mkdirSync(expectedDir, { recursive: true });
+    const result = resolveAuthoredRecapPointer("s1@r1", seatDir);
+    expect(result).toEqual({ absentReason: expect.stringContaining(`seat tree exists at ${expectedDir}, but no RECAP.md`) });
+    expect(JSON.stringify(result)).toContain("rig context recap-write");
+    expect(JSON.stringify(result)).not.toMatch(/predecessor|never wrote|first generation/);
+  });
+
   it("two-part canonical ref resolves the seat dir (local control)", async () => {
     const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
     const { mkdirSync: mkd, writeFileSync: wf } = await import("node:fs");

@@ -4,6 +4,8 @@ import { validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
 import { parseStoredProcessLimits, serializeProcessLimits, validateProcessLimits, type ProcessLimits } from "./process-limits.js";
+import { storedStatuslineThrottle, validateStatuslineThrottle } from "./claude-statusline-throttle.js";
+import { parseStoredPoolBlock, storedPoolText, type SeatPoolNodeBlock, type StoredSeatPool } from "./seat-pool-spec.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
@@ -339,6 +341,10 @@ interface NodeOptions {
   launchWrapper?: readonly string[] | null;
   /** The seat's own process limits (spec `process_limits`); null/absent = none. */
   processLimits?: ProcessLimits | null;
+  /** #3416 (3): a Claude seat's status line throttle in seconds (spec `statusline_throttle`); null/absent = none. */
+  statuslineThrottle?: number | null;
+  /** #3395: the seat pool block this node is the model of (spec `pool`); null/absent = none. */
+  pool?: SeatPoolNodeBlock | null;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -365,6 +371,11 @@ export class RigRepository {
    *  protection arms in the same act that creates the rig. Wired at startup;
    *  optional so repo construction stays dependency-free. */
   onRigCreated?: (rig: Rig) => void;
+  /** #3634 — the same act for archive, unarchive and delete: fired after the row changed, so a daemon-owned
+   *  per-name job follows the rig on every path (routes, instantiator, teardown, lifecycle). */
+  onRigArchived?: (rig: { id: string; name: string }) => void;
+  onRigUnarchived?: (rig: { id: string; name: string }) => void;
+  onRigDeleted?: (rig: { id: string; name: string }) => void;
   constructor(db: Database.Database) {
     this.db = db;
   }
@@ -667,6 +678,16 @@ export class RigRepository {
       // Written atomically with creation: a seat never exists without the limit it was created with.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.statuslineThrottle) {
+      validateStatuslineThrottle(opts.statuslineThrottle, "statusline_throttle");
+      // As with process limits: a seat never exists without the throttle it was created with.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
+    if (opts?.pool) {
+      storedPoolText(opts.pool);
+      // As with process limits: a model seat never exists without the pool block it was created with.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -823,6 +844,8 @@ export class RigRepository {
       this.setNodeLaunchWrapper(id, opts.launchWrapper);
     }
     if (opts?.processLimits) this.setNodeProcessLimits(id, opts.processLimits);
+    if (opts?.statuslineThrottle) this.setNodeStatuslineThrottle(id, opts.statuslineThrottle);
+    if (opts?.pool) this.setNodePool(id, opts.pool);
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -984,6 +1007,44 @@ export class RigRepository {
     return parseStoredProcessLimits(row?.process_limits, `Seat ${nodeId} process_limits`);
   }
 
+  /** #3416 (3): persist or clear (null) a Claude seat's status line throttle in seconds. Its launches read it. */
+  setNodeStatuslineThrottle(nodeId: string, seconds: number | null): boolean {
+    if (seconds !== null) validateStatuslineThrottle(seconds, "statusline_throttle");
+    if (!this.hasNodeColumn("statusline_throttle_seconds")) {
+      if (seconds !== null) throw new Error("Cannot persist statusline_throttle: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET statusline_throttle_seconds = ? WHERE id = ?").run(seconds, nodeId).changes > 0;
+  }
+
+  /** A seat's status line throttle in seconds, read at each launch; null = none, and a stored value outside the bounds
+   *  reads as none (the launch then collects on every status line run, as without a throttle). */
+  getNodeStatuslineThrottle(nodeId: string): number | null {
+    if (!this.hasNodeColumn("statusline_throttle_seconds")) return null;
+    const row = this.db.prepare("SELECT statusline_throttle_seconds FROM nodes WHERE id = ?").get(nodeId) as
+      { statusline_throttle_seconds: number | null } | undefined;
+    return storedStatuslineThrottle(row?.statusline_throttle_seconds);
+  }
+
+  /** #3395: persist or clear (null) the seat pool block of a model seat. A usable block is stored in its spec form;
+   *  one that can't be used is stored as authored, so it holds that pool rather than removing it. */
+  setNodePool(nodeId: string, block: SeatPoolNodeBlock | null): boolean {
+    const stored = block === null ? null : storedPoolText(block);
+    if (!this.hasNodeColumn("pool")) {
+      if (stored !== null) throw new Error("Cannot persist pool: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(stored, nodeId).changes > 0;
+  }
+
+  /** #3395: a model seat's stored pool block; undefined = none. A block that can't be read comes back as stored, with
+   *  why, and never throws. */
+  getNodePool(nodeId: string): StoredSeatPool | undefined {
+    if (!this.hasNodeColumn("pool")) return undefined;
+    const row = this.db.prepare("SELECT pool FROM nodes WHERE id = ?").get(nodeId) as { pool: string | null } | undefined;
+    return parseStoredPoolBlock(row?.pool);
+  }
+
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
     if (!this.hasNodeColumn("advisor")) return false;
     return this.db.prepare("UPDATE nodes SET advisor = ? WHERE id = ?")
@@ -1084,6 +1145,13 @@ export class RigRepository {
     return rows.map((r) => this.rowToRig(r));
   }
 
+  /** #3634: the names that still have an unarchived row (every name before migration 042). */
+  listUnarchivedRigNames(): string[] {
+    const where = this.hasRigColumn("archived_at") ? " WHERE archived_at IS NULL" : "";
+    const rows = this.db.prepare(`SELECT DISTINCT name FROM rigs${where} ORDER BY name`).all() as Array<{ name: string }>;
+    return rows.map((r) => r.name);
+  }
+
   getRigSummaries(filter?: RigArchiveFilter): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null; hasServices: boolean; archivedAt: string | null }> {
     const cond = archiveWhereClause("r.archived_at", filter);
     const where = cond ? `WHERE ${cond}` : "";
@@ -1127,6 +1195,7 @@ export class RigRepository {
     const result = this.db
       .prepare("UPDATE rigs SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND archived_at IS NULL")
       .run(rigId);
+    if (result.changes > 0) this.fireRigHook(this.onRigArchived, rigId);
     return result.changes > 0;
   }
 
@@ -1135,11 +1204,22 @@ export class RigRepository {
     const result = this.db
       .prepare("UPDATE rigs SET archived_at = NULL, updated_at = datetime('now') WHERE id = ? AND archived_at IS NOT NULL")
       .run(rigId);
+    if (result.changes > 0) this.fireRigHook(this.onRigUnarchived, rigId);
     return result.changes > 0;
   }
 
   deleteRig(rigId: string): void {
-    this.db.prepare("DELETE FROM rigs WHERE id = ?").run(rigId);
+    const rig = this.onRigDeleted
+      ? this.db.prepare("SELECT id, name FROM rigs WHERE id = ?").get(rigId) as { id: string; name: string } | undefined
+      : undefined;
+    const result = this.db.prepare("DELETE FROM rigs WHERE id = ?").run(rigId);
+    if (rig && result.changes > 0) this.onRigDeleted?.(rig);
+  }
+
+  private fireRigHook(hook: ((rig: { id: string; name: string }) => void) | undefined, rigId: string): void {
+    if (!hook) return;
+    const rig = this.db.prepare("SELECT id, name FROM rigs WHERE id = ?").get(rigId) as { id: string; name: string } | undefined;
+    if (rig) hook(rig);
   }
 
   deleteNode(nodeId: string): void {
@@ -1256,6 +1336,7 @@ export class RigRepository {
       ...(launchWrapper ? { launchWrapper } : {}),
       ...(processLimits ? { processLimits } : {}),
       ...(processLimitsError ? { processLimitsError } : {}),
+      ...(storedStatuslineThrottle(row.statusline_throttle_seconds) !== null ? { statuslineThrottle: storedStatuslineThrottle(row.statusline_throttle_seconds) } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
@@ -1355,6 +1436,7 @@ interface NodeRow {
   claude_mcp?: ClaudeMcp | null;
   launch_wrapper?: string | null;
   process_limits?: string | null;
+  statusline_throttle_seconds?: number | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;

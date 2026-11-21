@@ -1498,3 +1498,106 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     expect(f.bodies.a).toBe("");
   });
 });
+
+// #2429: does the guard recognize its own paste once Claude Code has collapsed it? The labels and footer notices below
+// are the strings Claude Code 2.1.326 builds (read from its bundle, not from a pane capture): a paste with N line breaks
+// shows `[Pasted text #K +N lines]`, and one with none (a single line over 800 characters) shows `[Pasted text #K]`;
+// the paste hint takes the mode bar's place for 8 s while the footer's right side keeps its notices, such as the context
+// warning (`N% until auto-compact`, `auto-compact is next`, `N% context used`, `Context low (N% remaining)`).
+describe("#2429: the guard's own paste after Claude Code collapses it", () => {
+  const collapsedUnder = (f: ReturnType<typeof fixture>, text: string, label: string, hint = "paste again to expand", modeBar = "⏵⏵ bypass permissions on (shift+tab to cycle)") =>
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const staged = f.bodies.a === text;
+      const snapshot = frame(staged ? label : f.bodies.a ?? "");
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${staged ? hint : modeBar}\n`);
+      return snapshot;
+    });
+
+  it("submits its own multi-line envelope collapsed to [Pasted text #1 +N lines]", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = wrapPaneEnvelope("sender@test", "worker@test", "Body line one.\nBody line two.");
+    collapsedUnder(f, text, `[Pasted text #1 +${text.split("\n").length - 1} lines]`);
+    const result = await f.send("collapsed-envelope", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it("submits its own single-line paste collapsed to [Pasted text #1], with no line count", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `reminder: ${"x".repeat(1190)}`;
+    collapsedUnder(f, text, "[Pasted text #1]");
+    const result = await f.send("collapsed-one-line", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  // The label carries only its paste ID, so one drawn after notePasted's read could be a person's replacement single
+  // line: it is held, as on main, while a counted label drawn late is still recognized (the delayed-label test above).
+  it("holds a count-less label first drawn after notePasted's read, with no Enter", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `reminder: ${"x".repeat(1190)}`;
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      frame(f.bodies.a === text ? (readsAfterPaste++ === 0 ? "" : "[Pasted text #1]") : f.bodies.a ?? ""));
+    const result = await f.send("late-count-less", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(text);
+  });
+
+  // A count-less label beside literal text is a person's single-line paste, not ours: our own single line collapses to the
+  // bare label, and an inline paste draws no label. The text after it matching our head proves nothing, whether the
+  // composite is first drawn after notePasted's read or already at it.
+  it.each([["after notePasted's read", true], ["at notePasted's read", false]])(
+    "holds an unrecorded count-less label followed by our own text, drawn %s, with no Enter", async (_case, late) => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = `reminder: ${"x".repeat(24)}`;
+      let readsAfterPaste = 0;
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+        frame(f.bodies.a === text ? (late && readsAfterPaste++ === 0 ? text : `[Pasted text #2] ${text}`) : f.bodies.a ?? ""));
+      const result = await f.send("count-less-composite", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+      expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+      expect(f.submissions).toEqual([]);
+    });
+
+  it("submits its own inline text that spells out a count-less label", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `see [Pasted text #2] in the reminder ${"x".repeat(24)}`;
+    const result = await f.send("quotes-a-label", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it.each([["a single-line label for a multi-line paste", "one\ntwo\nthree", "[Pasted text #1]"],
+    ["a counted label for a single-line paste", `reminder: ${"x".repeat(1190)}`, "[Pasted text #1 +2 lines]"]])(
+    "does not submit %s", async (_case, text, label) => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      collapsedUnder(f, text, label);
+      expect(await f.send("collapsed-mismatch", text, { verify: false })).toMatchObject({ ok: false, sent: true });
+      expect(f.submissions).toEqual([]);
+    });
+
+  it.each(["12% until auto-compact", "auto-compact is next", "40% context used", "Context low (8% remaining)",
+    "Context low (8% remaining) · /compact to free up space"])(
+    "submits its own collapsed paste when the hint shares the footer with the context notice %s", async notice => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      collapsedUnder(f, text, "[Pasted text #1 +2 lines]", `paste again to expand${" ".repeat(60)}${notice}`,
+        `⏵⏵ bypass permissions on (shift+tab to cycle)${" ".repeat(40)}${notice}`);
+      const result = await f.send("context-notice", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+      expect(f.submissions).toEqual([text]);
+    });
+
+  it.each(["12% until auto-compact soon", "Context low (8% remaining) · run /compact", "12 % until auto-compact"])(
+    "still holds its paste under an unknown notice beside the hint: %s", async notice => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      collapsedUnder(f, text, "[Pasted text #1 +2 lines]", `paste again to expand  ${notice}`);
+      expect(await f.send("unknown-notice", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+      expect(f.submissions).toEqual([]);
+    });
+});

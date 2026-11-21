@@ -28,7 +28,7 @@ export interface ExceptionReadiness {
 /** Read the same lazy resolver as detection. Failed reads stay unavailable;
  * inspection never writes, routes work, or imposes an admission gate. */
 export function inspectExceptionReadiness(input: {
-  db: Database.Database; spec: WorkflowSpec; source: string; boundRig?: string | null;
+  db: Database.Database; spec: WorkflowSpec; source: string; boundRig?: string | null; boundPod?: string | null;
   hostDefault: () => ExceptionRouteInput["hostDialDefault"];
   humanFallbackSeat?: ExceptionRouteInput["humanFallbackSeat"];
   instanceId?: string;
@@ -37,7 +37,7 @@ export function inspectExceptionReadiness(input: {
   const role = spec.exception_routing?.orchestrator_role ?? null;
   const selected = role === null ? "missing" : Object.hasOwn(spec.roles, role) ? "selected" : "undeclared";
   const selection = { state: selected, role, source: input.source + ".orchestrator_role", entryRole: spec.entry?.role ?? null } as ExceptionReadiness["selection"];
-  const ctx = roleResolutionContext(input.db, input.boundRig ?? spec.target?.rig);
+  const ctx = roleResolutionContext(input.db, input.boundRig ?? spec.target?.rig, input.boundPod);
   const routes: ExceptionReadiness["routes"] = [];
   // These are the two admitted exception classes. Human gates already carry
   // their own explicit decision obligation and do not mint another exception.

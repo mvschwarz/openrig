@@ -284,6 +284,7 @@ export class SeatActivityService {
     if (snapshot.length === 0) return;
     const permissionRevision = seat.permissionRevision;
     const occupant = seat.arbitrated.lastSwap;
+    const readStartedAt = this.now().toISOString();
     seat.permissionPolling = true;
     try {
       const visible = canCapture && this.permissionPromptReader
@@ -304,6 +305,7 @@ export class SeatActivityService {
         updated = true;
       }
       if (!updated) return;
+      seat.permissionReadStartedAt = readStartedAt;
       this.reportPermissionObservation(seatNodeId!, seat, "needs-input-chrome", this.now().toISOString(),
         !claude && visible === null ? "permission_request_unverified" : "permission_prompt");
     } finally {
@@ -660,6 +662,24 @@ export class SeatActivityService {
     if (!seat) return null;
     this.arbitrate(seat); // lazy re-evaluation picks up time-based expiry/caps
     return seat.arbitrated;
+  }
+
+  /** This oracle's pane check of a Codex seat's hook-raised permission requests, for the readers that would otherwise
+   *  hold the raw request hook until the turn's next hook (the wake ladder, the send gate). "blocked" while a request is
+   *  on screen or its pane can't be read; "unknown" until a read lands at least the grace after `raisedAt`, the latest
+   *  request hook (a same-turn request keeps its earlier entry); then "clear" when that read found no prompt, and came
+   *  after `after` when given. Null when no request is tracked: the caller keeps its own hook reading. */
+  codexPermissionState(seatNodeId: string, raisedAt?: string | null, after?: string): "blocked" | "clear" | "unknown" | null {
+    const seat = this.ladder.get(seatNodeId);
+    if (!seat || seat.retired || (seat.inventory?.runtime ?? "codex") !== "codex" || seat.permissions.size === 0) return null;
+    const requests = [...seat.permissions.values()];
+    if (requests.some(request => request.confirmed)) return "blocked";
+    // When the last read's capture began: a refusal or request during a slow capture comes after what it saw.
+    const readAt = Date.parse(seat.permissionReadStartedAt ?? "");
+    const raised = Date.parse(raisedAt ?? "");
+    if (requests.some(request => request.nextCheckMs === 0) || !Number.isFinite(readAt)
+        || (Number.isFinite(raised) && readAt < raised + PERMISSION_REQUEST_GRACE_MS)) return "unknown";
+    return after !== undefined && !(readAt > Date.parse(after)) ? "unknown" : "clear";
   }
 
   /** Wait-after-seq read primitive (T1 seam, exposed not consumed here): resolves when
@@ -1093,6 +1113,8 @@ interface SeatLadderState {
   permissionRevision: number;
   permissionPolling: boolean;
   permissionEvidence: ArbitratedSeatState["needsInputEvidence"];
+  /** When the last applied pane read of the permission requests began; read only by `codexPermissionState`. */
+  permissionReadStartedAt?: string;
   sessionName: string;
   retired: boolean;
   inventory: AdapterRungInventory | null;

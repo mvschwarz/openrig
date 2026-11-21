@@ -34,6 +34,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Check the packed MCP public entry and declarations
+        run: npm run test:mcp-package
       - name: Record the published file list of each package
         run: |
           set -euo pipefail
@@ -187,6 +189,56 @@ jobs:
           test "$(command -v ps)" = "$TMPDIR/bin/ps"
           exec npm run test -w "packages/$1"
           SUITE
+
+  daemon-ubuntu:
+    if: ${{ github.event_name != 'push' }}
+    # The full daemon suite on Ubuntu, beside `package-tests (daemon)` on macOS, which is unchanged.
+    # It adds evidence and replaces no macOS coverage. Confinement is package-tests' Linux one.
+    # Tests needing tmux control mode, zsh or ksh skip when the runner lacks them; the job summary
+    # lists the tests that did not run and the daemon-ubuntu-results JSON report has them all.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install the real terminal
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+      - run: npm ci
+      - name: Build the packages the tests import
+        run: npm run build
+      - name: Run the daemon suite without ambient credentials or external network
+        run: |
+          set -euo pipefail
+          suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
+          mkdir -p "$suite_root/home" daemon-ubuntu-results
+          # Only loopback exists in this namespace. Drop back to the runner user
+          # before the suite starts. Pathname Unix sockets are not confined by it.
+          sudo unshare --net -- /bin/bash -s -- "$(id -un)" "$suite_root" "$PATH" "$PWD/daemon-ubuntu-results/vitest.json" <<'SUITE'
+          set -euo pipefail
+          ip link set lo up
+          exec runuser -u "$1" -- env -i HOME="$2/home" PATH="$3" TMPDIR="$2" TMUX_TMPDIR="$2" \
+            CI=true TERM=xterm-256color \
+            npm run test -w packages/daemon -- --reporter=default --reporter=json --outputFile.json="$4" --includeTaskLocation
+          SUITE
+      - name: List the tests that failed or did not run
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-vitest-summary.mjs daemon-ubuntu-results/vitest.json | tee daemon-ubuntu-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: daemon-ubuntu-results
+          path: daemon-ubuntu-results/
+          if-no-files-found: error
 
   installed-scenario:
     runs-on: ubuntu-latest

@@ -125,8 +125,14 @@ normalized submitted `answer`, `replayed`, actor-scoped links, and `submission`:
 partial choice; `answered` means the existing answer owner accepted the whole answer:
 it returned the answer, handed a permission request to its receiving agent, **or kept
 the answer on a request that is still waiting** because no agent could read it or the
-handoff could not complete. The owner's own `message` says which, and is the same text in the
-immutable receipt and its replays. `answered` never proves a native effect: it does not
+handoff could not complete. `replyQitemId` tells them apart first. A returned answer
+names its new reply row and has no `message`, unless the `message` says
+`Already answered`: then the row is the original return, and no new reply was sent.
+A runner's permission request has a null `replyQitemId`, and its `message` says
+whether the answer went to the receiving agent or is kept on the waiting request;
+one the answer closed, with no receiving agent here, has no `message`. The owner's
+`message`, when there is one, is the same text in the immutable receipt and its
+replays. `answered` never proves a native effect: it does not
 mean permission was granted, the tool ran, or work completed. Under unknown authority
 the answer is saved exactly this way, attributed to the person, bound to the exact ask,
 and never granted, resent or moved to a successor.

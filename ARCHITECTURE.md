@@ -315,7 +315,10 @@ packages.
   blocked: by a `sandbox-exec` profile on macOS, and on Ubuntu by a private network namespace
   with loopback only. On Ubuntu, the filesystem, pathname Unix sockets, and the runner user's
   processes and `/proc` stay shared; see `docs/as-built/test-layers.md`),
-  `linux-seat-environment` and `installed-scenario`.
+  `daemon-ubuntu` (the daemon suite again on Ubuntu under that confinement, with a summary of
+  the tests that failed or did not run and the full JSON report as an artifact; macOS daemon
+  coverage is unchanged), `linux-seat-environment` and
+  `installed-scenario`.
 
 ## Pointers
 

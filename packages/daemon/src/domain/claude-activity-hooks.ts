@@ -105,3 +105,13 @@ export function parseManagedClaudeNodeCommand(command: string): { executable: st
   if (executable !== "node" && (!isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(basename(executable)))) return null;
   return { executable, args: decoded.slice(1) };
 }
+
+/** The Node command OpenRig generates for a managed Claude setting (the status line collector, the activity relay):
+ *  the pinned interpreter and its arguments, POSIX-quoted. `exec` lets `sh -c` become Node instead of waiting on it
+ *  (dash keeps the shell otherwise, #3416); the matchers still own the shape without it. */
+export function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
+  const quotedArgs = args.map(shellQuote).join(" ");
+  const pinned = `${shellQuote(executable)} ${quotedArgs}`;
+  // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar.
+  return `exec ${parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`}`;
+}

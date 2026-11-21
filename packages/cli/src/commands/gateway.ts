@@ -247,7 +247,10 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
           followUps.default = res.ok ? { path: res.path } : { error: res.error };
         }
         const failed = Object.values(followUps).some((value) => "error" in (value as object));
-        console.log(JSON.stringify({ ok: !failed, entityId, path: result.value.path, receipt: result.receipt, ...followUps }));
+        // With no connector the person is asked in the Feed and Steering only (the list view's wording); say so now.
+        const noConnector = result.value.fragment.connectorBindings.length === 0;
+        console.log(JSON.stringify({ ok: !failed, entityId, path: result.value.path, receipt: result.receipt, ...(noConnector ? { delivery: "Feed and Steering only" } : {}), ...followUps }));
+        if (noConnector) console.error(`${entityId} has no connector binding, so messages and questions reach them only in the TUI's Feed and Steering until one is added: rerun rig gateway human add ${entityId} --replace with the same options plus --binding <kind:connectorRef:secretsRef:primary[:handle=<id>]> (rig gateway human set's binding.<n> changes only a binding that exists).`);
         if (failed) { console.error(`the person was registered, but part of their placement wasn't saved; fix it with rig gateway human set ${entityId} … or rig gateway default ${entityId}`); process.exitCode = 1; }
       } catch (error) { console.error(`refused: ${(error as Error).message}`); process.exitCode = 1; }
     })

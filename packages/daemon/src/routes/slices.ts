@@ -19,7 +19,7 @@ import { inferCatalogProject, ProjectReadError } from "../domain/workspace/proje
 
 import { Hono, type Context } from "hono";
 import { readParentScope, type ParentScopeNode } from "../domain/scope/mission-parent.js";
-import { readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
+import { createProofPolicyRead, readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
@@ -62,6 +62,9 @@ export function slicesRoutes(): Hono {
     // operation: the list rebuild, the boundToWorkflow per-slice get loop,
     // and the mission sidecar share ONE membership batch (pre-scope, each
     // uncached get built its own 2-scan batch: 2+2N total queue scans).
+    // One request-local policy reader for every readiness in this response
+    // (the listing and the project readiness below); never across requests.
+    const readPolicy = createProofPolicyRead();
     const listing = deps.indexer.withMembershipBatch(() => {
       const all = deps.indexer.list();
       let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
@@ -101,6 +104,7 @@ export function slicesRoutes(): Hono {
       const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
         additionalSliceRoots: projectLookup.additionalSliceRoots,
         complete: projectLookup.complete,
+        canonicalProjectId: projectLookup.canonicalProjectId,
       });
       const authored = deps.indexer.missionAuthoredStatuses();
       const parentRoots = new Map<string, ParentScopeNode[]>();
@@ -121,7 +125,7 @@ export function slicesRoutes(): Hono {
           ...s,
           childMissions: childMissions(s.slicePath, s.missionId),
           queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
-          readiness: readSliceReadiness(s.slicePath),
+          readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
         })),
         totalCount: filtered.length,
         filter,
@@ -135,7 +139,7 @@ export function slicesRoutes(): Hono {
     });
     if (listing instanceof Response) return listing;
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
-    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot);
+    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
       ...listing.missions[m.name],
       authoredStatus: m.historicalStatus ?? listing.missions[m.name]?.authoredStatus ?? null,
@@ -277,6 +281,7 @@ function selectSliceDeps(
       slicesRoot: project.missionsRoot,
       dogfoodEvidenceRoot: (opts.includeEvidenceRoot ?? true) ? qualifiedEvidenceRoot(project.root, project.missionsRoot) : null,
       projectId: project.id,
+      projectAliases: project.aliases,
       missionId: mission,
     });
     deps = { indexer, projector: deps.projector.withIndexer(indexer) };
@@ -308,6 +313,8 @@ interface SliceProjectLookup {
   resolveProjectId: (slicePath: string) => string | null;
   additionalSliceRoots: string[];
   complete: boolean;
+  /** A former id a catalogued project declares, read as that project's id (#3261). */
+  canonicalProjectId?: (id: string) => string;
 }
 
 function resolveSliceProjectLookup(
@@ -316,9 +323,12 @@ function resolveSliceProjectLookup(
 ): SliceProjectLookup {
   let catalogPath: string | null = null;
   let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
+  let canonicalProjectId: ((id: string) => string) | undefined;
   try {
     const listed = listProjects(c as never);
     catalogPath = listed.catalogPath;
+    const owners = new Map(listed.projects.flatMap((p) => (p.aliases ?? []).map((alias) => [alias, p.id] as const)));
+    canonicalProjectId = (id) => owners.get(id) ?? id;
     projects = listed.projects.map((p) => ({
       id: p.id,
       root: safeRealpath(p.root),
@@ -331,7 +341,7 @@ function resolveSliceProjectLookup(
   const additionalSliceRoots = projects.map((project) => project.missionsRoot);
   const complete = projects.length > 0 && projects.every((project) => !project.error);
   if (projects.length === 0) {
-    return { resolveProjectId: () => null, additionalSliceRoots, complete };
+    return { resolveProjectId: () => null, additionalSliceRoots, complete, canonicalProjectId };
   }
   // A project-scoped indexer's explicitly configured roots keep their existing
   // project identity, including compatible roots outside project.yaml. Extra
@@ -402,7 +412,7 @@ function resolveSliceProjectLookup(
     if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
     return selected.id;
   };
-  return { resolveProjectId, additionalSliceRoots, complete };
+  return { resolveProjectId, additionalSliceRoots, complete, canonicalProjectId };
 }
 
 function compareByActivityDesc(a: SliceListEntry, b: SliceListEntry): number {

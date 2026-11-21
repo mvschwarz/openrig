@@ -13,6 +13,22 @@ import { RigNotFoundError } from "./errors.js";
 import { seatLaunchAdditionsForLaunch, seatLaunchAdditionsForNode } from "./seat-launch-additions.js";
 import { isAbsolute, normalize } from "node:path";
 import { validateSafePath } from "./path-safety.js";
+import { SeatPoolSlotsRepository } from "./seat-pool-slots.js";
+
+/** The member-local id of a pod node: `impl` for `dev.impl`; a logical id without a pod is its own. */
+function memberLocalId(logicalId: string): string {
+  return logicalId.includes(".") ? logicalId.split(".").slice(1).join(".") : logicalId;
+}
+
+/** A node's restore policy: its latest session's (by creation, then id), else the node's own. */
+function restorePolicyOf(sessions: ReadonlyArray<{ nodeId: string; createdAt: string; id: string; restorePolicy?: string | null }>,
+  node: { id: string; restorePolicy?: string | null }): string | undefined {
+  const nodeSessions = sessions
+    .filter((s) => s.nodeId === node.id)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  const latest = nodeSessions.length > 0 ? nodeSessions[nodeSessions.length - 1]! : null;
+  return latest?.restorePolicy ?? node.restorePolicy ?? undefined;
+}
 
 interface RigSpecExporterDeps {
   rigRepo: RigRepository;
@@ -25,6 +41,7 @@ export class RigSpecExporter {
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private podRepo: PodRepository | null;
+  private poolSlots: SeatPoolSlotsRepository;
 
   constructor(deps: RigSpecExporterDeps) {
     if (deps.rigRepo.db !== deps.sessionRegistry.db) {
@@ -37,12 +54,54 @@ export class RigSpecExporter {
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.podRepo = deps.podRepo ?? null;
+    this.poolSlots = new SeatPoolSlotsRepository(this.db);
+  }
+
+  /** #3395: the rig as an export sees it. A seat pool's agents (every phase, `drained` included) are clones the pool
+   *  adds and drains on its own, so neither they nor an edge that touches one are part of the declared rig. The export
+   *  and every "not carried" list read through here, so none of them names a pool agent. */
+  private exportableNodes(rigId: string): import("./types.js").RigWithRelations | null {
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) return null;
+    const pool = new Set(this.poolSlots.poolAgentNodeIds(rigId));
+    if (pool.size === 0) return rig;
+    return {
+      ...rig,
+      nodes: rig.nodes.filter((node) => !pool.has(node.id)),
+      edges: rig.edges.filter((edge) => !pool.has(edge.sourceId) && (Boolean(edge.targetRef) || !pool.has(edge.targetId))),
+    };
+  }
+
+  /** #3395: the edges an export leaves out because they touch a seat pool agent, as `from`, `to` and `kind`, sorted.
+   *  The pool's own add creates no edge, so such an edge was added by hand; it is named rather than dropped silently. */
+  poolEdgesNotCarried(rigId: string): Array<{ from: string; to: string; kind: string }> {
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) return [];
+    const pool = new Set(this.poolSlots.poolAgentNodeIds(rigId));
+    if (pool.size === 0) return [];
+    const logical = new Map(rig.nodes.map((node) => [node.id, node.logicalId]));
+    return rig.edges
+      .filter((edge) => pool.has(edge.sourceId) || (!edge.targetRef && pool.has(edge.targetId)))
+      .map((edge) => ({
+        from: logical.get(edge.sourceId) ?? edge.sourceId,
+        to: edge.targetRef ?? logical.get(edge.targetId) ?? edge.targetId,
+        kind: edge.kind,
+      }))
+      .sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to) || a.kind.localeCompare(b.kind));
+  }
+
+  /** #3395: model seats whose stored `pool` block can't be read. The export leaves the block out of that seat, exports
+   *  the rest of the rig, and keeps the stored value as it is. */
+  poolNotCarried(rigId: string): string[] {
+    return (this.exportableNodes(rigId)?.nodes ?? [])
+      .filter((node) => { const pool = this.rigRepo.getNodePool(node.id); return pool !== undefined && "error" in pool; })
+      .map((node) => node.logicalId).sort();
   }
 
   /** OPR.0.7.0.9 — seats whose launch additions (agent file, appended prompt file, plugin folders) an export doesn't
    *  carry: the node records the seat's copies, not the spec's paths, so they must be named rather than dropped silently. */
   launchAdditionsNotCarried(rigId: string): string[] {
-    const rig = this.rigRepo.getRig(rigId);
+    const rig = this.exportableNodes(rigId);
     if (!rig) return [];
     return rig.nodes.filter((node) => {
       const additions = seatLaunchAdditionsForNode(this.db, node.id);
@@ -52,7 +111,7 @@ export class RigSpecExporter {
 
   /** Member declarations that cannot be honestly represented by this rig's single export root. */
   memberStartupNotCarried(rigId: string): Array<{ logicalId: string; reason: "source unavailable" | "different source root" }> {
-    const rig = this.rigRepo.getRig(rigId);
+    const rig = this.exportableNodes(rigId);
     if (!rig) return [];
     return rig.nodes.filter(node => node.podId !== null).flatMap(node => {
       const result = this.memberStartupSource(rigId, node);
@@ -90,7 +149,7 @@ export class RigSpecExporter {
 
   /** Name dormant Claude MCP choices omitted from declarations for another runtime. */
   claudeMcpNotCarried(rigId: string): string[] {
-    const rig = this.rigRepo.getRig(rigId);
+    const rig = this.exportableNodes(rigId);
     return (rig?.nodes ?? [])
       .filter((node) => node.runtime !== "claude-code" && node.claudeMcp === "none")
       .map((node) => node.logicalId).sort();
@@ -98,7 +157,7 @@ export class RigSpecExporter {
 
   /** Claude seats whose saved claude_auto_mode can't be read; the export leaves the block out. */
   claudeAutoModeNotCarried(rigId: string): string[] {
-    return (this.rigRepo.getRig(rigId)?.nodes ?? [])
+    return (this.exportableNodes(rigId)?.nodes ?? [])
       .filter((node) => node.runtime === "claude-code" && this.savedAutoMode(node.id).unreadable)
       .map((node) => node.logicalId).sort();
   }
@@ -106,7 +165,7 @@ export class RigSpecExporter {
   /** #3253: seats whose stored process_limits can't be read. The export leaves the field out of that seat, exports the
    *  rest of the rig, and keeps the stored value as it is. */
   processLimitsNotCarried(rigId: string): string[] {
-    return (this.rigRepo.getRig(rigId)?.nodes ?? [])
+    return (this.exportableNodes(rigId)?.nodes ?? [])
       .filter((node) => node.processLimitsError !== undefined)
       .map((node) => node.logicalId).sort();
   }
@@ -117,7 +176,7 @@ export class RigSpecExporter {
   }
 
   exportRig(rigId: string): LegacyRigSpec | RigSpec {
-    const rig = this.rigRepo.getRig(rigId);
+    const rig = this.exportableNodes(rigId);
     if (!rig) {
       throw new RigNotFoundError(rigId);
     }
@@ -176,6 +235,7 @@ export class RigSpecExporter {
       if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
       // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
       if (node.processLimits) specNode.processLimits = { ...node.processLimits };
+      if (node.runtime === "claude-code" && node.statuslineThrottle) specNode.statuslineThrottle = node.statuslineThrottle;
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;
@@ -206,6 +266,67 @@ export class RigSpecExporter {
     };
   }
 
+  /**
+   * #3395: one node as the pod-aware export writes its member: every launch setting the node records, its `pool` block
+   * when it is a seat pool's model, and its restore policy (the latest session's, else the node's). The rig export
+   * builds each member here, and the seat pool builds an agent's fragment from its model here, so a launch setting
+   * added later reaches both.
+   */
+  exportedMemberFromNode(rigId: string, nodeId: string): RigSpecPodMember {
+    const node = this.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) throw new Error(`Cannot export node '${nodeId}': no such node in rig '${rigId}'`);
+    return this.memberFromNode(rigId, node, restorePolicyOf(this.sessionRegistry.getSessionsForRig(rigId), node));
+  }
+
+  private memberFromNode(rigId: string, node: import("./types.js").NodeWithBinding, restorePolicy: string | undefined): RigSpecPodMember {
+    if (!node.runtime) {
+      throw new Error(`Cannot export node '${node.logicalId}': runtime is required but missing`);
+    }
+    const member: RigSpecPodMember = {
+      id: memberLocalId(node.logicalId),
+      agentRef: node.agentRef ?? "",
+      profile: node.profile ?? "default",
+      runtime: node.runtime,
+      cwd: node.cwd ?? ".",
+    };
+    if (node.label) member.label = node.label;
+    if (node.codexConfigProfile) member.codexConfigProfile = node.codexConfigProfile;
+    if (node.model) member.model = node.model;
+    if (node.effort) member.effort = node.effort;
+    if (node.advisor) member.advisor = node.advisor;
+    if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
+    if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+    // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
+    if (node.processLimits) member.processLimits = { ...node.processLimits };
+    if (node.runtime === "claude-code" && node.statuslineThrottle) member.statuslineThrottle = node.statuslineThrottle;
+    // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
+    // an export carries the ones its launch passes.
+    const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;
+    if (channels?.length) member.pluginChannels = channels;
+    // OPR.0.4.6.FAC1: a declared seat role exports with the pod
+    // member (round-trip fidelity — export→import keeps the role).
+    if (node.role) member.role = node.role;
+    // OPR.0.4.8.3 Seam B: the seat's RAW permission_policy ref round-trips
+    // (export truth = the ref, never the resolved provenance).
+    if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
+    const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
+    if (rules !== undefined) member.claudePermissions = rules;
+    const autoMode = node.runtime === "claude-code" ? this.savedAutoMode(node.id).block : undefined;
+    if (autoMode !== undefined) member.claudeAutoMode = autoMode;
+    if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") member.claudeTokenRef = node.claudeTokenRef;
+    const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.rigRepo.db, node.id) : undefined;
+    if (envelope !== undefined) member.codexPermissions = envelope;
+    if (node.env) member.env = node.env;
+    if (node.sessionSource) member.sessionSource = node.sessionSource;
+    const ownStartup = this.memberStartupSource(rigId, node).startup;
+    if (ownStartup) member.startup = ownStartup;
+    // #3395: a usable stored block exports with its model; one that can't be read is left out and named by poolNotCarried.
+    const pool = this.rigRepo.getNodePool(node.id);
+    if (pool !== undefined && "spec" in pool) member.pool = pool.spec;
+    if (restorePolicy) member.restorePolicy = restorePolicy;
+    return member;
+  }
+
   private exportPodAware(rigId: string, rig: import("./types.js").RigWithRelations): RigSpec {
     const pods = this.podRepo!.getPodsForRig(rigId);
     const sessions = this.sessionRegistry.getSessionsForRig(rigId);
@@ -214,7 +335,7 @@ export class RigSpecExporter {
     // Build maps for lookups
     // logicalId is "podSpecId.memberLocalId" — extract both parts
     const idToLogical = new Map(rig.nodes.map((n) => [n.id, n.logicalId]));
-    const idToMemberLocal = new Map(rig.nodes.map((n) => [n.id, n.logicalId.includes(".") ? n.logicalId.split(".").slice(1).join(".") : n.logicalId]));
+    const idToMemberLocal = new Map(rig.nodes.map((n) => [n.id, memberLocalId(n.logicalId)]));
     const idToNode = new Map(rig.nodes.map((n) => [n.id, n]));
     const nodeIdToPodId = new Map(rig.nodes.map((n) => [n.id, n.podId]));
 
@@ -229,64 +350,14 @@ export class RigSpecExporter {
     }
 
     // Helper: get restorePolicy for a node
-    const getRestorePolicy = (nodeId: string): string | undefined => {
-      const nodeSessions = sessions
-        .filter((s) => s.nodeId === nodeId)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-      const latest = nodeSessions.length > 0 ? nodeSessions[nodeSessions.length - 1]! : null;
-      return latest?.restorePolicy ?? idToNode.get(nodeId)?.restorePolicy ?? undefined;
-    };
+    const getRestorePolicy = (nodeId: string): string | undefined => restorePolicyOf(sessions, idToNode.get(nodeId)!);
 
     // Build pod specs
     const podSpecs: RigSpecPod[] = pods.map((pod) => {
       const podNodes = nodesByPod.get(pod.id) ?? [];
       const memberNodeIds = new Set(podNodes.map((n) => n.id));
 
-      const members: RigSpecPodMember[] = podNodes.map((node) => {
-        if (!node.runtime) {
-          throw new Error(`Cannot export node '${node.logicalId}': runtime is required but missing`);
-        }
-        const member: RigSpecPodMember = {
-          id: idToMemberLocal.get(node.id) ?? node.logicalId,
-          agentRef: node.agentRef ?? "",
-          profile: node.profile ?? "default",
-          runtime: node.runtime,
-          cwd: node.cwd ?? ".",
-        };
-        if (node.label) member.label = node.label;
-        if (node.codexConfigProfile) member.codexConfigProfile = node.codexConfigProfile;
-        if (node.model) member.model = node.model;
-        if (node.effort) member.effort = node.effort;
-        if (node.advisor) member.advisor = node.advisor;
-        if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
-        if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
-        // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
-        if (node.processLimits) member.processLimits = { ...node.processLimits };
-        // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
-        // an export carries the ones its launch passes.
-        const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;
-        if (channels?.length) member.pluginChannels = channels;
-        // OPR.0.4.6.FAC1: a declared seat role exports with the pod
-        // member (round-trip fidelity — export→import keeps the role).
-        if (node.role) member.role = node.role;
-        // OPR.0.4.8.3 Seam B: the seat's RAW permission_policy ref round-trips
-        // (export truth = the ref, never the resolved provenance).
-        if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
-        const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
-        if (rules !== undefined) member.claudePermissions = rules;
-        const autoMode = node.runtime === "claude-code" ? this.savedAutoMode(node.id).block : undefined;
-        if (autoMode !== undefined) member.claudeAutoMode = autoMode;
-        if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") member.claudeTokenRef = node.claudeTokenRef;
-        const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.rigRepo.db, node.id) : undefined;
-        if (envelope !== undefined) member.codexPermissions = envelope;
-        if (node.env) member.env = node.env;
-        if (node.sessionSource) member.sessionSource = node.sessionSource;
-        const ownStartup = this.memberStartupSource(rigId, node).startup;
-        if (ownStartup) member.startup = ownStartup;
-        const rp = getRestorePolicy(node.id);
-        if (rp) member.restorePolicy = rp;
-        return member;
-      });
+      const members: RigSpecPodMember[] = podNodes.map((node) => this.memberFromNode(rigId, node, getRestorePolicy(node.id)));
 
       // Pod-local edges: both endpoints are in this pod
       const podEdges: RigSpecPodEdge[] = rig.edges

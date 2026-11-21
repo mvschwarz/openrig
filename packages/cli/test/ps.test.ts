@@ -502,6 +502,23 @@ describe("Ps CLI", () => {
     expect(output).toContain("test-rig");
   });
 
+  it.each(["compact", "full"])("aligns the %s ps --nodes session column after a wide rig name", async (mode) => {
+    const name = "演示".repeat(9);
+    psData = [{ rigId: "rig-1", name, nodeCount: 1, runningCount: 1, status: "running" }];
+    nodesData["rig-1"] = [{
+      rigId: "rig-1", rigName: name, logicalId: "dev.impl", podNamespace: "dev",
+      canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+      sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
+    }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", ...(mode === "full" ? ["--full"] : [])]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const row = logs.find((line) => line.startsWith("演示"))!;
+    expect(row).toContain("dev-impl@test-rig");
+    expect(stringWidth(row.slice(0, row.indexOf("dev-impl@test-rig")))).toBe(header.indexOf("SESSION"));
+  });
+
   it("ps --nodes truncates long rig and session names so the table stays aligned", async () => {
     psData = [
       {

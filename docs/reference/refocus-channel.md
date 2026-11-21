@@ -166,6 +166,12 @@ With the switch on:
   `OPENRIG_REFOCUS_NOTES_MAX_AGE_DAYS` (default 14) is named with its age, the
   age's source (`updated:` frontmatter, else mtime) and the threshold: a cue
   for judgment, not a staleness verdict.
+- `rig scope slice progress <slice> --current-state "<text>"` and the
+  corresponding mission command replace the current-state section and stamp
+  `current_state_updated` in UTC. Repeating the same text leaves the stamp
+  unchanged. The packet reports that stamp, or an unknown write time when it
+  is absent; unrelated edits to the file do not refresh it. For a readme-only
+  rail, the section and stamp live in the node's spec instead of PROGRESS.md.
 - Each field is bounded on its own, with no total cap. A held or next row's
   summary and continuation are one line each (about 160 characters), with
   `rig queue show <id>` named when one was shortened. At most 20 held and 10

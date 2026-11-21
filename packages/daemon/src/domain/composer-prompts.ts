@@ -152,7 +152,9 @@ export interface ComposerInput {
   ghost?: { line: number; offset: number; continuationRows: number };
 }
 
-export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+ \+(\d+) lines\]$/;
+// Claude Code adds the line count only when the paste has line breaks: a single line over its collapse threshold
+// (800 characters in 2.1.326) shows as `[Pasted text #N]` (#2429).
+export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+(?: \+(\d+) lines)?\]$/;
 
 /** Preserve characters and spaces within rows. Only a real line break, a full
  * terminal row, or a word that cannot fit may explain a rendered row boundary.
@@ -214,7 +216,22 @@ export function composerPasteUncertainty(input: ComposerInput, text: string): "c
  * in the original composer. A later lease cannot acquire ownership from a label.
  */
 export function ownCollapsedPaste(input: ComposerInput, expected: string): string | null {
-  if (input.collapsedPaste && input.cursorAtEnd && input.pasteMatchesExpected) return input.collapsedPaste;
+  if (input.collapsedPaste && input.cursorAtEnd && input.pasteMatchesExpected && !foreignCountlessLabel(input.collapsedPaste, expected)) return input.collapsedPaste;
   const match = input.collapsedPaste && input.cursorAtEnd ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(input.collapsedPaste) : null;
-  return match && Number(match[1]) === expected.split("\n").length - 1 ? input.collapsedPaste : null;
+  return match && Number(match[1] ?? 0) === expected.split("\n").length - 1 ? input.collapsedPaste : null;
+}
+
+/** A label without a line count (`[Pasted text #K]`) beside other text is a person's single-line paste: ours collapses
+ * to the bare label, which `ownCollapsedPaste` reads on its own, and an inline paste draws none, so matching our head
+ * beside it proves nothing (#2429). Beside other text, only a label our own text spells out, as many times as it does,
+ * is ours; whitespace is ignored, since a wrap may split the label. */
+function foreignCountlessLabel(drawn: string, expected: string): boolean {
+  const labels = (text: string): string[] => text.replace(/\s+/g, "").match(/\[Pastedtext#\d+\]/g) ?? [];
+  const ours = labels(expected);
+  return labels(drawn).some(label => {
+    const at = ours.indexOf(label);
+    if (at < 0) return true;
+    ours.splice(at, 1);
+    return false;
+  });
 }

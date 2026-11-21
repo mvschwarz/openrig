@@ -56,6 +56,13 @@ collector stays silent and the renderer supplies the visible status line. This
 POSIX-shell example applies to WSL2's Linux installation; it does not establish
 native Windows support.
 
+## A throttled seat
+
+A seat with `statusline_throttle` (see the rig spec reference) keeps its throttled status line in its own launch
+settings, not in `.claude/settings.local.json`, so the generated command in that file is the same as for any other seat.
+A status line command of your own there, such as the wrapper above, wins over the throttle: the launch skips the
+throttle and says so.
+
 ## Check after an upgrade or instance change
 
 The collector command's paths and arguments are implementation details. OpenRig
@@ -120,6 +127,14 @@ failure stated (`provider-reset`). Otherwise a typed failure uses
 existing wake jitter, and records `config-fallback`. That is a retry time, not a
 claim that the provider's quota will reset then. The timer releases the shared
 blocker once and retains the existing durable wake delivery behavior.
+
+A parked row's watchdog wake that a Claude seat refuses at its usage-limit
+menu records `usage limit until <reset>` and retries at that stated reset,
+when OpenRig holds the seat's own typed usage-limit report with a readable
+reset. Otherwise, and for a Codex seat, the ordinary retry applies. The hold
+is rechecked: a seat that recovers is retried sooner, and a changed or
+unreadable report returns to the ordinary retry, so the wake can come before
+the stated reset.
 
 Authentication, billing and overloaded errors are not classified as usage
 limits. Claude limit banners are not scraped from the terminal, and older

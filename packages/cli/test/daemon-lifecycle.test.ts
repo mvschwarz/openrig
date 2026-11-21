@@ -3,6 +3,8 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createProcessLiveness, realDeps } from "../src/commands/daemon.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
@@ -25,6 +27,7 @@ import {
   type LifecycleDeps,
   type DaemonState,
 } from "../src/daemon-lifecycle.js";
+import { archiveSpentReservation } from "../src/daemon-start-lock.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -100,6 +103,73 @@ describe("Daemon Lifecycle", () => {
     const deps = startableDeps({ exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null), processLiveness: vi.fn(() => "dead") });
     await startDaemon({ port: 7433 }, deps);
     expect(deps.spawn).toHaveBeenCalledOnce();
+  });
+
+  describe("start over a stale daemon.json checks the launch port before spawning", () => {
+    const staleState: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const stale = (state: DaemonState = staleState): Partial<LifecycleDeps> => ({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+    });
+
+    it("refuses when the recorded PID is dead and the port is held, and releases the reservation", async () => {
+      const recordChild = vi.fn();
+      const release = vi.fn();
+      const deps = startableDeps({ ...stale(), processLiveness: vi.fn(() => "dead"), isPortOccupied: vi.fn(async () => true), acquireStartLock: () => ({ recordChild, release }) });
+      const error = await startDaemon({ port: 7433, host: "127.0.0.2" }, deps).catch((e) => e as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toMatch(/EADDRINUSE.*port 7433/);
+      expect(error.message).toContain("--port <unused-port>");
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.2", 7433);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.openForAppend).not.toHaveBeenCalled();
+      expect(deps.writeFile).not.toHaveBeenCalled();
+      expect(recordChild).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(false);
+    });
+
+    it("refuses when the recorded PID is alive but not an OpenRig daemon (refused probe) and the launch port is held", async () => {
+      // The recorded daemon was on another port; something else now holds the one this start binds.
+      const deps = startableDeps({
+        ...stale({ ...staleState, port: 7999 }),
+        processLiveness: vi.fn(() => "alive"),
+        fetch: vi.fn(async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); }),
+        isPortOccupied: vi.fn(async () => true),
+      });
+      await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/EADDRINUSE.*port 7433/);
+      expect(deps.fetch).toHaveBeenCalledWith("http://127.0.0.1:7999/healthz");
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.1", 7433);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.openForAppend).not.toHaveBeenCalled();
+    });
+
+    it("refuses on a real held loopback port when the recorded PID is dead", async () => {
+      const listener = createServer();
+      await new Promise<void>((resolve, reject) => {
+        listener.once("error", reject);
+        listener.listen(0, "127.0.0.1", resolve);
+      });
+      try {
+        const port = (listener.address() as { port: number }).port;
+        const deps = startableDeps({ ...stale({ ...staleState, port }), processLiveness: vi.fn(() => "dead"), isPortOccupied: realDeps().isPortOccupied });
+        await expect(startDaemon({ port }, deps)).rejects.toThrow(/EADDRINUSE/);
+        expect(deps.spawn).not.toHaveBeenCalled();
+        expect(deps.mkdirp).not.toHaveBeenCalled();
+        expect(listener.listening).toBe(true);
+      } finally {
+        await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+      }
+    });
+
+    it("checks the launch address once and starts when the recorded PID is dead and the port is free", async () => {
+      const deps = startableDeps({ ...stale(), processLiveness: vi.fn(() => "dead") });
+      await startDaemon({ port: 7433 }, deps);
+      expect(deps.isPortOccupied).toHaveBeenCalledOnce();
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.1", 7433);
+      expect(deps.spawn).toHaveBeenCalledOnce();
+    });
   });
 
   it("does not signal or remove state when recorded process liveness is unknown", async () => {
@@ -491,6 +561,32 @@ describe("Daemon Lifecycle", () => {
     expect(error.message).toContain("--port <unused-port>");
     expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
     expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start: a child that exits with the daemon's listen-failure line reports that line", async () => {
+    vi.useFakeTimers();
+    let log = "Earlier daemon log\n";
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFile: vi.fn((p: string) => p === LOG_FILE ? log : null),
+      spawn: vi.fn(() => {
+        setTimeout(() => {
+          log += "OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433\n";
+          child.exitCode = 69;
+          child.emit("exit", 69, null);
+        }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({ port: 7433 }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
+
+    expect(error.message).toMatch(/exited before startup completed \(code 69/);
+    expect(error.message).toContain("OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433");
+    expect(error.message).not.toContain("See ");
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
   });
 
   it("start reports the current child's database-conflict stop and one-start remedy", async () => {
@@ -2205,5 +2301,381 @@ describe("T2 — start-pending status (daemon-start.lock)", () => {
     }
     expect(logs[0]).toBe(`Daemon starting: launch reserved by pid ${LAUNCHER_PID} since ${STARTED_AT}; not listening yet`);
     expect(logs.join("\n")).not.toMatch(/timed out or was inconclusive/);
+  });
+});
+
+// ===================================================================
+// #3315 — stop with no recorded state: the child an unfinished start left running
+// (StartupChildPendingError keeps daemon-start.lock with its child record) is stopped only after the
+// reservation is confirmed to still name it. Fixture home: a real temp dir as in T2; every pid is
+// fictional, kill is a vi.fn and liveness is simulated, so no real process is ever signalled.
+// ===================================================================
+describe("#3315 — stop: unpublished start-reservation child", () => {
+  const LAUNCHER = 4242;
+  const CHILD = 5151;
+  const STARTED_AT = "2026-11-01T00:00:00.400Z";
+  const ENDPOINT = "http://127.0.0.1:7433";
+  const NOW = new Date("2026-11-01T00:05:00.000Z");
+  let home: string;
+  let savedUrl: string | undefined;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "stop-reserved-child-"));
+    savedUrl = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = ENDPOINT; // the checked endpoint, independent of any local config
+    vi.useFakeTimers({ now: NOW });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    fs.rmSync(home, { recursive: true, force: true });
+    if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+    else delete process.env["OPENRIG_URL"];
+  });
+
+  const lockFile = () => path.join(home, "daemon-start.lock");
+  const header = (extra: Record<string, unknown> = { bootId: "boot-A" }) =>
+    JSON.stringify({ launcherPid: LAUNCHER, startedAt: STARTED_AT, ...extra }) + "\n";
+  const childRecord = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ childPid: CHILD, startToken: "linux:777", pidNamespace: "host", host: "127.0.0.1", port: 7433, ...extra }) + "\n";
+  const validLock = () => header() + childRecord();
+
+  function reservedDeps(opts: {
+    lock?: string | null;
+    alive?: number[];
+    liveness?: Record<number, "alive" | "dead" | "unknown">;
+    bootId?: string;
+    token?: string | null;
+    pidNamespace?: string | null;
+    /** Before the signal: the listener's answer; default, it hangs (the wedge). After it: refused. */
+    probe?: (init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+    exits?: boolean;
+    /** The receipt the child writes as it exits, made at signal time; null = none. */
+    receipt?: ((pid: number) => string) | null;
+    unreadableState?: boolean;
+  } = {}): LifecycleDeps {
+    const lock = opts.lock === undefined ? validLock() : opts.lock;
+    if (lock !== null) fs.writeFileSync(lockFile(), lock);
+    const alive = new Set(opts.alive ?? [CHILD]);
+    let signalled = false;
+    const underHome = (p: string) => p.startsWith(home + path.sep) && fs.existsSync(p);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    return mockDeps({
+      homeDir: home,
+      exists: vi.fn((p: string) => (opts.unreadableState && p === STATE_FILE) || underHome(p)),
+      readFile: vi.fn((p: string) => {
+        if (opts.unreadableState && p === STATE_FILE) return "{not json";
+        return underHome(p) ? fs.readFileSync(p, "utf8") : null;
+      }),
+      isProcessAlive: vi.fn((pid: number) => alive.has(pid)),
+      processLiveness: vi.fn((pid: number) => opts.liveness?.[pid] ?? (alive.has(pid) ? "alive" : "dead")),
+      bootId: () => opts.bootId ?? "boot-A",
+      processStartToken: vi.fn((pid: number) =>
+        pid === CHILD && opts.token !== null ? opts.token ?? "linux:777" : undefined),
+      pidNamespace: () => (opts.pidNamespace === null ? undefined : opts.pidNamespace ?? "host"),
+      releaseStartReservation: vi.fn(archiveSpentReservation),
+      sleep: async () => {},
+      kill: vi.fn((pid: number) => {
+        signalled = true;
+        if (opts.exits !== false) {
+          alive.delete(pid);
+          if (opts.receipt !== null) fs.writeFileSync(path.join(home, "daemon-shutdown.json"), (opts.receipt ?? cleanReceipt)(pid));
+        }
+        return true;
+      }),
+      fetch: vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+        if (signalled) throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+        return opts.probe ? opts.probe(init) : neverFetch();
+      }),
+    });
+  }
+
+  async function stop(deps: LifecycleDeps): Promise<"stopped" | "no-target" | Error> {
+    const outcome = stopDaemon(deps).catch((e: Error) => e);
+    await vi.runAllTimersAsync();
+    return outcome;
+  }
+
+  async function expectRefused(deps: LifecycleDeps, reason: RegExp): Promise<void> {
+    const outcome = await stop(deps);
+    expect(outcome).toBeInstanceOf(Error);
+    const message = (outcome as Error).message;
+    expect(message).toMatch(/^Daemon state is missing — cannot stop safely\. Checked .*; listener (unavailable|responding)\./);
+    expect(message).toMatch(reason);
+    expect(message).toMatch(/no signal sent\.$/);
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(fs.existsSync(lockFile())).toBe(true);
+  }
+
+  function fresh(): void { fs.rmSync(lockFile(), { force: true }); }
+
+  it("stops the wedged child the reservation names: one SIGTERM to the child, never the launcher, and archives the reservation", async () => {
+    const deps = reservedDeps();
+    const raw = validLock();
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledTimes(1);
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+    expect(deps.releaseStartReservation).toHaveBeenCalledWith(lockFile(), raw);
+    expect(fs.existsSync(lockFile())).toBe(false);
+    const archived = fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock.stopped-"));
+    expect(archived).toHaveLength(1);
+    expect(fs.readFileSync(path.join(home, archived[0]!), "utf8")).toBe(raw);
+  });
+
+  it("stops the child when the listener answers with the child's own PID", async () => {
+    const deps = reservedDeps({ probe: async () => ({ ok: true, json: async () => ({ pid: CHILD }) }) });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+  });
+
+  it("refuses when the listener names another PID or no PID", async () => {
+    await expectRefused(reservedDeps({ probe: async () => ({ ok: true, json: async () => ({ pid: 999 }) }) }), /names PID 999/);
+    fresh();
+    await expectRefused(reservedDeps({ probe: async () => ({ ok: true, json: async () => ({}) }) }), /names no PID/);
+  });
+
+  it("a body that never finishes is bounded like a listener that never answers (the wedge), not an endless wait", async () => {
+    const deps = reservedDeps({ probe: async () => ({ ok: true, json: () => new Promise(() => {}) }) });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+  });
+
+  it("refuses when the listener stops answering in time only on the first check and then refuses", async () => {
+    let calls = 0;
+    const deps = reservedDeps({ probe: () => (++calls === 1 ? neverFetch() : Promise.reject(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }))) });
+    await expectRefused(deps, /now refuses/);
+  });
+
+  it("refuses while the launcher is alive or its liveness is unknown", async () => {
+    await expectRefused(reservedDeps({ alive: [LAUNCHER, CHILD] }), /launcher PID 4242 is alive/);
+    fresh();
+    await expectRefused(reservedDeps({ liveness: { [LAUNCHER]: "unknown" } }), /launcher PID 4242 is of unknown liveness/);
+  });
+
+  it("refuses a reservation from another boot, and one that records no boot ID", async () => {
+    await expectRefused(reservedDeps({ bootId: "boot-B" }), /boot ID/);
+    fresh();
+    await expectRefused(reservedDeps({ lock: header({}) + childRecord() }), /boot ID/);
+  });
+
+  it("refuses a reused PID: the process now at the child's PID has another start token", async () => {
+    await expectRefused(reservedDeps({ token: "linux:999" }), /PID 5151 is now another process than the reserved child/);
+    fresh();
+    await expectRefused(reservedDeps({ token: null }), /start identity is unavailable/);
+  });
+
+  it("refuses a child record with no identity (an older CLI's reservation)", async () => {
+    await expectRefused(reservedDeps({ lock: header() + JSON.stringify({ childPid: CHILD }) + "\n" }), /records no child identity/);
+  });
+
+  it("refuses when the checked endpoint is not the one the child was launched on", async () => {
+    process.env["OPENRIG_URL"] = "http://127.0.0.1:7999";
+    await expectRefused(reservedDeps(), /launched to listen at http:\/\/127\.0\.0\.1:7433, not at the checked http:\/\/127\.0\.0\.1:7999\/healthz/);
+  });
+
+  it("refuses when the child is gone or its liveness is unknown", async () => {
+    await expectRefused(reservedDeps({ alive: [] }), /child PID 5151 is absent/);
+    fresh();
+    await expectRefused(reservedDeps({ liveness: { [CHILD]: "unknown" } }), /child PID 5151 is of unknown liveness/);
+  });
+
+  it("refuses a reservation that is not a launcher record followed by one child record", async () => {
+    await expectRefused(reservedDeps({ lock: header() }), /not a launcher record followed by one child record/);
+    fresh();
+    await expectRefused(reservedDeps({ lock: validLock() + childRecord({ childPid: 6161 }) }), /not a launcher record/);
+    fresh();
+    await expectRefused(reservedDeps({ lock: header() + childRecord({ host: "bad host/x" }) }), /not a launcher record/);
+  });
+
+  it("a child record with a port out of range carries no endpoint, and is refused as an older CLI's", async () => {
+    await expectRefused(reservedDeps({ lock: header() + childRecord({ port: 70000 }) }), /records no child identity/);
+  });
+
+  it("refuses when an unreadable daemon.json is present", async () => {
+    await expectRefused(reservedDeps({ unreadableState: true }), /daemon\.json is present but unreadable/);
+  });
+
+  it("re-reads the child's liveness and start token right before the signal: a change during the listener check refuses", async () => {
+    let token = "linux:777";
+    // Only the check's own listener read carries a signal; the stop's earlier listener probe does not.
+    const changed = reservedDeps({ probe: (init) => { if (init?.signal) token = "linux:888"; return neverFetch(); } });
+    changed.processStartToken = vi.fn((pid: number) => (pid === CHILD ? token : undefined));
+    await expectRefused(changed, /PID 5151 is now another process than the reserved child \(start linux:888, reserved linux:777\) after the listener check/);
+    fresh();
+    let exited = false;
+    const gone = reservedDeps({ probe: (init) => { if (init?.signal) exited = true; return neverFetch(); } });
+    gone.processLiveness = vi.fn((pid: number) => (pid === CHILD && !exited ? "alive" : "dead"));
+    await expectRefused(gone, /child PID 5151 is absent after the listener check/);
+  });
+
+  it("an unknown pid namespace is no evidence of the host's: a record without one, or an unreadable own one, refuses", async () => {
+    const { pidNamespace: _omitted, ...withoutNamespace } = JSON.parse(childRecord()) as Record<string, unknown>;
+    await expectRefused(reservedDeps({ lock: header() + JSON.stringify(withoutNamespace) + "\n" }), /records no pid namespace for its child/);
+    fresh();
+    await expectRefused(reservedDeps({ pidNamespace: null }), /this shell's pid namespace is unknown/);
+  });
+
+  it("aborts its own listener request and body at the check's deadline, and still reads the timeout as the wedge", async () => {
+    let seen: AbortSignal | undefined;
+    let abortedBeforeSignal: boolean | undefined;
+    const deps = reservedDeps({
+      probe: async (init) => {
+        seen = init?.signal;
+        // Headers arrive, then the body stays open until something aborts it.
+        return { ok: true, json: () => new Promise((_, reject) => seen?.addEventListener("abort", () => reject(seen?.reason))) };
+      },
+    });
+    const kill = deps.kill as ReturnType<typeof vi.fn>;
+    const realKill = kill.getMockImplementation()!;
+    kill.mockImplementation((pid: number, signal: string) => { abortedBeforeSignal = seen?.aborted; return realKill(pid, signal); });
+    expect(await stop(deps)).toBe("stopped");
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(true);
+    expect(abortedBeforeSignal).toBe(true);
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+  });
+
+  it("with realDeps' fetch and a local server that sends headers and holds the body open, the check's request is aborted and its socket closed by the 250 ms deadline", async () => {
+    vi.useRealTimers();
+    let arrived: number | undefined;
+    let closed: number | undefined;
+    let seen: AbortSignal | undefined;
+    let socketClosed!: () => void;
+    const closedOnce = new Promise<void>((resolve) => { socketClosed = resolve; });
+    const server = createHttpServer((req, res) => {
+      arrived = Date.now();
+      req.socket.on("close", () => { closed = Date.now(); socketClosed(); });
+      // Headers go out; the body never ends.
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"pid":');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    process.env["OPENRIG_URL"] = `http://127.0.0.1:${port}`;
+    try {
+      // Only the check's own listener read carries a signal: that one goes over the real fetch to the server.
+      const deps = reservedDeps({
+        lock: header() + childRecord({ port }),
+        probe: (init) => {
+          if (!init?.signal) return neverFetch();
+          seen = init.signal;
+          return realDeps().fetch(`http://127.0.0.1:${port}/healthz`, init);
+        },
+      });
+      const kill = deps.kill as ReturnType<typeof vi.fn>;
+      const realKill = kill.getMockImplementation()!;
+      let abortedBeforeSignal: boolean | undefined;
+      // The kill stays mocked: no real process gets a signal. It only records whether the request was already aborted.
+      kill.mockImplementation((pid: number, signal: string) => { abortedBeforeSignal = seen?.aborted; return realKill(pid, signal); });
+      const outcome = await stopDaemon(deps).catch((e: Error) => e);
+      await Promise.race([closedOnce, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      expect(outcome).toBe("stopped");
+      expect(arrived).toBeDefined();
+      expect(closed).toBeDefined();
+      // The deadline is 250 ms; the margin covers the event loop of a loaded test host.
+      expect(closed! - arrived!).toBeLessThan(250 + 500);
+      expect(abortedBeforeSignal).toBe(true);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("refuses from another pid namespace than the reservation's", async () => {
+    await expectRefused(reservedDeps({ pidNamespace: "pid:[4026532999]" }), /another pid namespace/);
+    fresh();
+    await expectRefused(reservedDeps({ lock: header() + childRecord({ pidNamespace: "pid:[4026532111]" }) }), /another pid namespace/);
+  });
+
+  it("a child that survives SIGTERM: one signal, and the reservation is retained", async () => {
+    const deps = reservedDeps({ exits: false });
+    const outcome = await stop(deps) as Error;
+    expect(outcome.message).toMatch(/did not exit after SIGTERM.*start-reservation child PID 5151 present.*start reservation retained/);
+    expect(deps.kill).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(lockFile())).toBe(true);
+  });
+
+  it("a child that exits without a matching clean receipt: drain unverified, reservation retained", async () => {
+    expect((await stop(reservedDeps({ receipt: null })) as Error).message)
+      .toMatch(/drain completion unverified \(no matching shutdown receipt\); start reservation retained/);
+    expect(fs.existsSync(lockFile())).toBe(true);
+    fresh();
+    expect((await stop(reservedDeps({ receipt: () => cleanReceipt(999) })) as Error).message).toMatch(/drain completion unverified/);
+    fresh();
+    // The child's own clean receipt, but from a shutdown that began before this stop's signal.
+    const stale = (pid: number) => JSON.stringify({ ...JSON.parse(cleanReceipt(pid)), startedAt: new Date(Date.now() - 60_000).toISOString() });
+    expect((await stop(reservedDeps({ receipt: stale })) as Error).message).toMatch(/drain completion unverified/);
+    fresh();
+    const timedOut = (pid: number) => JSON.stringify({ ...JSON.parse(cleanReceipt(pid)), outcome: "timed-out", phase: "drain" });
+    expect((await stop(reservedDeps({ receipt: timedOut })) as Error).message).toMatch(/incomplete shutdown: timed-out/);
+    expect(fs.existsSync(lockFile())).toBe(true);
+  });
+
+  it("stopped, but a reservation that changed before its release is left in place", async () => {
+    const deps = reservedDeps();
+    deps.releaseStartReservation = vi.fn((file: string, raw: string) => {
+      fs.appendFileSync(file, "\n"); // rewritten by someone else since stop read it
+      return archiveSpentReservation(file, raw);
+    });
+    expect(await stop(deps)).toBe("stopped");
+    expect(fs.existsSync(lockFile())).toBe(true);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/was not released/));
+  });
+
+  it("a refused listener with a reservation is still today's no-target, with nothing signalled", async () => {
+    const deps = reservedDeps({ probe: () => Promise.reject(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })) });
+    expect(await stop(deps)).toBe("no-target");
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("without a reservation the refusal is today's, word for word, and nothing is signalled", async () => {
+    const deps = reservedDeps({ lock: null });
+    const outcome = await stop(deps) as Error;
+    expect(outcome.message).toMatch(/^Daemon state is missing — cannot stop safely\. Checked \S+; listener unavailable\.$/);
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("#3315 — archiveSpentReservation", () => {
+  let home: string;
+  beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), "spent-reservation-")); });
+  afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  it("archives the reservation under its inode only while it holds exactly the expected bytes, and only once", () => {
+    const file = path.join(home, "daemon-start.lock");
+    fs.writeFileSync(file, "a\nb\n");
+    expect(archiveSpentReservation(file, "a\nb\nc\n")).toBeUndefined();
+    expect(fs.existsSync(file)).toBe(true);
+    const ino = fs.statSync(file).ino;
+    // Another stop already took this inode's archive name: this one leaves the file alone.
+    fs.writeFileSync(`${file}.stopped-${ino}`, "other");
+    expect(archiveSpentReservation(file, "a\nb\n")).toBeUndefined();
+    expect(fs.existsSync(file)).toBe(true);
+    fs.rmSync(`${file}.stopped-${ino}`);
+    expect(archiveSpentReservation(file, "a\nb\n")).toBe(`${file}.stopped-${ino}`);
+    expect(fs.existsSync(file)).toBe(false);
+    expect(archiveSpentReservation(file, "a\nb\n")).toBeUndefined();
+  });
+});
+
+describe("#3315 — realDeps fetch forwards the caller's abort signal", () => {
+  it("aborting the signal cancels the underlying request", async () => {
+    const seen: AbortSignal[] = [];
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => new Promise((_, reject) => {
+      const signal = (init as RequestInit).signal!;
+      seen.push(signal);
+      signal.addEventListener("abort", () => reject(signal.reason));
+    }));
+    try {
+      const controller = new AbortController();
+      const pending = realDeps().fetch("http://127.0.0.1:1/healthz", { signal: controller.signal });
+      controller.abort(new Error("check deadline"));
+      await expect(pending).rejects.toThrow("check deadline");
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.aborted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

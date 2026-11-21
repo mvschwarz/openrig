@@ -26,7 +26,7 @@
 
 import { Hono } from "hono";
 import { parseDocument, isScalar } from "yaml";
-import { readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
+import { createProofPolicyRead, readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -79,7 +79,10 @@ export function missionsRoutes(): Hono {
       workflowSpec,
       c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined,
     );
-    const readiness = readMissionReadiness(missionPath);
+    // One request-local policy reader: shared proofPolicy manifests are read
+    // once for this response and never carried to the next request.
+    const readPolicy = createProofPolicyRead();
+    const readiness = readMissionReadiness(missionPath, readPolicy);
     const status = readiness.historicalStatus ?? readMissionStatus(missionPath);
     const parentNodes = legacyNodes ?? readParentScope(path.resolve(missionPath, ".."), { onInvalid: (message) => parentWarnings.push(message) });
     const missionNode = parentNodes.find((node) => node.kind === "mission" && node.path === missionPath);
@@ -88,7 +91,7 @@ export function missionsRoutes(): Hono {
       missionId,
       missionPath,
       readiness,
-      slices: slices.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath) })),
+      slices: slices.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath, undefined, readPolicy) })),
       workflow_spec: workflowSpec,
       topology,
       status,
@@ -110,12 +113,12 @@ export function missionsRoutes(): Hono {
       return c.json({ error: "slices_indexer_unavailable" }, 503);
     }
     const missionId = c.req.param("missionId");
-    const allSlices = indexer.list();
-    const slices = allSlices.filter((s) => s.missionId === missionId);
-    if (slices.length === 0) {
+    // Only the folder is needed: a cold list() would rebuild queue membership for
+    // every slice before this write could run.
+    const missionPath = indexer.missionPath(missionId);
+    if (!missionPath) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
-    const missionPath = computeMissionPath(slices[0]!);
     try {
       writeMissionStatusComplete(missionPath);
     } catch (err) {

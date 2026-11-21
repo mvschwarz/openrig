@@ -118,6 +118,7 @@ export interface InstantiateInput {
    * Absent AND no spec default = unbound (today's behavior).
    */
   targetRig?: string;
+  targetPod?: string;
   /**
    * The project / mission / slice (and free-form tags) this instance works
    * for. Normalized here (a reserved or contradicting tag throws
@@ -222,8 +223,8 @@ export class WorkflowRuntime {
       exceptionConfigurationSource(compiled.sources.find(s => s.kind === "mission")!.path, compiled.graphSource)) } : {}) };
   }
 
-  private readExceptionReadiness(spec: WorkflowSpec, source: string, boundRig?: string | null, instanceId?: string) {
-    return inspectExceptionReadiness({ db: this.db, spec, source, boundRig, instanceId,
+  private readExceptionReadiness(spec: WorkflowSpec, source: string, boundRig?: string | null, instanceId?: string, boundPod?: string | null) {
+    return inspectExceptionReadiness({ db: this.db, spec, source, boundRig, instanceId, boundPod,
       hostDefault: () => this.exceptionDial?.hostDefault() ?? null, humanFallbackSeat: this.exceptionDial?.humanFallbackSeat });
   }
 
@@ -243,7 +244,7 @@ export class WorkflowRuntime {
     const row = this.specCache.getForInstance(instance);
     if (!row) return null;
     return this.readExceptionReadiness(row.spec, exceptionConfigurationSource(row.sourcePath,
-      instance.lifecycleBinding?.graphSource as LifecycleCompilation["graphSource"] | undefined), instance.boundRig, instanceId);
+      instance.lifecycleBinding?.graphSource as LifecycleCompilation["graphSource"] | undefined), instance.boundRig, instanceId, instance.boundPod);
   }
 
   exceptionObligations(instanceId: string) {
@@ -325,7 +326,7 @@ export class WorkflowRuntime {
     const specRow = instance ? this.specCache.getForInstance(instance) : stored ? bindRowToRig(stored, rig) : null;
     if (!specRow) return null;
     const spec = specRow.spec;
-    const roleCtx = roleResolutionContext(this.db, rig);
+    const roleCtx = roleResolutionContext(this.db, rig, instance?.boundPod);
     return resolveExceptionRoute({
       exceptionClass,
       spec,
@@ -558,7 +559,15 @@ export class WorkflowRuntime {
     // The instance row stores that binding, so every later read of this
     // instance's spec expands the same way. With no bound rig the target
     // stays literal and is handled at the hop that selects it.
-    specRow = bindRowToRig(specRow, boundRig);
+    const boundPod = input.targetPod ?? null;
+    if (boundPod !== null) {
+      if (!boundRig || !boundPod.trim()) {
+        throw new WorkflowProjectorError("bound_pod_invalid", "A valid --pod requires a bound rig.", { targetPod: boundPod, boundRig });
+      }
+      const pod = this.db.prepare(`SELECT id FROM pods WHERE rig_id = (SELECT id FROM rigs WHERE name = ? ORDER BY archived_at IS NOT NULL, created_at LIMIT 1) AND namespace = ?`).get(boundRig, boundPod);
+      if (!pod) throw new WorkflowProjectorError("bound_pod_unknown", `Pod '${boundPod}' is not registered on rig '${boundRig}'.`, { targetPod: boundPod, boundRig });
+    }
+    specRow = bindRowToRig(specRow, boundRig, boundPod);
 
     // OPR.0.4.6.WF2 FR-2: static harness-pin reconciliation for EVERY
     // pinned step at instantiate (the earliest knowable moment against
@@ -580,6 +589,10 @@ export class WorkflowRuntime {
     const runtimeOf = (session: string) => nodeRuntimeOf(this.db, session);
     const declaredTargetsOf = (roleName: string): number =>
       (specRow.spec.roles?.[roleName]?.preferred_targets ?? []).length;
+    const targetsAwaitPod = (roleName: string): boolean => {
+      const targets = specRow.spec.roles?.[roleName]?.preferred_targets ?? [];
+      return boundPod === null && targets.length > 0 && targets.every((target) => target.startsWith("{pod}-"));
+    };
     for (const step of specRow.spec.steps) {
       if (step.harness) {
         // rev1-r2 blocker fix: gated steps are NOT excluded — a pinned
@@ -592,9 +605,12 @@ export class WorkflowRuntime {
           const gateRoleTargets = gateIsHuman
             ? declaredTargetsOf(step.actor_role)
             : declaredTargetsOf(step.gate.target);
+          const gateRole = gateIsHuman ? step.actor_role : step.gate.target;
+          if (targetsAwaitPod(gateRole)) continue;
           if (boundRig !== null && gateRoleTargets === 0) continue; // role-only on a bound rig: projection resolves
           compileGate(specRow.spec, step, runtimeOf);
         } else if (!(step === entryStep && input.entryOwnerSession)) {
+          if (targetsAwaitPod(step.actor_role)) continue;
           if (boundRig !== null && declaredTargetsOf(step.actor_role) === 0) continue;
           resolveDefaultOwner(specRow.spec, step, runtimeOf);
         }
@@ -612,16 +628,16 @@ export class WorkflowRuntime {
     if (boundRig !== null) {
       for (const step of specRow.spec.steps) {
         const rolesToCover: string[] = [];
-        if (declaredTargetsOf(step.actor_role) === 0) rolesToCover.push(step.actor_role);
+        if (declaredTargetsOf(step.actor_role) === 0 && !(step === entryStep && !step.gate && input.entryOwnerSession)) rolesToCover.push(step.actor_role);
         if (step.gate && !isHumanSeatSession(step.gate.target) && declaredTargetsOf(step.gate.target) === 0) {
           rolesToCover.push(step.gate.target);
         }
         for (const roleName of rolesToCover) {
-          if (!rigDeclaresRole(this.db, boundRig, roleName)) {
+          if (!rigDeclaresRole(this.db, boundRig, roleName, boundPod)) {
             throw new WorkflowProjectorError(
               "bound_rig_role_uncovered",
-              `cannot instantiate: step "${step.id}" needs role "${roleName}" but NO seat on rig "${boundRig}" declares that role (at any lifecycle state). Add a member with role ${roleName} to rig ${boundRig} (rig add), declare role: ${roleName} on an existing member, or add preferred_targets to the role in the spec. (A declared-but-not-yet-running seat is fine — liveness is checked when the step projects.)`,
-              { specPath: input.specPath, stepId: step.id, role: roleName, boundRig },
+              `cannot instantiate: step "${step.id}" needs role "${roleName}" but no seat on rig "${boundRig}"${boundPod ? ` in pod "${boundPod}"` : ""} declares it. Add a member with that role or declare preferred_targets. A stopped seat is sufficient; liveness is checked at projection.`,
+              { specPath: input.specPath, stepId: step.id, role: roleName, boundRig, ...(boundPod ? { boundPod } : {}) },
             );
           }
         }
@@ -709,7 +725,7 @@ export class WorkflowRuntime {
     // packet is actually created now (the first routing decision), so
     // this is resolve-once, not eager pre-resolution. A tier-3 failure
     // here re-throws under the entry error code, candidates preserved.
-    const entryRoleCtx = roleResolutionContext(this.db, boundRig);
+    const entryRoleCtx = roleResolutionContext(this.db, boundRig, boundPod);
     let entryGate: GateCompileResult | null;
     let entryOwner: string | null;
     try {
@@ -768,6 +784,7 @@ export class WorkflowRuntime {
         // OPR.0.4.6.FAC1: the resolved rig binding persists with the
         // instance row (same txn as the entry packet).
         boundRig,
+        boundPod,
         scope,
         lifecycle: input.lifecycle
           ? {
@@ -1043,12 +1060,17 @@ export class WorkflowRuntime {
   async abort(input: { instanceId: string; reason: string; actorSession: string; identityProvenance?: string | null }): Promise<{
     instanceId: string;
     closedPacketIds: string[];
+    /** Frontier packets the queue had already closed (done or handed-off): recorded on the workflow, queue row untouched. */
+    alreadyClosedPacketIds?: string[];
+    advisories?: string[];
     status: "aborted";
   }> {
     if (!input.reason.trim()) {
       throw new WorkflowProjectorError("abort_reason_required", "workflow abort requires a non-empty reason");
     }
     const closedPacketIds: string[] = [];
+    const alreadyClosedPacketIds: string[] = [];
+    const advisories: string[] = [];
     this.eventBus.withNotifyEnvelope((register) => {
       const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
       if (instance.status === "completed" || instance.status === "aborted") {
@@ -1064,39 +1086,65 @@ export class WorkflowRuntime {
         const stepId = binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
         if (!stepId) throw new WorkflowProjectorError("frontier_binding_indeterminate", `cannot abort: packet ${packetId} has no step binding`, { instanceId: instance.instanceId, packetId });
         const step = spec?.steps.find((candidate) => candidate.id === stepId);
-        const closed = this.queueRepo.updateWithinTransaction({
-          qitemId: packetId,
-          actorSession: input.actorSession,
-          identityProvenance: input.identityProvenance ?? null,
-          viaWorkflowVerb: true,
-          state: "canceled",
-          transitionNote: `workflow abort by ${input.actorSession}: ${input.reason}`,
-        });
-        register(closed.persistedEvent);
+        // A frontier packet the queue already closed (an ordinary `rig queue handoff`, or `rig queue handoff-and-complete`,
+        // doesn't move the workflow) has nothing left to cancel, and canceling it would reopen a terminal row. The abort records it on the
+        // workflow without writing its queue row; a handoff successor stays as the queue left it, and the advisory names it.
+        const alreadyClosed = isTerminalState(packet.state);
+        if (alreadyClosed) {
+          // `rig queue handoff` leaves it handed-off and `rig queue handoff-and-complete` leaves it done; both record the
+          // successor's handed_off_from.
+          const successors = (this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").all(packetId) as Array<{ qitem_id: string }>)
+            .map((row) => this.queueRepo.getById(row.qitem_id)).filter((row) => row !== null);
+          // Only a live successor can still be canceled; a closed one is named for the record, with no command to run.
+          const live = successors.filter((row) => isBlockerLive(row.state));
+          const named = successors.length > 0
+            ? `; its successor ${successors.map((row) => `${row.qitemId} (${row.destinationSession}, ${row.state})`).join(", ")} is left as the queue has it`
+            : "";
+          const howToStop = live.length > 0
+            ? `: if that work should stop too, ${live.map((row) => `rig queue update ${row.qitemId} --state canceled`).join("; ")}`
+            : "";
+          advisories.push(`packet ${packetId} was already ${packet.state} in the queue, so the abort recorded it on the workflow without writing its queue row${named}${howToStop}`);
+        } else {
+          const closed = this.queueRepo.updateWithinTransaction({
+            qitemId: packetId,
+            actorSession: input.actorSession,
+            identityProvenance: input.identityProvenance ?? null,
+            viaWorkflowVerb: true,
+            state: "canceled",
+            transitionNote: `workflow abort by ${input.actorSession}: ${input.reason}`,
+          });
+          register(closed.persistedEvent);
+        }
         this.trailLog.record({
           instanceId: instance.instanceId,
           stepId,
           stepRole: step?.actor_role ?? "unknown",
           closedAt,
           closureReason: "failed",
-          closureEvidence: { abort: { reason: input.reason, actorSession: input.actorSession } },
+          closureEvidence: { abort: { reason: input.reason, actorSession: input.actorSession, ...(alreadyClosed ? { queueState: packet.state } : {}) } },
           actorSession: input.actorSession,
           nextQitemId: null,
           priorQitemId: packetId,
         });
         this.instanceStore.removeFrontierBinding(instance.instanceId, packetId);
-        closedPacketIds.push(packetId);
+        (alreadyClosed ? alreadyClosedPacketIds : closedPacketIds).push(packetId);
       }
       this.instanceStore.updateFrontier(instance.instanceId, [], "aborted", {
         currentStepId: "clear",
         completedAt: closedAt,
         expectedVersion: instance.version,
-        lastContinuationDecision: { action: "abort", actorSession: input.actorSession, reason: input.reason, closedPacketIds },
+        lastContinuationDecision: { action: "abort", actorSession: input.actorSession, reason: input.reason, closedPacketIds,
+          ...(alreadyClosedPacketIds.length > 0 ? { alreadyClosedPacketIds } : {}) },
       });
       if (this.watchdogJobsRepo) disarmAllWorkflowKeepalives(this.watchdogJobsRepo, instance.instanceId, `workflow_aborted: ${input.reason}`);
       register(this.eventBus.persistWithinTransaction({ type: "workflow.failed", instanceId: instance.instanceId, workflowName: instance.workflowName, reason: `aborted: ${input.reason}` }));
     });
-    return { instanceId: input.instanceId, closedPacketIds, status: "aborted" };
+    return {
+      instanceId: input.instanceId,
+      closedPacketIds,
+      ...(alreadyClosedPacketIds.length > 0 ? { alreadyClosedPacketIds, advisories } : {}),
+      status: "aborted",
+    };
   }
 
   /**
@@ -1238,7 +1286,7 @@ export class WorkflowRuntime {
         spec,
         step,
         runtimeOf,
-        roleResolutionContext(this.db, instance.boundRig),
+        roleResolutionContext(this.db, instance.boundRig, instance.boundPod),
       );
       if (!owner) {
         throw new WorkflowProjectorError(
@@ -1535,7 +1583,7 @@ export class WorkflowRuntime {
       const runtimeOf = (session: string) => nodeRuntimeOf(this.db, session);
       if (input.ownerSession) reconcileExplicitOwnerHarness(step, input.ownerSession, runtimeOf);
       const ownerSource = input.ownerSession ? "named" : "resolved";
-      const owner = input.ownerSession || resolveDefaultOwner(specRow.spec, step, runtimeOf, roleResolutionContext(this.db, instance.boundRig));
+      const owner = input.ownerSession || resolveDefaultOwner(specRow.spec, step, runtimeOf, roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
       if (!owner) throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve owner for failed step "${step.id}"`);
       assertBoundWorkflowTarget(owner, this.queueRepo);
       const redrivePacketId = newQitemId();

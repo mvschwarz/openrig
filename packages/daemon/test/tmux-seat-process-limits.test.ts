@@ -79,6 +79,9 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid" | { task
   const files = { writeFile: async (_p: string, content: string) => { writes.push(content); }, unlink: async () => {},
     tmpName: () => `/tmp/synthetic-seat-env-${++n}`, bufferName: () => "unused" };
   const adapter = new TmuxAdapter(exec, files, argvExec);
+  // #3253: the calls pinned here are a daemon's that has already checked its server's bus once (on Linux, a daemon's
+  // first launch runs startServer first; tmux-server-systemd-scope.test.ts covers that).
+  (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
   adapter.resolveExecutable = (name) => (opts.missing?.includes(name) ? null : `/usr/bin/${name}`);
   adapter.dirExists = () => opts.runDir === true;
   // By default a capped start is seen at once: its marker emptied (its command ran in the scope) and the pane's process
@@ -1113,18 +1116,23 @@ describe("a seat with memory_max (alone or beside tasks_max)", () => {
 
   it("a probe ended by SIGKILL under memory_max (the limit's OOM kill or any other) says only what was seen, retryable", async () => {
     const M = 1048576;
-    const killed = [Object.assign(new Error("Command failed"), { signal: "SIGKILL", code: null }),
-      Object.assign(new Error("Command failed"), { code: 137 })];
-    for (const scope of killed) {
+    // Each wording names only what was reported: the signal alone (no exit code) or the exit status 137.
+    const killed = [
+      [Object.assign(new Error("Command failed"), { signal: "SIGKILL", code: null }), "was killed by SIGKILL \\(no exit code\\)"],
+      [Object.assign(new Error("Command failed"), { code: 137 }), "exited with status 137 \\(128 \\+ SIGKILL\\)"],
+    ] as const;
+    for (const [scope, seen] of killed) {
       const h = makeAdapter({ limits: { "node-a": { memoryMax: M } }, probe: { scope } });
       const r = await freshRefused(h, "process_limits_unverified");
-      expect(r.message).toMatch(new RegExp(`the probe command ended with SIGKILL \\(exit 137\\) under the requested ` +
+      expect(r.message).toMatch(new RegExp(`the probe command ${seen} under the requested ` +
         `MemoryMax=${M}; the process and the cause aren't confirmed; a larger memory_max may help`));
+      if (scope.code === null) expect(r.message).not.toMatch(/137/);
+      else expect(r.message).not.toMatch(/no exit code/);
       expect(r.processLimits?.reason ?? "").not.toMatch(/OOM|\/bin\/sh was killed|too small/);
       expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", limit: "memory_max", requested: { memoryMax: M } } });
     }
     // A tasks-only probe killed the same way says nothing of a memory value: unverified, with no limit named.
-    const tasks = makeAdapter({ limits: { "node-a": 256 }, probe: { scope: killed[1] } });
+    const tasks = makeAdapter({ limits: { "node-a": 256 }, probe: { scope: killed[1][0] } });
     const t = await freshRefused(tasks, "process_limits_unverified");
     expect(t.processLimits).toMatchObject({ kind: "unverified" });
     expect(t.processLimits).not.toHaveProperty("limit");

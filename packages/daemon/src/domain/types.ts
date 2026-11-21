@@ -47,6 +47,9 @@ export interface Node {
   processLimits?: import("./process-limits.js").ProcessLimits | null;
   /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
   processLimitsError?: string;
+  /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
+   *  null/absent = none. */
+  statuslineThrottle?: number | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -181,6 +184,10 @@ export type RigEvent =
   | { type: "binding.updated"; rigId: string; nodeId: string }
   | { type: "session.status_changed"; rigId: string; nodeId: string; status: string }
   | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
+  // #3315 — the daemon's tmux server stopped or started answering (terminal-server-reachability.ts): one event per
+  // change, never per attempt. The daemon stays up through both; neither event says a seat's session is gone.
+  | { type: "tmux.server_gone"; socket: string; cause: string; since: string }
+  | { type: "tmux.server_back"; socket: string; since: string; goneSince: string }
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
@@ -190,6 +197,7 @@ export type RigEvent =
       slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
       reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.statusline_throttle_changed"; rigId: string; nodeId: string; logicalId: string; from: number | null; to: number | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -216,7 +224,7 @@ export type RigEvent =
   // failed/attention_required restoreOutcome to operator_recovered after
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
-  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: import("./runtime-recovery.js").RecoveryEvidence | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
@@ -403,6 +411,9 @@ export type RigEvent =
   | { type: "classifier.dead"; leaseId: string; classifierSession: string; lastHeartbeat: string; detectedAt: string }
   | { type: "classifier.reclaimed"; leaseId: string; previousClassifierSession: string; reclaimedBySession: string; reason: string; reclaimedAt: string }
   | { type: "view.changed"; viewName: string; cause: string }
+  // settings.changed: an HTTP caller set or reset a setting that defines what this daemon may reach.
+  // Stored, so a person asking later why the file surface changed has something to find.
+  | { type: "settings.changed"; key: string; action: "set" | "reset" }
   // PL-004 Phase C: daemon-native Watchdog supervision tree events.
   // Three policies in scope (periodic-reminder, artifact-pool-ready,
   // edge-artifact-required); workflow-keepalive deferred to Phase D.
@@ -1272,6 +1283,8 @@ export interface LegacyRigSpecNode {
   launchWrapper?: string[];
   /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1402,6 +1415,14 @@ export interface RigSpecPodMember {
   launchWrapper?: string[];
   /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
+  /** #3395: the seat pool this member is the model of (`pool:`), stored on its node; `null` is `pool: {}`, which
+   *  clears a stored block on re-apply; absent leaves it unchanged. */
+  pool?: import("./seat-pool-spec.js").SeatPoolSpec | null;
+  /** #3395: a `pool:` block that can't be used, as authored. It raised an advisory, is stored on the node as it is (it
+   *  holds that pool rather than removing it) and is never serialized back into a spec. */
+  unusablePool?: { raw: unknown };
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
@@ -1766,7 +1787,11 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
+  // "pi_usage_entries" is Pi's OWN persisted usage (fed by the runner's posted
+  // entries) — kept distinct from "runner_reported" because the token
+  // threshold's reader treats runner_reported rows as non-samples, and `rig ps`
+  // renders the two labels differently.
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "pi_usage_entries" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

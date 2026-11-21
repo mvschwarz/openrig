@@ -35,6 +35,15 @@ export function fileCommand(deps: FileCommandDeps = {}): Command {
     )
     .option("--dry-run", "Print the exact planned transfer (src, dst, host, files/bytes) and move nothing")
     .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+IPv6 targets:
+  Literal IPv6 addresses need GNU rsync. macOS's bundled openrsync does
+  not support IPv6 literals, even when bracketed.
+  With openrsync, configure an SSH Host alias in ~/.ssh/config:
+    Host ipv6-box
+      HostName 2001:db8::1
+  Register that alias as the SSH host's target (target: ipv6-box).
+`)
     .action(async (src: string, dst: string, opts: { dryRun?: boolean; json?: boolean }) => {
       const planned = planFileCopy(src, dst, { dryRun: opts.dryRun, registryLoader: deps.registryLoader });
       if (!planned.ok) {

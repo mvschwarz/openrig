@@ -585,6 +585,19 @@ describe("rig seat status", () => {
     expect(logs.join("\n")).toContain(`Reason: ${explanation}`);
   });
 
+  // #3185 (C14 native): a bare shell's session record stayed running, so seat status said running while rig ps said att.
+  it.each([
+    [{ lifecycle_state: "attention_required" }, "Session: needs attention (its session record is running; rig ps shows it as att)"],
+    [{ lifecycle_state: "running" }, "Session: running"],
+    [{}, "Session: running"],
+  ])("says a seat rig ps shows as att needs attention, never running (case %#)", async (extra, expected) => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, ...extra } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs).toContain(expected);
+  });
+
   it("returns a nonzero status for an unknown seat", async () => {
     const deps = makeDeps({
       status: 404,

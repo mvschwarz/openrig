@@ -494,7 +494,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
-    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
+    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy" || code === "invalid_statusline_throttle"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
     || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
     || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
@@ -503,7 +503,7 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry (409).
   if (code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_invalid") return 422;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
+    || code === "effort_unavailable" || code === "statusline_throttle_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
     || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
@@ -629,6 +629,28 @@ const setEffortHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
 seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
+
+// #3416 (3): save (or, with clear: true, remove) a Claude seat's status line throttle for its next launch.
+const setStatuslineThrottleHandler = async (c: Context) => {
+  // A body that isn't a JSON object (null, an array, a number) reads as an empty one: the check below answers 400.
+  const parsed: unknown = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown> : {};
+  const clear = body["clear"] === true;
+  if (clear === (body["seconds"] !== undefined)) {
+    return c.json({ ok: false, code: "invalid_statusline_throttle", message: "Pass seconds or clear, exactly one." }, 400);
+  }
+  const result = seatLifecycleService(c).setStatuslineThrottle({
+    ...settingTarget(c),
+    seconds: clear ? null : typeof body["seconds"] === "number" ? body["seconds"] : Number.NaN,
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+};
+seatRoutes.post("/set-statusline-throttle/:seatRef", setStatuslineThrottleHandler);
+seatRoutes.post("/set-statusline-throttle/node/:nodeId", setStatuslineThrottleHandler);
 
 // Choose (or, with clear: true, remove) the registered person who answers this seat's runner permission requests.
 // Audited; like set-permissions, the actor is required.

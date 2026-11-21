@@ -255,6 +255,15 @@ also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings
 arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
 not establish support by every Claude version.
 
+After composition, launches and resumes keep settings of at most 64 KiB inline, byte-identical.
+Larger JSON values go through Claude's native `--settings` file form: a content-addressed 0600
+file under OpenRig's seat-specific `state/claude-settings/` storage. OpenRig publishes the complete
+file atomically and prunes older files only when their bytes still match their digest. It keeps
+the current files and files named by captured live arguments. Continuations
+can rewrite OpenRig's own unchanged files to apply the selected auto-mode block; foreign files stay
+opaque. A failed write falls back inline with a warning naming the size and failure, never a size
+refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.
+
 The initial spec records the rules on the stable seat. For an existing seat, put the
 complete replacement in a JSON file and use the existing audited permission command:
 
@@ -938,6 +947,8 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
 | `launch_wrapper` | string[] | no | — | Local `pi`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
 | `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat, each key on its own. `{ tasks_max: N }` (an integer from 1 to 4194304) and `{ memory_max: <size> }` (an integer number of bytes, or `<n>K`, `M`, `G` or `T`, base 1024; a whole number of MiB up to 2^53 − 2^20 bytes) put the seat's own processes in a systemd user scope of their own with `TasksMax=N` and `MemoryMax=<bytes>`; both keys together share that one scope. The other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a CPU limit) is refused. `{}` clears the stored limits when re-applying an authored spec, a mapping replaces them whole, and omitting the key leaves them unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
+| `statusline_throttle` | integer | no | — | Claude members only, opt-in. Runs OpenRig's context collector from the status line at most once every N seconds (1 to 120); `0` clears a stored throttle when re-applying an authored spec, while omitting the key leaves it unchanged. Also settable with `rig seat set-statusline-throttle`. See [Status line throttle](#status-line-throttle-runtime-claude-code). |
+| `pool` | map | no | — | Makes this member the model of a seat pool: `{ max: N, … }`. Stored and validated; it has no runtime effect until the seat pool job is armed. Anything wrong inside the block is an advisory and the block is not used; the spec stays valid. `{}` clears a stored block when re-applying an authored spec, while omitting the key leaves it unchanged. A daemon from 0.7.18 or earlier refuses a spec with this key. See [Seat pool](#seat-pool-pool). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -1157,8 +1168,8 @@ members:
     guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
   - `process_limits_unverified` (retryable, save where said below) when it isn't known either way: the user manager
     timed out or its socket refused the connection (starting or restarting), the probe read nothing (no `pids.max` or
-    `memory.max` it asked for) or output it could not understand, the probe command ended with SIGKILL (exit 137)
-    under the requested `MemoryMax=` (the process and the cause aren't confirmed: the OOM killer at that limit, the
+    `memory.max` it asked for) or output it could not understand, the probe command ended with SIGKILL (the signal
+    alone, with no exit code, or exit status 137; the reason says which) under the requested `MemoryMax=` (the process and the cause aren't confirmed: the OOM killer at that limit, the
     host's OOM killer, systemd-oomd or a manual kill look the same; a larger value may help; `processLimits.limit` is
     `memory_max`), an error not recognized, a launch setting that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
@@ -1233,6 +1244,99 @@ members:
   `rig export` prints) with how to fix or clear it, and the `X-OpenRig-Export-Warnings` header on YAML and JSON (which
   `rig spec show --json` prints as a warning).
 
+### Status line throttle (`runtime: claude-code`)
+
+Claude Code runs a seat's status line on each update of its conversation, and each run starts Node for OpenRig's
+context collector. On a host with many seats, `statusline_throttle` lets a Claude member start the collector at most
+once every N seconds:
+
+```yaml
+members:
+  - id: impl
+    agent_ref: local:agents/impl
+    profile: default
+    runtime: claude-code
+    statusline_throttle: 30
+```
+
+- A short POSIX shell check reads the status line input before Node. It skips the collector, printing nothing (the
+  collector prints nothing either), for an update that comes fewer than N seconds after the last collection, in the same
+  conversation, with the context not below the last collected reading, and only when that collection wrote its reading
+  for this conversation. A reading below the last collected one (a compaction) or a new conversation collects at once;
+  so does an update whose session id or `context_window.used_percentage` the check can't read. The comparison is with
+  the last collected reading, not the last one seen: after a skipped rise, a compaction that lands above the last
+  collected reading waits for the interval, and until then the reading kept is the lower, earlier one. No throttle is
+  the default, and an unthrottled seat launches exactly as before.
+- The reading keeps its real sample time. Nothing rewrites it on a skipped run, so `rig ps`, the context watch and
+  managed compaction see its true age, and the compaction request names the time of the sample it acted on.
+- What it costs: while the seat works, the kept reading (and the provider rate limits recorded with it) can be up to N
+  seconds behind the conversation, so managed compaction can see the seat cross its threshold that much later. A seat
+  that goes idle right after a skipped update keeps the earlier reading until its next update, so a threshold crossed
+  in that last moment is seen at its next turn. N is capped at 120 seconds, well inside the 10 minutes after which a
+  reading counts as stale. The check finds the seat's reading by the seat's name; while Claude reports another
+  session name, the check collects on every update.
+- The throttled command goes only into the seat's own launch settings (its `--settings` value), never into the folder's
+  `.claude/settings.local.json`, so seats sharing a folder can choose different intervals and `rig down` has nothing
+  more to take back. A status line command of your own in that file wins: the launch then skips the throttle and says so.
+- It takes effect at the seat's next launch, resume or restore. A relaunch that reuses the running process's own
+  launch settings (a provider or account switch that keeps them) keeps its throttle as it was.
+  `rig seat set-statusline-throttle <seat> --seconds N --reason <text>` (or `--clear --reason <text>`) changes it
+  without editing the spec; `rig export` carries the stored value. A launch rebuilt from the spec (a persisted fresh
+  launch, or the fresh branch of a restore) writes the spec's `statusline_throttle` again over a later
+  `rig seat set-statusline-throttle`, as it does for `process_limits`; change the spec too to keep the new value
+  there.
+
+### Seat pool (`pool`)
+
+A `pool` block on a member makes that member the model of a seat pool: extra agents cloned from it, added when its
+work waits and drained when they sit idle.
+
+```yaml
+members:
+  - id: impl
+    agent_ref: local:agents/impl
+    profile: default
+    runtime: claude-code
+    cwd: .
+    pool:
+      max: 3                        # required
+      min: 0
+      dispatch_after_s: 60
+      idle_grace_s: 300
+      cooldown_s: 60
+      dispatch_tag: role:impl
+      cwd_template: /work/{rig}/{slot}
+      drain: false
+```
+
+Stored and validated; it has no runtime effect until the seat pool job is armed.
+
+| Field | Type and bounds | Default | Meaning |
+|-------|-----------------|---------|---------|
+| `max` | whole number, 0 or more, at least `min` | required | The most pool agents. `0` is valid: no extra agents. |
+| `min` | whole number, 0 or more | `0` | The fewest pool agents. |
+| `dispatch_after_s` | whole number, 0 or more | `60` | How long a row must wait before it can be moved to a pool agent. |
+| `idle_grace_s` | whole number, 0 or more | `300` | How long a pool agent must sit idle before it can be drained. |
+| `cooldown_s` | whole number, 0 or more | `60` | The gap between two add or drain steps. |
+| `dispatch_tag` | non-empty string | none: every row to the model | Move only the model's rows that carry this tag. |
+| `cwd_template` | absolute path; only `{rig}` and `{slot}` | none: the model's folder | Each pool agent's working folder, with `{rig}` and `{slot}` filled in. `{slot}` is optional: without it the agents share one folder. |
+| `drain` | `true` or `false` | `false` | Empties the pool. |
+
+- **Validation:** whatever is wrong inside the block is an advisory, never a spec error, reported as
+  `<pod>.<member> pool.<field>: <reason>; pool not used`: a wrong type, a value out of bounds, `max` below `min`, a
+  `cwd_template` that isn't absolute or uses another placeholder, or an unknown key. The whole block is then not used
+  (a pool never runs on part of its settings), the spec stays `valid` and the rest of the rig loads.
+- **Persistence and clear:** the block is stored on the model member's seat. Applying an authored spec to an existing
+  seat replaces a stored block whole, clears it with `pool: {}` and leaves it unchanged when the key is absent. A block
+  that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
+  `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
+  A fresh launch of the seat from its recorded launch keeps the stored block.
+- **Export and bundles:** `rig spec export` leaves the pool's agents out and writes the model member with its block;
+  an edge touching a pool agent is left out and named in a "Not carried" line. `rig bundle create` doesn't count pool
+  agents as drift, so `--allow-drift` isn't needed for them.
+- **Older daemons:** `pool` is a new member key. A daemon from 0.7.18 or earlier refuses a spec that has it, as it
+  refuses any unknown member key.
+
 ### Pi (`runtime: pi`)
 
 `runtime: pi` launches the Pi coding agent (`pi --mode rpc`) through OpenRig's RPC runner.
@@ -1256,7 +1360,7 @@ members:
 - **Credentials:** Provision each seat separately, or put the provider's key variable in `recovery.provider_auth_env_allowlist` (for example `ANTHROPIC_API_KEY` or `MISTRAL_API_KEY`). The allowlist accepts the key variable of every provider in OpenRig's OMP provider map, from `anthropic` through `litellm`. A seat receives a key only when its `model` is written as `provider/id`, such as `anthropic/claude-sonnet-4-5`. Short names such as `opus` pass no key. A provider whose key is scoped to one endpoint also accepts that endpoint's variable: `anthropic`, `openai` and `litellm` each take their `<PROVIDER>_BASE_URL` — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `LITELLM_BASE_URL`. The allowlist admits each variable on its own, so an endpoint named without its key is admitted too, which suits a keyless local proxy. The launch gate admits these endpoint names for OMP seats; the match against the seat's declared `provider/id` happens at the OMP child, which forwards a matching endpoint already in the runner's environment just as it forwards a key. OMP also reads the launch directory's `.env`, so use a trusted working directory.
 - **Approval posture:** The default floor is `--approval-mode always-ask`. Because the runner is headless, OMP approval requests are cancelled and the seat stays in needing-attention after the turn ends, until the next agent run starts. A `full_bypass` permission policy selects `--approval-mode yolo`.
 - **Model errors:** Errors are printed in the pane. A completed assistant failure with a numeric `errorStatus` of 408, 429, 500, 502, 503, 504, or 529 returns to idle at terminal `agent_end`, allowing an ordinary retry. Until that terminal boundary it stays in needing-attention. Intermediate `agent_end(isTerminal:false)` events do not release attention. A statusless failed retry summary retains that classification only when its attempt matches an announced retry and its final error exactly matches the latest typed transient assistant failure in that attempt. New assistant/turn boundaries invalidate the previous failure; unmatched summaries remain runtime errors. Rejected prompts, auth/configuration failures, exhausted retries without a typed transient status, and untyped errors (including text such as `529 overloaded`) retain attention until the next agent run starts. The runner does not classify diagnostic text. A transient failure does not clear a denied approval or another unresolved runtime failure in the same turn.
-- **Restore:** OMP creates its session file after the first persisted turn. A new seat with no persisted turn has no resume token, so a restore leaves it awaiting a decision. Start it fresh with `rig seat launch <seat> --fresh --reason "<why>"`, the command `rig start` and `rig up --existing` print for that seat. After that file exists, OpenRig restores that exact session file. If a full rig restore leaves an OMP seat in `attention_required` or `failed`, `rig seat clear-attention` cannot yet reconcile it to `operator_recovered`, even with `--reason`, because restore reconciliation only verifies Claude Code and Codex processes ([#41](https://github.com/mvschwarz/openrig/issues/41)). Relaunch that seat with `rig seat launch <seat> --fresh --reason "<why>"`, or restore it manually. `rig seat launch --fresh` refuses a managed seat whose pane is still running unless you add `--stop`, which ends what is running there; add it only when you mean to replace that session. A pane that holds only a shell after a failed start (the harness never started, or returned to the shell, and the pane is an idle shell now) is replaced without `--stop`.
+- **Restore:** OMP creates its session file after the first persisted turn. A new seat with no persisted turn has no resume token, so a restore leaves it awaiting a decision. Start it fresh with `rig seat launch <seat> --fresh --reason "<why>"`, the command `rig start` and `rig up --existing` print for that seat. After that file exists, OpenRig restores that exact session file. After recovering a Pi or OMP seat whose full rig restore ended in `attention_required` or `failed`, run `rig seat clear-attention <seat>`. OpenRig records `operator_recovered` only when the pane owns the expected runner and its live RPC child, a fresh `get_state` response matches the stored session file, and the daemon confirms that identity. It sends no prompt. Missing or mismatched evidence keeps attention and names the failed check. Runners started before this recovery capability was installed need a managed relaunch before they can supply that proof. `rig seat launch --fresh` refuses a managed seat whose pane is still running unless you add `--stop`, which ends what is running there; add it only when you mean to replace that session. A pane that holds only a shell after a failed start (the harness never started, or returned to the shell, and the pane is an idle shell now) is replaced without `--stop`.
 
 ### Terminal Nodes
 
@@ -1667,6 +1771,7 @@ spec can pass `rig spec validate` and then fail at preflight or import. Run
 25. Non-idempotent actions must not include `restore` in `applies_on`.
 26. `applies_on` values must be from: `fresh_start`, `restore`.
 27. `launch_wrapper` is valid on `pi`, `codex`, `claude-code` and supported community-harness members (`[]` included); see the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch) for community capability requirements. It must be an array of strings without NUL/CR/LF, and `launch_wrapper[0]` (when non-empty) must be an absolute path or a bare command name on the daemon `PATH`.
+28. What is inside a member's `pool` block is checked as advisories only, never as errors; see [Seat pool](#seat-pool-pool).
 
 ---
 

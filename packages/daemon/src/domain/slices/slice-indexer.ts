@@ -18,7 +18,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
+import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { runSyncSite } from "../sync-site-wrap.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
 
@@ -190,6 +192,8 @@ export interface SliceListEntry {
 
 export interface SliceIndexerOpts {
   projectId?: string;
+  /** Former ids the project declares (#3261): rows tagged with one still belong to `projectId`. */
+  projectAliases?: readonly string[];
   missionId?: string;
   /** Root directory containing slice folders. */
   slicesRoot: string;
@@ -308,10 +312,10 @@ function likePatternBodyToRegExpSource(patternBody: string): string {
  *  wildcard, leaving an end-anchored `%prefix`).
  *  - Untruncated pattern (the overwhelmingly common no-NUL case):
  *    `%term%` is exactly a contains-match, so the term translates
- *    UNANCHORED — a wildcard-free term compiles to a pure literal, which
- *    keeps the combined prefilter alternation on the regex engine's fast
- *    literal path (an anchored `^.*x.*$` form measured a ~80x benchmark
+ *    UNANCHORED (an anchored `^.*x.*$` form measured a ~80x benchmark
  *    regression: every non-matching row pays a greedy scan per branch).
+ *    The membership scan answers plain ASCII literals with
+ *    AsciiLiteralMatcher instead; this translation serves the rest.
  *  - Truncated pattern: LIKE full-match semantics now matter (the lost
  *    trailing `%` end-anchors the remainder), so translate the truncated
  *    pattern verbatim and anchor `^...$`.
@@ -366,6 +370,8 @@ export function sliceStatusBucket(raw: string | undefined): SliceStatus {
 
 export class SliceIndexer {
   readonly projectId?: string;
+  /** `projectId` and its declared former ids: the tags this indexer's project membership accepts. */
+  readonly projectIds: readonly string[];
   readonly missionId?: string;
   readonly slicesRoot: string;
   readonly additionalSliceRoots: string[];
@@ -395,6 +401,7 @@ export class SliceIndexer {
 
   constructor(opts: SliceIndexerOpts) {
     this.projectId = opts.projectId;
+    this.projectIds = opts.projectId ? [opts.projectId, ...(opts.projectAliases ?? [])] : [];
     this.missionId = opts.missionId;
     this.slicesRoot = opts.slicesRoot;
     this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
@@ -539,6 +546,15 @@ export class SliceIndexer {
     return entries;
   }
 
+  /** The folder of the mission whose first slice list() would show, or null when
+   *  no listed slice belongs to it. Walks the same locations as list() but builds
+   *  no listing entries, so it never reads queue membership. */
+  missionPath(missionId: string): string | null {
+    if (!this.isReady()) return null;
+    const location = this.readSliceLocations().find((candidate) => candidate.missionId === missionId);
+    return location ? path.resolve(location.slicePath, "..", "..") : null;
+  }
+
   get(name: string): SliceRecord | null {
     if (!this.isReady()) return null;
     if (this.batchDepth === 0) this.reconcileComposition();
@@ -616,7 +632,7 @@ export class SliceIndexer {
   observedQueueCounts(
     entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
     resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
-    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean } = {},
+    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean; canonicalProjectId?: (id: string) => string } = {},
   ): Map<string, SliceQueueCounts | null> {
     const result = new Map<string, SliceQueueCounts | null>();
     interface TargetScope {
@@ -770,44 +786,48 @@ export class SliceIndexer {
     }
 
     const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
-    for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
-      if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
-      const scope = parseTypedQueueScope(row.tags);
-      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
-      const rowProject = scope.projects.values().next().value;
-      const firstSlice = scope.slices.values().next().value!;
-      const candidates = targetsBySliceToken.get(firstSlice);
-      if (!candidates) continue;
+    runSyncSite("slices.queue_counts_scan", () => {
+      for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+        if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
+        const scope = parseTypedQueueScope(row.tags);
+        if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
+        const taggedProject = scope.projects.values().next().value;
+        // A former id a catalogued project declares counts as that project (#3261).
+        const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
+        const firstSlice = scope.slices.values().next().value!;
+        const candidates = targetsBySliceToken.get(firstSlice);
+        if (!candidates) continue;
 
-      let uniqueMatch: TargetScope | null = null;
-      for (const target of candidates) {
-        if (rowProject !== undefined && target.projectId !== rowProject) continue;
-        let allSlicesMatch = true;
-        for (const slice of scope.slices) {
-          if (!target.sliceKeys.has(slice)) {
-            allSlicesMatch = false;
+        let uniqueMatch: TargetScope | null = null;
+        for (const target of candidates) {
+          if (rowProject !== undefined && target.projectId !== rowProject) continue;
+          let allSlicesMatch = true;
+          for (const slice of scope.slices) {
+            if (!target.sliceKeys.has(slice)) {
+              allSlicesMatch = false;
+              break;
+            }
+          }
+          if (!allSlicesMatch) continue;
+          let allMissionsMatch = true;
+          for (const mission of scope.missions) {
+            if (!target.missionKeys.has(mission)) {
+              allMissionsMatch = false;
+              break;
+            }
+          }
+          if (!allMissionsMatch) continue;
+          if (uniqueMatch) {
+            uniqueMatch = null;
             break;
           }
+          uniqueMatch = target;
         }
-        if (!allSlicesMatch) continue;
-        let allMissionsMatch = true;
-        for (const mission of scope.missions) {
-          if (!target.missionKeys.has(mission)) {
-            allMissionsMatch = false;
-            break;
-          }
-        }
-        if (!allMissionsMatch) continue;
-        if (uniqueMatch) {
-          uniqueMatch = null;
-          break;
-        }
-        uniqueMatch = target;
+
+        if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
+        uniqueMatch.counts[row.state as ObservedQueueState]++;
       }
-
-      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
-      uniqueMatch.counts[row.state as ObservedQueueState]++;
-    }
+    });
 
     return result;
   }
@@ -1344,10 +1364,12 @@ export class SliceIndexer {
    *   Scan 2 (fallback): one streamed pass over (body, tags) evaluated
    *     against the term universe of the SERVED zero-typed locations — all of
    *     them for list() and any open withMembershipBatch scope, exactly one
-   *     for a standalone uncached get(). A combined regex is a PREFILTER
-   *     only; every term is then confirmed per row so overlapping terms all
-   *     credit (no consuming-alternation loss). Terms use SQL-LIKE-equivalent
-   *     matching (asciiFold + %/_ translation); bucket order is row (rowid)
+   *     for a standalone uncached get(). Plain ASCII literal terms are all
+   *     answered by one AsciiLiteralMatcher pass per haystack; the other
+   *     terms share a combined regex that is a PREFILTER only. Every term is
+   *     then confirmed per row so overlapping terms all credit (no
+   *     consuming-alternation loss). Terms use SQL-LIKE-equivalent
+   *     matching (ASCII fold, NUL cut, %/_ wildcards); bucket order is row (rowid)
    *     order — the same order the un-ORDERed per-term `LIMIT 500` queries
    *     returned; cap 500 per term.
    *
@@ -1402,15 +1424,17 @@ export class SliceIndexer {
         `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`,
       );
       const scanOrder = new Map<string, number>();
-      for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectId)) continue;
-        scanOrder.set(r.qitem_id, scanOrder.size);
-        for (const tagged of parseScopeTags(r.tags).slices) {
-          const bucket = typedBySlice.get(tagged);
-          if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
-          else if (bucket.length < 500) bucket.push(r.qitem_id);
+      runSyncSite("slices.membership_typed_scan", () => {
+        for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
+          if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
+          scanOrder.set(r.qitem_id, scanOrder.size);
+          for (const tagged of parseScopeTags(r.tags).slices) {
+            const bucket = typedBySlice.get(tagged);
+            if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
+            else if (bucket.length < 500) bucket.push(r.qitem_id);
+          }
         }
-      }
+      });
 
       // A tag may name a slice by its frontmatter id instead of its directory
       // name. Fold such rows into that slice's bucket. The id map is read only
@@ -1474,11 +1498,26 @@ export class SliceIndexer {
     }
     if (!tableAbsent && fallbackTerms.size > 0) {
       const termList = Array.from(fallbackTerms);
-      const matchers = termList.map((term) => ({
-        term,
-        re: new RegExp(likeBoundPatternToRegExpSource(term), LIKE_REGEXP_FLAGS),
-      }));
-      const prefilter = new RegExp(matchers.map((m) => `(?:${m.re.source})`).join("|"), LIKE_REGEXP_FLAGS);
+      // Plain ASCII terms (names without `_`, `%`, non-ASCII or U+0000) are
+      // answered by ONE transition pass over the raw haystack plus a visit per
+      // matched output (AsciiLiteralMatcher), instead of a single RegExp
+      // alternating every term; a row that matches still gets per-term work
+      // below. Only the remaining terms keep the translated-LIKE regex, with
+      // its own prefilter, so the matched set is unchanged.
+      const literalIdOfTerm = new Int32Array(termList.length).fill(-1);
+      const literalTerms: string[] = [];
+      termList.forEach((term, index) => {
+        if (!AsciiLiteralMatcher.eligible(term)) return;
+        literalIdOfTerm[index] = literalTerms.length;
+        literalTerms.push(term);
+      });
+      const literal = literalTerms.length > 0 ? new AsciiLiteralMatcher(literalTerms) : null;
+      const literalMarks = new Uint32Array(literalTerms.length);
+      const patternRegexes = termList.map((term, index) =>
+        literalIdOfTerm[index] === -1 ? new RegExp(likeBoundPatternToRegExpSource(term), LIKE_REGEXP_FLAGS) : null,
+      );
+      const patternSources = patternRegexes.filter((re): re is RegExp => re !== null).map((re) => `(?:${re.source})`);
+      const patternPrefilter = patternSources.length > 0 ? new RegExp(patternSources.join("|"), LIKE_REGEXP_FLAGS) : null;
       // Buckets accumulate LOCALLY and are published
       // to the index only after the scan completes. Previously they were
       // pre-seeded on the published map and a broad catch let a partially
@@ -1490,18 +1529,48 @@ export class SliceIndexer {
       const scan = tagsColumnPresent
         ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
         : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
-      for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectId)) continue;
-        const hayBody = asciiFold(sqliteVisiblePrefix(r.body));
-        const hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
-        if (!prefilter.test(hayBody) && !(hayTags !== null && prefilter.test(hayTags))) continue;
-        for (const m of matchers) {
-          if (m.re.test(hayBody) || (hayTags !== null && m.re.test(hayTags))) {
-            const bucket = localBuckets.get(m.term)!;
-            if (bucket.length < 500) bucket.push(r.qitem_id);
+      let stamp = 0;
+      runSyncSite("slices.membership_term_scan", () => {
+        for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
+          if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
+          // A non-TEXT value (a BLOB) failed the build here before this matcher:
+          // asciiFold/sqliteVisiblePrefix threw on it. The literal pass reads
+          // code units and would skip it silently, so fail it the same way.
+          if (typeof r.body !== "string" || (r.tags != null && typeof r.tags !== "string")) {
+            throw new TypeError(`queue_items row ${r.qitem_id}: body and tags must be TEXT`);
+          }
+          // Stamps tell this row's marks from earlier rows' without clearing;
+          // restart them before the Uint32 wraps.
+          if (stamp === 0xffffffff) {
+            literalMarks.fill(0);
+            stamp = 0;
+          }
+          stamp++;
+          // Both haystacks are scanned (no short-circuit) so every literal hit is marked.
+          const bodyHit = literal !== null && literal.scan(r.body, literalMarks, stamp);
+          const tagsHit = literal !== null && r.tags != null && literal.scan(r.tags, literalMarks, stamp);
+          let hayBody: string | null = null;
+          let hayTags: string | null = null;
+          let patternHit = false;
+          if (patternPrefilter) {
+            hayBody = asciiFold(sqliteVisiblePrefix(r.body));
+            hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
+            patternHit = patternPrefilter.test(hayBody) || (hayTags !== null && patternPrefilter.test(hayTags));
+          }
+          if (!bodyHit && !tagsHit && !patternHit) continue;
+          for (let index = 0; index < termList.length; index++) {
+            const literalId = literalIdOfTerm[index]!;
+            const re = patternRegexes[index];
+            const hit = literalId !== -1
+              ? literalMarks[literalId] === stamp
+              : patternHit && (re!.test(hayBody!) || (hayTags !== null && re!.test(hayTags)));
+            if (hit) {
+              const bucket = localBuckets.get(termList[index]!)!;
+              if (bucket.length < 500) bucket.push(r.qitem_id);
+            }
           }
         }
-      }
+      });
       for (const [term, ids] of localBuckets) fallbackByTerm.set(term, ids);
     }
 
