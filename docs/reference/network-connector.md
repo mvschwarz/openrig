@@ -149,7 +149,10 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
   (`external:network-request/<hub item>`). It's addressed to OpenRig rather than the seat, so the seat owes nothing on it
   and isn't reminded about it while it waits. Find it with `rig queue list --mine`.
 - **Then it's created on the hub** under an id derived from the seat's node, the hub, the participant and your request
-  id, so one request is always one hub item.
+  id, so one request is always one hub item. A create that goes again reads the request from the local item; the
+  connector keeps only a hash of it. So a request whose local item was erased, closed or canceled here isn't sent.
+- **The local item's text shows the hub URL with its query hidden,** as `rig network status` does, since a query string
+  can carry a credential.
 - **What `request` returns:** the local item, the hub item and a state.
   - `sent`: the hub confirmed the item.
   - `unknown`: the create timed out or its answer was lost. The connector looks for the hub item by its id on its next
@@ -159,7 +162,8 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
 
 **Reading the answer:** on each pass, the connector reads every open request's hub item. When the hub item closes, the
 local item closes the same way:
-- done with the hub's resolution and its closure reason;
+- done with the hub's resolution and its closure reason. A reason that needs a closure target here (`escalation`) reads
+  `no-follow-on`, with the hub's reason in the note;
 - canceled or denied as itself;
 - failed as failed.
 
@@ -170,7 +174,8 @@ A close with no resolution reads "Closed without a stated result." The close's n
 rig queue show <request-id>
 ```
 
-**A hub item handed on there:** the connector follows the successor the hub names while the participant can read it.
+**A hub item handed on there** (handed off, or closed by a handoff-and-complete): it isn't an answer. The connector
+follows the successor the hub names while the participant can read it.
 One it can't read leaves the local item open, with a note saying the answer isn't visible here. That outcome is unknown,
 never done.
 

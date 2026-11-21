@@ -64,15 +64,21 @@ export function hubFailure(error: unknown): HubError {
   return new HubError("unavailable", `The hub couldn't be reached: ${message.slice(0, 300)}`);
 }
 
-function parsed(result: { isError?: boolean; content?: unknown; structuredContent?: unknown }): unknown {
+/** The hub's codes for a request it couldn't make to its own daemon (unreachable, timed out, or failed in flight): try
+ *  again later, as for a connection that failed here. */
+const HUB_TRANSIENT_CODES = new Set(["daemon_unreachable", "daemon_timeout", "request_failed"]);
+
+/** A tool result as the connector reads it: the JSON it carries, or a HubError. Exported for its own cells. */
+export function parseHubToolResult(result: { isError?: boolean; content?: unknown; structuredContent?: unknown }): unknown {
   const content = Array.isArray(result.content) ? result.content as Array<{ type?: string; text?: string }> : [];
   const text = content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
   if (result.isError) {
     const detail = (result.structuredContent ?? {}) as { code?: unknown; outcome?: unknown; retryable?: unknown };
     const code = typeof detail.code === "string" ? detail.code : undefined;
-    // A create whose outcome the hub couldn't tell, or new work its fair-use limit holds back, is to be tried again with
-    // the same id; neither is a refusal.
-    const kind = detail.outcome === "unknown" || detail.retryable === true ? "unavailable" : "refused";
+    // A create whose outcome the hub couldn't tell, new work its fair-use limit holds back, or a request the hub couldn't
+    // make to its own daemon is to be tried again (a create with the same id); none is a refusal.
+    const kind = detail.outcome === "unknown" || detail.retryable === true || (code !== undefined && HUB_TRANSIENT_CODES.has(code))
+      ? "unavailable" : "refused";
     throw new HubError(kind, text.slice(0, 500) || "The hub refused this call.", code);
   }
   try { return JSON.parse(text); } catch { throw new HubError("refused", "The hub answered with something that isn't JSON."); }
@@ -121,7 +127,7 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
   }
   const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
     try {
-      return parsed(await client.callTool({ name, arguments: args }) as { isError?: boolean; content?: unknown; structuredContent?: unknown });
+      return parseHubToolResult(await client.callTool({ name, arguments: args }) as { isError?: boolean; content?: unknown; structuredContent?: unknown });
     } catch (error) {
       throw hubFailure(error);
     }

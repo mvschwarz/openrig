@@ -14,7 +14,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { NetworkBindingStore, networkCredentialFile } from "../src/domain/network/network-bindings.js";
 import { Hono } from "hono";
-import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
+import { connectMcpHub, HubError, parseHubToolResult, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { networkRoutes } from "../src/routes/network.js";
 import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 import { listNetworkPeers, networkHubRequestId, networkRequestBlocker, originateNetworkRequest } from "../src/domain/network/network-requests.js";
@@ -58,7 +58,7 @@ class FakeHub {
     if (this.down) throw new HubError("unavailable", "The hub couldn't be reached: connect ECONNREFUSED");
     const get = (id: string) => {
       const item = this.items.get(id);
-      if (!item) throw new HubError("refused", `qitem_not_found ${id}`);
+      if (!item) throw new HubError("refused", `qitem ${id} not found`, "qitem_not_found");
       return item;
     };
     const session: HubSession = {
@@ -771,5 +771,114 @@ describe("network connector", () => {
       expect(await res.json()).toMatchObject({ localQitemId: "req-6", hubQitemId: networkHubRequestId(b, "req-6"), peer: PEER, state: "sent" });
       expect(hub.tokens.at(-1)).toBe("tok-1");
     });
+
+    it("a hub handoff-and-complete (done, handed_off_to) is a handoff, not an answer: its successor's answer closes the request", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-8");
+      await send(b.id, "req-8");
+      answer(hubId, { state: "done", closureReason: "handed_off_to", resolution: "Passed to the next seat.", successor: null });
+      await pass(b.id);
+      expect(repo.getById("req-8")!.state).toBe("blocked");
+      expect(repo.listTransitions("req-8").filter((t) => t.transitionNote?.startsWith("The hub item was handed on to an item this connection can't read"))).toHaveLength(1);
+      const next = PEER.replace(/^sam/, "lee");
+      hub.add("hub-next-2", "Review the release notes", next);
+      answer("hub-next-2", { state: "done", closureReason: "no-follow-on", resolution: "Reviewed by the next seat." });
+      answer(hubId, { successor: "hub-next-2" });
+      await pass(b.id);
+      expect(repo.getById("req-8")).toMatchObject({ state: "done", resolution: "Reviewed by the next seat." });
+    });
+
+    it("a hub close as escalation closes the request no-follow-on with the reason named, and the pass goes on", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-9");
+      await send(b.id, "req-9");
+      answer(hubId, { state: "done", closureReason: "escalation", resolution: "Raised with the lead." });
+      expect((await pass(b.id)).error).toBeUndefined();
+      expect(repo.getById("req-9")).toMatchObject({ state: "done", closureReason: "no-follow-on", resolution: "Raised with the lead." });
+      expect(repo.listTransitions("req-9").at(-1)!.transitionNote).toBe(`Answered by ${PEER} via network hub https://hub.example/mcp (hub item ${hubId}); closed there as escalation.`);
+      expect(outcome("req-9")).toEqual({ outcome: "done" });
+    });
+
+    it("a request canceled here while the hub's answer is being read keeps that cancel, and the pass goes on", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-10");
+      await send(b.id, "req-10");
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Too late." });
+      hub.duringShow = (id) => { if (id === hubId) repo.update({ qitemId: "req-10", actorSession: b.localSession, state: "done", closureReason: "canceled" }); };
+      expect((await pass(b.id)).error).toBeUndefined();
+      expect(repo.getById("req-10")).toMatchObject({ state: "done", closureReason: "canceled" });
+      expect(outcome("req-10")).toEqual({ outcome: "local_closed" });
+    });
+
+    it("the receipt holds no request text, and a request whose local text was erased is never sent", async () => {
+      const b = bind();
+      await send(b.id, "req-11", "Confidential request text");
+      expect(JSON.stringify(db.prepare("SELECT * FROM network_requests WHERE local_qitem_id = 'req-11'").get())).not.toContain("Confidential request text");
+      hub.down = true;
+      expect((await send(b.id, "req-12", "Another confidential text")).state).toBe("unknown");
+      hub.down = false;
+      // As queue erasure's scrub leaves an item: its content gone, its record kept.
+      db.prepare("UPDATE queue_items SET body = '', summary = NULL WHERE qitem_id = 'req-12'").run();
+      const creates = hub.creates;
+      await pass(b.id);
+      expect(hub.creates).toBe(creates);
+      expect(outcome("req-12")).toEqual({ outcome: "unknown" });
+    });
+
+    it("a hub URL's query is hidden in the request's queue text, which keeps the answer's provenance", async () => {
+      const first = bind();
+      bindings.disconnect(first.id);
+      const b = bindings.create({ session: first.localSession, hubUrl: "https://hub.example/mcp?key=pasted-key", hubSeat: PARTICIPANT, token: "tok-q" });
+      const hubId = networkHubRequestId(b, "req-13");
+      await send(b.id, "req-13");
+      answer(hubId, { state: "done", closureReason: "no-follow-on", resolution: "Done." });
+      await pass(b.id);
+      const texts = [repo.getById("req-13")!.body, ...repo.listTransitions("req-13").map((t) => t.transitionNote)].join("\n");
+      expect(texts).not.toContain("pasted-key");
+      expect(texts).toContain("https://hub.example/mcp (query hidden)");
+    });
+
+    it("a retry after a local cancel sends nothing; a refusal from show that isn't not-found neither creates nor closes", async () => {
+      const b = bind();
+      hub.down = true;
+      expect((await send(b.id, "req-14")).state).toBe("unknown");
+      hub.down = false;
+      repo.update({ qitemId: "req-14", actorSession: b.localSession, state: "done", closureReason: "canceled" });
+      expect((await send(b.id, "req-14")).state).toBe("unknown");
+      expect(hub.creates).toBe(0);
+      expect(outcome("req-14")).toEqual({ outcome: "local_closed" });
+
+      hub.down = true;
+      expect((await send(b.id, "req-15")).state).toBe("unknown");
+      hub.down = false;
+      const hubId = networkHubRequestId(b, "req-15");
+      hub.duringShow = (id) => { if (id === hubId) throw new HubError("refused", "Item is outside what this connection may reach.", "out_of_scope"); };
+      await pass(b.id);
+      expect(hub.creates).toBe(0);
+      expect(repo.getById("req-15")!.state).toBe("blocked");
+      expect(outcome("req-15")).toEqual({ outcome: null });
+    });
+
+    it("a hub holding a different request under the derived id refuses it rather than confirming it", async () => {
+      const b = bind();
+      const hubId = networkHubRequestId(b, "req-16");
+      hub.items.set(hubId, { qitemId: hubId, sourceSession: PARTICIPANT, destinationSession: PEER, state: "pending", body: "someone else's text",
+        summary: null, resolution: null, closureReason: null, notes: [] });
+      expect((await send(b.id, "req-16")).state).toBe("refused");
+      expect(repo.getById("req-16")!.state).toBe("failed");
+      expect(repo.getById("req-16")!.resolution).toContain("qitem_body_not_saved");
+    });
+  });
+
+  it("reads a hub tool result: unknown outcome, a fair-use hold and the hub's transient codes are unavailable; other codes are refusals", () => {
+    const failure = (structuredContent: Record<string, unknown>) => {
+      try { parseHubToolResult({ isError: true, content: [{ type: "text", text: "failed" }], structuredContent }); } catch (error) { return error as HubError; }
+      throw new Error("expected a HubError");
+    };
+    expect(failure({ code: "request_failed", outcome: "unknown" })).toMatchObject({ kind: "unavailable", code: "request_failed" });
+    expect(failure({ code: "fair_use_retry_later", retryable: true })).toMatchObject({ kind: "unavailable" });
+    for (const code of ["daemon_unreachable", "daemon_timeout", "request_failed"]) expect(failure({ code })).toMatchObject({ kind: "unavailable", code });
+    expect(failure({ code: "destination_not_found" })).toMatchObject({ kind: "refused", code: "destination_not_found" });
+    expect(parseHubToolResult({ content: [{ type: "text", text: "{\"qitemId\":\"x\"}" }] })).toEqual({ qitemId: "x" });
   });
 });
