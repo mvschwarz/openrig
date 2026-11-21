@@ -2262,7 +2262,10 @@ export class RestoreOrchestrator {
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
+        // The seat's own settings (permissions, envelope, wrapper, homes, tenure) are read from the node the launcher
+        // registered: a seat recreated after the snapshot runs under a new id, which its launch stamps as OPENRIG_NODE_ID.
+        const seatNodeId = launchResult?.session.nodeId ?? node.id;
+        const resumeOutcome = await this.attemptResume(seatNodeId, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(seatNodeId, rigId), effortForRestore(), warnings, node.advisor,
           selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable, opts?.claudeLaunch);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
@@ -2607,7 +2610,8 @@ export class RestoreOrchestrator {
               if (finalStatus === "resumed") {
                 return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id,
                   isPodAware && node.runtime === "claude-code", startupResult.resumedProcess,
-                  selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined);
+                  selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
+                  launchResult?.session.nodeId);
               }
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus, ...(noConversation && finalStatus === "fresh-primed" ? { noConversation: true as const } : {}) };
             }
@@ -2695,7 +2699,8 @@ export class RestoreOrchestrator {
 
     if (baseStatus === "resumed") {
       return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id, false, undefined,
-        selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined);
+        selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
+        launchResult?.session.nodeId);
     }
     return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus, ...(noConversation && !startupFailed && baseStatus === "fresh-primed" ? { noConversation: true as const } : {}) };
   }
@@ -2711,13 +2716,17 @@ export class RestoreOrchestrator {
     /** Codex (#1524): the process the adapter proved the resume on. The join must verify that same process. */
     provenCodexProcess?: { pid: number; startedAt: string },
     assertCurrent?: () => boolean,
+    /** The node the launcher registered the session on; a seat recreated after the snapshot runs under a new id. The live
+     *  checks read it; the result keeps the snapshot's node, which the caller maps to the registered one. */
+    liveNodeId?: string,
   ): Promise<RestoreNodeResult> {
+    const seatNodeId = liveNodeId ?? node.id;
     if (assertCurrent && !assertCurrent()) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "Selected seat changed before joined native proof; outcome needs inspection." };
     const identity = await rebindAndVerifyPaneIdentity({
       db: this.db,
       sessionRegistry: this.sessionRegistry,
       tmux: this.tmuxAdapter,
-      nodeId: node.id,
+      nodeId: seatNodeId,
       sessionName,
       runtime: node.runtime ?? null,
       expectedResumeToken: resumeToken,
@@ -2732,7 +2741,7 @@ export class RestoreOrchestrator {
       // current and running, owns this readiness write after those awaits.
       const current = this.db.prepare(
         "SELECT id, session_name, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-      ).get(node.id) as { id: string; session_name: string; status: string } | undefined;
+      ).get(seatNodeId) as { id: string; session_name: string; status: string } | undefined;
       if (current?.id === sessionId && current.session_name === sessionName && current.status === "running") {
         this.sessionRegistry.updateStartupStatus(sessionId, "attention_required");
       }
@@ -2753,7 +2762,7 @@ export class RestoreOrchestrator {
       const joined = identity.nativeProcess;
       if (!joined || joined.pid !== provenCodexProcess.pid || joined.startedAt !== provenCodexProcess.startedAt) {
         const store = new SeatIdentityStore(this.db);
-        const proof = store.getForNode(node.id);
+        const proof = store.getForNode(seatNodeId);
         if (proof) store.upsert({ ...proof, verdict: "mismatch", reason: "process_identity_mismatch" });
         return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
           error: `Codex resume was proven on process ${provenCodexProcess.pid} (started ${provenCodexProcess.startedAt}), but the restore join verified ${joined ? `process ${joined.pid} (started ${joined.startedAt ?? "unknown"})` : "no matching Codex process"}. The session was preserved; nothing was restarted.` };
@@ -2764,7 +2773,7 @@ export class RestoreOrchestrator {
     if ((node.runtime === "codex" || node.runtime === "claude-code") && sessionId && resumeToken) {
       const current = this.db.prepare("SELECT node_id, session_name, status, resume_token FROM sessions WHERE id = ?").get(sessionId) as
         { node_id: string; session_name: string; status: string; resume_token: string | null } | undefined;
-      const sameSession = current?.node_id === node.id && current.session_name === sessionName && current.status === "running";
+      const sameSession = current?.node_id === seatNodeId && current.session_name === sessionName && current.status === "running";
       // Startup already retained the managed token. Recheck after the awaited
       // join; a hook/operator may have changed it meanwhile. Never backfill here.
       const retained = sameSession && (managedClaudeResume
@@ -2777,7 +2786,7 @@ export class RestoreOrchestrator {
       if (!retained) {
         markManagedResumeAttention();
         const store = new SeatIdentityStore(this.db);
-        const proof = store.getForNode(node.id);
+        const proof = store.getForNode(seatNodeId);
         if (proof) store.upsert({ ...proof, verdict: "mismatch", reason: "process_identity_mismatch" });
         return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
           error: "Native resume was observed but its current session metadata conflicts or could not be retained; session preserved." };

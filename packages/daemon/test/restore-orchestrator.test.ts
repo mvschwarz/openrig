@@ -1969,6 +1969,62 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  // A seat recreated after the snapshot runs under a new node id, the one its launch stamps as OPENRIG_NODE_ID. The legacy
+  // restore reads that registered node's own settings and checks its joined proof against it; the snapshot's id finds
+  // nothing there.
+  function recreate(snap: ReturnType<typeof seedRigAndSnapshot>, runtime: "claude-code" | "codex", opts: { launchWrapper?: string[] } = {}) {
+    const savedId = snap.data.nodes[0]!.id;
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(savedId);
+    const live = rigRepo.addNode(snap.rigId, "worker", { role: "worker", runtime, ...opts });
+    expect(live.id).not.toBe(savedId);
+    return { savedId, live };
+  }
+
+  it("a recreated Claude seat's legacy resume names its registered node", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "conv-1", restorePolicy: "resume_if_possible" });
+    const { live } = recreate(snap, "claude-code");
+    const claude = mockClaudeResume();
+    await createOrchestrator({ claude }).restore(snap.id);
+    expect((vi.mocked(claude.resume).mock.calls[0] as unknown[])[7]).toBe(live.id);
+  });
+
+  it("a recreated Codex seat's legacy resume keeps its envelope and launch wrapper", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }], edges: [],
+      resumeType: "codex_id", resumeToken: "uuid-123", restorePolicy: "resume_if_possible" });
+    const { live } = recreate(snap, "codex", { launchWrapper: ["rtk", "--codex-wrap"] });
+    const envelope = { sandbox: "read-only", approval: "on-request" };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(envelope), live.id);
+    const codex = mockCodexResume();
+    await createOrchestrator({ codex }).restore(snap.id);
+    const call = vi.mocked(codex.resume).mock.calls[0] as unknown[];
+    expect(call[12]).toEqual(envelope);
+    expect(call[14]).toEqual(["rtk", "--codex-wrap"]);
+  });
+
+  it("a recreated Codex seat's legacy resume passes its joined proof on the registered node and keeps the token", async () => {
+    const resumeToken = "saved-thread-recreated";
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }], edges: [],
+      resumeType: "codex_id", resumeToken });
+    const { savedId, live } = recreate(snap, "codex");
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
+    const codexArgv = ["codex", "resume", "--add-dir", "/tmp/openrig-state", resumeToken];
+    const result = await createOrchestrator({
+      tmux,
+      codex: mockCodexResume({ ok: true }),
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "-zsh", pgid: 1234, tpgid: 54776, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 54776, ppid: 1234, command: codexArgv.join(" "), argv: codexArgv,
+          pgid: 54776, tpgid: 54776, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "resumed", nodeId: live.id, intendedNodeId: savedId });
+    expect(db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC LIMIT 1").get(live.id))
+      .toEqual({ resume_token: resumeToken });
+  });
+
   it("restore_policy=resume_if_possible + claude_name -> Claude resume called", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
