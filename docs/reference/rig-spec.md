@@ -955,6 +955,9 @@ time. Seats move one at a time, and each gets one result:
   ends unknown, its login isn't known. A seat whose restart on a switched home doesn't confirm is unknown on its own,
   and the home's other seats still restart, because the home's login is known.
 - **Seats in another rig** on a switched home are listed with their restart command, never restarted.
+- **A home switched again while its seats restart** (by another rig's apply, or `rig provider switch`): a seat restarted
+  after that switch, or during it, is `unknown` with its restart command, not `switched`. Only this daemon's switches
+  are seen; a `rig auth switch` run by hand isn't.
 - **Each result is stored as it lands,** with what the seat was doing when it was reached. Status `--json` shows it as
   `applied.activity`.
 - **The rig's assignment** (label, reference, who asked, when) is stored with the first seat that's on the account or

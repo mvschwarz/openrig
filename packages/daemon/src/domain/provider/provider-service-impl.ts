@@ -78,6 +78,16 @@ const switchesByHome = new Map<string, Promise<unknown>>();
 /** #3625: the rigs an assignment is being applied to now. In memory, so a daemon restart can't leave a rig locked. */
 const applying = new Set<string>();
 
+/** #3625: the switches this daemon has made of each Codex home (keyed by its resolved path), and the seat that made the
+ *  last. An apply uses it to tell that a home it switched was switched again while it restarted the home's other seats.
+ *  In memory, and only this daemon's switches: a `rig auth switch` run by hand isn't counted. */
+const homeSwitches = new Map<string, { count: number; seat: string }>();
+
+/** The switches this daemon has made of a Codex home so far, and the seat that made the last; null for none. */
+export function homeSwitchesOf(home: string): { count: number; seat: string } | null {
+  return homeSwitches.get(resolvedHome(home)) ?? null;
+}
+
 /** A home's path with symlinks resolved, or its absolute path when it can't be resolved. */
 function resolvedHome(home: string): string {
   try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); }
@@ -309,6 +319,7 @@ export class ProviderServiceImpl implements ProviderService {
             : { ok: false, code: r.code, message: r.message };
         },
         ...(tools.successor ? { successor: tools.successor } : {}),
+        homeSwitches: homeSwitchesOf,
         activityOf: (seat) => this.activityOf(seat),
         save: (result, applied) => {
           if (!stored && tookEffect(result.kind, result.seat)) {
@@ -540,6 +551,8 @@ export class ProviderServiceImpl implements ProviderService {
         message: `The login "${input.toAccount}" couldn't be activated in ${home} (${activated.reason}); nothing was restarted.` };
     }
     report.loginChanged = true;
+    const key = resolvedHome(home);
+    homeSwitches.set(key, { count: (homeSwitches.get(key)?.count ?? 0) + 1, seat: input.seat });
     const restart = await seatRestart.run(input.seat, `rig provider switch --to-account ${input.toAccount}`);
     if (!restart.ok) {
       return { outcome: "failed_safely", reasons: ["login_changed_seat_not_restarted"], seat: report,

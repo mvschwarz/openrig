@@ -46,6 +46,9 @@ export interface ApplyDeps {
   successor?(seat: string, accountHome: string): Promise<SuccessorResult>;
   /** The seat's activity now, read as it's reached. */
   activityOf(seat: string): string;
+  /** The switches this daemon has made of a Codex home: how many, and the seat that made the last. A peer restarted on a
+   *  home some other switch changed after this apply's isn't recorded as on the account. Without it, nothing is checked. */
+  homeSwitches?(home: string): { count: number; seat: string } | null;
   /** Saves each result as it lands, with the reference a switched or pending-successor seat was given. */
   save(result: ApplySeatResult, applied: AppliedReference | undefined): void;
   now(): string;
@@ -120,6 +123,14 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
   async function applyHome(home: string, rows: PlanRow[]): Promise<void> {
     let state: "untouched" | "switched" | "unknown" = "untouched";
     let switcher = "";
+    /** The home's switch count as this apply's switch left it; null when it isn't known. */
+    let mine: number | null = null;
+    /** The seat whose switch changed the home after this apply's, or null. */
+    const switchedSince = (): string | null => {
+      if (!deps.homeSwitches) return null;
+      const now = deps.homeSwitches(home);
+      return now && now.count !== mine ? now.seat : null;
+    };
     /** Seats whose own switch failed before effect, with why: kept as they are, whatever the home does next. */
     const refused = new Map<string, string>();
     const waiting: PlanRow[] = [];
@@ -128,7 +139,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       `${home} now uses "${plan.account.label}" (switched by ${switcher}), and this seat wasn't restarted: ${why}`, restartCommand(row.seat));
     const onSwitchedHome = async (row: PlanRow) => {
       if (unsafe(row)) notRestarted(row, notAttempted(row).replace(/^not attempted: /, ""));
-      else await restartOnHome(row, home, switcher);
+      else await restartOnHome(row, home, switcher, switchedSince);
     };
     for (const row of rows) {
       if (state === "unknown") { skipped(row); continue; }
@@ -139,7 +150,12 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       const result = await deps.switchSeat(row.seat);
       const [kind, detail, recovery] = switchKind(row.seat, result);
       record(row, kind, detail, recovery, activity);
-      if (kind === "switched") { state = "switched"; switcher = row.seat; }
+      if (kind === "switched") {
+        state = "switched"; switcher = row.seat;
+        const after = deps.homeSwitches?.(home);
+        // The last switch of the home is this one: its count is the one peers must restart under.
+        mine = after && after.seat === row.seat ? after.count : -1;
+      }
       else if (kind === "unknown") { state = "unknown"; switcher = row.seat; }
       // Failed before effect: the home is as it was, and the next seat that can switches it. This seat isn't tried again.
       else refused.set(row.seat, detail);
@@ -159,10 +175,21 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     }
   }
 
-  async function restartOnHome(row: PlanRow, home: string, switcher: string): Promise<void> {
+  async function restartOnHome(row: PlanRow, home: string, switcher: string, switchedSince: () => string | null): Promise<void> {
     const activity = deps.activityOf(row.seat);
+    // Another switch of this home (another rig's apply, or rig provider switch) after this apply's: its login is that one's now.
+    const before = switchedSince();
+    if (before) {
+      record(row, "unknown", `${home} was switched again by ${before} after ${switcher} switched it to "${plan.account.label}", so this seat wasn't restarted`,
+        restartCommand(row.seat), activity);
+      return;
+    }
     const restarted = await deps.restartPeer(row.seat, reason);
-    if (restarted.ok && restarted.outcome === "restarted_account_unverified") {
+    const during = switchedSince();
+    if (restarted.ok && during) {
+      record(row, "unknown", `restarted in place on ${home}, but ${during} switched it again meanwhile: it may be on that login, not "${plan.account.label}"`,
+        restartCommand(row.seat), activity);
+    } else if (restarted.ok && restarted.outcome === "restarted_account_unverified") {
       record(row, "switched", `restarted in place on ${home}, which ${switcher} switched to "${plan.account.label}"; the account isn't verified until a tool turn`, undefined, activity);
     } else if (restarted.ok) {
       record(row, "unknown", `${home} now uses "${plan.account.label}"; the restart didn't confirm (${restarted.outcome ?? "no outcome"}: ${restarted.message}). Not retried.`,
