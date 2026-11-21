@@ -97,7 +97,7 @@ const MID_WORK_PATTERNS = [
 // as in a reasoning header clipped before "esc to interrupt" ("• Working on the test fixtures (6m 12s").
 // Prose such as "Working (as requested), …" or "Working... then I committed it." has no timer.
 const LIVE_WORKING_ROW_PATTERN =
-  /^(?:\S\s+)?Working(?:\s*\(\s*\d|\s*(?:…|\.{3})\s*(?:\(\s*\d|$)|\s*$|\b.*\(\s*\d+[hms]\b)/;
+  /^(?:\S\s+)?Working(?:\s*\(\s*\d+[hms]\b|\s*(?:…|\.{3})\s*(?:\(\s*\d+[hms]\b|$)|\s*$|\b.*\(\s*\d+[hms]\b)/;
 const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>
   pattern === WORKING_WORD_PATTERN ? LIVE_WORKING_ROW_PATTERN : pattern);
 

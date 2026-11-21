@@ -211,6 +211,8 @@ describe("agent pane activity classifier", () => {
       ["• Working... then I committed it.", "", "› "],
       ["• Working… then I committed it.", "", "› "],
       ["• Working tree is clean (2 files committed).", "", "› "],
+      ["• Working (2 files committed).", "", "› "],
+      ["• Working… (2 files committed).", "", "› "],
     ]) {
       const result = classifyPaneActivity(pane.join("\n"));
 
