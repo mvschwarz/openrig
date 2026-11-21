@@ -219,7 +219,7 @@ function defaultFrom(repoRoot: string, to: string): string {
     const commit = `${to}^{commit}`;
     // A release can have multiple tags. Exclude all names on the target itself
     // so describe can walk every parent of a merge looking for an earlier release.
-    const tags = git(repoRoot, ["tag", "--list", "v*", "--points-at", commit]).split("\n").filter(Boolean);
+    const tags = git(repoRoot, ["tag", "--no-column", "--list", "v*", "--points-at", commit]).split("\n").filter(Boolean);
     return git(repoRoot, ["describe", "--tags", "--abbrev=0", "--match", "v*", ...tags.map(tag => `--exclude=${tag}`), commit]).trim();
   } catch {
     throw new SurfaceParserError({

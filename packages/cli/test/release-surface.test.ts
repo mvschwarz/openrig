@@ -187,6 +187,7 @@ describe("release-surface parser - honest failure (AC-5)", () => {
     const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd: repoRoot, stdio: "pipe" });
     try {
       git("init", "-b", "main");
+      git("config", "column.tag", "always");
       const dir = join(repoRoot, "packages/cli/src/commands");
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(join(dir, "sample.ts"), 'export function sample() { return new Command("sample"); }');
