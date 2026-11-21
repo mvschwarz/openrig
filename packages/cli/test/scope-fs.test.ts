@@ -18,6 +18,7 @@ import {
   readFrontmatter,
   resolveMissionsRoot,
   splitFrontmatter,
+  editFrontmatter,
   updateFrontmatter,
 } from "../src/lib/scope/scope-fs.js";
 import { ScopeCliError } from "../src/lib/scope/types.js";
@@ -190,6 +191,11 @@ describe("frontmatter parser", () => {
       expect(fs.readFileSync(file, "utf8")).toContain(unowned);
       expect(fs.readFileSync(file, "utf8").endsWith("---\nbody\n")).toBe(true);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["\u2028", "\u2029", "\r"])("keeps dashes after %j inside frontmatter", (separator) => {
+    const original = `---\ntitle: before${separator}---\nstatus: active\n---\nbody\n`;
+    expect(editFrontmatter(original, { status: "closed" }, "README.md")).toBe(original.replace("status: active", "status: closed"));
   });
 
   describe.each(["\n", "\r\n"])("empty frontmatter (%j)", (newline) => {

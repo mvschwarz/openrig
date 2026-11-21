@@ -154,7 +154,7 @@ export function updateFrontmatter(
 export function editFrontmatter(original: string, updates: Record<string, unknown>, absPath: string, strict = false): string {
   const opening = /^---[ \t]*\r?\n/.exec(original);
   const rest = original.slice(opening?.[0].length ?? 0);
-  const closing = opening && /^---[ \t]*(?=\r?\n|(?![\s\S]))/m.exec(rest);
+  const closing = opening && /(?<=^|\n)---[ \t]*(?=\r?\n|(?![\s\S]))/.exec(rest);
   if (!opening || !closing) {
     if (strict && opening) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
