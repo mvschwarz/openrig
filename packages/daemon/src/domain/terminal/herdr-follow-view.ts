@@ -98,7 +98,7 @@ export class HerdrFollowView {
     try {
       const platform = this.deps.platform ?? process.platform;
       const strips = (await findAttributedViewerPanes(this.deps.run, state.cwd, platform))
-        .filter(found => sameViewerCwd(found.cwd, state.cwd, platform));
+        .filter(found => typeof found.cwd === "string" && sameViewerCwd(found.cwd, state.cwd, platform));
       const strip = strips.length === 1 && strips[0]!.workspace_id === state.pane.workspace_id && strips[0]!.pane_id === state.pane.pane_id ? strips[0]! : null;
       if (!strip) return null;
       const viewers = new HerdrViewer(this.deps.socketPath, this.deps.run, this.deps.platform, path.join(root, "viewers"), this.deps.inspect);

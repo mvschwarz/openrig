@@ -36,7 +36,7 @@ it in the harness, then connect it.
 
 ## The preset
 
-One YAML file per harness: `$OPENRIG_HOME/community-harnesses/<name>.yaml`. `rig community-harness list` shows what's
+One YAML file per harness: `$OPENRIG_HOME/community-harnesses/<name>.yaml`. `rig doctor --community-harnesses` reports invalid presets and exits with status 1 when any fail validation. `rig community-harness list` shows what's
 installed.
 
 ```yaml

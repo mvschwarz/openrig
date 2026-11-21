@@ -670,14 +670,15 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         const base = `http://${formatDaemonHostForUrl(config.daemon.host ?? "127.0.0.1")}:${config.daemon.port ?? DEFAULT_PORT}`;
         const { data } = await new DaemonClient(base).get<{
           dir: string;
-          harnesses: Array<{ name: string; path: string; usable: boolean; problem?: string; command?: string; limits?: string[] }>;
-        }>("/api/community-harnesses");
+          harnesses: Array<{ name: string; path: string; usable: boolean; problem?: string; command?: string; executable?: string; limits?: string[] }>;
+        }>("/api/community-harnesses?preflight=true");
         const healthy = data.harnesses.every((preset) => preset.usable);
         if (opts.json) console.log(JSON.stringify({ healthy, ...data }, null, 2));
         else {
           console.log(`Community harness presets in ${data.dir}`);
           for (const preset of data.harnesses) {
             console.log(`  [${preset.usable ? "OK" : "FAIL"}] ${preset.name} (${preset.path}): ${preset.problem ?? preset.command}`);
+            if (preset.executable) console.log(`    Windows executable: ${preset.executable}`);
             for (const limit of preset.limits ?? []) console.log(`    Limit: ${limit}`);
           }
           console.log("Preset validation reads the daemon's configuration. It does not launch the command.");
