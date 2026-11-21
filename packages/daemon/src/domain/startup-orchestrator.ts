@@ -667,7 +667,7 @@ export class StartupOrchestrator {
               rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
             }) : null;
             launchPrompt = this.composeInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles,
-              launchChallenge?.promptBlock ?? null, input.includeDurableObligations);
+              launchChallenge?.promptBlock ?? null, input.includeDurableObligations, { foldAllSendText: true });
           }
           if (input.beforeNativeLaunch && !input.beforeNativeLaunch()) {
             return this.fail(input, "attention_required", ["The selected seat, settings or history changed after preparation; native resume was not dispatched."], undefined, false, undefined, false, "harness_launch", true);
@@ -1225,24 +1225,35 @@ export class StartupOrchestrator {
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
+    { foldAllSendText = false }: { foldAllSendText?: boolean } = {},
   ): { prompt: string; remainingFiles: ResolvedStartupFile[] } {
     const { binding } = input;
-    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    const firstSendTextIndex = foldAllSendText
+      ? (postLaunchFiles.length > 0 ? 0 : -1) // postLaunchFiles already holds only files that resolved to send_text
+      : postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
     const identityContext = `OpenRig-generated identity context (not a project task):\n${identityAction.value}\nEnd of generated identity context.`;
     let prompt = identityContext;
     let remainingFiles = postLaunchFiles;
 
     if (firstSendTextIndex !== -1) {
-      const firstSendText = postLaunchFiles[firstSendTextIndex]!;
-      try {
-        const content = this.readFile(firstSendText.absolutePath);
-        if (content.length > 0) {
-          prompt = `${identityContext}\n\n${content}`;
-          remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+      // A community harness that takes its first turn at launch has no later path for startup files, so every
+      // send_text file goes into that one input, in order. Other routes still fold only the first and deliver the rest.
+      const candidates = foldAllSendText ? postLaunchFiles : [postLaunchFiles[firstSendTextIndex]!];
+      const folded = new Map<ResolvedStartupFile, string>();
+      for (const file of candidates) {
+        try {
+          const content = this.readFile(file.absolutePath);
+          if (content.length > 0) folded.set(file, content);
+        } catch {
+          // Leave it out of the prompt and let the adapter handle the original
+          // startup file using its normal failure semantics.
         }
-      } catch {
-        // Fall back to a standalone identity prompt and let the adapter handle
-        // the original startup file using its normal failure semantics.
+        // The first-file route stops at the first file whether or not it could be read.
+        if (!foldAllSendText) break;
+      }
+      if (folded.size > 0) {
+        prompt = [identityContext, ...folded.values()].join("\n\n");
+        remainingFiles = postLaunchFiles.filter((file) => !folded.has(file));
       }
     }
 

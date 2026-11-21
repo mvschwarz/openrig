@@ -24,8 +24,8 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Cancel | no | A plain preset has no live native cancellation consumer. Its own manual controls remain available; `/abort` is ordinary input unless that program defines it. An implemented runner can support the [named native command](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1), subject to its own capability and turn mapping. `rig seat stop` and `rig down` end the seat's tmux session; work outside that pane, such as a gateway, has separate custody and lifecycle. List those limits in the preset. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
 
-**Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
-configuration, or let a launcher that opts in take the seat's declared model (`passes_model`, below).
+**Not placed:** guidance, skills and the model. Set the model in the harness's own
+configuration, or let a launcher that opts in take the seat's declared model (`passes_model`, below). Startup files aren't placed either, unless the preset sets `first_input` (below): then its startup text files go in the first input, and a launch warns about any file it did not deliver.
 
 **Check that the harness answers on its own first.** Before writing a preset, start the harness in a terminal outside OpenRig, with the
 same configuration and credentials your launcher will give it, and send it one prompt. Use the folder your launcher gives the seat, not
@@ -50,7 +50,7 @@ launch_result: true             # optional: the launcher reports the conversatio
 # names_conversation: true      # optional, instead of launch_result: OpenRig names the conversation (below)
 resume: true                    # optional, needs one of those two; declare it only once your harness's resume is checked
 startup_assisted: true           # optional: startup submission needs a person's check (below)
-first_input: true                # optional: launcher takes the first turn from OPENRIG_FIRST_INPUT (below)
+first_input: true                # optional: launcher takes the first turn, with every readable startup text file in order, from OPENRIG_FIRST_INPUT (below)
 # runner: true                  # optional, needs launch_result: the launcher reports the seat's activity (below)
 # passes_model: true            # optional: the launcher takes the seat's declared model from OPENRIG_MODEL (below)
 # launch_wrapper: true          # optional: a runner applies OPENRIG_LAUNCH_WRAPPER to its native child (below)
@@ -60,7 +60,7 @@ first_input: true                # optional: launcher takes the first turn from 
   is refused: put it in a script and name the script.
 - **Built-in runtime names are reserved.** A preset can't replace `claude-code`, `codex` or the other built-ins.
 - **Unknown fields are refused,** so a preset written for a newer OpenRig says so instead of half-working.
-- **Fork isn't supported, and resume only as described below.** Neither is placing skills, guidance or startup files. Except
+- **Fork isn't supported, and resume only as described below.** Neither is placing skills or guidance, or startup files other than as text in a `first_input` turn. Except
   for assisted startup below, the seat is called ready while something other than a shell runs in its pane, which says
   nothing about which conversation it is.
 
@@ -450,9 +450,9 @@ A runner preset for [nodecode](https://nodecode.ai), a self-modifying Common Lis
 
 ## Pass the first startup input at launch
 
-A format-1 preset may set `first_input: true` (a boolean, default false). OpenRig composes the same initial identity turn it would otherwise paste, including the first merged text file, durable-obligation guidance and any selected orientation challenge. Before launch it writes that text to a per-attempt 0600 file under its own `state/first-input/` folder and passes the path as `OPENRIG_FIRST_INPUT`. The typed launch command carries the path, not the text; an argument-based launcher still puts the text in the native harness’s argv.
+A format-1 preset may set `first_input: true` (a boolean, default false). OpenRig composes the same initial identity turn it would otherwise paste, including every readable, non-empty startup file delivered as text (an explicit `delivery_hint: send_text`, or `auto` resolving to text) in its existing order, durable-obligation guidance and any selected orientation challenge. Before launch it writes that text to a per-attempt 0600 file under its own `state/first-input/` folder and passes the path as `OPENRIG_FIRST_INPUT`. The typed launch command carries the path, not the text; an argument-based launcher still puts the text in the native harness’s argv.
 
-The contributor-owned launcher reads the file and uses its harness’s supported initial-prompt route: the Cursor example passes one positional prompt; OpenClaw uses `--message`. Core knows neither flag. If no initial identity turn is due (an ordinary resume, for example), the variable is absent and the launcher starts without a first message. Later startup files and actions use their existing delivery paths; they are not folded into the launch file.
+The contributor-owned launcher reads the file and uses its harness’s supported initial-prompt route: the Cursor example passes one positional prompt; OpenClaw uses `--message`. Core knows neither flag. If no initial identity turn is due (an ordinary resume, for example), the variable is absent and the launcher starts without a first message. Those files are in the launch file and are not delivered a second time; an empty or unreadable one is left out and still warned about as not delivered. Startup actions after the identity turn use their existing delivery paths. Presets without `first_input` are unchanged: only the first file with an explicit `delivery_hint: send_text` joins the identity turn, and only if it is readable and not empty. That check reads the hint as written, so an `auto` file that resolves to text never joins, even when it is listed first. A community harness isn't sent the files that don't join; the launch warns about each one, as before.
 
 OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
 
@@ -497,7 +497,7 @@ Pi agent directory (`$OPENRIG_HOME/state/pi/<session>/agent/skills/`), or for Wo
 copies (openrig-world's `PI-SKILLS.md`). The [`pi-tui` example](#an-example-pis-terminal-ui) above does step 1 for its
 seats in its launcher.
 
-OpenRig installs no skills for a terminal or community seat: it skips their resources and startup files, and `rig skill
+OpenRig installs no skills for a terminal or community seat: it skips their resources, places startup files only as text in a community preset's `first_input` turn, and `rig skill
 loadout` covers Claude Code and Codex only. Without the coordination skills, the agent there doesn't know the queue's habits,
 such as parking a row that waits on CI instead of leaving it in progress, or handing work on so the next row names its
 source. The seat's setup does two things.
