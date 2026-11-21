@@ -19,7 +19,7 @@ function report(over: Record<string, unknown> = {}) {
   return { ok: true, planOnly: true, message: "planned", codexHome: HOME, peers: [], activity: { state: "idle", needsInput: null, detail: "" }, ...over };
 }
 
-function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, unknown>; saved?: string[]; loggedIn?: boolean; saveFails?: string } = {}) {
+function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, unknown>; saved?: string[]; loggedIn?: boolean; saveFails?: string; activateFails?: string } = {}) {
   const calls: string[] = [];
   const homes = new Map([[HOME, { active: opts.loggedIn === false ? null as string | null : "personal", saved: new Set(opts.saved ?? ["personal", "work"]) }]]);
   const codexLogins = {
@@ -37,6 +37,7 @@ function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, un
       calls.push(`activate ${home} ${name}`);
       const h = homes.get(home);
       if (!h?.saved.has(name)) return { ok: false as const, reason: "missing_profile" };
+      if (opts.activateFails) return { ok: false as const, reason: opts.activateFails };
       h.active = name;
       return { ok: true as const };
     },
@@ -89,6 +90,11 @@ describe("rig provider switch --seat moves one seat to a login saved in the Code
     expect(homeSwitchesOf(HOME)).toEqual({ count: start + 1, seat: "dev-a@rig" });
     const refused = harness({ saveFails: "io_error" });
     await refused.svc.switchAccount({ seat: "dev-b@rig", toAccount: "work", forceUnsafe: false }, refused.seatRestart);
+    expect(homeSwitchesOf(HOME)).toEqual({ count: start + 1, seat: "dev-a@rig" });
+    // Saved first, but the login couldn't be activated: the home is as it was, so it isn't a switch either.
+    const notActivated = harness({ activateFails: "unsafe_path" });
+    expect(await notActivated.svc.switchAccount({ seat: "dev-c@rig", toAccount: "work", forceUnsafe: false }, notActivated.seatRestart))
+      .toMatchObject({ outcome: "failed_safely", reasons: ["login_not_activated"] });
     expect(homeSwitchesOf(HOME)).toEqual({ count: start + 1, seat: "dev-a@rig" });
   });
 
