@@ -47,7 +47,7 @@ function tmuxWithLivePeer(): TmuxAdapter {
     listWindows: async () => [],
     listPanes: async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }],
     // Only the peer is live; the cold-start target's session is gone.
-    hasSession: async (name: string) => name === PEER_SESSION,
+    probeSession: async (name: string) => ({ state: name === PEER_SESSION ? "present" : "absent" }),
   } as unknown as TmuxAdapter;
 }
 
@@ -136,7 +136,7 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
       db,
       deliveryGuard,
       launchSingleNode: (id, logicalId) => orchestrator.launchSingleNode(id, logicalId, { requireCurrentOccupant: true }),
-      hasSession: name => tmux.hasSession(name),
+      probeSession: name => tmux.probeSession(name),
       getNodeLaunchRecipe: () => recipeWithColdStart(),
       log: () => {},
     });
@@ -234,4 +234,27 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     expect(resume).not.toHaveBeenCalled();
     expect((db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n).toBe(sessionsBefore);
   });
+
+// #3173 review round 2: a seat that started AFTER the snapshot was taken has a live
+// session newer than everything the snapshot records, and the snapshot names no occupant
+// for it. Fresh-launching there would silently replace that newer conversation — the seat
+// must park as awaiting-decision instead (R2b).
+it("parks when the seat ran after the snapshot and the snapshot records no occupant", async () => {
+  // Snapshot before the seat's current session existed: only the peer is in it.
+  snapshotCapture.captureSnapshot(rigId, "manual");
+  const later = sessionRegistry.registerSession(implNodeId, SEAT_SESSION);
+  sessionRegistry.updateStatus(later.id, "exited"); // exited without intent → dormant, revivable
+  const pi = { canResume: () => false, resume: vi.fn() } as unknown as PiResumeAdapter;
+  const tmux = tmuxWithLivePeer();
+  const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
+  const orchestrator = orchestratorWith(pi);
+  const starter = starterFor(orchestrator);
+
+  starter.notify(SEAT_SESSION);
+  await vi.waitFor(() => expect(ledger()).toBeDefined());
+
+  expect(ledger()).toContain("awaiting_decision");
+  expect(pi.resume).not.toHaveBeenCalled();
+  expect(createSession).not.toHaveBeenCalled();
+});
 });

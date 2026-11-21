@@ -1353,6 +1353,23 @@ export class RestoreOrchestrator {
           ...notStarted };
       }
     }
+    // R2b (#2829 review): the same protection for a snapshot that has no occupant for the
+    // seat at all. A seat that started after the snapshot was taken has a live session
+    // newer than every snapshot session; fresh-launching here would silently replace that
+    // conversation with a new one, so the seat parks for a decision instead.
+    if (opts?.requireCurrentOccupant && occupantResolution.kind === "none" && !selectedHistory && !freshRequested) {
+      const latestLive = this.sessionRegistry.getSessionsForRig(rigId)
+        .filter(row => row.nodeId === nodeId)
+        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+      const newestSnapshotId = data.sessions
+        .filter(row => row.nodeId === nodeId)
+        .reduce<string | null>((newest, row) => !newest || row.id > newest ? row.id : newest, null);
+      if (latestLive && (newestSnapshotId === null || latestLive.id > newestSnapshotId)) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: `The seat has a session newer than the snapshot's, and the snapshot records no occupant for it. No session was started. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+          ...notStarted };
+      }
+    }
     const carried = opts?.resumePeriodicCarry && !selectedHistory && !freshRequested
       && occupantResolution.kind === "none" && liveNode?.id === nodeId
       ? data.periodicResumeSourcesByNode?.[nodeId] : undefined;

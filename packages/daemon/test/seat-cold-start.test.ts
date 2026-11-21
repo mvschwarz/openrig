@@ -96,7 +96,7 @@ function fixture(opts?: FixtureOptions): Fixture {
       launches.push({ rigId, logicalId });
       return { ok: true, launched: [{ logicalId, status: "resumed" }] };
     },
-    hasSession: async name => liveSessions.has(name),
+    probeSession: async name => ({ state: liveSessions.has(name) ? "present" : "absent" }),
     getNodeLaunchRecipe: () => recipe,
     log: line => logs.push(line),
     now: () => new Date(),
@@ -326,11 +326,11 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
-  it("leaves the seat alone when its tmux probe throws (fail closed)", async () => {
+  it("leaves the seat alone when its tmux probe cannot establish absence (fail closed)", async () => {
     const f = fixture();
-    f.deps.hasSession = async name => {
-      if (name === "dev-impl@fleet") throw new Error("tmux probe failed");
-      return true; // a peer is live, so only the target probe failure can block the launch
+    f.deps.probeSession = async name => {
+      if (name === "dev-impl@fleet") return { state: "transport_unavailable", cause: "no server running on /tmp/nope" };
+      return { state: "present" }; // a peer is live, so only the target probe failure can block the launch
     };
     f.starter.notify("dev.impl@fleet");
     await flush();
@@ -341,12 +341,12 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
 
   it.each(["stop", "opt-out", "identity"])("rechecks %s after awaited probes and before launch", async change => {
     const f = fixture();
-    f.deps.hasSession = async name => {
-      if (name !== "dev-rev@fleet") return false;
+    f.deps.probeSession = async name => {
+      if (name !== "dev-rev@fleet") return { state: "absent" };
       if (change === "stop") f.db.prepare("UPDATE sessions SET intentionally_stopped=1 WHERE id='s1'").run();
       if (change === "opt-out") f.setRecipe(specWith({ member: false }));
       if (change === "identity") f.db.prepare("UPDATE nodes SET logical_id='dev.replacement' WHERE id='n1'").run();
-      return true;
+      return { state: "present" };
     };
     f.starter.notify("dev.impl@fleet");
     await flush();
@@ -420,8 +420,8 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
       f.db.prepare("INSERT INTO sessions(id,node_id,session_name,status) VALUES (?,?,?,'running')")
         .run(`s${i}`, `n${i}`, `dev-peer${i}@fleet`);
     }
-    const probe = vi.fn(f.deps.hasSession);
-    f.deps.hasSession = probe;
+    const probe = vi.fn(f.deps.probeSession);
+    f.deps.probeSession = probe;
     f.starter.notify("dev.impl@fleet");
     await vi.waitFor(() => expect(f.launches).toHaveLength(1));
     expect(probe).toHaveBeenCalledTimes(7);
@@ -500,9 +500,9 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.deps.now = () => new Date(now);
     f.setLiveSessions([]);
     const recipe = vi.fn(f.deps.getNodeLaunchRecipe);
-    const probe = vi.fn(f.deps.hasSession);
+    const probe = vi.fn(f.deps.probeSession);
     f.deps.getNodeLaunchRecipe = recipe;
-    f.deps.hasSession = probe;
+    f.deps.probeSession = probe;
     f.starter.notify("dev.impl@fleet");
     await flush();
     f.starter.notify("dev-impl@fleet");
@@ -523,9 +523,9 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.deps.now = () => new Date(now);
     f.setLiveSessions([]);
     const recipe = vi.fn(f.deps.getNodeLaunchRecipe);
-    const probe = vi.fn(f.deps.hasSession);
+    const probe = vi.fn(f.deps.probeSession);
     f.deps.getNodeLaunchRecipe = recipe;
-    f.deps.hasSession = probe;
+    f.deps.probeSession = probe;
     const pass = {};
     f.starter.notify("dev.impl@fleet", pass);
     await flush();
@@ -580,4 +580,24 @@ describe("cold-start continuity outcomes (#2829 slice 1)", () => {
     expect(classifyColdStartLaunch("dev.impl", { ok: false, code: "no_usable_snapshot", message: "no snapshot" }))
       .toEqual({ kind: "failed", error: "no snapshot" });
   });
+});
+
+// #3173 review round 2: a guard refusal raised before the launch callback (a draft in
+// the input box, a target that changed) is not a failed launch and must not increment
+// consecutive_failures — otherwise a repeatedly-refusing seat caps itself out and stays
+// blocked even after the refusal clears.
+it("does not count pre-launch lifecycle refusals as failed launches", async () => {
+  const f = fixture();
+  const guardError = (code: string) => { const e = new Error(code); (e as { code?: string }).code = code; return e; };
+  f.deps.deliveryGuard = { lifecycle: async () => { throw guardError("draft_aware_lifecycle"); } } as never;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    f.starter.notify("dev.impl@fleet");
+    await flush();
+  }
+  const row = f.ledger();
+  expect(row?.consecutive_failures ?? 0).toBe(0);
+  expect(row?.last_outcome).toContain("refused:draft_aware_lifecycle");
+  // A refusal is not a launch: the door never ran.
+  expect(f.launches).toHaveLength(0);
+  f.db.close();
 });

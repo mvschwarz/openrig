@@ -169,8 +169,9 @@ export interface SeatColdStartDeps {
   deliveryGuard: Pick<SeatDeliveryGuard, "lifecycle">;
   /** The existing single-seat launch door (`rig launch`): resumes or fresh-primes per restore policy. */
   launchSingleNode: (rigId: string, logicalId: string) => Promise<ColdStartLaunchResult>;
-  /** Live tmux probe; the same adapter the queue's transport uses. */
-  hasSession: (sessionName: string) => Promise<boolean>;
+  /** Three-state tmux probe; the same adapter the queue's transport uses. Cold start may
+   * proceed only on positive absence — present and transport_unavailable both refuse. */
+  probeSession: (sessionName: string) => Promise<import("../adapters/tmux.js").SessionProbe>;
   /** Reads the seat's persisted rig spec (opt-in source of truth). */
   getNodeLaunchRecipe: (nodeId: string) => { rigSpec: RigSpec } | null;
   log?: (line: string) => void;
@@ -256,7 +257,8 @@ export class SeatColdStarter {
     const now = this.currentTime();
     try {
       if (!await this.eligible(seat, now)) return;
-      await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
+      try {
+        await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
         // No await between the final eligibility read and the launch door. The door joins
         // this same lease, so a supported stop cannot commit in its launch preflight.
         const current = this.resolveSeat(seat.logicalId, seat.rigName, seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`);
@@ -277,6 +279,20 @@ export class SeatColdStarter {
         this.record(seat.nodeId, label, success ? "succeeded" : "failed", this.currentTime().toISOString());
         this.log(`${seat.logicalId}: ${label}`);
       });
+      } catch (err) {
+        // #3173 review: a refusal the guard raises BEFORE the launch callback runs (a draft
+        // sitting in the input box, a target that changed under us) is not a failed launch.
+        // It must not increment consecutive_failures — a seat that keeps refusing would
+        // otherwise cap itself out and stay blocked after the refusal clears.
+        const code = (err as { code?: string }).code;
+        if (code === "draft_aware_lifecycle" || code === "typing_guard_enabled"
+          || code === "guard_target_changed" || code === "guard_target_unknown") {
+          this.record(seat.nodeId, `refused:${code}`, "refused", this.currentTime().toISOString());
+          this.log(`${seat.logicalId}: not cold-starting: ${code}`);
+          return;
+        }
+        throw err;
+      }
     } catch (err) {
       this.record(seat.nodeId, "failed:exception", "failed", this.currentTime().toISOString());
       this.log(`${seat.logicalId}: attempt threw: ${err instanceof Error ? err.message : String(err)}`);
@@ -297,15 +313,16 @@ export class SeatColdStarter {
 
     // The queue said no receiver; verify — a live session means someone is there.
     const physical = seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`;
-    try {
-      if (await this.deps.hasSession(physical)) {
-        this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0, last_success_at=?, last_outcome='observed_running' WHERE node_id=?")
-          .run(now.toISOString(), seat.nodeId);
-        return refuse("seat's tmux session is live");
-      }
-    } catch {
-      // R5: a probe that throws is not evidence of absence — fail closed and leave the seat alone.
-      return refuse("seat's tmux probe failed; leaving the seat alone");
+    const probe = await this.deps.probeSession(physical).catch(() => ({ state: "transport_unavailable" as const, cause: "probe threw" }));
+    // R5/#3173 review: only positive absence is evidence the seat is gone. Present means
+    // someone is there; a transport failure is not absence — fail closed either way.
+    if (probe.state === "present") {
+      this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0, last_success_at=?, last_outcome='observed_running' WHERE node_id=?")
+        .run(now.toISOString(), seat.nodeId);
+      return refuse("seat's tmux session is live");
+    }
+    if (probe.state !== "absent") {
+      return refuse("seat's tmux probe could not establish absence; leaving the seat alone");
     }
 
     const ledger = this.ledgerRefuses(seat.nodeId, now);
@@ -321,7 +338,8 @@ export class SeatColdStarter {
       ORDER BY s.id DESC`)
       .all(seat.rigId, seat.nodeId) as Array<{ session_name: string }>;
     for (const peer of peers) {
-      try { if (await this.deps.hasSession(peer.session_name)) return true; } catch { /* try the next peer */ }
+      const peerProbe = await this.deps.probeSession(peer.session_name).catch(() => null);
+      if (peerProbe?.state === "present") return true; /* otherwise try the next peer */
     }
     return refuse("no other seat of this rig is live (rig down)");
   }
@@ -364,10 +382,11 @@ export class SeatColdStarter {
   /** Durable ledger: the attempt window opens at launch, then records the outcome.
    *  `in_flight` leaves the failure count alone: a crash mid-launch is neither a launch nor
    *  a proven failure, and the interval alone already prevents a second launch in the window. */
-  private record(nodeId: string, outcome: string, state: "in_flight" | "succeeded" | "failed", iso: string): void {
+  private record(nodeId: string, outcome: string, state: "in_flight" | "succeeded" | "failed" | "refused", iso: string): void {
     const existing = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     const failures = state === "succeeded" ? 0
       : state === "failed" ? (existing?.consecutive_failures ?? 0) + 1
+      : state === "refused" ? (existing?.consecutive_failures ?? 0)
       : (existing?.consecutive_failures ?? 0);
     const success = state === "succeeded";
     if (existing) {

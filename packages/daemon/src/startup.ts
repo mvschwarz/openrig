@@ -992,7 +992,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     launchSingleNode: (rigId, logicalId) => coldStartLaunch
       ? coldStartLaunch(rigId, logicalId)
       : Promise.resolve({ ok: false, code: "launcher_not_ready", message: "cold-start launcher is not ready" }),
-    hasSession: (sessionName) => tmuxAdapter.hasSession(sessionName),
+    probeSession: (sessionName) => tmuxAdapter.probeSession(sessionName),
     getNodeLaunchRecipe: (nodeId) => rigRepo.getNodeLaunchRecipe(nodeId),
   });
   queueRepoInstance.attachWakeWithoutReceiverNotifier((destination, pass) => seatColdStarter.notify(destination, pass));
