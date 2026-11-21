@@ -425,7 +425,10 @@ your context, your compaction and your replacement — and it is the only thing 
   and a close with `--resolution "<outcome>"` stores the outcome on the row; `--state done
   --evidence-ref <path>` also keeps the artifact's pointer on it. To accept a re-estimate,
   `--closure-required-at <iso>` on an in-progress row moves its deadline and keeps the claim,
-  recording the old and new time and who accepted it.
+  recording the old and new time and who accepted it. A caller that acts on a state it read earlier
+  (a closer that isn't the claimant) adds `--expect-state <state>`: the update applies only if the
+  row is still in that state, checked in the same transaction, and otherwise writes nothing and
+  fails with `qitem_state_changed` and the current state, so a claim that landed in between stays.
   Since 0.7.16 an otherwise-admitted state-changing park or close stores its supplied non-blank
   `--summary` or `--evidence-ref`, instead of refusing the whole update; note-append and
   re-estimate rules are unchanged, and the receipt names a requested field the stored row doesn't

@@ -8,9 +8,11 @@ import { DEFAULT_FOLLOW_POLICY, planFollowingTiles, type FollowControls, type Fo
 import type { ComposedPane, ComposedView, OpenViewResult } from "./terminal-provider.js";
 import type { HerdrTransport } from "./herdr-transport.js";
 import { earlierTileAttachment } from "./tile-attach.js";
+import { RESUME_REPORT_INTERVAL_MS, RESUME_REPORT_ROUNDS } from "./herdr-adapter.js";
 
 export type ReadFollowInput = (target: ComposedPane) => Promise<"empty" | "text" | "unknown">;
-interface Tile extends FollowTile { member: ViewerKey; target: ComposedPane; viewer: ViewerMapping; reason?: string }
+/** `resume`: Herdr holds this tile's own resume command, so a Herdr restart brings it back attached. */
+interface Tile extends FollowTile { member: ViewerKey; target: ComposedPane; viewer: ViewerMapping; reason?: string; resume?: true }
 interface Canvas {
   version: 1; cwd: string; phase: "creating" | "created" | "starting";
   pane?: ViewerPane; policy: FollowPolicy; tiles: Tile[]; events: string[];
@@ -27,6 +29,7 @@ export interface HerdrFollowDeps {
   platform?: NodeJS.Platform;
   root?: string;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 const keyOf = (hostId: string | null, nodeId: string | null) => JSON.stringify([hostId, nodeId]);
 const quote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -44,7 +47,66 @@ export class HerdrFollowView {
     const result = this.pending.then(() => this.apply(viewId, view, controls, stillCurrent, membershipError));
     this.pending = result.catch(() => {}); return result;
   }
-  private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult> {
+  /**
+   * Give Herdr each new tile's resume command, its own attach script, so a Herdr restart brings the tile back attached.
+   * A Claude, Codex or Pi tile carries Herdr's detection hint in that script, and reports under the runtime's label as
+   * one-shot tiles do (#1796), so Herdr's own screen detection keeps the tile's state; Herdr takes it once it has
+   * detected the agent, so a `resume_not_accepted` is retried in rounds. Any other tile has no agent for Herdr to
+   * detect, so OpenRig holds it with one state report that carries the command. What isn't taken is a note.
+   */
+  private async reportResume(opened: Array<{ tile: Tile; script: string; agent?: "claude" | "codex" | "pi" }>): Promise<string[]> {
+    const notes: string[] = [];
+    let waiting: typeof opened = [];
+    for (const item of opened) {
+      const argv = ["sh", item.script];
+      if (argv.some(arg => /['\u0000-\u001f\u007f]/.test(arg))) { notes.push(`${item.tile.seat}: its tile path can't be a Herdr restart command; after a Herdr restart, follow again.`); continue; }
+      if (item.agent) { waiting.push(item); continue; }
+      try {
+        await this.deps.transport.request("pane.report_agent", { pane_id: item.tile.viewer.paneId, source: "openrig-tile", agent: "openrig-tile",
+          state: "idle", seq: this.deps.now?.() ?? Date.now(), resume_argv: argv });
+        item.tile.resume = true;
+      } catch (error) { notes.push(`${item.tile.seat}: Herdr didn't take its restart command (${error instanceof Error ? error.message : String(error)}); after a Herdr restart, follow again.`); }
+    }
+    for (let round = 1; waiting.length > 0 && round <= RESUME_REPORT_ROUNDS; round++) {
+      if (round > 1) await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(RESUME_REPORT_INTERVAL_MS);
+      const next: typeof waiting = [];
+      for (const item of waiting) {
+        try {
+          await this.deps.transport.request("pane.report_agent_session", { pane_id: item.tile.viewer.paneId, source: "openrig", agent: item.agent, resume_argv: ["sh", item.script] });
+          item.tile.resume = true;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/resume_not_accepted/.test(message)) next.push(item);
+          else notes.push(`${item.tile.seat}: Herdr didn't take its restart command (${message}); after a Herdr restart, follow again.`);
+        }
+      }
+      waiting = next;
+    }
+    for (const item of waiting) notes.push(`${item.tile.seat}: Herdr hadn't detected its agent yet, so the tile has no restart command; after a Herdr restart, follow again.`);
+    return notes;
+  }
+
+  /** A restored canvas, confirmably this one: its strip the only pane in its own directory, in the same workspace and
+   *  pane, and every tile resumed and rebound by its viewer (same pane, its private directory, attached again). Null
+   *  when any of that can't be shown; nothing changes then. */
+  private async rebindRestored(state: Canvas, root: string): Promise<{ strip: ViewerPane; viewers: Map<string, ViewerMapping> } | null> {
+    if (!state.pane || state.tiles.some(tile => !tile.resume)) return null;
+    try {
+      const strips = (await findAttributedViewerPanes(this.deps.run, state.cwd)).filter(found => sameHerdrPath(found.cwd, state.cwd));
+      const strip = strips.length === 1 && strips[0]!.workspace_id === state.pane.workspace_id && strips[0]!.pane_id === state.pane.pane_id ? strips[0]! : null;
+      if (!strip) return null;
+      const viewers = new HerdrViewer(this.deps.socketPath, this.deps.run, this.deps.platform, path.join(root, "viewers"), this.deps.inspect);
+      const rebound = new Map<string, ViewerMapping>();
+      for (const tile of state.tiles) {
+        const verified = await viewers.rebind(tile.member, tile.target);
+        if (!verified.ok) return null;
+        rebound.set(tile.key, verified.viewer);
+      }
+      return { strip: { workspace_id: strip.workspace_id, pane_id: strip.pane_id, terminal_id: strip.terminal_id }, viewers: rebound };
+    } catch { return null; }
+  }
+
+  private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string, replaced?: string): Promise<OpenViewResult> {
     const id = createHash("sha256").update(JSON.stringify([this.deps.socketPath, viewId])).digest("hex");
     const root = path.join(this.deps.root ?? getDefaultOpenRigPath("private/terminal-following/provider"), id);
     const file = path.join(root, "canvas.json"), log = path.join(root, "events.log");
@@ -103,7 +165,7 @@ export class HerdrFollowView {
       if (!await stillCurrent()) throw new Error("Task membership changed before reconciliation; keeping the previous view.");
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
-          stripConfirmed: false, tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
+          stripConfirmed: false, tiles: [], events: [...(replaced && replaced !== "rebound" ? [replaced] : []), `Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
         mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
         // Persist first. An uncertain response is enumerated on the next call,
         // never interpreted as permission for another workspace.
@@ -130,7 +192,36 @@ export class HerdrFollowView {
         }
         return current;
       };
-      await currentPane(state.pane);
+      try { await currentPane(state.pane); }
+      catch (error) {
+        // After a Herdr restart (or once the person closes the workspace) Herdr no longer has this canvas's strip: it
+        // comes back as a new terminal, or not at all. A complete enumeration without its exact identity says so, and
+        // the canvas yields to a fresh one, kept aside as provenance, so re-following recovers the view. An unreadable
+        // enumeration proves nothing and keeps the previous view, as any failed read does; a fresh canvas never yields.
+        const stored = state.pane;
+        let gone = false;
+        if (!replaced) { // a fresh or just re-bound canvas never yields again in the same follow
+          try {
+            gone = !(await findAttributedViewerPanes(this.deps.run, state.cwd, stored)).some(found => found.pane_id === stored.pane_id
+              && found.terminal_id === stored.terminal_id && found.workspace_id === stored.workspace_id);
+          } catch { /* unknown, not gone */ }
+        }
+        if (!gone) throw error;
+        // Herdr restores a workspace with the same pane ids in new terminals, and reruns each tile's resume command once a
+        // client attaches. A canvas whose strip is back in its own directory and whose every tile resumed and is verified
+        // attached again is this canvas: it re-binds instead of yielding, so restored tiles don't get a second workspace.
+        const rebound = await this.rebindRestored(state, root);
+        if (rebound) {
+          state.pane = rebound.strip; state.phase = "created"; state.stripConfirmed = false;
+          for (const tile of state.tiles) tile.viewer = rebound.viewers.get(tile.key)!;
+          notice("Herdr restarted; this workspace and its tiles were found again and re-attached."); save();
+          return this.apply(viewId, view, controls, stillCurrent, membershipError, "rebound");
+        }
+        const kept = `${root}.replaced-${now()}-${randomUUID().slice(0, 8)}`;
+        renameSync(root, kept);
+        return this.apply(viewId, view, controls, stillCurrent, membershipError,
+          `Herdr no longer has the previous workspace (it restarted, or the workspace was closed); this is a new one. If the old one is still open, close it. Its record is kept at ${kept}.`);
+      }
       if (state.phase === "created") {
         state.phase = "starting"; save();
         await this.deps.run(["pane", "run", state.pane.pane_id, `printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail -n 30 -F ${quote(log)}`]);
@@ -206,6 +297,7 @@ export class HerdrFollowView {
         observations.set(tile.key, { focused: current.focused!, input: await this.deps.input?.(tile.target) ?? "unknown" });
       }
       const plan = planFollowingTiles(state.tiles, members, true, observations, policy, now());
+      const opened: Array<{ tile: Tile; script: string; agent?: "claude" | "codex" | "pi" }> = [];
       save(); // presentation choices survive lost replies and daemon restarts.
       for (const join of plan.joins) {
         const member = view.task.members.find(m => keyOf(m.key.hostId, m.key.nodeId) === join.key)!;
@@ -234,7 +326,13 @@ export class HerdrFollowView {
         delete state.viewerFailures?.[join.key];
         state.tiles.push({ key: join.key, seat: join.seat, target, member: { hostId: member.key.hostId, nodeId: member.key.nodeId }, viewer: verified.viewer });
         notice(`${join.seat}: ${join.reason}`); save();
+        // A tile reports its restart command when it first enters the canvas, whether this call created its viewer or an
+        // earlier, interrupted follow did (resumed from the journal, or confirmed by the lookup above). Retained tiles never
+        // pass through here, so they aren't reported again.
+        opened.push({ tile: state.tiles.at(-1)!, script: verified.script, ...(verified.agent ? { agent: verified.agent } : {}) });
       }
+      for (const line of await this.reportResume(opened)) notice(line);
+      if (opened.some(o => o.tile.resume)) save();
       for (const leaving of plan.leaves) {
         const tile = state.tiles.find(t => t.key === leaving.key)!;
         const retainInput = () => {

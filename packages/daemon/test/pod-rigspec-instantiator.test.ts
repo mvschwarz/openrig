@@ -2739,6 +2739,46 @@ state: 2-named
       }
     });
 
+    // #3395 C6/C7: the advisory text, counted in the whole outcome, so a second copy anywhere fails
+    const advisory = "dev.impl pool.max: must be at least min (4); pool not used";
+    const occurrences = (outcome: unknown) => JSON.stringify(outcome).split(advisory).length - 1;
+
+    it("Launch paths (`materializeStructured`, `launchMaterialized`, `addMemberToPod`) return the pool advisory in their warnings exactly once.", async () => {
+      const { db, inst, clearOccupancy } = poolSetup();
+      try {
+        const bad = { max: 2, min: 4 };
+        const structured = await inst.materializeStructured(RigSpecCodec.parse(yamlSpec(bad)), RIG_ROOT);
+        expect(structured.ok, JSON.stringify(structured)).toBe(true);
+        if (!structured.ok) return;
+        expect(structured.result.warnings.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(structured)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const launched = await inst.launchMaterialized(yamlSpec(bad), RIG_ROOT, structured.result.rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        if (!launched.ok) return;
+        expect(launched.result.warnings?.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(launched)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const clean = await inst.launchMaterialized(yamlSpec({ max: 3 }), RIG_ROOT, structured.result.rigId);
+        expect(JSON.stringify(clean)).not.toContain(" pool.");
+      } finally {
+        db.close();
+      }
+    });
+
+    it("Import returns the pool advisory in `warnings` exactly once (C6, through the load front).", async () => {
+      const { db, inst } = poolSetup();
+      try {
+        const imported = await inst.instantiate(yamlSpec({ max: 2, min: 4 }, "import-rig"), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        expect(occurrences(imported)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
     it("A fresh launch of the model seat from its launch recipe leaves the stored block as it is.", async () => {
       const { db, rigRepo, inst, clearOccupancy } = poolSetup();
       try {
@@ -2753,6 +2793,40 @@ state: 2-named
         const relaunched = await inst.launchPersistedFresh(rigId, nodeId);
         expect(relaunched.status, JSON.stringify(relaunched)).toBe("launched");
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 7 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    // #3395, spec section 5, "Stored": the retry launches from the seat's stored settings (its fragment can't carry
+    // `pool`), so it reads the stored pool block from the node, as the first start does.
+    it("A first-start retry of a seat reports its stored pool block that can't be used once in its warnings, and the retry still launches.", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: "." };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        // Stored as a re-apply writes a block that can't be used: as authored.
+        expect(rigRepo.setNodePool(worker.id, { raw: { max: -1 } })).toBe(true);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        const stored = "dev.worker pool.max: must be a whole number of 0 or more; pool not used";
+        expect(JSON.stringify(retried).split(stored).length - 1, JSON.stringify(retried)).toBe(1);
+        expect(rigRepo.getNodePool(worker.id)).toEqual({ raw: { max: -1 }, error: expect.any(String) });
       } finally {
         db.close();
       }

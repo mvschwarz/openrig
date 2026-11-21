@@ -1807,7 +1807,11 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
+  // "pi_usage_entries" is Pi's OWN persisted usage (fed by the runner's posted
+  // entries) — kept distinct from "runner_reported" because the token
+  // threshold's reader treats runner_reported rows as non-samples, and `rig ps`
+  // renders the two labels differently.
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "pi_usage_entries" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;
