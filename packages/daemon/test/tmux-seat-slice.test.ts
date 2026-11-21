@@ -203,6 +203,22 @@ describe("grouping that can't be applied: today's path, reported, never a refusa
 });
 
 describe("a grouped scope that fails after its check passed starts again on today's path", () => {
+  it("reports both missing scope properties when a grouped, limited recovery cannot prepare its environment", async () => {
+    const h = makeAdapter({ sliceRigs: { "node-a": "alpha" }, limits: { "node-a": { tasksMax: 256 } } });
+    vi.spyOn(h.adapter, "getDefaultShell").mockResolvedValue(null);
+    const result = await h.adapter.createSession("impl-a@alpha", "/work", A, { processLimitsMode: "recovery" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      processLimits: { state: "not_applied" },
+      warnings: expect.arrayContaining([
+        expect.stringContaining("process_limits requested, not applied"),
+        expect.stringContaining("seat_slice requested, grouping not applied"),
+      ]),
+    });
+    expect(h.seatScopes()).toEqual([]);
+  });
+
   /** The first start's pane dies with its marker pending (systemd-run could not make the scope); later starts run. */
   function failFirstStart(h: ReturnType<typeof makeAdapter>) {
     let checks = 0;

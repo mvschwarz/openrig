@@ -1363,10 +1363,12 @@ export class TmuxAdapter {
       }
       return ["/bin/sh", "-c", reset, "sh", file, ...seatScope, ...restore, shell, ...(command ? ["-c", command] : ["-l"])];
     } catch (error) {
+      const reason = `the scoped launch environment failed: ${(error as Error).message}`;
       if (limited) {
-        notApplied({ kind: "unverified", reason: `the scoped launch environment failed: ${(error as Error).message}`,
+        notApplied({ kind: "unverified", reason,
           requested: { ...(lookup as { limits: SeatProcessLimits }).limits } });
-      } else if (grouped) groupingNotApplied(`the scoped launch environment failed: ${(error as Error).message}`);
+      }
+      if (grouped) groupingNotApplied(reason);
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
       const warning = "Scoped tmux environment unavailable; retaining the previous environment for this launch.";
       warnings.push(warning);
