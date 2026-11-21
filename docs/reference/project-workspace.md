@@ -173,6 +173,8 @@ deepest root, leave the choice to `--project`. Step 3 reads the seat's
 `OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
 that chose the project as `position.selectedBy`.
 
+`GET /api/scopes/projects` includes each catalog entry's declared `rigs`, including names of stopped or absent rigs. An entry with no `rigs` declaration has an empty array. A malformed declaration is returned as `rigs: null` with `rigsError`, so it cannot be mistaken for an empty declaration; other projects remain available. An uncatalogued workspace has an empty array.
+
 With no explicit project, `rig scope`, `rig proof add` and daemon-backed
 `rig proof show`/`judge` use the one project whose `workspace.yaml` entry lists
 the caller's rig under `rigs`, and say which. `rig scope` and `rig proof add`

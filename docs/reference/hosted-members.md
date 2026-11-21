@@ -37,6 +37,18 @@ Assistants that run on your machine can reach OpenRig's MCP server locally. Many
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
 - **`rig_whoami`** answers the seat its grant names, though the member has no session.
 
+To wait for one task's answer in the same read, call `rig_queue_show` with its `qitemId` and optional `waitSeconds`
+(an integer from 0 to 50). Omitted or zero keeps today's immediate read. A positive wait holds only while that item
+is `pending` or `in-progress`; a claim, progress note or another item's change does not finish it. It returns at once
+when the item leaves those states, including `blocked`, `done`, `handed-off`, `failed`, `denied` or `canceled`.
+State, closure reason, resolution, transitions and any visible successor keep their usual meaning; no successor is
+automatically followed. At the bound the current item returns with an additive top-level
+`waited: { outcome: "timeout", seconds: <requested bound> }`. A timeout is not an answer or completed work.
+Cancellation or a disconnected HTTP call releases the wait without changing the durable task. The read uses the
+same grant scope as an immediate read; another member's private task is still refused. Keep the caller's MCP timeout
+above the requested bound (the usual SDK default is 60 seconds); only this daemon call gets a longer timeout, not
+ordinary requests. `GET /api/queue/:qitemId?waitSeconds=<bound>` offers the same wait to daemon API callers.
+
 ## Asking a person while keeping the work
 
 When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
@@ -168,6 +180,34 @@ line; when that notice is filed doesn't change.
 ## Revoke
 
 `rig mcp token revoke grok` refuses its next request. The rows it worked, and their answers, stay.
+
+## Embed the HTTP endpoint from Node.js
+
+An ESM application can start and close the same HTTP endpoint without running the CLI:
+
+```js
+import { startMcpHttpServer } from "@openrig/cli/mcp.js";
+
+const endpoint = await startMcpHttpServer({
+  daemonUrl: "http://127.0.0.1:7433",
+  host: "127.0.0.1",
+  port: 7434,
+  tokenFile: "/absolute/path/to/mcp-http-tokens.json",
+});
+// endpoint.url is the MCP URL; endpoint.authenticated says whether authentication is configured.
+// Keep the endpoint for as long as the application serves it, then:
+await endpoint.close();
+```
+
+`McpHttpOptions`, `McpAccess`, `McpPrincipal`, `McpGrant` and `GrantServiceOptions` are exported types;
+`McpHttpConfigError` is the endpoint's configuration error. Importing the module starts neither an endpoint
+nor a daemon. Start the daemon separately, and use the existing token commands above to manage grants.
+The CLI commands, authentication and tool scope work as before. No package exports map is added, so
+existing deep imports and CommonJS extension lookup keep their previous resolution; `@openrig/cli/mcp.js`
+is the documented entry.
+
+This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
+additional adapter callbacks that those options do not implement.
 
 ## Assistants connected through a grant service
 

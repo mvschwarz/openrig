@@ -526,6 +526,13 @@ export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
   state?: QueueState;
+  /**
+   * The caller's compare-and-set condition: the state it last read for the row. Checked inside the
+   * update's own transaction, before anything else: when the row is in another state, the update
+   * writes nothing (no state, note, transition, event or wake) and fails with `qitem_state_changed`,
+   * naming the current state. Absent (or null), the update behaves as it always has.
+   */
+  expectState?: QueueState | null;
   /** The actor accepts this revised closure deadline without replacing the claim. */
   closureRequiredAt?: string;
   /** Explicit acknowledgment for a deliberate terminal → active repair. */
@@ -637,6 +644,9 @@ export interface QueueClaimInput {
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
 }
+
+/** A row as a handoff successor shows it (QueueRepository.handoffSuccessorReads). */
+export interface HandoffSuccessorRow { qitemId: string; destinationSession: string; state: QueueState; tsCreated: string }
 
 export interface QueueListOptions {
   /** One legacy exact tag or repeated exact tags, all of which must match before the result bound. */
@@ -3747,6 +3757,23 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
+    if (input.expectState != null) {
+      if (!isQueueState(input.expectState)) {
+        throw new QueueRepositoryError(
+          "invalid_state",
+          `expectState=${String(input.expectState)} not valid; valid: ${QUEUE_STATES.join(", ")}; nothing was written`,
+        );
+      }
+      // The condition is read in the same transaction as the write below, so no other write
+      // (a claim, a close) can land between this check and this update's own write.
+      if (qitem.state !== input.expectState) {
+        throw new QueueRepositoryError(
+          "qitem_state_changed",
+          `qitem ${input.qitemId} is ${qitem.state}, not the expected ${input.expectState}; nothing was written`,
+          { expectedState: input.expectState, currentState: qitem.state },
+        );
+      }
+    }
     const hasReestimate = input.closureRequiredAt !== undefined;
     let closureRequiredAt: string | undefined;
     if (hasReestimate) {
@@ -4186,6 +4213,15 @@ export class QueueRepository {
         nextResolution,
         input.qitemId
       );
+    // A row that enters in-progress here (resolve, or an update to in-progress from blocked, pending or a reopened
+    // terminal state) carries the claimant generation the way claim() stamps it: the destination's current occupant,
+    // not the actor's, since another seat or a person can resolve it. A seat swap releases or transfers in-progress
+    // rows by this stamp (migration 063).
+    if (this.hasClaimedGenColumn && input.state === "in-progress" && fromState !== "in-progress") {
+      this.db
+        .prepare("UPDATE queue_items SET claimed_by_generation_uuid = ? WHERE qitem_id = ?")
+        .run(this.resolveOccupantGeneration?.(qitem.destinationSession) ?? null, input.qitemId);
+    }
 
     // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
     // merely validated-then-dropped) — visible to the attention query, to
@@ -4949,9 +4985,9 @@ export class QueueRepository {
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
   /** Bounded recorded relations for an opened request/result. No inference from seats, summaries or timestamps. */
   relatedTo(qitemId: string, limit = 101): Array<{ item: QueueItem; relation: "reply-to" | "handed-off-from" | "blocked-on" }> {
-    const rows = this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
+    const rows = runSyncSite("queue.related_to", () => this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
       WHERE reply_to = ? OR handed_off_from = ? OR blocked_on = ? ORDER BY rowid LIMIT ?`)
-      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>;
+      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>);
     return rows.flatMap(row => {
       const item = this.getById(row.qitem_id);
       if (!item) return [];
@@ -5195,10 +5231,45 @@ export class QueueRepository {
   /** The decisions made on a person's behalf under one mode application, oldest first: for the account when they're back. */
   delegatedDecisionsFor(applicationId: string): QueueItem[] {
     if (!this.hasDelegatedDecisionColumn) return [];
-    const rows = this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
+    const rows = runSyncSite("queue.delegated_decisions", () => this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
         AND json_extract(delegated_decision, '$.applicationId') = ?
-      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[];
+      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[]);
     return rows.map((row) => this.rowToItem(row));
+  }
+
+  /** #3645: the reads that name handoff successors (routes/queue.ts handoffSuccessors) for a whole page of rows in two
+   *  statements, batched as createLinkedSuccessorLookup reads (`IN (SELECT value FROM json_each(?))`): for each source,
+   *  the rows whose handed_off_from is that source, newest first by ts_created, at most `perSource` (what
+   *  `list({ handedOffFrom, limit: perSource })` picks for that source); and the rows with the given ids, as getById
+   *  finds them. Only the fields a successor shows, from the stored row, with no listing projection per row. */
+  handoffSuccessorReads(sourceQitemIds: readonly string[], targetQitemIds: readonly string[], perSource: number): {
+    bySource: Map<string, HandoffSuccessorRow[]>;
+    byId: Map<string, HandoffSuccessorRow>;
+  } {
+    const bySource = new Map<string, HandoffSuccessorRow[]>();
+    const byId = new Map<string, HandoffSuccessorRow>();
+    type Read = { qitem_id: string; destination_session: string; state: QueueState; ts_created: string };
+    const shown = (r: Read): HandoffSuccessorRow => ({ qitemId: r.qitem_id, destinationSession: r.destination_session, state: r.state, tsCreated: r.ts_created });
+    if (sourceQitemIds.length > 0) {
+      const rows = this.db.prepare(
+        `SELECT qitem_id, destination_session, state, ts_created, source FROM (
+           SELECT qitem_id, destination_session, state, ts_created, handed_off_from AS source,
+             ROW_NUMBER() OVER (PARTITION BY handed_off_from ORDER BY ts_created DESC) AS n
+           FROM queue_items WHERE handed_off_from IN (SELECT value FROM json_each(?)))
+         WHERE n <= ? ORDER BY source, n`,
+      ).all(JSON.stringify([...new Set(sourceQitemIds)]), perSource) as Array<Read & { source: string }>;
+      for (const r of rows) {
+        const list = bySource.get(r.source);
+        if (list) list.push(shown(r)); else bySource.set(r.source, [shown(r)]);
+      }
+    }
+    if (targetQitemIds.length > 0) {
+      const rows = this.db.prepare(
+        "SELECT qitem_id, destination_session, state, ts_created FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))",
+      ).all(JSON.stringify([...new Set(targetQitemIds)])) as Read[];
+      for (const r of rows) byId.set(r.qitem_id, shown(r));
+    }
+    return { bySource, byId };
   }
 
   /** opts.waiting: false skips the row's waiting view (the stuck sweep's own reads); the default builds it. Per call:
@@ -5432,13 +5503,13 @@ export class QueueRepository {
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(101, Math.floor(opts.limit!))) : 20;
     const receipts = `SELECT qitem_id, ts, transition_note FROM queue_transitions` +
       (detectTable(this.db, "queue_transitions_archive") ? ` UNION ALL SELECT qitem_id, ts, transition_note FROM queue_transitions_archive` : "");
-    const rows = this.db.prepare(`
+    const rows = runSyncSite("queue.delivered_human_updates", () => this.db.prepare(`
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
         AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
-    `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
+    `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>);
     return rows.map((row) => {
       const deliveryOutcome: "posted" | "accepted" = row.delivery_receipt.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)
         ? "accepted"
