@@ -7,6 +7,7 @@ import { readSendOutcome } from "./connection-contract.js";
 import { cutReminderForNote, parkedRowNote, sliceWholeChars } from "./park-wake-text.js";
 import type { QueuePriority } from "./queue-repository.js";
 import { NOTED_ON_PARKED_ROW, NOTED_ON_QUEUED_ROW, QUEUED_AS_ROW } from "./watchdog-history-log.js";
+import type { WatchdogUsageLimitState } from "./watchdog-usage-limit.js";
 import {
   formatWatchdogDeliveryMessage,
   type DeliveryFn,
@@ -38,6 +39,7 @@ export function makeWatchdogDeliver(deps: {
   now?: () => Date;
   retryIntervalSeconds?: number;
   retryCap?: number;
+  readUsageLimitState?: (sessionName: string) => WatchdogUsageLimitState | null;
   hasPendingPostCompactStage?: (sessionName: string) => boolean;
   isTerminalSeat?: (sessionName: string) => boolean;
   createContinuityAction?: (action: NonNullable<DeliveryRequest["continuityAction"]>) => Promise<void>;

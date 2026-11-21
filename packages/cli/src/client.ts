@@ -3,7 +3,7 @@ import { assessLocalDaemonOwner, ForeignLocalDaemonError, type LocalDaemonOwner 
 export { ForeignLocalDaemonError } from "./local-daemon-owner.js";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
-import { getOpenRigHome, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
+import { getOpenRigHome, normalizeOpenRigUrl, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
 import { resolveSenderSession, type BindingCheck, type TmuxIdentityReader } from "./sender-identity.js";
@@ -298,7 +298,7 @@ export class DaemonClient {
 
   constructor(baseUrl?: string, options?: DaemonClientOptions) {
     if (baseUrl) {
-      this.baseUrl = baseUrl;
+      this.baseUrl = normalizeOpenRigUrl(baseUrl);
     } else {
       const envUrl = readOpenRigUrl();
       if (envUrl) {
