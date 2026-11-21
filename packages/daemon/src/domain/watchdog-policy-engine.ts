@@ -183,6 +183,9 @@ interface WatchdogPolicyEngineDeps {
    *  prove they are no longer actionable. A reason terminals the job without
    *  delivering; null preserves the existing send path. */
   resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
+  /** A due timer whose owning domain fires it with no recipient (a usage-limit blocker's expiry, #3704): the hook
+   *  performs the fire and returns the job's terminal reason, and nothing is sent. Null keeps the send path. */
+  fireWithoutDelivery?: (input: { jobId: string }) => string | null;
   /** Queue-side observer for a wake attempt. It appends resume evidence to
    *  every HELD row armed to this job; delivery outcome is preserved. */
   resolveQueueWait?: (input: { jobId: string }) => PolicyEvaluation | null | undefined;
@@ -322,6 +325,7 @@ export class WatchdogPolicyEngine {
   private readonly targetNameCarried?: (sessionName: string) => boolean;
   private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
+  private readonly fireWithoutDelivery?: WatchdogPolicyEngineDeps["fireWithoutDelivery"];
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
   private readonly onWakeAttempt?: WatchdogPolicyEngineDeps["onWakeAttempt"];
   private readonly resolveDigestEntry?: WatchdogPolicyEngineDeps["resolveDigestEntry"];
@@ -342,6 +346,7 @@ export class WatchdogPolicyEngine {
     this.targetNameCarried = deps.targetNameCarried;
     this.resolveContextUsage = deps.resolveContextUsage;
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
+    this.fireWithoutDelivery = deps.fireWithoutDelivery;
     this.onWakeAttempt = deps.onWakeAttempt;
     this.resolveQueueWait = deps.resolveQueueWait;
     this.resolveDigestEntry = deps.resolveDigestEntry;
@@ -744,9 +749,11 @@ export class WatchdogPolicyEngine {
     return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold: thresholdFire, notice: outcome.notice === true, sentMessage: message });
   }
 
-  /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */
+  /** The pre-transport guard: a job its owning domain can prove is no longer actionable, or fires itself with no
+   *  recipient, is terminaled, not sent. */
   private terminalBeforeDelivery(job: WatchdogJob, evaluatedAt: string): EvaluationResult | null {
-    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId });
+    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId })
+      ?? this.fireWithoutDelivery?.({ jobId: job.jobId });
     if (!preDeliveryTerminalReason) return null;
     this.jobsRepo.markTerminal(job.jobId, preDeliveryTerminalReason);
     const history = this.historyLog.record({
