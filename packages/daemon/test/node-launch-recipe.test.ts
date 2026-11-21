@@ -622,3 +622,137 @@ describe("persisted pod-aware launch recipes", () => {
     expect(setup.rigRepo.getNodeLaunchRecipe(node.id)).toBeNull();
   });
 });
+
+// #3395, spec section 5, "Stored": a launch from stored state reads a model seat's pool advisory from its node.
+describe("a restore reports the stored pool block of a model seat", () => {
+  let db: Database.Database | undefined;
+
+  afterEach(() => {
+    db?.close();
+    db = undefined;
+  });
+
+  const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
+
+  /**
+   * Restores a stopped one-seat rig with its node storing `seed` (nothing when undefined): fresh, through its launch
+   * recipe, or, with `resume`, by resuming the seat's recorded session.
+   */
+  async function restoreWithStoredPool(seed: ((db: Database.Database, nodeId: string, setup: ReturnType<typeof createTestApp>) => void) | undefined, resume = false) {
+    db = createFullTestDb();
+    let setup!: ReturnType<typeof createTestApp>;
+    const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
+    const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
+    setup = createTestApp(db, {
+      freshLaunch,
+      freshLaunchAvailable,
+      podInstantiatorFsOps: {
+        exists: (file) => file.replaceAll("\\", "/").endsWith("/agents/impl/agent.yaml"),
+        readFile: () => agentYaml,
+      },
+    });
+    const runtimeAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const rig = setup.rigRepo.createRig("pooled-recipe-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)")
+      .run("pod-pooled", rig.id, "dev", "Development");
+    const rigRoot = process.cwd();
+    const rigSpec: RigSpec = {
+      version: "0.2",
+      name: "pooled-recipe-rig",
+      pods: [{ id: "dev", label: "Development", members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." }], edges: [] }],
+      edges: [],
+    };
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", {
+      runtime: "codex",
+      agentRef: "local:agents/impl",
+      profile: "default",
+      cwd: rigRoot,
+      podId: "pod-pooled",
+      launchRecipe: { version: 1, rigRoot, rigSpec },
+    });
+    seed?.(db, node.id, setup);
+    const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@pooled-recipe-rig");
+    if (resume) setup.sessionRegistry.updateResumeToken(session.id, "codex_id", "pooled-thread", "operator");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    setup.sessionRegistry.updateBinding(node.id, { tmuxPane: "%7" });
+    const snapshot = setup.snapshotCapture.captureSnapshot(rig.id, "pooled-recipe");
+    setup.sessionRegistry.updateStatus(session.id, "exited");
+
+    const result = await setup.restoreOrchestrator.restore(snapshot.id, {
+      adapters: { codex: runtimeAdapter },
+      ...(resume ? {} : { freshLogicalIds: [node.logicalId] }),
+    });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) throw new Error("restore failed");
+    expect(freshLaunch).toHaveBeenCalledTimes(resume ? 0 : 1);
+    return { result: result.result, nodeId: node.id };
+  }
+
+  /** What the restore says about the seat and the rig, the advisories left out. */
+  const outcome = (result: Awaited<ReturnType<typeof restoreWithStoredPool>>["result"]) => ({
+    rigResult: result.rigResult,
+    nodes: result.nodes.map((entry) => ({ logicalId: entry.logicalId, status: entry.status })),
+  });
+
+  const occurrences = (whole: unknown, advisory: string) => JSON.stringify(whole).split(JSON.stringify(advisory).slice(1, -1)).length - 1;
+
+  // Two restores: the seat resumes its recorded session, and the seat starts fresh, where the restore's own launch and
+  // the launch recipe's fresh launch both run, so the count also proves the fresh branch doesn't report it a second time.
+  it("A restore reports a model seat's stored pool block that can't be used once in its warnings, as <pod>.<member> pool.<field>: <reason>; pool not used, also when the seat starts fresh through its launch recipe, and the rig result is the same as without the block", async () => {
+    const advisory = "dev.impl pool.max: must be a whole number of 0 or more; pool not used";
+    const plain = await restoreWithStoredPool(undefined);
+    db?.close();
+    // Stored as a re-apply writes a block that can't be used: as authored.
+    const pooled = await restoreWithStoredPool((_db, nodeId, setup) => {
+      expect(setup.rigRepo.setNodePool(nodeId, { raw: { max: -1 } })).toBe(true);
+    });
+    expect(pooled.result.nodes.find((entry) => entry.nodeId === pooled.nodeId)?.status).toBe("fresh-primed");
+
+    expect(pooled.result.warnings.filter((w) => w === advisory)).toHaveLength(1);
+    expect(occurrences(pooled.result, advisory)).toBe(1);
+    expect(plain.result.warnings.some((w) => w.includes("pool not used"))).toBe(false);
+    expect(outcome(pooled.result)).toEqual(outcome(plain.result));
+
+    // The seat resumes its recorded session instead: the restore's own launch reports the block, once, the same way.
+    db?.close();
+    const plainResume = await restoreWithStoredPool(undefined, true);
+    db?.close();
+    const pooledResume = await restoreWithStoredPool((_db, nodeId, setup) => {
+      expect(setup.rigRepo.setNodePool(nodeId, { raw: { max: -1 } })).toBe(true);
+    }, true);
+    expect(pooledResume.result.nodes.find((entry) => entry.nodeId === pooledResume.nodeId)?.status).not.toBe("awaiting-decision");
+    expect(pooledResume.result.warnings.filter((w) => w === advisory)).toHaveLength(1);
+    expect(occurrences(pooledResume.result, advisory)).toBe(1);
+    expect(plainResume.result.warnings.some((w) => w.includes("pool not used"))).toBe(false);
+    expect(outcome(pooledResume.result)).toEqual(outcome(plainResume.result));
+  });
+
+  it("A stored pool value that is not valid JSON never stops a launch from stored state: the restore names it once in its warnings as <pod>.<member> pool: the stored value is not valid JSON; pool not used, and a usable stored block, or none, adds no warning", async () => {
+    const advisory = "dev.impl pool: the stored value is not valid JSON; pool not used";
+    const plain = await restoreWithStoredPool(undefined);
+    db?.close();
+    const broken = await restoreWithStoredPool((db, nodeId) => {
+      db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run("not json", nodeId);
+    });
+
+    expect(broken.result.warnings.filter((w) => w === advisory)).toHaveLength(1);
+    expect(occurrences(broken.result, advisory)).toBe(1);
+    expect(JSON.stringify(broken.result)).not.toContain("must be a mapping");
+    expect(outcome(broken.result)).toEqual(outcome(plain.result));
+    db?.close();
+
+    const usable = await restoreWithStoredPool((_db, nodeId, setup) => {
+      expect(setup.rigRepo.setNodePool(nodeId, { raw: { max: 2 } })).toBe(true);
+    });
+    expect(usable.result.warnings.some((w) => w.includes("pool not used") || w.includes(" pool"))).toBe(false);
+    expect(plain.result.warnings.some((w) => w.includes("pool not used") || w.includes(" pool"))).toBe(false);
+    expect(outcome(usable.result)).toEqual(outcome(plain.result));
+  });
+});

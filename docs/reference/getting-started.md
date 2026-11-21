@@ -54,6 +54,9 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
+>     Activity hooks use a daemon-owned relay copy under `OPENRIG_HOME/runtime/assets/`. Existing hooks migrate
+>     once to that stable path; moving the same OpenRig version to another Node installation then leaves hook
+>     commands and trust records unchanged. The daemon refreshes the copy from its own shipped relay at startup.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
 >     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
 >     and status line back out once no Claude seat uses that directory.
@@ -186,15 +189,15 @@ agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent codex
 # OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent pi
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent pi
 ```
 
-**OMP:** this pin installs the shared skill only. The `v0.7.18` skill does not yet include OMP attachment guidance,
+**OMP:** this pin installs the shared skill only. The `v0.7.20` skill does not yet include OMP attachment guidance,
 and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
 signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
 `/reload-plugins` first.
@@ -215,11 +218,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.18/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.18/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -400,6 +403,12 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+Restore requests run one at a time by default. To keep up to two requests
+outstanding, for example, use `rig start --last --concurrency 2`. A request that
+times out can keep running in the daemon, so more than two restores can still be
+running; check `rig ps` before retrying. Each rig reports its own result, and
+interactive fresh-start decisions remain serialized.
 
 To deliberately start individual seats with fresh conversations during a multi-rig
 restore, name each logical ID and rig: `rig start --last --fresh '<logical-id>@<rig-name>'`.

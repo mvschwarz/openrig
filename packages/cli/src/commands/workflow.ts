@@ -102,6 +102,11 @@ export function printOutcomeSummary(json: boolean, status: number, summary: Outc
   console.log(`  next:  ${summary.next}`);
 }
 
+/** After a route or resume, the packet's close may need --evidence-ref or acceptance flags; workflow show prints its exact command. */
+function ownerAdvancesLine(who: string, instanceId: string, packetId: string | undefined): string {
+  return `${who} advances with the action rig workflow show ${instanceId} prints for packet ${packetId ?? "<packet>"} (it carries any --evidence-ref or acceptance flags the step needs)`;
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -983,14 +988,14 @@ Examples:
             state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step; no queue row closed or created; no step advanced`,
             next: !["pending", "in-progress", "blocked"].includes(state)
               ? `The successor is already ${state}; its outcome is on rig queue show ${body.newPacketId ?? "<packet>"}, and the step's exit is the workflow owner's to project`
-              : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+              : ownerAdvancesLine("The owner", instanceId, body.newPacketId),
           });
           return;
         }
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Re-routed step ${body.stepId ?? "?"} from ${body.fromSession ?? "?"} to ${body.toSession ?? opts.to} (packet ${body.closedPacketId ?? "?"} → ${body.newPacketId ?? "?"})`,
           state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step, new owner; no step advanced`,
-          next: `The new owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          next: ownerAdvancesLine("The new owner", instanceId, body.newPacketId),
         });
       });
     });
@@ -1056,7 +1061,7 @@ Examples:
             : `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
           next: body.absorbedReplay
             ? `Check where the instance stands: rig workflow show ${instanceId}`
-            : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+            : ownerAdvancesLine("The owner", instanceId, body.newPacketId),
         });
       });
     });
@@ -1070,14 +1075,17 @@ Examples:
     .action(async (instanceId: string, opts: { reason: string; actorSession?: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.post<{ closedPacketIds?: string[]; status?: string }>(
+        const res = await client.post<{ closedPacketIds?: string[]; alreadyClosedPacketIds?: string[]; advisories?: string[]; status?: string }>(
           `/api/workflow/${encodeURIComponent(instanceId)}/abort`,
           { reason: opts.reason, actorSession: opts.actorSession },
         );
         printResult(opts.json ?? false, res.data, res.status);
+        printWorkflowAdvisories(res.data?.advisories);
+        const alreadyClosed = res.data?.alreadyClosedPacketIds?.length ?? 0;
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Aborted workflow ${instanceId}`,
-          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`,
+          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`
+            + (alreadyClosed > 0 ? `; ${alreadyClosed} already closed by the queue (see the advisory)` : ""),
           next: `Inspect: rig workflow trace ${instanceId}`,
         });
       });

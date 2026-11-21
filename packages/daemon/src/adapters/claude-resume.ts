@@ -3,6 +3,7 @@ import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
+import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -104,6 +105,8 @@ export class ClaudeResumeAdapter {
     launchWrapper?: readonly string[],
     continuation?: ClaudeContinuationLaunch,
     claudeAutoMode?: ClaudeAutoModeChoice,
+    /** The reserved occupant for this restore; the kept tmux pane may still carry its predecessor's value. */
+    occupantGeneration?: string,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -125,7 +128,9 @@ export class ClaudeResumeAdapter {
       try {
         if (!nodeId || !this.options.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.options.claudeManagedLaunch!.prepare({ nodeId: nodeId!, cwd, session: tmuxSessionName,
-          ...(executable ? { executable } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}), ...(continuation?.configDir !== undefined ? { continuationConfigDir: continuation.configDir } : {}) }, selectedPermissionMode);
+          ...(executable ? { executable } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}),
+          ...(occupantGeneration ? { generation: occupantGeneration } : {}),
+          ...(continuation?.configDir !== undefined ? { continuationConfigDir: continuation.configDir } : {}) }, selectedPermissionMode);
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
     }
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
@@ -144,28 +149,32 @@ export class ClaudeResumeAdapter {
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const autoMode = claudeAutoModeForLaunch(claudeAutoMode);
     if (autoMode.warning) tokenWarnings.push(autoMode.warning);
-    const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
+    const settingsSeat = { openrigHome: this.options.openrigHome, session: tmuxSessionName };
+    let launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
       ...(this.options.restoreReadPolicy?.() ?? {}),
     });
-    const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     let wrapperPrefix = "";
     if (!managed && executable && launchWrapper?.length) {
       if (!this.options.seatLaunchEnvironment) return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
       try { wrapperPrefix = this.options.seatLaunchEnvironment.resolveLaunchWrapper(launchWrapper).map(shellQuote).join(" ") + " "; }
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
-    const nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null);
+    let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat);
+    if (managed || (continuation?.args && executable)) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
+    else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, continuation?.args);
+    const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(nativeArgs, claudeResumeLaunchEnv(resumeToken!))
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
     const configPrefix = continuation?.configDir != null && this.options.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(continuation.configDir)} ` : "";
-    const classicCommand = configPrefix + (continuation?.args && executable
+    const generationPrefix = occupantGeneration ? `OPENRIG_OCCUPANT_GENERATION=${shellQuote(occupantGeneration)} ` : "";
+    const classicCommand = generationPrefix + configPrefix + (continuation?.args && executable
       ? `${claudeResumeLaunchPrefix(resumeToken!)}exec ${wrapperPrefix}${shellQuote(executable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && continuation?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(continuation, posture, model));
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
-    const sentAutoMode = managed || (continuation?.args && executable) ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
+    const sentAutoMode = managed || (continuation?.args && executable) ? sentClaudeAutoMode(nativeArgs, settingsSeat) : autoMode.block ?? null;
     if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
     const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: sentAutoMode === undefined ? { unknown: "settings_file" as const } : sentAutoMode };
 
@@ -181,6 +190,7 @@ export class ClaudeResumeAdapter {
         return assertSelected ? this.tmux.sendText(tmuxSessionName, classicCommand, assertSelected) : this.tmux.sendText(tmuxSessionName, classicCommand);
       }
       const staged = await this.options.seatLaunchEnvironment.command(tmuxSessionName, classicCommand, { runtime: "claude-code", nodeId,
+        ...(occupantGeneration ? { generation: occupantGeneration } : {}),
         ...(launchWrapper?.length ? { launchWrapper } : {}), ...(executable && launchWrapper?.length ? { claudeShellLookup: false as const } : {}),
         ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
@@ -194,6 +204,10 @@ export class ClaudeResumeAdapter {
         : this.tmux.sendShellCommand(tmuxSessionName, staged, undefined, shellOptions);
     };
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Claude resume preparation; no native command was sent." };
+    if (occupantGeneration) {
+      try { await this.tmux.setSessionEnv(tmuxSessionName, "OPENRIG_OCCUPANT_GENERATION", occupantGeneration); }
+      catch { tokenWarnings.push("The tmux session environment could not be updated; the resumed process still receives the current occupant generation."); }
+    }
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, beforeManagedInput) : await sendClassic();
     if (!textResult.ok) {
       // sendText failed — nothing in the buffer, no cleanup needed

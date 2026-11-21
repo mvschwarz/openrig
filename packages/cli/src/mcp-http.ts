@@ -19,6 +19,7 @@ import nodePath from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
+import { z } from "zod";
 import { DaemonClient } from "./client.js";
 import { createMcpServer, mintUnknownSender, type McpAccess, type UnfilledSeat } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
@@ -164,7 +165,12 @@ export class McpHttpConfigError extends Error {}
 /** The caller whose grant this server checked, as the daemon records it beside the rows it writes (principal:v1). */
 export type McpPrincipal = { source: "file" | "grant-service"; id: string; grant?: string; version?: number | string };
 /** One request's caller as this server decided it: no seat, access or principal for the loopback local owner. */
-type RequestCaller = { seat?: string; access?: McpAccess; principal?: McpPrincipal };
+type RequestCaller = { seat?: string; access?: McpAccess; principal?: McpPrincipal; signal: AbortSignal };
+
+const queueWaitCall = z.object({ method: z.literal("tools/call"), id: z.union([z.string(), z.number()]),
+  params: z.object({ name: z.literal("rig_queue_show"), arguments: z.object({ waitSeconds: z.number().positive() }) }) });
+const cancelCall = z.object({ method: z.literal("notifications/cancelled"),
+  params: z.object({ requestId: z.union([z.string(), z.number()]) }) });
 
 /** An external grant service's contract. Core asks on every request with the caller's raw key and its own instance id;
  *  nothing is cached, and every answer but `active` is refused. */
@@ -433,6 +439,9 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   // the caller decided below, handed over as the request's authInfo. A caller with no seat writes as this process's one
   // unknown sender, so its later requests carry the label rig_whoami named and a same-id create retry matches.
   const unknownSender = mintUnknownSender();
+  // Legacy HTTP is stateless: cancellation arrives on a separate request/server instance.
+  // Bind only active queue waits to the authenticated credential and RPC id, never another caller's wait.
+  const queueWaits = new Map<string, Set<AbortController>>();
   const mcpHandler = createMcpHandler(({ authInfo }) => {
     const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
     // Never a default seat: a request reaches the handler only with its caller decided.
@@ -440,6 +449,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     // A grant that names its person gets a client acting as them, which records only their answers to the team.
     const person = caller.access?.external?.person;
     return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
+      requestSignal: caller.signal,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
       unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),
       ...(person ? { personClient: makeClient(opts.daemonUrl, `${person}@external`, caller.principal) } : {}) });
@@ -539,9 +549,31 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
       reply(res, 403, { jsonrpc: "2.0", error: { code: -32000, message: `Invalid Host header: ${req.headers.host}` }, id: null });
       return;
     }
-    const caller: RequestCaller = { seat, access, principal };
+    const controller = new AbortController();
+    const disconnect = () => { if (!res.writableFinished) controller.abort(); };
+    res.once("close", disconnect);
+    const credential = createHash("sha256").update(bearer(req) ?? "local-owner").digest("hex");
+    const keyFor = (id: string | number) => JSON.stringify([credential, id]);
+    const cancel = cancelCall.safeParse(body);
+    if (cancel.success) for (const wait of queueWaits.get(keyFor(cancel.data.params.requestId)) ?? []) wait.abort();
+    const call = queueWaitCall.safeParse(body);
+    const key = call.success ? keyFor(call.data.id) : undefined;
+    if (key !== undefined) {
+      const active = queueWaits.get(key) ?? new Set<AbortController>();
+      active.add(controller);
+      queueWaits.set(key, active);
+    }
+    const caller: RequestCaller = { seat, access, principal, signal: controller.signal };
     (req as http.IncomingMessage & { auth?: AuthInfo }).auth = { token: "", clientId: principal?.id ?? "local-owner", scopes: [], extra: { caller } };
-    await serveMcp(req, res, body);
+    try { await serveMcp(req, res, body); }
+    finally {
+      res.off("close", disconnect);
+      if (key !== undefined) {
+        const active = queueWaits.get(key);
+        active?.delete(controller);
+        if (active?.size === 0) queueWaits.delete(key);
+      }
+    }
   };
 
   const server = http.createServer((req, res) => {

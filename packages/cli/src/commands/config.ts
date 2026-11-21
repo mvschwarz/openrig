@@ -45,7 +45,7 @@ function getContextPressureFallbackInfo(store: ConfigStore, key: string): Contex
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
-const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms", "db.path", "terminal.tmux_server"];
+const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms", "daemon.identity_poll_interval_ms", "db.path", "terminal.tmux_server"];
 const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
@@ -89,7 +89,8 @@ Examples:
   rig config init-workspace                  # scaffold a repo-ready project workspace
 
 Keys:
-  daemon.*               port, host, seat_poll_interval_ms (startup-only seat-pollers cadence, 1000–2000; default 1000)
+  daemon.*               port, host, seat_poll_interval_ms (startup-only seat-pollers cadence, 1000–2000; default 1000),
+                         identity_poll_interval_ms (startup-only identity-reconciler cadence, 5000–30000; default 5000)
   db.path
   transcripts.*          enabled, path, lines, poll_interval_seconds
                          (lines/poll_interval set scrollback CAPTURE depth + cadence.

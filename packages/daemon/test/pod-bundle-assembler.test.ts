@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { PodBundleAssembler, type PodAssemblerFsOps } from "../src/domain/pod-bundle-assembler.js";
 import { validatePodBundleManifest, parsePodBundleManifest, serializePodBundleManifest, type PodBundleManifest } from "../src/domain/bundle-types.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { RigSpec } from "../src/domain/types.js";
 
 // -- Mock filesystem --
@@ -736,6 +737,40 @@ describe("PodBundleAssembler", () => {
 
   // Deferred: full golden-path integration (assemble -> validate -> preflight -> instantiate)
   // will be verified at Checkpoint 2 when AS-T11 + AS-T08b land
+
+  it("A pod bundle carries a valid block, while a malformed block is dropped, listed in `warnings` and `manifest.provenance.notes`, and the bundle does not fail.", () => {
+    // #3395 C14: raw YAML, because the codec never writes a malformed block back
+    const member = (id: string, pool: unknown) => ({ id, agent_ref: `local:agents/${id}`, profile: "default", runtime: "claude-code", cwd: ".", pool });
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/rig.yaml`]: stringifyYaml({
+        version: "0.2", name: "test-rig",
+        pods: [{ id: "dev", label: "Dev", members: [member("impl", { max: 3 }), member("qa", { max: 2, min: 4 })], edges: [] }],
+        edges: [],
+      }),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+      [`${RIG_ROOT}/agents/qa/agent.yaml`]: validAgentYaml("qa"),
+    };
+    const fs = mockFs(files);
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+    const advisory = "dev.qa pool.max: must be at least min (4); pool not used";
+
+    const result = assembler.assemble({
+      rigRoot: RIG_ROOT,
+      rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/staging-pool",
+      bundleName: "test-bundle",
+      bundleVersion: "1.0.0",
+    });
+
+    expect(result.warnings).toEqual([advisory]);
+    expect(result.manifest.provenance?.notes).toBe(advisory);
+    const written = (fs as unknown as { _written: Record<string, string> })._written;
+    const rig = parseYaml(written["/tmp/staging-pool/rig.yaml"]!) as { pods: Array<{ members: Array<{ id: string; pool?: unknown }> }> };
+    const byId = Object.fromEntries(rig.pods[0]!.members.map((m) => [m.id, m]));
+    expect(byId["impl"]!.pool).toMatchObject({ max: 3 });
+    expect(byId["qa"]).toBeDefined();
+    expect(byId["qa"]!.pool).toBeUndefined();
+  });
 
   // Item 1 — provenance capture (slice-05 Checkpoint 2 part 2)
   it("v2: captures provenance from opts into manifest", () => {

@@ -504,7 +504,7 @@ function deriveContinuityOutcome(
 
 interface RestoreProjection {
   outcome: NodeRestoreOutcome;
-  resumedRuntime?: "claude-code" | "codex";
+  resumedRuntime?: "claude-code" | "codex" | "pi" | "omp";
   /** The attempt started before the node's latest completed handover, so it restored an earlier occupant. */
   retiredOccupant?: true;
 }
@@ -580,11 +580,13 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && event.to === "operator_recovered" && (event.from === "failed" || event.from === "attention_required")
         && !!attempt && attempt.seq === event.attemptId && attempt.outcomes.get(event.nodeId) === event.from
         && evidence?.tmux === true && evidence.resumeTokenUsed === true && evidence.paneState === "usable"
-        && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex");
+        && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex"
+          || ((evidence.fgProcess === "pi" || evidence.fgProcess === "omp")
+            && evidence.runner?.rpcConfirmed === true && evidence.runner?.identityConfirmed === true));
       const key = restoreKey(row.rig_id, event.nodeId);
       map.set(key, {
         outcome: mapStatus(event.to),
-        ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
+        ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" as const : evidence!.fgProcess as "codex" | "pi" | "omp" } : {}),
       });
       // A zero attemptId names no attempt (every subset clear writes it): it acknowledges the outcome it
       // replaces, so it is as current as that outcome. With nothing replaced, it describes no attempt.
@@ -1548,7 +1550,8 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     (`hookOrPaneActivity`), which sees a prompt no hook reported. Stale hooks
  *     arrive as `unknown` and contribute nothing — never guessed. The rig total
  *     and the seat row must not disagree about the same seat.
- *   - a held seat (`heldReason` present)
+ *   - a held seat, except an unlaunched hold with no assigned work and no recorded
+ *     launch or restore result (`isUnlaunchedHeldWithoutWork`)
  *   - a recorded startup error (`latestError` present)
  *   - an occupant a handover started without a required startup file (`startedWithoutRequired`, #2456)
  */
@@ -1556,14 +1559,30 @@ export function seatNeedsAttention(
   entry: NodeInventoryEntry,
   activity: AgentActivity | null,
   arbitratedNeedsInput: boolean | null = null,
+  assignedWorkCount?: number,
 ): boolean {
   return entry.lifecycleState === "attention_required"
     || entry.startupStatus === "attention_required"
     || entry.startupStatus === "failed"
     || (arbitratedNeedsInput ?? activity?.state === "needs_input")
-    || entry.heldReason != null
+    || (entry.heldReason != null && !isUnlaunchedHeldWithoutWork(entry, assignedWorkCount))
     || entry.latestError != null
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
+}
+
+/**
+ * An explicit hold on a never-launched seat with no outstanding queue work.
+ *
+ * `restoreOutcome === "n-a"` is the existing fact for "no launch or restore result has ever
+ * named this seat". It keeps a seat that an earlier launch or restore ended `failed` or
+ * `awaiting-decision` out of the exemption: a later subset launch only writes `node.held`
+ * for the seats it did not select and records no result for them, so without this a failure
+ * with no session left and no startup error would silently lose its attention.
+ */
+export function isUnlaunchedHeldWithoutWork(entry: NodeInventoryEntry, assignedWorkCount: number | undefined): boolean {
+  return entry.heldReason != null && entry.sessionStatus === null && entry.storedSessionStatus === null
+    && entry.attachmentType !== "external_cli" && (entry.canonicalSessionName != null || deriveCanonicalFromEntry(entry) != null)
+    && entry.restoreOutcome === "n-a" && assignedWorkCount === 0;
 }
 
 /**
@@ -1660,7 +1679,7 @@ export function attachTerminalActivityAndWork(
       activityState,
       // The activity this row serves (a live hook, else the cached pane reading) when it was attached, so a prompt
       // only the pane shows counts; the hook store alone where it wasn't.
-      needsAttention: seatNeedsAttention(entry, entry.agentActivity ?? hook, arbitratedNeedsInput),
+      needsAttention: seatNeedsAttention(entry, entry.agentActivity ?? hook, arbitratedNeedsInput, work.assignedWorkCount),
       arbitratedNeedsInput,
       needsInputEvidence: arb?.needsInputEvidence ?? null,
       hasAssignedWork: work.assignedWorkCount > 0,
