@@ -294,6 +294,8 @@ describe("seat-pool planner: sizing", () => {
     const same = plan(spec({ max: 3 }), state({ agents: [issued], pending: rows(1) }));
     expect(same.target).toBe(1);
     expect(ofKind(same.intents, "add")).toEqual([]);
+    // A slot coming up covers the waiting row: demand does not exceed max, so steady.
+    expect(same.reason).toBe("steady");
     // Even with max lowered to 0 and drain set, sizing leaves the issued attempt alone.
     for (const lowered of [spec({ max: 0 }), spec({ drain: true })]) {
       const result = plan(lowered, state({ agents: [issued] }));
