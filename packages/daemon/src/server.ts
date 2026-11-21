@@ -257,6 +257,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** #2940: relaunches a keep_alive seat that falls while the daemon runs. Started after the listener binds; stopped first. */
+  keepAliveSupervisor?: import("./domain/keep-alive-supervisor.js").KeepAliveSupervisor;
   /** The outbound network connector (`rig network`); started after the listener binds. */
   networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */

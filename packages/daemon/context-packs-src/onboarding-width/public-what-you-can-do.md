@@ -787,6 +787,13 @@ not have to tear one down to change it, and you rarely have to start from nothin
   seat in the rig is paused or being typed in, and it takes a seat's session name, including an
   adopted seat's raw tmux name; ambiguous names aren't launched, and the other unambiguous
   selections are handled normally.
+- **`keep_alive: true`** (rig spec member, or an AgentSpec's `lifecycle.keep_alive`; off by default)
+  — the daemon relaunches that seat through the same one-seat launch when it falls while the daemon
+  runs, and leaves it down after `rig seat stop` or `rig down`, which record the stop before stopping
+  anything. A daemon stop changes no seat's desired state. Each fall gets 2 attempts, counted durably;
+  when they run out the seat reads `attention_required` (`keepAliveIncident` in
+  `rig ps --nodes --json --full`) until you start it with `rig launch`. Not for seats attached from
+  outside (`docs/reference/rig-spec.md`, "Keep a seat running").
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a

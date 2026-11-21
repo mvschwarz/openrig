@@ -1820,7 +1820,8 @@ Examples:
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
-Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
+Siblings are untouched. A dead seat is refused (use rig seat clean), except a
+seat that declares keep_alive: its stop is recorded, so it stays down. An adopted
 session is refused: to end only it, run rig unclaim <session> (it releases the
 session and leaves its process running), then end that process and the
 underlying tmux session, including any remaining shell. Closing only its
@@ -1842,6 +1843,10 @@ rig stopped. Examples:
     .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
       await runLifecycleVerb("stop", seat, { reason: opts.reason, operator: opts.operator }, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        if (data["alreadyDown"]) {
+          console.log(`${String(data["message"])} (seat ${s?.logicalId}@${s?.rigName})`);
+          return;
+        }
         console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}).`);
         console.log("Session marked exited, binding cleared; siblings untouched. Relaunch via the normal launch surface.");
         if (data["paneOnly"]) console.log("Only the community seat viewer was closed. Native execution, storage and compute may remain; inspect the selected environment or harness lifecycle.");
