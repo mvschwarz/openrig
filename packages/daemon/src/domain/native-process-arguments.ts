@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { promisify } from "node:util";
+import { readWindowsProcessFactsBatch } from "./windows-process-facts.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_PIDS = 128;
@@ -142,7 +143,9 @@ export async function readNativeProcessArguments(requested: number[]): Promise<M
   if (pids.length === 0) return result;
   let entries: unknown;
   try {
-    if (process.platform === "linux") {
+    if (process.platform === "win32") {
+      entries = [...await readWindowsProcessFactsBatch(pids)].map(([pid, facts]) => [pid, facts.argv]);
+    } else if (process.platform === "linux") {
       const found: Array<[number, string[] | null]> = [];
       // Bounded concurrency and one overall deadline keep a slow /proc from holding observation indefinitely.
       const controller = new AbortController();
@@ -187,6 +190,10 @@ export async function readNativeProcessArguments(requested: number[]): Promise<M
 export async function readNativeProcessLaunch(pid: number): Promise<{ argv: string[]; env: Record<string, string> } | null> {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 2147483647) return null;
   try {
+    if (process.platform === "win32") {
+      const facts = (await readWindowsProcessFactsBatch([pid])).get(pid);
+      return facts ? { argv: facts.argv, env: { ...facts.env } } : null;
+    }
     if (process.platform === "linux") {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 2000);
       try {

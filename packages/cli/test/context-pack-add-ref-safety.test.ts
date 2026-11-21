@@ -136,7 +136,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     tmpSrcs.push(outside);
     const storeRoot = join(home, "context");
     mkdirSync(storeRoot, { recursive: true });
-    symlinkSync(outside, join(storeRoot, "linked")); // attacker-planted namespace segment
+    symlinkSync(outside, join(storeRoot, "linked"), process.platform === "win32" ? "junction" : "dir"); // directory namespace link
     let failed = false;
     const origErr = console.error;
     const errLogs: string[] = [];
@@ -163,7 +163,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     const outside = join(home, "outside-missing");
     const leaf = join(storeRoot, "dangle");
     mkdirSync(storeRoot, { recursive: true });
-    symlinkSync(outside, leaf);
+    symlinkSync(outside, leaf, process.platform === "win32" ? "junction" : "dir");
     const origErr = console.error;
     const errLogs: string[] = [];
     console.error = (...a: unknown[]) => { errLogs.push(a.map(String).join(" ")); };

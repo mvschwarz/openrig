@@ -1,5 +1,7 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi } from "vitest";
 import http from "node:http";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { DaemonClient } from "../src/client.js";
 import { ConfigStore } from "../src/config-store.js";
 import { waitForKernelReady } from "../src/daemon-lifecycle.js";
@@ -46,7 +48,9 @@ describe("waitForKernelReady deadline bounds", () => {
   });
 
   it("bounds slow headers to the wait deadline", async () => {
+    let requests = 0;
     const server = http.createServer((_req, res) => {
+      requests++;
       // Delay sending headers beyond the client wait deadline
       setTimeout(() => {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -54,22 +58,26 @@ describe("waitForKernelReady deadline bounds", () => {
       }, 400);
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const port = (server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
+    allowFetchTarget(baseUrl);
 
     const start = Date.now();
     const result = await waitForKernelReady(baseUrl, 150, 20);
     const elapsed = Date.now() - start;
 
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
 
     expect(result.ok).toBe(false);
+    expect(requests).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(350);
   });
 
   it("bounds delayed body chunk reads to the wait deadline", async () => {
+    let requests = 0;
     const server = http.createServer((_req, res) => {
+      requests++;
       // Send headers and partial body immediately, delay the rest beyond the deadline
       res.writeHead(200, { "Content-Type": "application/json" });
       res.write('{"kernel_state":"');
@@ -78,17 +86,19 @@ describe("waitForKernelReady deadline bounds", () => {
       }, 400);
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const port = (server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
+    allowFetchTarget(baseUrl);
 
     const start = Date.now();
     const result = await waitForKernelReady(baseUrl, 150, 20);
     const elapsed = Date.now() - start;
 
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
 
     expect(result.ok).toBe(false);
+    expect(requests).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(350);
   });
 
@@ -98,12 +108,13 @@ describe("waitForKernelReady deadline bounds", () => {
       res.end(JSON.stringify({ kernel_state: "ready", variant: "fast" }));
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const port = (server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
+    allowFetchTarget(baseUrl);
 
     const result = await waitForKernelReady(baseUrl, 500, 20);
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
 
     expect(result.ok).toBe(true);
     expect(result.kernelState).toBe("ready");

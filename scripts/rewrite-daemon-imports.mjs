@@ -126,7 +126,7 @@ export function rewriteDaemonImports({ cliDir, daemonPackageJsonPath }) {
 // import.meta.url is percent-encoded (spaces, "#") and names the symlink-resolved file.
 function invokedDirectly() {
   try {
-    return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+    return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
   } catch {
     return false; // argv[1] is not an existing file, so this module was imported, not run
   }

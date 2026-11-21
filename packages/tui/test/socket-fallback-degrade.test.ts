@@ -36,10 +36,11 @@ describe("control-socket fallback", () => {
       const primary = path.join(root, "tui-taken.sock");
       fs.mkdirSync(primary);
       if (process.platform === "win32") {
-        // Every AF_UNIX bind fails with EACCES on the hosts measured so far, so there is no endpoint to
-        // come up on here; the both-fail test covers what the adapter says instead.
-        await expect(createControlSocket({ socketPath: primary, view: view(), fallbackOnCollision: true }))
-          .rejects.toThrow(/could not bind a TUI control socket/);
+        // Windows binds a named pipe, not this path: the pipe namespace is flat and the directory that
+        // exists here is not consulted, so the primary endpoint comes up. What a collision costs is the
+        // pipe-name case, in socket-windows.test.ts.
+        open = await createControlSocket({ socketPath: primary, view: view(), fallbackOnCollision: true });
+        expect(open.path).toMatch(/^\\\\\.\\pipe\\openrig-tui-[a-f0-9]{64}$/);
         return;
       }
       open = await createControlSocket({ socketPath: primary, view: view(), fallbackOnCollision: true });
@@ -67,8 +68,13 @@ describe("control-socket fallback", () => {
       if (outcome.ok) {
         open = outcome.socket;
         expect(open.path).not.toBe(primary);
-        expect(open.path.startsWith(root)).toBe(true);
-        expect(Buffer.byteLength(open.path)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+        if (process.platform === "win32") {
+          // The pipe name is a hash of the requested path, so a long one never reaches a length limit.
+          expect(open.path).toMatch(/^\\\\\.\\pipe\\openrig-tui-[a-f0-9]{64}$/);
+        } else {
+          expect(open.path.startsWith(root)).toBe(true);
+          expect(Buffer.byteLength(open.path)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+        }
       } else {
         expect(outcome.error.message).not.toMatch(/socket path too long/);
         expect(outcome.error.message).toMatch(/could not bind a TUI control socket/);
@@ -88,6 +94,14 @@ describe("control-socket fallback", () => {
       // that costs.
       const blocked = path.join(root, "file");
       fs.writeFileSync(blocked, "not a directory\n");
+      if (process.platform === "win32") {
+        // A named pipe has no parent directory to block; an over-long pipe name is what Windows refuses,
+        // and it refuses it for the alternate name as well.
+        const primary = `\\\\${"."}\\pipe\\${"p".repeat(300)}`;
+        await expect(createControlSocket({ socketPath: primary, view: view(), fallbackOnCollision: true }))
+          .rejects.toThrow(/could not bind a TUI control socket/);
+        return;
+      }
       const primary = path.join(blocked, "sub", "tui.sock");
       await expect(createControlSocket({ socketPath: primary, view: view(), fallbackOnCollision: true }))
         .rejects.toThrow(/could not bind a TUI control socket/);

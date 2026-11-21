@@ -6,7 +6,8 @@ import { describe, expect, it, vi, type TestContext } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { writeRefocusNpmFixture, writeRefocusBudgetProbe } from "./helpers/refocus-native-fixtures.js";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -14,8 +15,7 @@ const PLUGIN = resolve(HERE, "../assets/plugins/openrig-core");
 const HOOK = join(PLUGIN, "hooks/scripts/refocus.cjs");
 const SEAT = "dev-impl@budget-rig";
 
-interface Fixture { root: string; home: string; bin: string; log: string }
-
+interface Fixture { root: string; home: string; bin: string; log: string; trace: string }
 /** Build isolated hook state and controllable lookup scripts for timing and overlap cases. */
 function fixture(onTestFinished: TestContext["onTestFinished"]): Fixture {
   const root = mkdtempSync(join(tmpdir(), "refocus-budget-"));
@@ -53,7 +53,22 @@ echo "TRACE OK: work and topology"
 `);
   chmodSync(join(bin, "rig"), 0o755);
   chmodSync(join(bin, "trace"), 0o755);
-  return { root, home, bin, log };
+  let trace = join(bin, "trace");
+  if (process.platform === "win32") {
+    writeRefocusNpmFixture(bin, `
+const fs=require('fs'),args=process.argv.slice(2),env=process.env;
+const log=${JSON.stringify(log)};
+const sleep=ms=>{if(ms)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Number(ms));};
+if(args[0]!=='stream')fs.appendFileSync(log,'rig '+args.join(' ')+'\\n');
+const verb=args.slice(0,2).join(' ');
+if(verb==='stream emit'){sleep(200);fs.appendFileSync(log,'rig '+args.join(' ')+'\\n');console.log('{}');}
+else if(verb==='queue whoami'){sleep(env.STUB_WHOAMI_MS);console.log(JSON.stringify({role:{state:'no-record',files:[]},currentWorkBasis:'none'}));}
+else if(verb==='context get'){sleep(env.STUB_CONTEXT_MS);console.log('CONFIGURED REFOCUS CONTENT');}
+else console.log('{}');
+`);
+    trace = writeRefocusBudgetProbe(trace);
+  }
+  return { root, home, bin, log, trace };
 }
 
 interface Run { killed: boolean; ms: number; stdout: string; stderr: string }
@@ -64,10 +79,11 @@ function hook(f: Fixture, event: string, session: string, extra: Record<string, 
   if (!existsSync(transcript)) writeFileSync(transcript, "");
   const started = Date.now();
   return new Promise((done) => {
-    const child = spawn("node", [HOOK, "--runtime", "claude"], {
+    const child = spawn(process.execPath, [HOOK, "--runtime", "claude"], {
       env: {
-        PATH: `${f.bin}:${process.env.PATH}`, HOME: f.root, OPENRIG_HOME: f.home, OPENRIG_SESSION_NAME: SEAT,
-        PYTHON: join(f.bin, "trace"), OPENRIG_REFOCUS_WORK_NODE: f.home, OPENRIG_WORKSPACE_ROOT: f.home,
+        PATH: [f.bin, process.env.PATH].join(delimiter), HOME: f.root, OPENRIG_HOME: f.home, OPENRIG_SESSION_NAME: SEAT,
+        SystemRoot: process.env.SystemRoot,
+        PYTHON: f.trace, OPENRIG_REFOCUS_WORK_NODE: f.home, OPENRIG_WORKSPACE_ROOT: f.home,
         OPENRIG_TOPOLOGY_ROOT: f.home, ...extra,
       },
     });
@@ -302,7 +318,7 @@ describe("refocus: overlapping events for one occupant", () => {
     expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
   });
 
-  it("uses a shared successor guard after its former owner exits", async ({ expect, onTestFinished }) => {
+  it.skipIf(process.platform === "win32")("uses a shared successor guard after its former owner exits", async ({ expect, onTestFinished }) => {
     const f = fixture(onTestFinished);
     await hook(f, "PostCompact", "s1");
     const guard = join(f.home, "refocus", `${SEAT}__s1.json.guard`);
@@ -316,7 +332,7 @@ describe("refocus: overlapping events for one occupant", () => {
     expect(readlinkSync(guard)).toBe(token);
   });
 
-  it("does not take a successor when the old guard was released before the owner exited", async ({ expect, onTestFinished }) => {
+  it.skipIf(process.platform === "win32")("does not take a successor when the old guard was released before the owner exited", async ({ expect, onTestFinished }) => {
     const f = fixture(onTestFinished);
     await hook(f, "PostCompact", "s1");
     const stateFile = join(f.home, "refocus", `${SEAT}__s1.json`);
@@ -344,7 +360,7 @@ describe("refocus: overlapping events for one occupant", () => {
     expect(readlinkSync(guard)).toBe(liveToken);
   });
 
-  it("reports an unreadable guard and leaves the pending compaction available", async ({ expect, onTestFinished }) => {
+  it.skipIf(process.platform === "win32")("reports an unreadable guard and leaves the pending compaction available", async ({ expect, onTestFinished }) => {
     const f = fixture(onTestFinished);
     await hook(f, "UserPromptSubmit", "s1");
     const guard = join(f.home, "refocus", `${SEAT}__s1.json.guard`);

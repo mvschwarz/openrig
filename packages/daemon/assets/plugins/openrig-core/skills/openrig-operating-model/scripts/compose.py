@@ -26,6 +26,7 @@ Composed output is GENERATED, NEVER EDITED (fragments are the source of truth).
 Seals/locks bind to a render's bytes, not to fragments. Stdlib only.
 """
 import argparse, os, sys, fnmatch, datetime, re, shutil, subprocess
+from pathlib import Path
 
 # A SHELF holds instances of an altitude; it is not a position and carries no chain file.
 # Both trees have them: missions/ slices/ (work) and rigs/ pods/ seats/ (topology). Without
@@ -301,10 +302,20 @@ def resolve_roots():
 
 
 def rig_config(key):
-    if not shutil.which("rig"):
-        return None
+    if os.name == "nt":
+        node = os.environ.get("OPENRIG_NODE") or shutil.which("node")
+        if not node:
+            return None
+        bridge = Path(__file__).resolve().parents[3] / "hooks" / "scripts" / "rig-command.cjs"
+        command = [node, str(bridge)]
+    else:
+        executable = shutil.which("rig")
+        if not executable:
+            return None
+        command = [executable]
     try:
-        p = subprocess.run(["rig", "config", "get", key], capture_output=True, text=True, timeout=10)
+        p = subprocess.run([*command, "config", "get", key], capture_output=True,
+                           encoding="utf-8", timeout=10)
         v = (p.stdout or "").strip()
         return v if p.returncode == 0 and v else None
     except Exception:

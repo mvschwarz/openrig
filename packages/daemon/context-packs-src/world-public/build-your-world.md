@@ -105,4 +105,5 @@ The full public pack demonstrates the optional claim-checking climb.
 <!-- world-claim: derive-pack-path -->
 Use rig context show world-public --json to derive the installed pack directory.
 <!-- world-claim: run-public-verifier -->
-Run `sh verify-world.sh` in that derived directory instead of teaching a machine-specific path.
+Run `node verify-world-native.mjs` in that derived directory instead of teaching a machine-specific path.
+The POSIX `sh verify-world.sh` entry retains the same named checks.

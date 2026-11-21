@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { join, resolve } from "node:path";
 import { routeAgentImages, type AgentImagesRouterFsOps, type RouteAgentImagesInput } from "../src/domain/bundle-agent-images-router.js";
 
 // Item 6 / slice-05 Checkpoint 7.3g step 2: bundle-agent-images-router
@@ -14,8 +15,8 @@ function mockFs(initial: { dirs?: string[]; files?: string[] } = {}): AgentImage
   _dirs: Set<string>;
   _files: Set<string>;
 } {
-  const dirs = new Set<string>(initial.dirs ?? []);
-  const files = new Set<string>(initial.files ?? []);
+  const dirs = new Set<string>((initial.dirs ?? []).map(p => resolve(p)));
+  const files = new Set<string>((initial.files ?? []).map(p => resolve(p)));
   const copyCalls: Array<{ src: string; dest: string }> = [];
   const mkdirpCalls: string[] = [];
   return {
@@ -35,8 +36,8 @@ function imageFixture(imageDir: string): { dirs: string[]; files: string[] } {
   return { dirs: [imageDir], files: [`${imageDir}/manifest.yaml`] };
 }
 
-const BUNDLE_ROOT = "/bundle/root";
-const TARGET = "/operator/.openrig/agent-images";
+const BUNDLE_ROOT = resolve("/bundle/root");
+const TARGET = resolve("/operator/.openrig/agent-images");
 
 function makeInput(overrides?: Partial<RouteAgentImagesInput>): RouteAgentImagesInput {
   return {
@@ -67,11 +68,11 @@ describe("routeAgentImages", () => {
     );
     expect(result.routedCount).toBe(1);
     expect(result.records[0]!.status).toBe("routed");
-    expect(result.records[0]!.installedAt).toBe(`${TARGET}/seat-a`);
+    expect(result.records[0]!.installedAt).toBe(join(TARGET, "seat-a"));
     expect(fs._copyCalls).toHaveLength(1);
     expect(fs._copyCalls[0]).toEqual({
-      src: `${BUNDLE_ROOT}/agent-images/seat-a`,
-      dest: `${TARGET}/seat-a`,
+      src: join(BUNDLE_ROOT, "agent-images/seat-a"),
+      dest: join(TARGET, "seat-a"),
     });
   });
 
@@ -194,12 +195,12 @@ describe("routeAgentImages", () => {
     expect(result.routedCount).toBe(1);
     expect(result.rejectedCount).toBe(1);
     expect(result.records[0]!.status).toBe("routed");
-    expect(result.records[0]!.installedAt).toBe(`${TARGET}/seat-a`);
+    expect(result.records[0]!.installedAt).toBe(join(TARGET, "seat-a"));
     expect(result.records[1]!.status).toBe("conflict");
     expect(result.records[1]!.detail).toContain("seat-a");
     expect(result.records[1]!.detail).toContain("collides");
     expect(fs._copyCalls).toHaveLength(1);
-    expect(fs._copyCalls[0]!.src).toBe(`${BUNDLE_ROOT}/a/seat-a`);
+    expect(fs._copyCalls[0]!.src).toBe(join(BUNDLE_ROOT, "a/seat-a"));
   });
 
   // A10: mixed list — routed + missing + unsafe + not_directory +

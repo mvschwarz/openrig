@@ -310,6 +310,18 @@ describe("FR-1 — verbatim intent, section media, idempotence", () => {
     expect(r.defects[0]).toContain("/abs/path/shot.png");
   });
 
+  it.each(["C:\\outside\\shot.png", "C:shot.png", "\\\\host\\share\\shot.png", "..\\outside.png", "bad\0.png"])("reports native non-relative or escaping media: %s", ref => {
+    expect(sliceRelativeMediaPath(ref, "")).toBeNull();
+    expect(composeSliceReview(baseInputs({ mediaRefs: [ref] })).defects.some(d => d.includes(ref))).toBe(true);
+  });
+
+  it("normalizes authored native relative media while retaining the artifact base boundary", () => {
+    expect(sliceRelativeMediaPath("..\\mockups\\shot.png", "proof", "win32")).toBe("mockups/shot.png");
+    expect(sliceRelativeMediaPath("..\\..\\outside.png", "proof")).toBeNull();
+    expect(sliceRelativeMediaPath("..notes\\shot.png", "proof", "win32")).toBe("proof/..notes/shot.png");
+    expect(sliceRelativeMediaPath("plot\\baseline.png", "proof", "linux")).toBe("proof/plot\\baseline.png");
+  });
+
   it("traversal media refs surface as escape-defect findings (rev1 fixback)", () => {
     const r = composeSliceReview(
       baseInputs({ mediaRefs: ["../sibling/shot.png", "proof/sub/../../../x.png", "proof/ok..png", "proof/fine.png"] }),

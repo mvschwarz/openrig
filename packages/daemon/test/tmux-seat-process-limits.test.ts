@@ -550,6 +550,21 @@ async function freshRefused(h: ReturnType<typeof makeAdapter>, code: string) {
 }
 
 describe("a positive inability: the fresh launch is not started, process_limits_unsupported", () => {
+  it.each([
+    [{ tasksMax: 256 }, "tasks_max", /process-and-thread task count/],
+    [{ tasksMax: 256, memoryMax: 268435456 }, "tasks_max", /process-and-thread task count/],
+  ] as const)("refuses unsupported Windows limits and gives recovery the same reason: %j", async (limits, key, reason) => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const h = makeAdapter({ limits: { "node-a": limits } });
+    const fresh = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(fresh).toMatchObject({ ok: false, code: "process_limits_unsupported", retryable: false,
+      processLimits: { kind: "unsupported", limit: key, reason: expect.stringMatching(reason), requested: limits } });
+    expect(h.newSessions()).toEqual([]);
+    expect(await h.adapter.seatProcessLimitsRecoveryPlan("node-a")).toMatchObject({ state: "not_applied",
+      kind: "unsupported", limit: key, reason: expect.stringMatching(reason), requested: limits });
+    expect(await h.adapter.readSeatProcessLimits("impl-a@demo", limits, "node-a")).toMatchObject({ state: "unsupported", requested: limits });
+    expect(systemdCalls(h.shellCalls)).toEqual([]);
+  });
   const cases: Array<[string, () => ReturnType<typeof makeAdapter>, RegExp]> = [
     ["not Linux", () => { Object.defineProperty(process, "platform", { value: "darwin" }); return makeAdapter({ limits: { "node-a": 256 } }); }, /not Linux/],
     ["systemd-run is missing", () => makeAdapter({ limits: { "node-a": 256 }, probe: { scope: fail("/bin/sh: 1: systemd-run: not found", 127) } }), /not installed/],
@@ -571,6 +586,48 @@ describe("a positive inability: the fresh launch is not started, process_limits_
       expect(r).toMatchObject({ retryable: false, processLimits: { kind: "unsupported", requested: { tasksMax: 256 } } });
     });
   }
+});
+
+describe("Windows Job commit memory", () => {
+  it("requires a started receipt and verified member before accepting a fresh launch", async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: 268435456 } } });
+    h.adapter.procRead = async p => SYNTHETIC.test(p) ? "started|4322" : "";
+    h.adapter.readWindowsSeatJobForPane = vi.fn(async (pid, deps) => {
+      expect(pid).toBe(4321); if (deps) expect(deps.targetPid).toBe(4322);
+      return { memoryMax: 268435456, activeProcesses: 1 };
+    });
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result.ok).toBe(true);
+    expect(h.adapter.readWindowsSeatJobForPane).toHaveBeenCalled();
+    expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: 268435456 }, "node-a"))
+      .toMatchObject({ state: "applied", memoryAccounting: "job_commit", memoryMax: "268435456" });
+  });
+  it("does not replay an assigned but unconfirmed start during recovery", async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: 268435456 } } });
+    h.adapter.procRead = async p => SYNTHETIC.test(p) ? "assigned|4322" : "";
+    h.adapter.isPaneDead = async () => true;
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A, { processLimitsMode: "recovery" });
+    expect(result).toMatchObject({ ok: true, processLimits: { state: "unknown", commandStarted: "unknown" } });
+    expect(h.newSessions()).toHaveLength(1);
+  });
+  it("does not replay when a Windows guardian dies before its first receipt", async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: 268435456 } } });
+    h.adapter.procRead = async p => SYNTHETIC.test(p) ? "pending\n" : "";
+    h.adapter.isPaneDead = async () => true;
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A, { processLimitsMode: "recovery" });
+    expect(result).toMatchObject({ ok: true, processLimits: { state: "unknown", commandStarted: "unknown" } });
+    expect(h.newSessions()).toHaveLength(1);
+  });
+  it("reports unknown when guardian or member readback is unavailable", async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: 268435456 } } });
+    h.adapter.readWindowsSeatJobForPane = async () => { throw new Error("guardian exited"); };
+    expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: 268435456 }, "node-a"))
+      .toMatchObject({ state: "unknown", reason: expect.stringMatching(/could not be verified/) });
+  });
 });
 
 describe("a setup that can't use the scope: process_limits_setup, with the way out", () => {

@@ -1,9 +1,11 @@
 import { afterEach, describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { authSwitch, resolveCodexHome } from "../src/domain/codex-auth.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { createPrivateTextFile, createWindowsPrivateDirectory } from "../src/domain/private-text-file.js";
 
 // `rig provider switch --seat`: one seat moves to a login saved in the Codex home it runs on (its own home with #1937,
 // or a shared one, whose peers are named). The seat's in-place restart keeps its conversation and launch settings;
@@ -53,6 +55,27 @@ function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, un
 }
 
 describe("rig provider switch --seat moves one seat to a login saved in the Codex home it runs on", () => {
+  it("undo and list guidance preserve a quoted Codex home in the actual platform shell", async () => {
+    const home = process.platform === "win32" ? "C:\\owned path\\User ' 中文\\.codex" : "/owned path/User ' 中文/.codex";
+    const h = harness();
+    h.homes.set(home, h.homes.get(HOME)!);
+    const restart = { ...h.seatRestart, plan: async () => report({ codexHome: home }) as never };
+    const parse = (command: string): string[] => {
+      if (process.platform !== "win32") return execFileSync("/bin/sh", ["-c", `rig() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8", timeout: 15000 }).trim().split("\n");
+      const script = "function rig { ConvertTo-Json -Compress -InputObject @($args) }\n" + command;
+      return JSON.parse(execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+        { encoding: "utf8", windowsHide: true, timeout: 15000, stdio: "pipe" }).trim());
+    };
+    const switched = await h.svc.switchAccount({ seat: "dev-a@rig", toAccount: "work", forceUnsafe: false }, restart);
+    expect(parse(switched.seat!.undo!)).toEqual(["auth", "switch", "--codex-home", home, BEFORE]);
+    const absent = await h.svc.precheck({ seat: "dev-a@rig", toAccount: "missing" }, restart);
+    expect(absent.safe).toBe(false);
+    if (absent.safe) throw new Error("Expected absent login refusal");
+    const command = absent.message!.split("List them with: ")[1]!;
+    expect(parse(command)).toEqual(["auth", "list", "--codex-home", home]);
+  });
+
   it("plans the restart, keeps the outgoing login, activates the chosen one there, restarts in place, and leaves uptake to verify", async () => {
     const h = harness();
     const r = await h.svc.switchAccount({ seat: "dev-a@rig", toAccount: "work", forceUnsafe: false }, h.seatRestart);
@@ -214,11 +237,11 @@ describe("switches on one Codex home keep each receipt's way back and the login 
   const login = (name: string) => JSON.stringify({ fixture: name });
 
   function codexHome() {
-    const home = mkdtempSync(path.join(tmpdir(), "provider-switch-home-"));
+    const home = process.platform === "win32" ? createWindowsPrivateDirectory(tmpdir()) : mkdtempSync(path.join(tmpdir(), "provider-switch-home-"));
     cleanup.push(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(path.join(home, "auth-profiles"), { mode: 0o700 });
-    for (const name of ["alpha", "beta", "gamma"]) writeFileSync(path.join(home, "auth-profiles", `${name}.json`), login(name), { mode: 0o600 });
-    writeFileSync(path.join(home, "auth.json"), login("alpha"), { mode: 0o600 });
+    for (const name of ["alpha", "beta", "gamma"]) createPrivateTextFile(path.join(home, "auth-profiles", `${name}.json`), login(name));
+    createPrivateTextFile(path.join(home, "auth.json"), login("alpha"));
     const times = ["2026-10-25T04:10:00.100Z", "2026-10-25T04:10:00.200Z"];
     const svc = new ProviderServiceImpl({ db: {} as never, listRigs: () => [], now: () => times.length > 1 ? times.shift()! : times[0] });
     const restarted = () => report({ codexHome: home, planOnly: false, outcome: "restarted_account_unverified", message: "Restarted in place." });
@@ -231,7 +254,7 @@ describe("switches on one Codex home keep each receipt's way back and the login 
   it("a native API-key profile switches and returns to subscription bytes through the existing restart", async () => {
     const f = codexHome();
     const api = JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "synthetic-api-fixture" });
-    writeFileSync(path.join(f.home, "auth-profiles", "api.json"), api, { mode: 0o600 });
+    createPrivateTextFile(path.join(f.home, "auth-profiles", "api.json"), api);
     const result = await f.svc.switchAccount({ seat: "dev-a@rig", toAccount: "api", forceUnsafe: false }, f.restart());
     expect(result).toMatchObject({ outcome: "rebind_in_progress", seat: { account: "api" } });
     expect(f.active()).toBe(api);

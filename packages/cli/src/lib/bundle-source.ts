@@ -11,6 +11,8 @@ import { getOpenRigHome } from "../openrig-compat.js";
 import type { StatusDeps } from "../commands/status.js";
 import { authoredMapping, readDeclaredConfigurations, resolveConfiguration, stageConfiguration, ConfigurationError } from "./bundle-configuration.js";
 
+const canonicalPath = process.platform === "win32" ? realpathSync.native : realpathSync;
+
 export interface BundleSource {
   repository: string;
   folder: string;
@@ -92,7 +94,7 @@ export async function localBundleClient(deps: StatusDeps, host?: string): Promis
 const execFileAsync = promisify(execFile);
 export async function bundleGit(cwd: string, args: string[]): Promise<string> {
   // Public HTTPS only, with no global credential helpers, URL rewrites, hooks or injected Git config.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
   try {
     const result = await execFileAsync("git", ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", ...args], {
       cwd, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
@@ -107,16 +109,16 @@ export async function bundleGit(cwd: string, args: string[]): Promise<string> {
 
 /** The link path must not vendor files from the installing host through repository symlinks. */
 function checkGitHubBundleSymlinks(checkoutDir: string): void {
-  const root = realpathSync(checkoutDir);
+  const root = canonicalPath(checkoutDir);
   const visited = new Set<string>();
   const walk = (file: string): void => {
     if (lstatSync(file).isSymbolicLink()) {
-      file = realpathSync(file);
+      file = canonicalPath(file);
       const relative = path.relative(root, file);
       if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error();
     }
     if (!statSync(file).isDirectory()) return;
-    const directory = realpathSync(file);
+    const directory = canonicalPath(file);
     if (visited.has(directory)) return;
     visited.add(directory);
     for (const name of readdirSync(directory)) if (name !== ".git") walk(path.join(directory, name));
@@ -127,9 +129,9 @@ function checkGitHubBundleSymlinks(checkoutDir: string): void {
 
 /** Match create: member/package refs use the rig directory; imports use their agent directory. */
 function checkGitHubBundleRefs(folder: string, checkoutDir: string, retainedCheckoutDir?: string, includePackages: readonly string[] = []): void {
-  const roots = [checkoutDir, ...(retainedCheckoutDir ? [retainedCheckoutDir] : [])].map(dir => realpathSync(dir));
+  const roots = [checkoutDir, ...(retainedCheckoutDir ? [retainedCheckoutDir] : [])].map(dir => canonicalPath(dir));
   const contained = (file: string): string => {
-    const real = realpathSync(file);
+    const real = canonicalPath(file);
     if (!roots.some(root => {
       const relative = path.relative(root, real);
       return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
@@ -195,10 +197,10 @@ export async function prepareGitHubBundle(input: string, git = bundleGit, import
     await git(checkoutDir, ["checkout", "--detach", source.resolvedCommit]);
     let folder: string;
     try {
-      folder = realpathSync(path.join(checkoutDir, source.folder));
-      const relative = path.relative(realpathSync(checkoutDir), folder);
+      folder = canonicalPath(path.join(checkoutDir, source.folder));
+      const relative = path.relative(canonicalPath(checkoutDir), folder);
       if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !statSync(folder).isDirectory() || !statSync(path.join(folder, "rig.yaml")).isFile()) throw new Error();
-      const specRelative = path.relative(realpathSync(checkoutDir), realpathSync(path.join(folder, "rig.yaml")));
+      const specRelative = path.relative(canonicalPath(checkoutDir), canonicalPath(path.join(folder, "rig.yaml")));
       if (specRelative === ".." || specRelative.startsWith(`..${path.sep}`) || path.isAbsolute(specRelative)) throw new Error();
     } catch { throw new Error("The selected GitHub bundle folder must contain rig.yaml inside the fetched repository."); }
     checkGitHubBundleSymlinks(checkoutDir);
@@ -288,7 +290,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       if (!declared) throw new ConfigurationError("This bundle has no configurations.yaml; build it as authored or choose a bundle with declared configurations.");
       const chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
       // Preserve monorepo-relative refs when a preset changes the selected rig.
-      const staged = stageConfiguration(realpathSync(prepared.checkoutDir), specPath, declared, chosen);
+      const staged = stageConfiguration(canonicalPath(prepared.checkoutDir), specPath, declared, chosen);
       configurationStaging = staged.stagingDir;
       specPath = staged.rigSpecPath;
       folder = path.dirname(specPath);

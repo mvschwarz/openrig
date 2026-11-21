@@ -152,6 +152,7 @@ connector that outlives the command:
 rig exec harnesses                               # the adapter and native versions installed here, and how each differs
 rig exec run <row> --harness claude --plan       # what would run, with versions; starts nothing
 rig exec run <row> --harness claude [--wait]     # start it; --wait waits here for the outcome
+rig exec run <row> --cwd /workspace -- cursor-agent acp
 rig exec status <runId|row>                      # state, outcome, usage and cost, and what still runs
 rig exec cancel <runId>
 ```

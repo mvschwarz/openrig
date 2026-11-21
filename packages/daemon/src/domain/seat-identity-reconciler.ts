@@ -4,7 +4,7 @@ import { readProcessTableCensus } from "./process-table.js";
 import { recordedProcessStillRunning } from "./reconciler.js";
 import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation, type NativeProcessRow } from "./native-process-lineage.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -82,6 +82,15 @@ const SHELL_COMMANDS = new Set([
   "bash", "zsh", "fish", "sh", "dash", "tcsh", "csh",
   "-bash", "-zsh", "-fish", "-sh", "-dash", "-tcsh", "-csh",
 ]);
+
+function windowsShellHost(command: string | null): boolean {
+  return process.platform === "win32" && isWindowsShellHost(command ?? "");
+}
+
+function claudeHostNeedsNativeProof(command: string | null): boolean {
+  return windowsShellHost(command) || (classifyPaneRuntimeMatch(command, "claude-code") === "mismatch"
+    && isShellForeground(command?.trim().toLowerCase() ?? ""));
+}
 
 /**
  * Legacy short-command classifier. Codex callers additionally require the
@@ -340,8 +349,7 @@ export class SeatIdentityReconciler {
             // selection and final observation rather than caching an early label.
             command = await this.tmux.getPaneCommand(seat.tmux_pane);
           }
-          if (classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch"
-            && isShellForeground(command?.trim().toLowerCase() ?? "")) nativeSeats.push(seat);
+          if (claudeHostNeedsNativeProof(command)) nativeSeats.push(seat);
         } catch { /* No proof selected; the final per-seat observation still runs. */ }
         if (generation !== this.generation) return;
       }
@@ -492,8 +500,8 @@ export class SeatIdentityReconciler {
     if (command === null && seat.runtime === "claude-code") {
       return this.tmuxUnavailableVerdict(seat, observedAt);
     }
-    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && (seat.resume_token != null || native !== null)
-      && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
+    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && (windowsShellHost(command)
+      || ((seat.resume_token != null || native !== null) && claudeHostNeedsNativeProof(command))))) {
       let verified = native?.panePid === pid;
       if (verified && seat.runtime === "claude-code" && seat.resume_token == null) {
         // Runtime-only proof must still refer to the sole bound pane after the

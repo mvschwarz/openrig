@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as scopeReader from "../src/domain/terminal/scope-task-terminal-view.js";
@@ -32,6 +32,16 @@ function fixture(projectId?: string) {
 }
 
 describe("authoritative scoped terminal membership", () => {
+  it.runIf(process.platform === "win32")("deduplicates native case and junction aliases of the configured scope index", () => {
+    const f = fixture();
+    const alias = f.root + "-alias";
+    symlinkSync(f.root, alias, "junction");
+    cleanup.unshift(() => rmSync(alias, { recursive: true, force: true }));
+    f.index.additionalSliceRoots = [f.root.toLowerCase(), alias.toLowerCase()];
+    f.add("owned");
+    expect(f.read("slice:OPR.3")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+    expect(f.read("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+  });
   it("selects exact name and unique id tags, active states, and every current obligation", () => {
     const f = fixture();
     f.add("two", "a", "blocked", ["slice:OPR.3"]); f.add("one", "a", "in-progress");

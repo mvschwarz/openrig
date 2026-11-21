@@ -113,7 +113,7 @@ it("a row parked on someone is resolved with reply, in words, as the primary use
 // The startup paths, through the real StartupController and main.ts's own enable and opening functions and callbacks,
 // taken verbatim from the source (main.ts is the terminal entry, so it isn't imported).
 function startupHarness(rigsSummary: () => Promise<unknown[]>) {
-  const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
   const start = source.indexOf("  function enableLive(): boolean");
   const funcs = source.slice(start, source.indexOf("  function commandContext()", start));
   const wiring = source.slice(source.indexOf("  if (client) startup = new StartupController"));

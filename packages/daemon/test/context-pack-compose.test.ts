@@ -244,21 +244,25 @@ describe("ATOM 3 — durable compose into the Atom-2 ref store", () => {
     expect(existsSync(join(userRoot, "packs", "hidden-child"))).toBe(false);
   });
 
-  it("rejects symlink and non-directory namespace segments with zero mutation", () => {
+  it("rejects symlink namespace segments with zero mutation", () => {
     const a = source("a.md", "A");
     const outside = join(tmp, "outside");
     mkdirSync(outside);
     mkdirSync(userRoot);
     symlinkSync(outside, join(userRoot, "linked"));
-    let err = captureError(() => service().composeFromFiles({
+    const err = captureError(() => service().composeFromFiles({
       outRef: "linked/escape",
       sources: [{ path: a, label: "a.md" }],
     }));
     expect(err.code).toBe("unsafe_ref_namespace");
     expect(existsSync(join(outside, "escape"))).toBe(false);
+  });
 
+  it("rejects non-directory namespace segments with zero mutation", () => {
+    const a = source("a.md", "A");
+    mkdirSync(userRoot);
     writeFileSync(join(userRoot, "blocked"), "not-a-directory");
-    err = captureError(() => service().composeFromFiles({
+    const err = captureError(() => service().composeFromFiles({
       outRef: "blocked/child",
       sources: [{ path: a, label: "a.md" }],
     }));

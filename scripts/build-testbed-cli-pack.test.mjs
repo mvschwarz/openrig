@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, statSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join, relative, isAbsolute, sep } from "node:path";
 import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
+import { npmCommand } from "./npm-command.mjs";
+import { packageBuildShell } from "./run-package-build.mjs";
 
 // 51-04 Q2 — the pack-step proof. The old guard only string-matched `npm pack`, so it stayed GREEN
 // over THREE stacked breaks (root package / no bin / non-standalone-installable). Tiers:
@@ -23,6 +25,12 @@ import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const CLI_DIR = join(REPO_ROOT, "packages", "cli");
+function installedCliRoot(prefix) {
+  const modules = execFileSync(...npmCommand(["root", "-g", "--prefix", prefix]), { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const rel = relative(prefix, modules);
+  assert.ok(isAbsolute(modules) && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel), "npm global root must stay in the owned prefix");
+  return join(modules, "@openrig", "cli");
+}
 // Daemon exports-map surfaces the cli's runtime value-imports resolve to after packaging.
 const DAEMON_SURFACES = [
   "daemon/dist/gateway-human-registry-surface.js",
@@ -31,7 +39,7 @@ const DAEMON_SURFACES = [
 ];
 
 function assertReleaseGuidance(version, note) {
-  const [heading, intro] = note.trim().split(/\n\s*\n/, 2);
+  const [heading, intro] = note.replaceAll("\r\n", "\n").trim().split(/\n\s*\n/, 2);
   assert.equal(heading, `# What changed in OpenRig ${version}`, 'packaged whats-new heading is stale');
   assert.ok(intro.includes(`just upgraded to ${version}.`), 'packaged whats-new introduction is stale');
 }
@@ -39,6 +47,7 @@ function assertReleaseGuidance(version, note) {
 test("whats-new names its package version, and rejects stale heading or introduction", () => {
   const note = '# What changed in OpenRig 0.7.0\n\nThis note is for an agent on an install that was just upgraded to 0.7.0.';
   assertReleaseGuidance('0.7.0', note);
+  assertReleaseGuidance('0.7.0', note.replaceAll('\n', '\r\n'));
   assert.throws(() => assertReleaseGuidance('0.7.0', note.replace('OpenRig 0.7.0', 'OpenRig 0.6.12')), /heading is stale/);
   assert.throws(() => assertReleaseGuidance('0.7.0', note.replace('upgraded to 0.7.0', 'upgraded to 0.6.12')), /introduction is stale/);
 });
@@ -55,13 +64,13 @@ test("pre-check: @openrig/cli, ships the `rig` bin, and does not depend on the u
   }
 });
 
-test("package proof: the tarball ships the daemon surfaces and no packaged JS imports @openrig/daemon", () => {
+test("package proof: the tarball ships the daemon surfaces and no packaged JS imports @openrig/daemon", async () => {
   // assemble (stages daemon/, rewrites daemon imports) — heavy but no install/native build
-  execFileSync("bash", [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
+  execFileSync(packageBuildShell(process.platform, process.env), [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
   assert.ok(!existsSync(join(CLI_DIR, "node_modules", "@openrig", "daemon")),
     "build-package.sh must not leave a bundled <cli>/node_modules/@openrig/daemon copy");
 
-  const tgz = execFileSync("npm", ["pack", "--silent"], { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
+  const tgz = execFileSync(...npmCommand(["pack", "--silent"]), { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
   const tgzPath = join(CLI_DIR, tgz);
   const extract = mkdtempSync(join(tmpdir(), "q2-pack-content-"));
   try {
@@ -80,6 +89,30 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
     assert.equal(packed.bundledDependencies, undefined, "the packed manifest must not bundle dependencies");
 
     execFileSync("tar", ["-xzf", tgzPath, "-C", extract]);
+    const tileHelper = join(extract, "package/daemon/assets/terminal/windows-tile-attach.ps1");
+    const followHelper = join(extract, "package/daemon/assets/terminal/follow-events.mjs");
+    assert.equal(lstatSync(followHelper).isFile(), true);
+    assert.equal(lstatSync(followHelper).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(followHelper), readFileSync(join(REPO_ROOT, "packages/daemon/assets/terminal/follow-events.mjs")));
+    assert.equal(lstatSync(tileHelper).isFile(), true);
+    assert.equal(lstatSync(tileHelper).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(tileHelper), readFileSync(join(REPO_ROOT,"packages/daemon/assets/terminal/windows-tile-attach.ps1")));
+    const tileModule = await import(pathToFileURL(join(extract,"package/daemon/dist/domain/terminal/windows-tile-attach.js")).href);
+    const tileArgv = tileModule.windowsTileAttachArgv(process.execPath,[],"owned-fixture",true);
+    assert.ok(Buffer.from(tileArgv.at(-1),"base64").toString("utf16le").includes(tileHelper.replaceAll("'","''")),
+      "the extracted module must resolve the helper inside the extracted package");
+    for (const [projected, document] of [
+      ["help/help.md", "help.md"],
+      ["reference/acp-agents.md", "acp-agents.md"],
+      ["reference/getting-started.md", "getting-started.md"],
+      ["reference/instance-layout.md", "instance-layout.md"],
+      ["reference/rig-spec.md", "rig-spec.md"],
+      ["reference/whats-new.md", "whats-new.md"],
+    ]) {
+      const output = join(extract, "package/daemon/context-packs", projected);
+      assert.equal(lstatSync(output).isSymbolicLink(), false);
+      assert.deepEqual(readFileSync(output), readFileSync(join(REPO_ROOT, "docs/reference", document)), projected);
+    }
     const left = [];
     const walk = (dir) => {
       for (const entry of readdirSync(dir)) {
@@ -105,14 +138,14 @@ test("install RED (resident, docker-free): a clean install materializes a COMPLE
   // (daemon present + better-sqlite3 absent) FALSE-GREENS this — it passes on the broken pack. The
   // effect is only visible one layer later, at INSTALL. --ignore-scripts skips the native build, so
   // this is TOOLCHAIN-INDEPENDENT + fast (the effect one layer earlier than the container gate).
-  execFileSync("bash", [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
+  execFileSync(packageBuildShell(process.platform, process.env), [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
   const prefix = mkdtempSync(join(tmpdir(), "q2-install-red-"));
   let tgzPath;
   try {
-    const tgz = execFileSync("npm", ["pack", "--silent"], { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
+    const tgz = execFileSync(...npmCommand(["pack", "--silent"]), { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
     tgzPath = join(CLI_DIR, tgz);
-    execFileSync("npm", ["install", "-g", "--prefix", prefix, "--ignore-scripts", tgzPath], { cwd: REPO_ROOT, stdio: "inherit" });
-    const bsq3 = join(prefix, "lib", "node_modules", "@openrig", "cli", "node_modules", "better-sqlite3");
+    execFileSync(...npmCommand(["install", "-g", "--prefix", prefix, "--ignore-scripts", tgzPath]), { cwd: REPO_ROOT, stdio: "inherit" });
+    const bsq3 = join(installedCliRoot(prefix), "node_modules", "better-sqlite3");
     assert.ok(existsSync(bsq3), "a clean install must materialize the cli-level better-sqlite3 dir");
     assert.ok(existsSync(join(bsq3, "binding.gyp")),
       "better-sqlite3 must be COMPLETE (binding.gyp present) — an EMPTY placeholder is the bundled-daemon-deps break #5 the pack-content assertion cannot see");
@@ -126,21 +159,82 @@ test("install RED (resident, docker-free): a clean install materializes a COMPLE
 
 const RUN_GATE = process.env.RUN_TESTBED_PACK_GATE === "1";
 test("GATE (target-native): install the tarball + a cli command LOADS the daemon subpath", { skip: RUN_GATE ? false : "opt-in RUN_TESTBED_PACK_GATE=1; needs TARGET build tools (better-sqlite3 builds fresh) — the operator's Docker rerun is this gate" }, () => {
-  execFileSync("bash", [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
+  execFileSync(packageBuildShell(process.platform, process.env), [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
   const prefix = mkdtempSync(join(tmpdir(), "q2-gate-prefix-"));
   const home = mkdtempSync(join(tmpdir(), "q2-gate-home-"));
   let tgzPath;
   try {
-    const tgz = execFileSync("npm", ["pack", "--silent"], { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
+    const tgz = execFileSync(...npmCommand(["pack", "--silent"]), { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
     tgzPath = join(CLI_DIR, tgz);
-    execFileSync("npm", ["install", "-g", "--prefix", prefix, tgzPath], { cwd: REPO_ROOT, stdio: "inherit" });
-    const rigBin = join(prefix, "bin", "rig");
-    const out = execFileSync(rigBin, [
+    execFileSync(...npmCommand(["install", "-g", "--prefix", prefix, tgzPath]), { cwd: REPO_ROOT, stdio: "inherit" });
+    const installed = installedCliRoot(prefix);
+    for (const helper of ["windows-tile-attach.ps1", "follow-events.mjs"]) {
+      const delivered = join(installed,"daemon/assets/terminal",helper);
+      assert.equal(lstatSync(delivered).isFile(),true);
+      assert.equal(lstatSync(delivered).isSymbolicLink(),false);
+      assert.deepEqual(readFileSync(delivered),readFileSync(join(REPO_ROOT,"packages/daemon/assets/terminal",helper)),`installed terminal helper ${helper} must match source`);
+    }
+    assert.throws(()=>execFileSync(process.execPath,[join(installed,"daemon/assets/terminal/follow-events.mjs")],{cwd:home,encoding:"utf8",stdio:"pipe"}),
+      error=>error.status===1 && String(error.stderr).includes("An explanation log path is required"),"installed following helper must load and reject a missing path");
+    const providerRecoveryHelper = join(installed,"daemon/assets/windows-provider-recovery.mjs");
+    assert.deepEqual(readFileSync(providerRecoveryHelper),readFileSync(join(REPO_ROOT,"packages/daemon/assets/windows-provider-recovery.mjs")),"installed provider recovery helper must match source");
+    assert.throws(()=>execFileSync(process.execPath,[providerRecoveryHelper],{cwd:home,encoding:"utf8",stdio:"pipe",windowsHide:true}),
+      error=>error.status===1 && String(error.stderr).includes("Windows provider recovery requires one payload"),"installed provider recovery helper must load its paired launcher modules before rejecting missing data");
+    const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
+    const entry = join(installed, manifest.bin.rig);
+    assert.ok(existsSync(entry), "installed bin entry must exist");
+    assert.ok(existsSync(process.platform === "win32" ? join(prefix, "rig.cmd") : join(prefix, "bin", "rig")), "npm must materialize the installed rig shim");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENRIG|RIGGED)_/i.test(key)));
+    Object.assign(env, { OPENRIG_HOME: home, HOME: home, USERPROFILE: home });
+    const resourceResult = execFileSync(process.execPath,
+      [join(HERE, "installed-resource-library-probe.mjs"), installed, home],
+      { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true });
+    assert.deepEqual(JSON.parse(resourceResult), { contextComposeReadRemove: true, specScanRename: true, nativeCaptureEnvironment: process.platform === "win32" });
+    if (process.platform === "win32") {
+      const nativeFileResult=execFileSync(process.execPath,
+        [join(HERE,"installed-native-file-probe.mjs"),installed,home],
+        {cwd:home,env,encoding:"utf8",stdio:"pipe",windowsHide:true});
+      assert.deepEqual(JSON.parse(nativeFileResult),{nativeFileReplacement:true,retainedHardlink:true,nativeFilenameComparison:true});
+      const terminalControlResult=execFileSync(process.execPath,
+        [join(HERE,"installed-terminal-control-probe.mjs"),installed],
+        {cwd:home,env,encoding:"utf8",stdio:"pipe",windowsHide:true});
+      assert.deepEqual(JSON.parse(terminalControlResult),{nativeControl:true,literalArgv:true,sftpControl:true,mappedSingleAttach:true});
+    }
+    const nativeHelper = join(installed, "daemon/context-packs/skills/process/systematic-debugging/find-polluter.mjs");
+    assert.deepEqual(readFileSync(nativeHelper), readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs")), "installed native helper must match its authored source");
+    assert.throws(() => execFileSync(process.execPath, [nativeHelper], { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true }),
+      error => error.status === 2 && String(error.stdout).includes("Usage: node find-polluter.mjs"), "installed helper must execute and report invalid invocation honestly");
+    const upgradeScripts = "skills/core/openrig-upgrade/scripts";
+    for (const file of ["inspect-upgrade.mjs", "migrate-telemetry-state-0.5.9.mjs", "run-rig.mjs"]) {
+      assert.deepEqual(readFileSync(join(installed, "daemon/context-packs", upgradeScripts, file)),
+        readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared", upgradeScripts, file)),
+        `installed upgrade dependency ${file} must match its authored source`);
+    }
+    // --help imports the real sibling module but performs no inventory or mutation.
+    const migrationHelp = execFileSync(process.execPath,
+      [join(installed, "daemon/context-packs", upgradeScripts, "migrate-telemetry-state-0.5.9.mjs"), "--help"],
+      { cwd: home, env: { ...env, OPENRIG_RIG_BIN: join(home, "must-not-execute-rig.exe") }, encoding: "utf8", stdio: "pipe", windowsHide: true });
+    assert.match(migrationHelp, /Usage:/, "installed migration helper must load its shipped dependency and print help");
+    // Explicitly exercise the installed in-memory SQLite check even when the
+    // operator's npm configuration happens to suppress lifecycle scripts.
+    execFileSync(process.execPath, [join(installed, "scripts/check-abi.mjs")], { cwd: home, env, stdio: "pipe" });
+    const args = [
       "gateway", "human", "add", "gateuser",
       "--display-name", "Gate User",
       "--binding", "slack:main:vault://slack/gate:primary:handle=UGATE",
       "--delivery-class", "B",
-    ], { encoding: "utf8", env: { ...process.env, OPENRIG_HOME: home } });
+    ];
+    let out;
+    if (process.platform === "win32") {
+      const argumentsFile = join(home, "rig-arguments.json");
+      writeFileSync(argumentsFile, JSON.stringify(args));
+      const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+      out = execFileSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; $rigArgs=@(Get-Content -LiteralPath $env:OPENRIG_TEST_RIG_ARGUMENTS -Raw | ConvertFrom-Json); & $env:OPENRIG_TEST_RIG_COMMAND @rigArgs; exit $LASTEXITCODE"], {
+        encoding: "utf8", cwd: home, windowsHide: true,
+        env: { ...env, OPENRIG_TEST_RIG_ARGUMENTS: argumentsFile, OPENRIG_TEST_RIG_COMMAND: join(prefix, "rig.cmd") },
+      });
+    } else out = execFileSync(join(prefix, "bin", "rig"), args, { encoding: "utf8", cwd: home, env });
     assert.match(out, /"ok":\s*true|gateuser/, "`rig gateway human add` must succeed, proving @openrig/daemon resolved on a clean install");
     assert.ok(existsSync(join(home, "gateway", "humans", "gateuser.yaml")), "the daemon-backed verb must have written the fragment");
   } finally {

@@ -9,6 +9,9 @@ import { readOpenRigEnv } from "../openrig-compat.js";
 import { describeUsage, runAcpAssignment, type AcpOutcomeKind, type AcpQueue, type AcpUsage } from "../acp/connector.js";
 import type { JsonRpcErrorObject } from "../acp/json-rpc-stdio.js";
 import { findRunProcesses, RUN_MARKER } from "../acp/run-processes.js";
+import { watchCancelRequest } from "../acp/cancel-request.js";
+import { resolveAcpAgentCommand } from "../acp/agent-command.js";
+import { readPlatformEnv } from "../lib/codex-auth.js";
 import { daemonAcpQueue, newId, processStart, runsDir } from "./acp.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -72,10 +75,13 @@ function readJson(file: string): Record<string, unknown> | undefined {
   try { return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>; } catch { return undefined; }
 }
 
-function onPath(bin: string, path = ""): string | undefined {
+function onPath(bin: string, path = "", pathExt = ".COM;.EXE;.BAT;.CMD"): string | undefined {
   for (const dir of path.split(delimiter)) {
     if (!dir) continue;
-    try { if (statSync(join(dir, bin)).isFile()) return join(dir, bin); } catch { /* not in this folder */ }
+    for (const suffix of process.platform === "win32" ? pathExt.split(";").filter(Boolean) : [""]) {
+      const file = join(dir.replace(/^"(.*)"$/, "$1"), bin + suffix);
+      try { if (statSync(file).isFile()) return file; } catch { /* not in this folder */ }
+    }
   }
   return undefined;
 }
@@ -98,11 +104,18 @@ function dependencyManifest(from: string, name: string): Record<string, unknown>
 }
 
 export function resolveHarness(harness: Harness, env: NodeJS.ProcessEnv = process.env): ResolvedHarness {
-  const found = onPath(harness.bin, env.PATH);
+  const found = onPath(harness.bin, readPlatformEnv(env, "PATH"), readPlatformEnv(env, "PATHEXT"));
   if (!found) {
     return { harness, native: "unknown", problem: `${harness.bin} isn't on PATH; install it with npm install --prefix <dir> ${harness.package}@${harness.qualified} and put <dir>/node_modules/.bin on PATH` };
   }
-  const root = packageRoot(realpathSync(found), harness.package);
+  let entry = found;
+  if (process.platform === "win32") {
+    try {
+      const resolved = resolveAcpAgentCommand(found, process.cwd(), env);
+      entry = resolved.prefix[0] ?? resolved.command;
+    } catch (error) { return { harness, native: "unknown", problem: (error as Error).message }; }
+  }
+  const root = packageRoot(realpathSync(entry), harness.package);
   const version = root ? readJson(join(root, "package.json"))?.version : undefined;
   const manifest = root ? dependencyManifest(root, harness.native.package) : undefined;
   const field = harness.native.versionField ? manifest?.[harness.native.versionField] : undefined;
@@ -335,6 +348,9 @@ export async function runExecConnector(runId: string, queue: AcpQueue | undefine
     return 1;
   }
   let settle: string | undefined;
+  const stopCancelWatch = process.platform === "win32"
+    ? watchCancelRequest(join(runsDir(), `${runId}.cancel.json`), started.processStart, cancel)
+    : () => {};
   try {
     const outcome = await runAcpAssignment(queue, {
       qitemId: run.qitemId, agent: run.agent, cwd: run.cwd, self: run.self, permissionsTo: run.permissionsTo,
@@ -347,6 +363,8 @@ export async function runExecConnector(runId: string, queue: AcpQueue | undefine
   } catch (error) {
     await end({ state: "finished", outcome: "failed", summary: (error as Error).message, settle, endedAt: now() });
     return 1;
+  } finally {
+    stopCancelWatch();
   }
 }
 
@@ -434,9 +452,9 @@ export function execCommand(deps: ExecDeps = {}): Command {
     });
 
   cmd
-    .command("run <qitemId>")
-    .description("Start one row's task as a single turn on a named harness, in a connector that outlives this command")
-    .requiredOption("--harness <name>", `The harness: ${Object.keys(HARNESSES).join(" or ")} (rig exec harnesses)`)
+    .command("run <qitemId> [agent...]")
+    .description("Start one queue-owned turn on a named harness or an explicit ACP command")
+    .option("--harness <name>", `The harness: ${Object.keys(HARNESSES).join(" or ")} (rig exec harnesses)`)
     .option("--cwd <dir>", "The agent session's working directory", process.cwd())
     .option("--permissions-to <session>", "The seat that answers the agent's permission requests (default: this seat)")
     .option("--load-session <id>", "Continue an earlier session; nothing new starts when it can't be loaded")
@@ -461,18 +479,30 @@ harnesses lists what each harness reads). A permission request becomes a row to 
   rig exec cancel <runId>           asks the agent to cancel its turn; the acknowledgement isn't settlement
 
 Guide: rig context get reference/acp-agents.md`)
-    .action(async (qitemId: string, opts: { harness: string; cwd: string; permissionsTo?: string; loadSession?: string; wait?: boolean; plan?: boolean; again?: boolean; pollSeconds: string }) => {
-      const harness = HARNESSES[opts.harness];
-      if (!harness) { console.error(`No harness ${opts.harness}; the named ones are ${Object.keys(HARNESSES).join(", ")}`); process.exitCode = 1; return; }
-      const resolved = resolveHarness(harness);
+    .addHelpText("after", "\nExplicit ACP command: rig exec run QITEM --cwd /workspace -- /path/to/agent acp")
+    .action(async (qitemId: string, agent: string[], opts: { harness?: string; cwd: string; permissionsTo?: string; loadSession?: string; wait?: boolean; plan?: boolean; again?: boolean; pollSeconds: string }) => {
+      if (Boolean(opts.harness) === Boolean(agent.length)) {
+        console.error("Choose one named --harness or supply an ACP command after --.");
+        process.exitCode = 1;
+        return;
+      }
+      const harness = opts.harness && Object.hasOwn(HARNESSES, opts.harness) ? HARNESSES[opts.harness] : undefined;
+      if (opts.harness && !harness) {
+        console.error(`No harness ${opts.harness}; the named ones are ${Object.keys(HARNESSES).join(", ")}`);
+        process.exitCode = 1;
+        return;
+      }
+      const resolved = harness ? resolveHarness(harness) : undefined;
+      const invocation = resolved?.command ? [resolved.command] : agent;
       if (opts.plan) {
-        console.log(`${describeHarness(resolved)}\n  would run: ${resolved.command ?? harness.bin} for ${qitemId} in ${resolve(opts.cwd)}${opts.loadSession ? `, continuing session ${opts.loadSession}` : ", in a new session"}; permission requests to ${opts.permissionsTo ?? "this seat"}`);
-        if (resolved.problem) process.exitCode = 1;
+        if (resolved) console.log(describeHarness(resolved));
+        console.log(`  would run: ${resolved?.problem ? resolved.harness.bin : JSON.stringify(invocation)} for ${qitemId} in ${resolve(opts.cwd)}${opts.loadSession ? `, continuing session ${opts.loadSession}` : ", in a new session"}; permission requests to ${opts.permissionsTo ?? "this seat"}`);
+        if (resolved?.problem) process.exitCode = 1;
         return;
       }
       const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
       if (!seat) { console.error("rig exec run acts as the seat that owns the row, but OPENRIG_SESSION_NAME isn't set"); process.exitCode = 1; return; }
-      if (resolved.problem) { console.error(resolved.problem); process.exitCode = 1; return; }
+      if (resolved?.problem) { console.error(resolved.problem); process.exitCode = 1; return; }
       const queue = await queueFor();
       if (!queue) { process.exitCode = 1; return; }
       mkdirSync(runsDir(), { recursive: true });
@@ -501,9 +531,9 @@ Guide: rig context get reference/acp-agents.md`)
 
       const runId = newId("exec", 4);
       const run: ExecRun = {
-        runId, qitemId, harness: harness.name, agent: [resolved.command!], cwd: resolve(opts.cwd), self: seat,
+        runId, qitemId, harness: harness?.name ?? "acp", agent: invocation, cwd: resolve(opts.cwd), self: seat,
         permissionsTo: opts.permissionsTo, loadSession: opts.loadSession, pollMs: Math.max(1, Number(opts.pollSeconds) || 2) * 1000,
-        adapterVersion: resolved.adapterVersion, native: resolved.native, state: "requested", pid: process.pid,
+        adapterVersion: resolved?.adapterVersion, native: resolved?.native ?? "unknown", state: "requested", pid: process.pid,
         processStart: processStart(process.pid), requestedAt: now(),
         transcript: join(runsDir(), `${runId}.jsonl`), connectorLog: join(runsDir(), `${runId}.connector.log`),
       };
@@ -524,7 +554,7 @@ Guide: rig context get reference/acp-agents.md`)
       let spawnError: Error | undefined;
       let connectorExit: string | undefined;
       try {
-        const child = spawn(file!, args, { detached: true, stdio: ["ignore", log, log], env: { ...process.env, [CONNECTOR_MARKER]: runId } });
+        const child = spawn(file!, args, { detached: true, windowsHide: true, stdio: ["ignore", log, log], env: { ...process.env, [CONNECTOR_MARKER]: runId } });
         child.once("error", (error) => { spawnError = error; });
         child.once("exit", (code, signal) => { connectorExit = `exited (code ${code ?? "none"}, signal ${signal ?? "none"})`; });
         child.unref();
@@ -540,7 +570,7 @@ Guide: rig context get reference/acp-agents.md`)
       } else if (connectorExit && current.state === "requested") {
         current = await reconcileRun(current, async () => queue, connectorExit);
       }
-      console.log(`[rig exec] ${runId} for ${qitemId} on ${harness.name}: ${current.endedAt ? `ended, outcome ${current.outcome}: ${current.summary}` : current.state === "started" ? "started" : "requested; its connector hasn't recorded itself yet"}`);
+      console.log(`[rig exec] ${runId} for ${qitemId} on ${run.harness}: ${current.endedAt ? `ended, outcome ${current.outcome}: ${current.summary}` : current.state === "started" ? "started" : "requested; its connector hasn't recorded itself yet"}`);
       console.log(`  rig exec status ${runId} shows it; rig exec cancel ${runId} cancels it.`);
       deps.afterAnnounce?.();
       await report(current, waiter);
@@ -568,7 +598,9 @@ Guide: rig context get reference/acp-agents.md`)
         process.exitCode = 1;
         return;
       }
-      process.kill(run.pid, "SIGINT");
+      if (process.platform === "win32") {
+        writeFileSync(join(runsDir(), `${runId}.cancel.json`), JSON.stringify({ processStart: run.processStart }));
+      } else process.kill(run.pid, "SIGINT");
       console.log(`Cancel requested for ${runId}; its row ${run.qitemId} records what the agent acknowledges. An acknowledgement isn't settlement: rig exec status ${runId} shows the outcome and what still runs.`);
     });
 

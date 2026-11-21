@@ -18,7 +18,7 @@ export function readLocal(cliEntry: string | undefined, request: LocalRequest): 
   if (!cliEntry) return Promise.resolve({ error: "Local reader unavailable in this launcher; open through the installed rig CLI." });
   return new Promise((resolve) => {
     execFile(process.execPath, [join(dirname(cliEntry), "local-reading.js"), JSON.stringify(request)],
-      { cwd: helperCwd(), timeout: 5000, maxBuffer: 8 * 1024 * 1024 }, (error, stdout) => {
+      { cwd: helperCwd(), timeout: 5000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
         if (error) return resolve({ error: "Local reader did not complete", message: error.message });
         try { resolve(JSON.parse(stdout)); }
         catch { resolve({ error: "Local reader returned invalid data" }); }

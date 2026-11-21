@@ -64,7 +64,9 @@ function validateIdShapedToken(resumeType: ResumeType, token: string): ResumeTok
   return { ok: true, resumeType, token };
 }
 
-export function validateSessionFileFormat(rawToken: unknown, label = "Pi", options: { allowFormatCharacters?: boolean } = {}): { ok: true; token: string } | { ok: false; error: string } {
+export function validateSessionFileFormat(rawToken: unknown, label = "Pi", options: { allowFormatCharacters?: boolean } | NodeJS.Platform = {}, selectedPlatform: NodeJS.Platform = process.platform): { ok: true; token: string } | { ok: false; error: string } {
+  const platform = typeof options === "string" ? options : selectedPlatform;
+  const allowFormatCharacters = typeof options !== "string" && options.allowFormatCharacters === true;
   if (typeof rawToken !== "string") {
     return { ok: false, error: `${label} session file must be a string.` };
   }
@@ -72,18 +74,23 @@ export function validateSessionFileFormat(rawToken: unknown, label = "Pi", optio
   if (token.length > MAX_SESSION_FILE_LEN) {
     return { ok: false, error: `${label} session-file token is too long (max ${MAX_SESSION_FILE_LEN} characters).` };
   }
-  if (!token.startsWith("/")) {
-    return { ok: false, error: `${label} session-file token must be an absolute path (starting with '/').` };
+  const windowsPath = platform === "win32" && (/^[A-Za-z]:[\\/]/.test(token) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/]/.test(token));
+  if (!token.startsWith("/") && !windowsPath) {
+    return { ok: false, error: platform === "win32"
+      ? `${label} session-file token must be an absolute path (a drive-rooted or UNC Windows path, or starting with '/').`
+      : `${label} session-file token must be an absolute path (starting with '/').` };
   }
-  if (token.split("/").includes("..")) {
+  if (token.split(windowsPath ? /[\\/]/ : "/").includes("..")) {
     return { ok: false, error: `${label} session-file token must not contain a '..' path segment.` };
   }
-  // Observation-only reports retain the original spelling; ordinary launch/resume callers keep their existing floor.
-  const charset = options.allowFormatCharacters ? /^[A-Za-z0-9._/@\p{Cf}-]+$/u : SESSION_FILE_CHARSET_RE;
-  if (!charset.test(token)) {
+  const charset = allowFormatCharacters ? /^[A-Za-z0-9._/@\p{Cf}-]+$/u : SESSION_FILE_CHARSET_RE;
+  const safeWindowsPath = windowsPath && !/^[\\/]{2}[?.][\\/]/.test(token)
+    && /^[\p{L}\p{N}\p{M} ._/@~\\-]+$/u.test(token.replace(/^[A-Za-z]:/, ""));
+  if (!(windowsPath ? safeWindowsPath : charset.test(token))) {
     return {
       ok: false,
-      error: options.allowFormatCharacters ? `${label} observation session-file token contains disallowed characters.`
+      error: windowsPath
+        ? `${label} session-file token contains disallowed characters or device/stream syntax; use an ordinary absolute Windows session-file path.`
         : `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
     };
   }
@@ -93,9 +100,9 @@ export function validateSessionFileFormat(rawToken: unknown, label = "Pi", optio
   return { ok: true, token };
 }
 
-function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file", token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
+function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file", token: string, platform: NodeJS.Platform): ResumeTokenValidationOk | ResumeTokenValidationErr {
   const label = resumeType === "pi_session_file" ? "Pi" : "OMP";
-  const res = validateSessionFileFormat(token, label);
+  const res = validateSessionFileFormat(token, label, platform);
   if (!res.ok) return res;
   return { ok: true, resumeType, token: res.token };
 }
@@ -103,6 +110,7 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
 export function validateResumeToken(
   runtime: string | null,
   rawToken: unknown,
+  platform: NodeJS.Platform = process.platform,
 ): ResumeTokenValidationOk | ResumeTokenValidationErr {
   const resumeType = resumeTypeForRuntime(runtime);
   if (!resumeType) {
@@ -119,7 +127,7 @@ export function validateResumeToken(
     return { ok: false, error: "Resume token is empty." };
   }
   if (resumeType === "pi_session_file" || resumeType === "omp_session_file") {
-    return validateSessionFileToken(resumeType, token);
+    return validateSessionFileToken(resumeType, token, platform);
   }
   return validateIdShapedToken(resumeType, token);
 }

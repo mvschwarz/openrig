@@ -50,7 +50,7 @@ describe("rig context work-install", () => {
   let savedSessionName: string | undefined;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "openrig-context-work-install-"));
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), "openrig-context-work-install-")));
     catalogRoot = join(root, "catalog");
     alphaRoot = join(root, "alpha-root");
     betaRoot = join(root, "unrelated-beta-tree");
@@ -479,7 +479,7 @@ ${worlds}`);
     });
 
     const first = await run();
-    expect(first.exitCode).toBeUndefined();
+    expect(first.exitCode, first.errLogs.join("\n")).toBeUndefined();
     const installed = JSON.parse(first.logs.join("")) as {
       pieces: Array<{ address: string; exists: boolean }>;
       skillLoadout: { entries: Array<{ id: string; selectedBy: string[] }> };

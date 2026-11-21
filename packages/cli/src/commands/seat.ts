@@ -45,7 +45,7 @@ interface SeatStatusResponse {
   processLimits?: { state: "applied" | "not_applied" | "unsupported" | "unknown" | "invalid";
     requested?: { tasksMax?: number; memoryMax?: number };
     reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number;
-    memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number; scope?: string; readFrom?: string };
+    memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number; memoryAccounting?: "job_commit"; scope?: string; readFrom?: string };
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
   terminalPolicy?: {
@@ -288,8 +288,9 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.processLimits) {
     const l = status.processLimits;
     const read = l.pidsMax !== undefined ? ` (pids.max ${l.pidsMax}, current ${l.pidsCurrent ?? "?"}, limit hit ${l.limitHits ?? 0} times)` : "";
-    const readMemory = l.memoryMax !== undefined ? ` (memory.max ${l.memoryMax}, current ${l.memoryCurrent ?? "?"}, at the limit ` +
-      `${l.memoryLimitHits ?? 0} times, OOM kills ${l.oomKills ?? 0})` : "";
+    const readMemory = l.memoryMax === undefined ? "" : l.memoryAccounting === "job_commit"
+      ? ` (Windows Job committed-memory limit ${l.memoryMax} bytes; accounting differs from Linux cgroup memory)`
+      : ` (memory.max ${l.memoryMax}, current ${l.memoryCurrent ?? "?"}, at the limit ${l.memoryLimitHits ?? 0} times, OOM kills ${l.oomKills ?? 0})`;
     const state = l.state === "not_applied" ? "requested, not applied" : l.state === "invalid" ? "stored value invalid" : l.state;
     const asked = askedLimits(l.requested);
     console.log(`Process limits: ${asked}: ${state}${read}${readMemory}${l.reason ? `; ${l.reason}` : ""}${l.readFrom ? ` (read from ${l.readFrom})` : ""}`);
@@ -928,7 +929,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch" || path === "continue" || path === "restart"
+      res = path === "launch" || path === "continue" || path === "restart" || path === "restart-plan" || path === "restart-verify"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.

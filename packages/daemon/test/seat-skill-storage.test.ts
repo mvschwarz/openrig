@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -71,9 +71,9 @@ describe("seat skill storage", () => {
   });
 
   it("adds OpenRig's plugins in order after the seat's own list, each once", () => {
-    expect(withPluginDirs({}, ["/v/openrig-core", "/s/plugin"])).toEqual({ [PLUGIN_ENV]: "/v/openrig-core:/s/plugin" });
-    expect(withPluginDirs({ [PLUGIN_ENV]: "/own" }, [undefined, "/s/plugin"])).toEqual({ [PLUGIN_ENV]: "/own:/s/plugin" });
-    expect(withPluginDirs({ [PLUGIN_ENV]: "/own:/s/plugin" }, ["/s/plugin"])).toEqual({ [PLUGIN_ENV]: "/own:/s/plugin" });
+    expect(withPluginDirs({}, ["/v/openrig-core", "/s/plugin"])).toEqual({ [PLUGIN_ENV]: ["/v/openrig-core", "/s/plugin"].join(delimiter) });
+    expect(withPluginDirs({ [PLUGIN_ENV]: "/own" }, [undefined, "/s/plugin"])).toEqual({ [PLUGIN_ENV]: ["/own", "/s/plugin"].join(delimiter) });
+    expect(withPluginDirs({ [PLUGIN_ENV]: ["/own", "/s/plugin"].join(delimiter) }, ["/s/plugin"])).toEqual({ [PLUGIN_ENV]: ["/own", "/s/plugin"].join(delimiter) });
     expect(withPluginDirs({}, [undefined, undefined])).toEqual({});
   });
 });

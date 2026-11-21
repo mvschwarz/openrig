@@ -1,8 +1,9 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serve } from "@hono/node-server";
+
 import { Hono } from "hono";
 import { Command } from "commander";
 import { describe, expect, it, vi } from "vitest";
@@ -77,7 +78,7 @@ describe("terminal open request budget", () => {
       await next();
     });
     app.route("/api/terminal", terminalRoutes());
-    const httpServer = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
+    const httpServer = await serveOwnedHonoFixture(app.fetch);
     if (!httpServer.listening) await new Promise<void>(resolve => httpServer.once("listening", resolve));
     const port = (httpServer.address() as { port: number }).port;
     const deps: TerminalDeps = {

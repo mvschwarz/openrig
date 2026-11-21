@@ -31,7 +31,7 @@ const HEADER = `// GENERATED FILE — DO NOT EDIT.
 `;
 
 export function renderGenerated(canonicalContent) {
-  return HEADER + canonicalContent;
+  return HEADER + canonicalContent.replace(/\r\n/g, "\n");
 }
 
 function main() {
@@ -44,7 +44,7 @@ function main() {
 
   if (check) {
     const actual = existsSync(generatedPath) ? readFileSync(generatedPath, "utf8") : null;
-    if (actual !== expected) {
+    if (actual?.replace(/\r\n/g, "\n") !== expected) {
       console.error(
         `DRIFT: ${GENERATED} does not match the canonical derivation.\n` +
           `Re-run: node scripts/sync-scope-lineage.mjs`,

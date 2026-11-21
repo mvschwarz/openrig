@@ -159,7 +159,8 @@ describe("BootstrapOrchestrator", () => {
     };
   }
 
-  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown; bundleSourceResolver?: unknown }) {
+  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown; bundleSourceResolver?: unknown;
+    platform?: string; probeRegistry?: RequirementsProbeRegistry; execArgv?: (file: string, args: string[]) => Promise<string> }) {
     const exec = opts?.exec ?? createMockExec({
       "tmux -V": "tmux 3.4",
       "claude --version": "claude 1.0.0",
@@ -172,9 +173,9 @@ describe("BootstrapOrchestrator", () => {
 
     const bootstrapRepo = new BootstrapRepository(db);
     const runtimeVerifier = new RuntimeVerifier({ exec, db });
-    const probeRegistry = new RequirementsProbeRegistry(exec, { platform: "darwin" });
-    const installPlanner = new ExternalInstallPlanner({ platform: "darwin" });
-    const installExecutor = new ExternalInstallExecutor({ exec, db });
+    const probeRegistry = opts?.probeRegistry ?? new RequirementsProbeRegistry(exec, { platform: opts?.platform ?? "darwin" });
+    const installPlanner = new ExternalInstallPlanner({ platform: opts?.platform ?? "darwin" });
+    const installExecutor = new ExternalInstallExecutor({ exec, db, execArgv: opts?.execArgv });
     const packageRepo = new PackageRepository(db);
     const installRepo = new InstallRepository(db);
     const installEngine = new InstallEngine(installRepo, realEngineFsOps());
@@ -199,6 +200,49 @@ describe("BootstrapOrchestrator", () => {
       podInstantiator: opts?.podInstantiator as any,
     });
   }
+
+  it.each([
+    ...(["installed", "missing", "unknown", "throws", "install-failed", "install-skipped"] as const).map(postInstall => ({ postInstall, name: "git", id: "Git.Git" })),
+    { postInstall: "installed" as const, name: "JQ.EXE", id: "jqlang.jq" },
+    { postInstall: "installed" as const, name: "rg", id: "BurntSushi.ripgrep.MSVC" },
+    { postInstall: "installed" as const, name: "gh", id: "GitHub.cli" },
+  ])("carries a reviewed Windows dependency plan through bootstrap with post-install $postInstall ($name)", async ({ postInstall, name, id }) => {
+    writePkg(path.join(tmpDir, "test-pkg"), VALID_MANIFEST_YAML + `\nrequirements:\n  cli_tools:\n    - name: ${name}\n` + (postInstall === "install-skipped" ? "    - name: pwsh\n" : ""),
+      { "skills/helper/SKILL.md": "# Owned helper" });
+    const sourceRef = writeSpec(SPEC_WITH_PACKAGES_YAML);
+    const probeRegistry = new RequirementsProbeRegistry(async () => { throw Error("Unexpected probe shell"); }, { platform: "win32" });
+    const missing = (postInstall === "install-skipped" ? [name, "pwsh"] : [name]).map(name => ({ name, kind: "cli_tool" as const, status: "missing" as const, version: null,
+      detectedPath: null, provider: null, command: null, installHints: null, error: null }));
+    const probe = vi.spyOn(probeRegistry, "probeAll").mockResolvedValueOnce(missing).mockResolvedValueOnce(missing).mockResolvedValueOnce(missing);
+    if (postInstall === "throws") probe.mockRejectedValueOnce(Error("owned observation unavailable"));
+    else if (postInstall !== "install-failed" && postInstall !== "install-skipped") probe.mockResolvedValueOnce([{ ...missing[0]!, status: postInstall }]);
+    const execArgv = vi.fn(async () => {
+      if (postInstall === "install-failed") throw Error("owned installer failed");
+      return "owned install result";
+    });
+    const instantiator = createMockInstantiator(db), instantiate = vi.spyOn(instantiator, "instantiate");
+    const orch = buildOrchestrator({ platform: "win32", probeRegistry, execArgv, instantiator });
+    const plan = await orch.bootstrap({ mode: "plan", sourceRef });
+    expect(plan.status).toBe("planned");
+    expect(plan.actionKeys).toContain(`external_install:cli_tool:${name}`);
+    expect(JSON.stringify(plan.stages)).toContain(id);
+    expect(execArgv).not.toHaveBeenCalled();
+    const blocked = await orch.bootstrap({ mode: "apply", sourceRef, autoApprove: true });
+    expect(blocked.status).toBe("failed");
+    expect(execArgv).not.toHaveBeenCalled();
+    const applied = await orch.bootstrap({ mode: "apply", sourceRef, approvedActionKeys: [`external_install:cli_tool:${name}`] });
+    expect(applied.status, JSON.stringify(applied.errors)).toBe(postInstall === "installed" ? "completed" : "partial");
+    expect(instantiate).toHaveBeenCalledTimes(postInstall === "installed" ? 1 : 0);
+    expect(applied.stages.find(stage => stage.stage === "verify_external_installs")?.status)
+      .toBe(postInstall === "install-failed" || postInstall === "install-skipped" ? undefined : postInstall === "installed" ? "ok" : "blocked");
+    expect(probe).toHaveBeenCalledTimes(postInstall === "install-failed" || postInstall === "install-skipped" ? 3 : 4);
+    expect(execArgv).toHaveBeenCalledExactlyOnceWith("winget.exe", ["install", "--id", id, "--exact", "--source", "winget",
+      "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"]);
+    expect(db.prepare("SELECT provider, status FROM bootstrap_actions WHERE bootstrap_id = ? AND action_kind = 'external_install'").get(applied.runId))
+      .toEqual({ provider: "winget", status: postInstall === "install-failed" ? "failed" : "completed" });
+    if (postInstall === "install-skipped") expect(db.prepare("SELECT status FROM bootstrap_actions WHERE bootstrap_id = ? AND subject_name = 'pwsh' AND action_kind = 'external_install'").get(applied.runId))
+      .toEqual({ status: "skipped" });
+  });
 
   it.each([
     ["false", undefined, false], ["true", undefined, true],

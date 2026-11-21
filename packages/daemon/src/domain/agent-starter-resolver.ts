@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import os from "node:os";
+import { readPlatformEnv } from "./platform-env.js";
 import type { ResolvedStartupFile } from "./runtime-adapter.js";
 
 /**
@@ -106,12 +107,14 @@ export class AgentStarterResolver {
     }
     const env = opts.env ?? process.env;
     const envVarName = opts.envVarName ?? DEFAULT_ENV_VAR;
-    const fromEnv = env[envVarName];
+    const fromEnv = readPlatformEnv(env, envVarName);
     if (typeof fromEnv === "string" && fromEnv !== "") {
       return fromEnv;
     }
     const homeBase = opts.homeDirRoot
-      ?? join(env.HOME ?? os.homedir(), DEFAULT_HOME_SUBPATH);
+      ?? join(readPlatformEnv(env, "HOME")
+        || (process.platform === "win32" ? readPlatformEnv(env, "USERPROFILE") : undefined)
+        || os.homedir(), DEFAULT_HOME_SUBPATH);
     if (exists(homeBase)) {
       return homeBase;
     }

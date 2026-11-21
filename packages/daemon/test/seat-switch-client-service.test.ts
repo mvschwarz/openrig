@@ -192,7 +192,7 @@ describe("SeatSwitchClientService", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected failure");
     expect(result.code).toBe("no_client");
-    expect(result.guidance).toContain("tmux attach -t dev-impl@seat-rig");
+    expect(result.guidance).toContain("tmux attach -t =dev-impl@seat-rig");
     expect(probes.switchClient).not.toHaveBeenCalled();
   });
 

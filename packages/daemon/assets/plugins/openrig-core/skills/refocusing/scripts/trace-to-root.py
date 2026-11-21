@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -35,11 +36,22 @@ HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A
 
 
 def rig_output(*args, timeout=10):
+    if os.name == "nt":
+        node = os.environ.get("OPENRIG_NODE") or shutil.which("node")
+        if not node:
+            return None
+        bridge = Path(__file__).resolve().parents[3] / "hooks" / "scripts" / "rig-command.cjs"
+        command = [node, str(bridge), *args]
+    else:
+        executable = shutil.which("rig")
+        if not executable:
+            return None
+        command = [executable, *args]
     try:
         result = subprocess.run(
-            ["rig", *args], capture_output=True, text=True, timeout=timeout, check=False
+            command, capture_output=True, encoding="utf-8", timeout=timeout, check=False
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
     value = (result.stdout or "").strip()
     return value if result.returncode == 0 and value else None

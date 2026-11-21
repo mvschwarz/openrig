@@ -13,12 +13,13 @@
 //   - readProgressRootsFromEnv parses delimited pairs
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { progressRoutes } from "../src/routes/progress.js";
 import { ProgressIndexer, readProgressRootsFromEnv } from "../src/domain/progress/progress-indexer.js";
+import { classifyPriorityRailLevel } from "../../ui/src/components/progress/priority-rail-rule.js";
 
 describe("UI Enhancement Pack v0 — readProgressRootsFromEnv", () => {
   it("returns empty when env unset", () => {
@@ -126,6 +127,37 @@ describe("UI Enhancement Pack v0 — ProgressIndexer", () => {
     const result = indexer.scan();
     expect(result.files).toHaveLength(1);
     expect(result.files[0]?.relPath).toBe("PROGRESS.md");
+  });
+
+  it("matches progress filenames and noise directories with the host's name semantics", () => {
+    const workspace = join(tempDir, "Workspace"); mkdirSync(workspace);
+    for (const name of ["NODE_MODULES", "Dist", "BUILD"]) {
+      mkdirSync(join(workspace, name)); writeFileSync(join(workspace, name, "PROGRESS.md"), "- [ ] dependency row\n");
+    }
+    mkdirSync(join(workspace, "plan"));
+    writeFileSync(join(workspace, "plan", "progress.md"), "- [x] real progress\n");
+    writeFileSync(join(workspace, "plan", "STEERING.MD"), "- [ ] real steering\n");
+    const result = new ProgressIndexer({ roots: [{ name: "ws", canonicalPath: workspace }] }).scan();
+    expect(result.files.map(file => file.relPath).sort()).toEqual(process.platform === "win32"
+      ? ["plan/STEERING.MD", "plan/progress.md"] : ["BUILD/PROGRESS.md", "Dist/PROGRESS.md", "NODE_MODULES/PROGRESS.md"]);
+    expect(result.aggregate.totalRows).toBe(process.platform === "win32" ? 2 : 3);
+  });
+
+  it.runIf(process.platform === "win32")("decodes the actual native spelling of a mixed-case scan root", () => {
+    const workspace = join(tempDir, "Workspace"); mkdirSync(workspace);
+    writeFileSync(join(workspace, "PROGRESS.md"), "- [x] owned\n");
+    const roots = readProgressRootsFromEnv({ OPENRIG_PROGRESS_SCAN_ROOTS: `ws:${workspace.toUpperCase()}` });
+    expect(roots[0]!.canonicalPath).toBe(realpathSync.native(workspace));
+    expect(new ProgressIndexer({ roots }).scan().files[0]!.absolutePath).toBe(realpathSync.native(join(workspace, "PROGRESS.md")));
+  });
+
+  it.runIf(process.platform === "win32")("preserves mission classification from a real mixed-case native scan into the UI helper", () => {
+    mkdirSync(join(tempDir, "MiSSioNS", "owned"), { recursive: true });
+    writeFileSync(join(tempDir, "MiSSioNS", "owned", "progress.MD"), "- [x] owned\n");
+    const roots = readProgressRootsFromEnv({ OPENRIG_PROGRESS_SCAN_ROOTS: `ws:${tempDir}` });
+    const files = new ProgressIndexer({ roots }).scan().files;
+    expect(files).toHaveLength(1); expect(files[0]!.relPath).toBe("MiSSioNS/owned/progress.MD");
+    expect(classifyPriorityRailLevel(files[0]!)).toBe("mission");
   });
 
   it("respects maxDepth", () => {

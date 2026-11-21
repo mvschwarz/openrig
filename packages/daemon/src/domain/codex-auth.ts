@@ -20,7 +20,12 @@ function accountHome(): string {
   try { return userInfo().homedir ?? ""; } catch { return ""; }
 }
 import fs from "node:fs";
+import { windowsAuthFile } from "./windows-owned-text.js";
+import { createPrivateTextFile } from "./private-text-file.js";
+import { resolveCodexCommand } from "./windows-provider-command.js";
+import { readPlatformEnv } from "./platform-env.js";
 import { spawnSync } from "node:child_process";
+import { prepareWindowsJobProcess } from "./windows-job-process.js";
 
 /** Strict profile-name whitelist: alnum-led, then [A-Za-z0-9._-], 1..64 chars. Excludes /, \, ~,
  *  leading dot, whitespace, control, and shell metacharacters. Fail closed. */
@@ -43,10 +48,12 @@ export interface CodexAuthPaths {
 
 /** Resolve the Codex paths from an env map (default process.env). CODEX_HOME wins; else $HOME/.codex. */
 export function resolveCodexHome(env: NodeJS.ProcessEnv = process.env): CodexAuthPaths {
-  const home = typeof env.HOME === "string" && env.HOME.length > 0 ? env.HOME : accountHome();
+  const selectedHome = readPlatformEnv(env, "HOME");
+  const selectedCodexHome = readPlatformEnv(env, "CODEX_HOME");
+  const home = selectedHome || accountHome();
   const codexHome =
-    typeof env.CODEX_HOME === "string" && env.CODEX_HOME.length > 0
-      ? env.CODEX_HOME
+    selectedCodexHome
+      ? selectedCodexHome
       // HOME unset/empty (cron, systemd, some CI/container shells) must not yield a
       // cwd-relative ".codex" — auth files stay under the account's home.
       : path.join(home, ".codex");
@@ -68,6 +75,11 @@ function lstatSafe(p: string): fs.Stats | null {
   }
 }
 
+function sourceStat(p: string): fs.Stats | fs.BigIntStats | null {
+  if (process.platform !== "win32") return lstatSafe(p);
+  try { return fs.lstatSync(p, { bigint: true }); } catch { return null; }
+}
+
 function isDir(p: string): boolean {
   const st = lstatSafe(p);
   return st !== null && st.isDirectory();
@@ -82,6 +94,11 @@ function isFile(p: string): boolean {
 function fileModeOctal(p: string): string | null {
   const st = lstatSafe(p);
   if (st === null) return null;
+  // Keep the existing safety token in the API; on Windows it represents an
+  // owner-only protected DACL verified on the opened file, never POSIX mode bits.
+  if (process.platform === "win32") {
+    try { return windowsAuthFile("auth-mode", p).trim(); } catch { return "unsafe"; }
+  }
   return (st.mode & 0o777).toString(8).padStart(3, "0");
 }
 
@@ -101,7 +118,8 @@ function realDirContained(dir: string, codexHome: string): boolean {
   try {
     const root = fs.realpathSync(codexHome);
     const resolved = fs.realpathSync(dir);
-    return resolved === root || resolved.startsWith(root + path.sep);
+    const relative = path.relative(root, resolved);
+    return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
   } catch {
     return false;
   }
@@ -139,8 +157,12 @@ function destReplaceable(p: string): boolean {
 export function copyOntoFresh(
   source: string,
   dest: string,
-  expectSrc?: { dev: number; ino: number },
+  expectSrc?: { dev: number | bigint; ino: number | bigint },
 ): boolean {
+  if (process.platform === "win32") {
+    if (expectSrc && [expectSrc.dev, expectSrc.ino].some(value => typeof value === "number" && !Number.isSafeInteger(value))) return false;
+    try { windowsAuthFile("auth-copy", source, dest, expectSrc); return true; } catch { return false; }
+  }
   const tmp = `${dest}.tmp-${process.pid}`;
   // O_NOFOLLOW fails the open closed if a final-component symlink was swapped in. (O_CLOEXEC is omitted:
   // it is undefined on macOS Node and absent from @types/node, and no child process is spawned during
@@ -234,12 +256,22 @@ export interface CodexAuthDeps {
 
 /** Default login-state probe: exit code only, output never captured (stdio: ignore = no leak path). */
 function defaultLoginStatus(codexHome: string): "logged_in" | "not_logged_in" | "unavailable" {
-  const r = spawnSync("codex", ["login", "status"], {
-    stdio: "ignore",
-    env: { ...process.env, CODEX_HOME: codexHome },
-  });
-  if (r.error) return "unavailable";
-  return r.status === 0 ? "logged_in" : "not_logged_in";
+  const env = { ...process.env, CODEX_HOME: codexHome };
+  let launch: ReturnType<typeof resolveCodexCommand>;
+  try { launch = resolveCodexCommand(env); } catch { return "unavailable"; }
+  let probe: ReturnType<typeof prepareWindowsJobProcess> | undefined;
+  try {
+    const args = [...launch.prefix, "login", "status"];
+    if (process.platform === "win32") probe = prepareWindowsJobProcess(launch.command, args, { env });
+    const r = spawnSync(probe?.file ?? launch.command, probe?.args ?? args, {
+      ...probe?.options, stdio: "ignore", env: probe?.options.env ?? env, windowsHide: true,
+      ...(probe ? { timeout: 5000, killSignal: "SIGKILL" as const } : {}),
+    });
+    // 125 also names a native helper failure; it cannot prove a signed-out CLI.
+    if (r.error || (probe && r.status === 125)) return "unavailable";
+    return r.status === 0 ? "logged_in" : "not_logged_in";
+  } catch { return "unavailable"; }
+  finally { probe?.dispose(); }
 }
 
 export interface AuthStatusResult {
@@ -290,7 +322,10 @@ export function authValidate(paths: CodexAuthPaths, name: string): AuthValidateR
   if (fileModeOctal(target) !== "600") return { ok: false, reason: "unsafe_permissions" };
   let content: string;
   try {
-    content = fs.readFileSync(target, "utf8");
+    if (process.platform === "win32") {
+      const bytes = Buffer.from(windowsAuthFile("auth-read", target), "base64");
+      try { content = bytes.toString("utf8"); } finally { bytes.fill(0); }
+    } else content = fs.readFileSync(target, "utf8");
   } catch {
     return { ok: false, reason: "parse_check_unavailable" };
   }
@@ -311,7 +346,7 @@ export type AuthSaveResult =
  *  via copyFileSync — contents never enter JS memory; result reports name/path/mode only. */
 export function authSave(paths: CodexAuthPaths, name: string): AuthSaveResult {
   if (!validateProfileName(name)) return { ok: false, reason: "invalid_profile" };
-  const srcStat = lstatSafe(paths.activeAuth);
+  const srcStat = sourceStat(paths.activeAuth);
   if (srcStat === null || !srcStat.isFile()) return { ok: false, reason: "not_configured" };
   const target = path.join(paths.profileDir, `${name}.json`);
   // Refuse a symlinked profile-dir BEFORE mkdir/chmod so we never follow it out of CODEX_HOME or
@@ -319,8 +354,13 @@ export function authSave(paths: CodexAuthPaths, name: string): AuthSaveResult {
   const pdStat = lstatSafe(paths.profileDir);
   if (pdStat !== null && pdStat.isSymbolicLink()) return { ok: false, reason: "unsafe_path" };
   try {
-    fs.mkdirSync(paths.profileDir, { recursive: true });
-    fs.chmodSync(paths.profileDir, 0o700);
+    if (process.platform === "win32") {
+      fs.mkdirSync(paths.codexHome, { recursive: true });
+      windowsAuthFile("auth-directory", paths.profileDir);
+    } else {
+      fs.mkdirSync(paths.profileDir, { recursive: true });
+      fs.chmodSync(paths.profileDir, 0o700);
+    }
   } catch {
     return { ok: false, reason: "io_error" };
   }
@@ -344,7 +384,7 @@ export type AuthSwitchResult =
 export function authSwitch(paths: CodexAuthPaths, name: string): AuthSwitchResult {
   if (!validateProfileName(name)) return { ok: false, reason: "invalid_profile" };
   const source = path.join(paths.profileDir, `${name}.json`);
-  const srcStat = lstatSafe(source);
+  const srcStat = sourceStat(source);
   if (srcStat === null) return { ok: false, reason: "missing_profile" };
   if (!isSafeProfileFile(source, paths.profileDir)) return { ok: false, reason: "unsafe_path" };
   // Destination guard: a symlink/non-regular OR hardlinked (nlink>1) active auth would let the copy
@@ -435,7 +475,7 @@ function rawRegistryLines(registryPath: string): string[] {
   }
   const out: string[] = [];
   let first = true;
-  for (const line of text.split("\n")) {
+  for (const line of text.split(/\r?\n/)) {
     if (line === "" || line.startsWith("#")) continue;
     if (first) {
       first = false; // skip header
@@ -496,10 +536,13 @@ export function authSeatSet(
   const tmp = `${paths.registryPath}.${process.pid}.tmp`;
   try {
     fs.mkdirSync(path.dirname(paths.registryPath), { recursive: true });
-    fs.writeFileSync(tmp, body, { mode: 0o600 });
-    fs.chmodSync(tmp, 0o600);
+    if (process.platform === "win32") createPrivateTextFile(tmp, body);
+    else {
+      fs.writeFileSync(tmp, body, { mode: 0o600 });
+      fs.chmodSync(tmp, 0o600);
+    }
     fs.renameSync(tmp, paths.registryPath);
-    fs.chmodSync(paths.registryPath, 0o600);
+    if (process.platform !== "win32") fs.chmodSync(paths.registryPath, 0o600);
   } catch {
     try {
       fs.rmSync(tmp, { force: true });
@@ -566,3 +609,4 @@ export function authSeatsReport(paths: CodexAuthPaths): SeatsReport {
     malformed,
   };
 }
+export { readPlatformEnv } from "./platform-env.js";

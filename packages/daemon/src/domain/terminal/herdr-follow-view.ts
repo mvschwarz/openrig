@@ -1,8 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { ensureWindowsPrivateDirectory } from "../windows-owned-text.js";
+import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
+import { nativeViewerShellCommand } from "./native-viewer-command.js";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
-import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, sameHerdrPath, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
+import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, sameHerdrPath, sameViewerCwd, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
   type HerdrViewerRun, type InspectViewerSeat, type ViewerKey, type ViewerMapping, type ViewerPane } from "./herdr-viewer.js";
 import { DEFAULT_FOLLOW_POLICY, planFollowingTiles, type FollowControls, type FollowPolicy, type FollowTile, type FollowingStatus } from "./terminal-follow-policy.js";
 import type { ComposedPane, ComposedView, OpenViewResult } from "./terminal-provider.js";
@@ -54,11 +58,11 @@ export class HerdrFollowView {
    * detected the agent, so a `resume_not_accepted` is retried in rounds. Any other tile has no agent for Herdr to
    * detect, so OpenRig holds it with one state report that carries the command. What isn't taken is a note.
    */
-  private async reportResume(opened: Array<{ tile: Tile; script: string; agent?: "claude" | "codex" | "pi" }>): Promise<string[]> {
+  private async reportResume(opened: Array<{ tile: Tile; argv: string[]; agent?: "claude" | "codex" | "pi" }>): Promise<string[]> {
     const notes: string[] = [];
     let waiting: typeof opened = [];
     for (const item of opened) {
-      const argv = ["sh", item.script];
+      const argv = item.argv;
       if (argv.some(arg => /['\u0000-\u001f\u007f]/.test(arg))) { notes.push(`${item.tile.seat}: its tile path can't be a Herdr restart command; after a Herdr restart, follow again.`); continue; }
       if (item.agent) { waiting.push(item); continue; }
       try {
@@ -72,7 +76,7 @@ export class HerdrFollowView {
       const next: typeof waiting = [];
       for (const item of waiting) {
         try {
-          await this.deps.transport.request("pane.report_agent_session", { pane_id: item.tile.viewer.paneId, source: "openrig", agent: item.agent, resume_argv: ["sh", item.script] });
+          await this.deps.transport.request("pane.report_agent_session", { pane_id: item.tile.viewer.paneId, source: "openrig", agent: item.agent, resume_argv: item.argv });
           item.tile.resume = true;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -92,7 +96,9 @@ export class HerdrFollowView {
   private async rebindRestored(state: Canvas, root: string): Promise<{ strip: ViewerPane; viewers: Map<string, ViewerMapping> } | null> {
     if (!state.pane || state.tiles.some(tile => !tile.resume)) return null;
     try {
-      const strips = (await findAttributedViewerPanes(this.deps.run, state.cwd)).filter(found => sameHerdrPath(found.cwd, state.cwd));
+      const platform = this.deps.platform ?? process.platform;
+      const strips = (await findAttributedViewerPanes(this.deps.run, state.cwd, platform))
+        .filter(found => typeof found.cwd === "string" && sameViewerCwd(found.cwd, state.cwd, platform));
       const strip = strips.length === 1 && strips[0]!.workspace_id === state.pane.workspace_id && strips[0]!.pane_id === state.pane.pane_id ? strips[0]! : null;
       if (!strip) return null;
       const viewers = new HerdrViewer(this.deps.socketPath, this.deps.run, this.deps.platform, path.join(root, "viewers"), this.deps.inspect);
@@ -107,6 +113,8 @@ export class HerdrFollowView {
   }
 
   private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string, replaced?: string): Promise<OpenViewResult> {
+    const platform = this.deps.platform ?? process.platform;
+    const privateDirectory = (directory: string) => platform === "win32" ? ensureWindowsPrivateDirectory(directory) : mkdirSync(directory, {recursive:true,mode:0o700});
     const id = createHash("sha256").update(JSON.stringify([this.deps.socketPath, viewId])).digest("hex");
     const root = path.join(this.deps.root ?? getDefaultOpenRigPath("private/terminal-following/provider"), id);
     const file = path.join(root, "canvas.json"), log = path.join(root, "events.log");
@@ -126,12 +134,18 @@ export class HerdrFollowView {
       return answer;
     };
     const save = () => {
-      mkdirSync(root, { recursive: true, mode: 0o700 });
-      const temporary = `${file}.${randomUUID()}.tmp`;
-      writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+      privateDirectory(root);
+      if (platform === "win32") replaceWindowsPrivateTextFile(file, JSON.stringify(state) + "\n");
+      else {
+        const temporary = `${file}.${randomUUID()}.tmp`;
+        writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+      }
       const lines = state!.events.join("\n") + "\n";
       let previous = ""; try { previous = readFileSync(log, "utf8"); } catch { /* initial own strip */ }
-      if (previous !== lines) writeFileSync(log, lines, { mode: 0o600 });
+      if (previous !== lines) {
+        if (platform === "win32") replaceWindowsPrivateTextFile(log, lines);
+        else writeFileSync(log, lines, { mode: 0o600 });
+      }
     };
     const notice = (line: string) => {
       if (state!.events.at(-1) !== line) state!.events = [...state!.events, line].slice(-60);
@@ -156,7 +170,7 @@ export class HerdrFollowView {
         if (state) { notice(message); save(); }
         return result(false, "retained", message);
       }
-      if (!["linux", "darwin"].includes(this.deps.platform ?? process.platform)) return unsupported("Live following supports Linux and macOS with Herdr protocol 22.");
+      if (!["linux", "darwin", "win32"].includes(platform)) return unsupported("Live following supports Linux, macOS and Windows with Herdr protocol 22.");
       const status = body(await this.deps.run(["status", "server", "--json"]));
       if (status.running !== true || !sameHerdrPath(status.socket, this.deps.socketPath)) {
         throw new Error("Herdr protocol 22 or the selected endpoint is unconfirmed; keeping the previous view.");
@@ -166,7 +180,7 @@ export class HerdrFollowView {
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
           stripConfirmed: false, tiles: [], events: [...(replaced && replaced !== "rebound" ? [replaced] : []), `Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
-        mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
+        privateDirectory(state.cwd); save();
         // Persist first. An uncertain response is enumerated on the next call,
         // never interpreted as permission for another workspace.
         const reply = body(await this.deps.run(["workspace", "create", "--cwd", state.cwd,
@@ -177,7 +191,7 @@ export class HerdrFollowView {
         state.pane = made; state.phase = "created"; save();
       }
       if (!state.pane) {
-        const found = await findAttributedViewerPanes(this.deps.run, state.cwd);
+        const found = await findAttributedViewerPanes(this.deps.run, state.cwd, state.pane, platform);
         if (found.length !== 1) throw new Error("Uncertain workspace creation has no unique attributed pane; no create was repeated.");
         state.pane = found[0]!; state.phase = "created"; save();
       }
@@ -192,6 +206,9 @@ export class HerdrFollowView {
         }
         return current;
       };
+      const stripArgv = platform === "win32"
+        ? [process.execPath, fileURLToPath(new URL("../../../assets/terminal/follow-events.mjs", import.meta.url)), log]
+        : ["/usr/bin/tail", "-n", "30", "-F", log];
       try { await currentPane(state.pane); }
       catch (error) {
         // After a Herdr restart (or once the person closes the workspace) Herdr no longer has this canvas's strip: it
@@ -202,7 +219,7 @@ export class HerdrFollowView {
         let gone = false;
         if (!replaced) { // a fresh or just re-bound canvas never yields again in the same follow
           try {
-            gone = !(await findAttributedViewerPanes(this.deps.run, state.cwd, stored)).some(found => found.pane_id === stored.pane_id
+            gone = !(await findAttributedViewerPanes(this.deps.run, state.cwd, stored, platform)).some(found => found.pane_id === stored.pane_id
               && found.terminal_id === stored.terminal_id && found.workspace_id === stored.workspace_id);
           } catch { /* unknown, not gone */ }
         }
@@ -223,8 +240,13 @@ export class HerdrFollowView {
           `Herdr no longer has the previous workspace (it restarted, or the workspace was closed); this is a new one. If the old one is still open, close it. Its record is kept at ${kept}.`);
       }
       if (state.phase === "created") {
+        let command = `printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail -n 30 -F ${quote(log)}`;
+        if (platform === "win32") {
+          const observed = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
+          command = nativeViewerShellCommand(stripArgv, observed.process_info, state.cwd);
+        }
         state.phase = "starting"; save();
-        await this.deps.run(["pane", "run", state.pane.pane_id, `printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail -n 30 -F ${quote(log)}`]);
+        await this.deps.run(["pane", "run", state.pane.pane_id, command]);
       }
       let stripReady = false;
       // A first login shell can take seconds. Observe its single dispatched run
@@ -233,7 +255,7 @@ export class HerdrFollowView {
       while (true) {
         const strip = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
         const processes = (strip.process_info as { foreground_processes?: Array<{ argv?: string[] }> } | undefined)?.foreground_processes;
-        stripReady = processes?.some(p => JSON.stringify(p.argv) === JSON.stringify(["/usr/bin/tail", "-n", "30", "-F", log])) ?? false;
+        stripReady = processes?.some(p => JSON.stringify(p.argv) === JSON.stringify(stripArgv)) ?? false;
         if (stripReady) break;
         const remaining = stripDeadline - Date.now();
         if (remaining <= 0) break;
@@ -297,7 +319,7 @@ export class HerdrFollowView {
         observations.set(tile.key, { focused: current.focused!, input: await this.deps.input?.(tile.target) ?? "unknown" });
       }
       const plan = planFollowingTiles(state.tiles, members, true, observations, policy, now());
-      const opened: Array<{ tile: Tile; script: string; agent?: "claude" | "codex" | "pi" }> = [];
+      const opened: Array<{ tile: Tile; argv: string[]; agent?: "claude" | "codex" | "pi" }> = [];
       save(); // presentation choices survive lost replies and daemon restarts.
       for (const join of plan.joins) {
         const member = view.task.members.find(m => keyOf(m.key.hostId, m.key.nodeId) === join.key)!;
@@ -329,7 +351,7 @@ export class HerdrFollowView {
         // A tile reports its restart command when it first enters the canvas, whether this call created its viewer or an
         // earlier, interrupted follow did (resumed from the journal, or confirmed by the lookup above). Retained tiles never
         // pass through here, so they aren't reported again.
-        opened.push({ tile: state.tiles.at(-1)!, script: verified.script, ...(verified.agent ? { agent: verified.agent } : {}) });
+        opened.push({ tile: state.tiles.at(-1)!, argv: verified.resumeArgv, ...(verified.agent ? { agent: verified.agent } : {}) });
       }
       for (const line of await this.reportResume(opened)) notice(line);
       if (opened.some(o => o.tile.resume)) save();

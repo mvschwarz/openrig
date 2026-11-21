@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
@@ -61,6 +63,67 @@ describe("SpecLibraryService", () => {
       specReviewService,
     });
   }
+
+  it.runIf(process.platform === "win32")("rolls back the new spec when a native reader refuses deletion of the old file", async () => {
+    const original = join(tmpDir, "original.yaml");
+    writeFileSync(original, VALID_AGENT_YAML);
+    const lib = createLibrary(); lib.scan();
+    const id = lib.list()[0]!.id;
+    const script = "$ErrorActionPreference='Stop'; $s=[IO.File]::Open($env:OPENRIG_OWNED_LOCK_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{[Console]::Out.WriteLine('held');[Console]::In.ReadLine()|Out-Null}finally{$s.Dispose()}";
+    const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+    const child = spawn(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { SystemRoot: process.env.SystemRoot, OPENRIG_OWNED_LOCK_FILE: original },
+    });
+    const closed = once(child, "close");
+    let readyTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const ready = await Promise.race([once(child.stdout, "data").then(([bytes]) => String(bytes)),
+        new Promise<string>((_, reject) => { readyTimer = setTimeout(() => reject(new Error("owned lock did not start")), 5000); })]);
+      clearTimeout(readyTimer);
+      expect(ready.trim()).toBe("held");
+      expect(() => lib.rename(id, "renamed")).toThrow();
+      expect(readFileSync(original, "utf8")).toBe(VALID_AGENT_YAML);
+      expect(readdirSync(tmpDir)).toEqual(["original.yaml"]);
+    } finally {
+      clearTimeout(readyTimer);
+      child.stdin.end("\n");
+      const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
+      await closed.finally(() => clearTimeout(timer));
+    }
+    expect(lib.rename(id, "renamed")).toMatchObject({ ok: true, entry: { name: "renamed" } });
+  }, 15000);
+
+  it.runIf(process.platform === "win32")("discovers native YAML extension and builtin entrypoint case spellings", () => {
+    const builtin = join(tmpDir, "builtin"), user = join(tmpDir, "user");
+    mkdirSync(join(builtin, "RIGS", "native"), { recursive: true });
+    mkdirSync(join(builtin, "AGENTS", "native"), { recursive: true });
+    mkdirSync(user);
+    writeFileSync(join(builtin, "RIGS", "native", "RIG.YAML"), VALID_RIG_YAML);
+    writeFileSync(join(builtin, "AGENTS", "native", "AGENT.YAML"), VALID_AGENT_YAML);
+    writeFileSync(join(user, "owned.YmL"), VALID_AGENT_YAML);
+    for (const noise of ["NODE_MODULES", ".GIT"]) {
+      mkdirSync(join(user, noise));
+      writeFileSync(join(user, noise, "noise.yaml"), VALID_RIG_YAML);
+    }
+    const lib = createLibrary([{ path: builtin, sourceType: "builtin" }, { path: user, sourceType: "user_file" }]);
+    lib.scan();
+    expect(lib.list().map(entry => [entry.sourceType, entry.kind]).sort()).toEqual([
+      ["builtin", "agent"], ["builtin", "rig"], ["user_file", "agent"],
+    ]);
+  });
+
+  it.runIf(process.platform === "win32").each(["CON", "x".repeat(251), "ORIGINAL"])("renames a native user spec to a valid display name %s", name => {
+    writeFileSync(join(tmpDir, "original.yaml"), VALID_AGENT_YAML);
+    const lib = createLibrary(); lib.scan();
+    const result = lib.rename(lib.list()[0]!.id, name);
+    expect(result).toMatchObject({ ok: true, entry: { name } });
+    if (!result.ok) throw new Error(result.error);
+    if (name === "CON" || name.length > 250) expect(result.entry.sourcePath).toContain(".openrig-spec-");
+    if (name === "ORIGINAL") expect(result.entry.sourcePath).toBe(join(tmpDir, "original.yaml"));
+    expect(existsSync(result.entry.sourcePath)).toBe(true);
+    expect(readFileSync(result.entry.sourcePath, "utf8")).toContain(`name: ${name}`);
+    expect(lib.list()).toHaveLength(1);
+  });
 
   it("scan discovers rig specs validated by SpecReviewService", () => {
     writeFileSync(join(tmpDir, "my-rig.yaml"), VALID_RIG_YAML);
@@ -147,7 +210,7 @@ describe("SpecLibraryService", () => {
     const entries = lib.list({ kind: "agent" });
     expect(entries).toHaveLength(1);
     expect(entries[0]!.name).toBe("test-agent");
-    expect(entries[0]!.relativePath).toBe("agents/development/implementer/agent.yaml");
+    expect(entries[0]!.relativePath).toBe(join("agents", "development", "implementer", "agent.yaml"));
 
     lib.scan();
     expect(lib.list({ kind: "agent" })[0]!.id).toBe(entries[0]!.id);
@@ -167,7 +230,7 @@ describe("SpecLibraryService", () => {
 
     const rigs = lib.list({ kind: "rig" });
     expect(rigs).toHaveLength(1);
-    expect(rigs[0]!.relativePath).toBe("rigs/launch/demo/rig.yaml");
+    expect(rigs[0]!.relativePath).toBe(join("rigs", "launch", "demo", "rig.yaml"));
   });
 
   // OPR.0.3.2.22 Bug 4 — walkYamlFiles now skips noise directories

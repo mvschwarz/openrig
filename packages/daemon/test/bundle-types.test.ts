@@ -6,6 +6,7 @@ import {
   normalizeLegacyBundleManifest as normalizeBundleManifest,
   serializeLegacyBundleManifest as serializeBundleManifest,
   isRelativeSafePath,
+  validatePodBundleManifest,
   type LegacyBundleManifest as BundleManifest,
   type BundleProvenance,
   type BundleCompatibility,
@@ -822,6 +823,16 @@ describe("Bundle types", () => {
 });
 
 describe("isRelativeSafePath", () => {
+  it.each(["C:/outside.md", "C:outside.md", "C:", "notes/bad\0.md"])("rejects native or NUL paths across manifest schemas: %s", value => {
+    expect(isRelativeSafePath(value)).toBe(false);
+    expect(validateBundleManifest({ ...VALID_RAW, rig_spec: value }).errors.some(e => e.includes("rig_spec"))).toBe(true);
+    expect(validateBundleManifest({ ...VALID_RAW, packages: [{ ...VALID_RAW.packages[0], path: value }] }).errors.some(e => e.includes("packages[0].path"))).toBe(true);
+    expect(validateBundleManifest({ ...VALID_RAW, integrity: { algorithm: "sha256", files: { [value]: "a".repeat(64) } } }).errors.some(e => e.includes("integrity.files key"))).toBe(true);
+    const pod = { schema_version: 2, name: "fixture", version: "1", created_at: "2026-11-02T00:00:00Z", rig_spec: "rig.yaml", agents: [{ name: "reviewer", path: "agents/reviewer", hash: "a".repeat(64) }] };
+    expect(validatePodBundleManifest(pod).valid).toBe(true);
+    expect(validatePodBundleManifest({ ...pod, rig_spec: value }).errors.some(e => e.includes("rig_spec"))).toBe(true);
+    expect(validatePodBundleManifest({ ...pod, agents: [{ ...pod.agents[0], path: value }] }).errors.some(e => e.includes("agents[0].path"))).toBe(true);
+  });
   it("accepts simple relative paths including names with dots", () => {
     expect(isRelativeSafePath("rig.yaml")).toBe(true);
     expect(isRelativeSafePath("packages/review-kit/package.yaml")).toBe(true);

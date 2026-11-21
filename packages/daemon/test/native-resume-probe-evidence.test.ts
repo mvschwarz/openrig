@@ -7,6 +7,19 @@ const pane = { id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true
 const assess = (paneContent: string) => assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent });
 
 describe("bounded resume probe evidence (#1480)", () => {
+  it.each(["owned:logical", "%1"])("uses explicit session identity for geometry of %s", async session => {
+    const listPanes = vi.fn(async () => { throw new Error("Wrong target contract"); });
+    const listSessionPanes = vi.fn(async () => [{ ...pane, id: "psmux:b3duZWQ:%1" }]);
+    const evidence = await resumeProbeEvidence(assess("Login expired"), "Login expired", { listPanes, listSessionPanes }, session, "session");
+    expect(evidence.capture).toMatchObject({ columns: 80, rows: 24 });
+    expect(listSessionPanes).toHaveBeenCalledExactlyOnceWith(session, false); expect(listPanes).not.toHaveBeenCalled();
+  });
+  it("matches the exact scoped pane instead of selecting another sole pane", async () => {
+    const target = "psmux:b3duZWQ:%1", probe = assess("Login expired");
+    const evidence = await resumeProbeEvidence(probe, "Login expired", { listPanes: async () => [{ ...pane, id: "psmux:b3RoZXI:%1" }] }, target, "pane");
+    expect(evidence.capture).toMatchObject({ columns: null, rows: null });
+    expect(evidence.status).toBe(probe.status); expect(evidence.code).toBe(probe.code);
+  });
   it.each(["Not logged in", "Login expired", "OAuth token revoked"])("records the fixed %s refusal and its row kind", async prefix => {
     for (const [marker, row] of [["●", "response"], ["⏺", "response"], ["  ⎿", "result"]] as const) {
       const message = `${prefix} · Please run /login`;

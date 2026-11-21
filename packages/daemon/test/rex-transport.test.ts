@@ -150,15 +150,28 @@ describe("rex CLI transport", () => {
 });
 
 describe("resolveRexBinary", () => {
+  it.runIf(process.platform === "win32")("finds native Rex under quoted absolute PATH entries without bypassing earlier relative entries", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rex quoted path # "));
+    const binary = path.join(root, "rex.exe");
+    try {
+      fs.writeFileSync(binary, "owned discovery fixture; never executed");
+      expect(resolveRexBinary({ PATH: `"${root}"` })).toBe(binary);
+      expect(resolveRexBinary({ PATH: `relative;"${root}"` })).toBeNull();
+      expect(resolveRexBinary({ PATH: `;"${root}"` })).toBeNull();
+      expect(resolveRexBinary({ PATH: `"${root}` })).toBeNull();
+    } finally { fs.unlinkSync(binary); fs.rmdirSync(root); }
+  });
   const bundled = path.join(homedir(), "Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex");
 
   it("prefers $REX_BIN_DIR, then PATH, then the app bundle", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rex-bin-"));
     try {
-      fs.writeFileSync(path.join(dir, "rex"), "#!/bin/sh\n", { mode: 0o755 });
-      expect(resolveRexBinary({ REX_BIN_DIR: "/rex dir", PATH: dir }, (file) => file === "/rex dir/rex")).toBe("/rex dir/rex");
-      expect(resolveRexBinary({ REX_BIN_DIR: "/missing", PATH: dir }, () => false)).toBe(path.join(dir, "rex"));
-      expect(resolveRexBinary({ PATH: "/nowhere" }, (file) => file === bundled)).toBe(bundled);
+      const name=process.platform === "win32" ? "rex.exe" : "rex";
+      const selected=path.join(dir,"selected",name);
+      fs.writeFileSync(path.join(dir, name), "fixture", { mode: 0o755 });
+      expect(resolveRexBinary({ REX_BIN_DIR: path.dirname(selected), PATH: dir }, (file) => file === selected)).toBe(selected);
+      expect(resolveRexBinary({ REX_BIN_DIR: "/missing", PATH: dir }, () => false)).toBe(path.join(dir, name));
+      expect(resolveRexBinary({ PATH: "/nowhere" }, (file) => file === bundled)).toBe(process.platform === "win32" ? null : bundled);
       expect(resolveRexBinary({ PATH: "/nowhere" }, () => false)).toBeNull();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -166,7 +179,8 @@ describe("resolveRexBinary", () => {
   });
 });
 
-describe("spawnRex", () => {
+// Real POSIX shell/process-group witnesses; native Job equivalents live in rex-native-job.test.ts.
+describe.skipIf(process.platform === "win32")("spawnRex", () => {
   const script = (body: string) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rex-run-"));
     const file = path.join(dir, "rex");

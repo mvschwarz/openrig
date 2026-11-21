@@ -56,6 +56,20 @@ describe("bundle configurations", () => {
   const declared = () => readDeclaredConfigurations(rigDir)!;
   const authored = () => authoredMapping(nodePath.join(rigDir, "rig.yaml"));
 
+  it.runIf(process.platform === "win32")("excludes native dependency directory case variants from the staged copy", () => {
+    for (const relative of ["NODE_MODULES", "agents/dev/Node_Modules", "node_modules-not"]) {
+      const dir = nodePath.join(rigDir, relative); fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(nodePath.join(dir, "fixture.txt"), "synthetic dependency bytes");
+    }
+    const chosen = resolveConfiguration(declared(), authored(), { preset: "all-pi" });
+    const result = stageConfiguration(rigDir, nodePath.join(rigDir, "rig.yaml"), declared(), chosen);
+    staged.push(result.stagingDir);
+    expect(fs.existsSync(nodePath.join(result.stagingDir, "NODE_MODULES"))).toBe(false);
+    expect(fs.existsSync(nodePath.join(result.stagingDir, "agents/dev/Node_Modules"))).toBe(false);
+    expect(fs.readFileSync(nodePath.join(result.stagingDir, "node_modules-not/fixture.txt"), "utf8")).toBe("synthetic dependency bytes");
+    expect(fs.readFileSync(nodePath.join(rigDir, "NODE_MODULES/fixture.txt"), "utf8")).toBe("synthetic dependency bytes");
+  });
+
   it("no choice gives the authored rig.yaml, which the recommended preset matches", () => {
     expect(resolveConfiguration(declared(), authored(), {})).toEqual({ mapping: authored(), configurationId: RECOMMENDED, preset: "recommended" });
   });

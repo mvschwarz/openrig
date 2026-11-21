@@ -41,13 +41,15 @@ import {
   resolvePersistedRestorePosture,
 } from "./permission-policy/persisted-restore-posture.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
-import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { daemonTmuxAttachCommand, daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
-import { shellQuote } from "../adapters/shell-quote.js";
+import { operatorShellWord, shellQuote } from "../adapters/shell-quote.js";
+import { powershellQuote } from "../adapters/windows-launch.js";
+import { providerRecoveryCommand } from "./provider-recovery-command.js";
 
 // -- Row types for SQL results --
 
@@ -286,6 +288,10 @@ function readPermissionSelectionsMap(db: Database.Database): PermissionSelection
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
 
+function recoveryDirectoryCommand(cwd: string): string {
+  return process.platform === "win32" ? `Set-Location -LiteralPath ${powershellQuote(cwd)}` : `cd ${operatorShellWord(cwd)}`;
+}
+
 function computeRecoveryGuidance(input: {
   runtime: string | null;
   resumeToken: string | null;
@@ -308,7 +314,7 @@ function computeRecoveryGuidance(input: {
       if (cmd) commands.push(cmd);
     }
     if (cwd) {
-      commands.push(`cd ${cwd}`);
+      commands.push(recoveryDirectoryCommand(cwd));
     }
     commands.push(["claude --resume", ...claudeMcpArgs(claudeMcp).map(shellQuote)].join(" "));
 
@@ -321,7 +327,7 @@ function computeRecoveryGuidance(input: {
       summary: resumeToken
         ? "Try native Claude resume first, then fall back to the workspace-local picker if needed."
         : "No stored Claude resume token. Use the workspace-local Claude picker fallback.",
-      commands,
+      commands: commands.map(command => providerRecoveryCommand(command)!),
       notes,
     };
   }
@@ -351,7 +357,7 @@ function computeRecoveryGuidance(input: {
       commands.push(primaryDisplay.command);
     }
     if (cwd) {
-      commands.push(`cd ${cwd}`);
+      commands.push(recoveryDirectoryCommand(cwd));
     }
     if (!resumeToken) {
       commands.push(primaryDisplay.command);
@@ -375,7 +381,7 @@ function computeRecoveryGuidance(input: {
       summary: resumeToken
         ? `Try native Codex resume first (${primaryDisplay.command}).`
         : `No stored Codex resume token. Try ${primaryDisplay.command} from the seat workspace.`,
-      commands,
+      commands: commands.map(command => providerRecoveryCommand(command)!),
       notes,
     };
   }
@@ -1099,6 +1105,8 @@ function buildInventoryItem(
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
+    ...(row.binding_attachment_type === "tmux" && row.session_name
+      ? { tmuxCommand: daemonTmuxAttachCommand() } : {}),
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerArgs().length
       ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),

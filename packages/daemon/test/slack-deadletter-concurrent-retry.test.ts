@@ -13,6 +13,7 @@ import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbo
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { makeInboundFilePort } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
+import { allowOwnedHttpFixture } from "../../cli/test/helpers/owned-http-fixture.js";
 
 it("retains new and still-failing events across overlapping retries while successful work lands once", async () => {
   const home = mkdtempSync(join(tmpdir(), "openrig-dead-retry-"));
@@ -36,6 +37,7 @@ it("retains new and still-failing events across overlapping retries while succes
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
+  allowOwnedHttpFixture(server);
   try {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("missing fixture address");

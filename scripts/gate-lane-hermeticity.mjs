@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 function fail(message) {
   throw new Error(`[gate-hermeticity] REFUSED: ${message}`);
@@ -7,7 +7,7 @@ function fail(message) {
 
 function inside(parent, child) {
   const rel = relative(parent, child);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel));
 }
 
 /**

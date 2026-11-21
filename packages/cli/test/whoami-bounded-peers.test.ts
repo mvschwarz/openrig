@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import fs from "node:fs";
@@ -92,7 +93,7 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => { server.close(); });

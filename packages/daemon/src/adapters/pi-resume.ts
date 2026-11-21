@@ -11,7 +11,10 @@ import type { RunnerGrantLaunch } from "../domain/runner-grant-launch.js";
 
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
+import { sameSessionFile } from "./same-session-file.js";
 import type { TmuxAdapter } from "./tmux.js";
+import { shellQuote } from "./shell-quote.js";
+import { renderWindowsLaunch } from "./windows-launch.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
@@ -74,10 +77,13 @@ export class PiResumeAdapter {
     // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
     effort?: string | null,
     launchWrapper?: readonly string[],
+    beforeNativeDispatch?: () => boolean,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
     }
+    const selectionChanged = () => ({ ok: false as const, code: "attention_required", message: "Selected history changed; no further runner resume input is authorized." });
+    if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
     const wrapped = launchWrapper?.length ? launchWrapper : undefined;
     if (wrapped && (this.runtime !== "pi" || !this.options.seatLaunchEnvironment)) {
       return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
@@ -105,8 +111,8 @@ export class PiResumeAdapter {
 
     // Launch-attempt scoping (guard fold): overwrite any stale sidecar from a
     // prior runner instance BEFORE typing the command; verifyResume trusts
-    // only states stamped with THIS attempt's launchId. The prior record is
-    // read FIRST so the durable catch-up cursor (lastEntryId, FR-5) survives.
+    // only states stamped with THIS attempt's launchId. Read the prior record
+    // at the write boundary to retain the latest durable catch-up cursor.
     const launchId = (this.options.newLaunchId ?? (() => randomUUID()))();
     let authority: RunnerGrantLaunch | undefined;
     let authorityUnavailable = false;
@@ -115,11 +121,6 @@ export class PiResumeAdapter {
     catch { authorityUnavailable = true; }
     let launchSucceeded = false;
     try {
-      const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
-      this.fs.writeFile(
-        seat.runnerStatePath,
-        JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
-      );
 
       const trust = this.runtime === "omp"
         ? (yoloEnabled(process.env, resolvedPosture) ? "approve" : "no-approve")
@@ -159,24 +160,35 @@ export class PiResumeAdapter {
         ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
       });
 
-      const fallback = cmd;
+    const runnerCommand = process.platform === "win32" ? `${shellQuote(process.execPath)} ${cmd.slice("node ".length)}` : cmd;
+    const bareCommand = process.platform === "win32" ? renderWindowsLaunch(runnerCommand, {}) : cmd;
+    const beforeInput = () => {
+      if (beforeNativeDispatch && !beforeNativeDispatch()) throw new Error("Selected history changed before runner resume input");
+      const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
+      this.fs.writeFile(seat.runnerStatePath, JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)));
+    };
+      const fallback = bareCommand;
       let command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-        ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome, ...(authority ? { generation: authority.generation } : {}) })
+        ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, runnerCommand, { runtime: this.runtime, nodeId, accountHome, ...(authority ? { generation: authority.generation } : {}) })
         : fallback;
       const originalCommand = command;
       if (authority) command = authority.wrap(command);
       // Short commands retain the direct path; long commands exec from a private script.
-      let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
+      let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, beforeInput, { stageIfLong: true, execInScript: true });
       if (!textResult.ok && textResult.code === "launch_path_too_long" && authority && command !== originalCommand) {
         try { await authority.finish(false); } catch { /* optional authority cleanup cannot prevent the original resume */ }
         authority = undefined; authorityUnavailable = true;
-        textResult = await this.tmux.sendShellCommand(tmuxSessionName, originalCommand, undefined, { stageIfLong: true, execInScript: true });
+        textResult = await this.tmux.sendShellCommand(tmuxSessionName, originalCommand, beforeInput, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok && textResult.code === "launch_path_too_long" && originalCommand !== fallback && accountHome === undefined) {
-        textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
+        textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, beforeInput, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok) {
-        return { ok: false, code: "resume_failed", message: textResult.message };
+        // The pre-input hook refusing means the selected history changed: nothing was typed, and the
+        // caller must ask again rather than treat this as a failed resume.
+        return textResult.code === "selection_changed"
+          ? { ok: false, code: "attention_required", message: textResult.message }
+          : { ok: false, code: "resume_failed", message: textResult.message };
       }
       try { authority?.dispatched(); }
       catch {
@@ -220,7 +232,7 @@ export class PiResumeAdapter {
           } as ResumeResult;
         }
         if (state.ready) {
-          if (state.sessionFile !== sessionFile) {
+          if (!sameSessionFile(state.sessionFile, sessionFile)) {
             return {
               ok: false,
               code: "resume_failed",

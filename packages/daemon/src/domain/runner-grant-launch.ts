@@ -4,6 +4,9 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import type { NodeBinding } from "./runtime-adapter.js";
 import { ActivityGrantStore } from "./activity-grants.js";
 import { SessionRegistry } from "./session-registry.js";
+import { prepareWindowsLaunch, powershellQuote } from "../adapters/windows-launch.js";
+import { daemonTmuxAttachCommand, daemonTmuxServerArgs } from "../adapters/tmux-server.js";
+import { bindNativeSessionName } from "./terminal/native-session-name.js";
 
 export interface RunnerGrantLaunch {
   readonly grantId: string;
@@ -17,7 +20,8 @@ export type RunnerGrantIssuer = (binding: NodeBinding, runtime: string, runId: s
 /** Shared by actual Pi/community launch owners. The token crosses only tmux's private environment channel;
  * the typed command carries an unpredictable environment KEY, never its value. The runner's shell consumes and
  * removes that key before exec. Neither a failed await nor a later readiness result may revoke a successor. */
-export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter, "getPanePid" | "setSessionEnv" | "unsetSessionEnv">): RunnerGrantIssuer {
+export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter, "getPanePid" | "setSessionEnv" | "unsetSessionEnv">,
+  options: { platform?: NodeJS.Platform; terminalCommand?: readonly string[]; serverArgs?: readonly string[] } = {}): RunnerGrantIssuer {
   return async (binding, runtime, runId, runner) => {
     const session = binding.tmuxSession, pane = binding.tmuxPane;
     if (!session || !pane) throw new Error("Runner authority needs a concrete launch pane.");
@@ -48,6 +52,24 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
       grantId: grant.grantId,
       generation: grant.generation,
       wrap(command) {
+        if ((options.platform ?? process.platform) === "win32") {
+          const physical = bindNativeSessionName(session).physical;
+          const terminal = [...(options.terminalCommand ?? daemonTmuxAttachCommand()), ...(options.serverArgs ?? daemonTmuxServerArgs()), "-t", "=" + physical];
+          const invoke = (args: string[]) => "& " + [...terminal, ...args].map(powershellQuote).join(" ");
+          const read = invoke(["show-environment", "-t", "=" + physical + ":", key]);
+          const remove = invoke(["set-environment", "-t", "=" + physical + ":", "-r", key]);
+          // Only the private environment KEY appears in the command; the token
+          // stays in psmux's selected session and the child's environment block.
+          const step = `$openrigStart.EnvironmentVariables.Remove('OPENRIG_RUN_ID')\n`
+            + `$openrigGrant=@(${read} 2>$null)\n$openrigGrantRead=$LASTEXITCODE\n`
+            + `${remove} 2>$null\n$openrigGrantRemoved=$LASTEXITCODE\n`
+            + `if($openrigGrantRead -eq 0 -and $openrigGrantRemoved -eq 0 -and $openrigGrant.Count -eq 1 -and ([string]$openrigGrant[0]).StartsWith(${powershellQuote(key + "=oag_")})){\n`
+            + `$openrigStart.EnvironmentVariables['OPENRIG_ACTIVITY_HOOK_TOKEN']=([string]$openrigGrant[0]).Substring(${key.length + 1})\n`
+            + `$openrigStart.EnvironmentVariables['OPENRIG_RUN_ID']=${powershellQuote(runId)}\n`
+            + `$openrigStart.EnvironmentVariables['OPENRIG_OCCUPANT_GENERATION']=${powershellQuote(grant.generation)}\n`
+            + `}else{[Console]::Error.WriteLine('Run-bound reporting unavailable; using existing install-token reporting.')}\nRemove-Variable openrigGrant\n`;
+          return prepareWindowsLaunch(command, step);
+        }
         const target = shellQuote(`=${session}`);
         // No eval: token text is treated only as data. Disable tracing before reading the private value.
         const script = `set +x; unset OPENRIG_RUN_ID; if _openrig_grant=$(tmux show-environment -t ${target} ${key} 2>/dev/null) && `

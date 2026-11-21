@@ -11,6 +11,10 @@ import { composeView, type ViewMemberInput } from "../src/domain/terminal/view-c
 
 describe("the daemon's tmux server", () => {
   let base: string;
+  // A raw session name is addressed differently by each platform's renderer: native Windows always
+  // sends the exact-match `=<name>` target, while POSIX passes an ordinary name through
+  // `tmuxSessionWord`, which prefixes `=` only for a name that is already a target expression.
+  const exactTarget = (name: string): string => (process.platform === "win32" ? `=${name}` : name);
   beforeEach(() => {
     base = realpathSync(mkdtempSync(join(tmpdir(), "openrig-tmux-server-")));
     mkdirSync(join(base, "tmux-501"));
@@ -48,13 +52,18 @@ describe("the daemon's tmux server", () => {
     expect(tmuxServerArgs({ TMUX: "/srv/sockets/team,shared,9,1" }, 501)).toEqual(["-S", "/srv/sockets/team,shared"]);
     expect(tmuxServerArgs({ TMUX: "/tmp/tmux-501/person,123,0" }, 502)).toEqual(["-S", "/tmp/tmux-501/person"]);
   });
+  it("uses platform environment spelling rules in standalone attachment metadata", () => {
+    const socket = join(base, "personal");
+    expect(tmuxServerArgs({ Tmux: `${socket},9,1`, Tmux_Tmpdir: base }, 501))
+      .toEqual(process.platform === "win32" ? ["-S", socket] : []);
+  });
 
-  it("keeps the attach command unchanged on the default server, and adds the server otherwise", () => {
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t dev-build@starter");
+  it("uses an exact attach target and adds the selected server when needed", () => {
+    expect(tmuxAttachCommand("dev-build@starter")).toBe(`tmux attach -t ${exactTarget("dev-build@starter")}`);
     setDaemonTmuxServer(["-L", "person"]);
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L person attach -t dev-build@starter");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe(`tmux -L person attach -t ${exactTarget("dev-build@starter")}`);
     setDaemonTmuxServer(["-S", "/tmp/my sockets/team"]);
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -S '/tmp/my sockets/team' attach -t dev-build@starter");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe(`tmux -S '/tmp/my sockets/team' attach -t ${exactTarget("dev-build@starter")}`);
   });
 
   it("names the window by its id, on the daemon's server, in the command that drops a window's own window-size", () => {
@@ -68,12 +77,15 @@ describe("the daemon's tmux server", () => {
   it("quotes a server name with `=`, which zsh would read as a command lookup", () => {
     setDaemonTmuxServer(["-L", "=person"]);
     expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -L '=person' set-window-option -t @7 -u window-size");
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L '=person' attach -t dev-build@starter");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe(`tmux -L '=person' attach -t ${exactTarget("dev-build@starter")}`);
     setDaemonTmuxServer(["-S", "/tmp/a=b/team"]);
     expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -S '/tmp/a=b/team' set-window-option -t @7 -u window-size");
   });
 
-  it("quotes a session name that would otherwise reach the shell as code", () => {
+  // These three pin POSIX shell quoting: `'it'"'"'s'` and a bare `report\;` are sh rules, while the native
+  // Windows renderer quotes for PowerShell. Both platforms escape the trailing separator, which the
+  // first assertion below proves through the shared helper rather than through quoting.
+  it.runIf(process.platform !== "win32")("quotes a session name that would otherwise reach the shell as code", () => {
     // An ordinary seat name keeps its exact form: shellWord only quotes what needs it.
     expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t dev-build@starter");
     // Everything else reaches a shell as one word. The CMUX helper types this line into a
@@ -87,12 +99,20 @@ describe("the daemon's tmux server", () => {
     expect(tmuxAttachCommand("a;b")).toBe("tmux -L person attach -t 'a;b'");
   });
 
-  it("escapes a trailing semicolon for tmux's own parser, before the shell sees the word", () => {
+  it.runIf(process.platform === "win32")("escapes a trailing separator for the native attach target too", () => {
+    // Both renderers must escape a final `;`, which tmux would otherwise read as a command separator.
+    expect(tmuxAttachCommand("report;")).toBe("tmux attach -t '=report\\;'");
+    // An ordinary name needs no quoting on either platform; only the exact-match marker differs.
+    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t =dev-build@starter");
+  });
+
+  it.runIf(process.platform !== "win32")("escapes a trailing semicolon for tmux's own parser, before the shell sees the word", () => {
     const bs = "\\"; // one backslash
     // One backslash is added in front of a final separator, once, for the raw name as written.
-    expect(tmuxAttachCommand("report;")).toBe(`tmux attach -t 'report${bs};'`);
-    expect(tmuxAttachCommand(`report${bs};`)).toBe(`tmux attach -t 'report${bs}${bs};'`);
-    expect(tmuxAttachCommand(`report${bs}${bs};`)).toBe(`tmux attach -t 'report${bs}${bs}${bs};'`);
+    // Both renderers escape it; only the leading exact-match marker differs by platform.
+    expect(tmuxAttachCommand("report;")).toBe(`tmux attach -t '${exactTarget("report")}${bs};'`);
+    expect(tmuxAttachCommand(`report${bs};`)).toBe(`tmux attach -t '${exactTarget("report")}${bs}${bs};'`);
+    expect(tmuxAttachCommand(`report${bs}${bs};`)).toBe(`tmux attach -t '${exactTarget("report")}${bs}${bs}${bs};'`);
     // The three names stay different all the way to tmux, which is the property that matters.
     expect(new Set([
       tmuxAttachCommand("report;"),
@@ -101,10 +121,19 @@ describe("the daemon's tmux server", () => {
     ]).size).toBe(3);
     // A separator that is not final is not touched, and ordinary names keep their bytes.
     expect(tmuxAttachCommand("a;b")).toBe("tmux attach -t 'a;b'");
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t dev-build@starter");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe(`tmux attach -t ${exactTarget("dev-build@starter")}`);
   });
 
-  it("encodes tmux's target markers so the session name survives, and quotes any = for the shell", () => {
+  it.runIf(process.platform === "win32")("encodes tmux's target markers on the native path too", () => {
+    // `=` is tmux's exact-match marker, so a session named `=ls` needs `==ls` on either platform.
+    // A leading `@`/`%`/`~` gets the same one-`=` rescue. Windows only quotes a word outside its
+    // safe set, so these stay unquoted where POSIX would also quote against zsh's `=` expansion.
+    expect(tmuxAttachCommand("=ls")).toBe("tmux attach -t ==ls");
+    expect(tmuxAttachCommand("@work")).toBe("tmux attach -t =@work");
+    expect(tmuxAttachCommand("~")).toBe("tmux attach -t '=~'");
+  });
+
+  it.runIf(process.platform !== "win32")("encodes tmux's target markers so the session name survives, and quotes any = for the shell", () => {
     // `=` is tmux's exact-match marker and the rest of the word is the name it looks up, so a
     // session named `=ls` needs `==ls`: sent as `=ls`, tmux looks for `ls`.
     expect(tmuxAttachCommand("=ls")).toBe("tmux attach -t '==ls'");

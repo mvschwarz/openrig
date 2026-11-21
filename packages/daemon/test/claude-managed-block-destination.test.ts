@@ -106,7 +106,7 @@ function rigYaml(managedBlocksYaml: string, cwd: string, name = "issue25-rig"): 
     `        agent_ref: "local:agents/impl"`,
     `        profile: default`,
     `        runtime: claude-code`,
-    `        cwd: "${cwd}"`,
+    `        cwd: ${JSON.stringify(cwd)}`,
     `    edges: []`,
     `edges: []`,
   ].filter(Boolean).join("\n") + "\n";
@@ -295,9 +295,9 @@ describe("#25 selected-file semantics — preservation, idempotence, the other f
   });
 
   it("the conflict target follows the selection; the default is unchanged", () => {
-    expect(claudeConflictTargetPath("guidance", "g", "/cwd")).toBe("/cwd/CLAUDE.md");
-    expect(claudeConflictTargetPath("guidance", "g", "/cwd", undefined, "CLAUDE.local.md")).toBe("/cwd/CLAUDE.local.md");
-    expect(claudeConflictTargetPath("skill", "s", "/cwd", undefined, "CLAUDE.local.md")).toBe("/cwd/.claude/skills/s/SKILL.md");
+    expect(claudeConflictTargetPath("guidance", "g", "/cwd")).toBe(nodePath.join("/cwd", "CLAUDE.md"));
+    expect(claudeConflictTargetPath("guidance", "g", "/cwd", undefined, "CLAUDE.local.md")).toBe(nodePath.join("/cwd", "CLAUDE.local.md"));
+    expect(claudeConflictTargetPath("skill", "s", "/cwd", undefined, "CLAUDE.local.md")).toBe(nodePath.join("/cwd", ".claude", "skills", "s", "SKILL.md"));
   });
 
   it("the Codex adapter ignores the Claude selection and stays on AGENTS.md", async () => {

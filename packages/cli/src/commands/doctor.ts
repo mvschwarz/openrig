@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
@@ -14,7 +14,7 @@ import {
   readCmuxSocketControlModeFromText,
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl, tmuxInstallGuidance } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
@@ -34,7 +34,7 @@ export interface DoctorDeps {
   baseDir: string;
   readFile: (path: string) => string | null;
   /** `timeoutMs` bounds one command; without it a command runs to completion, as before. */
-  exec: (cmd: string, opts?: { timeoutMs?: number }) => string;
+  exec: (cmd: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => string;
   checkPort: (port: number, host: string) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
   platform?: NodeJS.Platform;
@@ -199,12 +199,13 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       status: "fail",
       message: "tmux not found.",
       reason: "OpenRig uses tmux to manage agent sessions.",
-      fix: "Install tmux: brew install tmux (macOS), apt install tmux (Linux).",
+      fix: tmuxInstallGuidance(deps.platform),
     });
   } else if (tmuxProbe.available && tmuxProbe.version) {
     checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });
     // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
-    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts));
+    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts), undefined, platform);
+    if (capture.cleanupWarning) checks.push({ name: "tmux_capture_cleanup", status: "skipped", message: capture.cleanupWarning });
     if (capture.status === "fail") {
       const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
       checks.push({ name: "tmux_capture", status: "fail", message: failure.message, reason: failure.reason, fix: failure.fix });
@@ -599,8 +600,8 @@ function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): Do
 
 /** The standalone doctor's command runner. A command with `timeoutMs` is bounded (the tmux capture probe passes one); others
  *  run to completion, as before. */
-export function doctorExec(c: string, opts?: { timeoutMs?: number }): string {
-  return execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], ...(opts?.timeoutMs ? { timeout: opts.timeoutMs } : {}) });
+export function doctorExec(c: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): string {
+  return execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], ...(opts?.env ? { env: opts.env } : {}), ...(opts?.timeoutMs ? { timeout: opts.timeoutMs } : {}) });
 }
 
 function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
@@ -661,8 +662,30 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
 
   cmd
     .option("--json", "JSON output for agents")
+    .option("--community-harnesses", "Check installed community harness presets on the daemon")
     .option("--spec <path>", "Rig spec to check against the running rig of the same name (spec-vs-live topology)")
-    .action(async (opts: { json?: boolean; spec?: string }) => {
+    .action(async (opts: { json?: boolean; spec?: string; communityHarnesses?: boolean }) => {
+      if (opts.communityHarnesses) {
+        const config = (depsOverride?.configStore ?? new ConfigStore()).resolve();
+        const base = `http://${formatDaemonHostForUrl(config.daemon.host ?? "127.0.0.1")}:${config.daemon.port ?? DEFAULT_PORT}`;
+        const { data } = await new DaemonClient(base).get<{
+          dir: string;
+          harnesses: Array<{ name: string; path: string; usable: boolean; problem?: string; command?: string; executable?: string; limits?: string[] }>;
+        }>("/api/community-harnesses?preflight=true");
+        const healthy = data.harnesses.every((preset) => preset.usable);
+        if (opts.json) console.log(JSON.stringify({ healthy, ...data }, null, 2));
+        else {
+          console.log(`Community harness presets in ${data.dir}`);
+          for (const preset of data.harnesses) {
+            console.log(`  [${preset.usable ? "OK" : "FAIL"}] ${preset.name} (${preset.path}): ${preset.problem ?? preset.command}`);
+            if (preset.executable) console.log(`    Windows executable: ${preset.executable}`);
+            for (const limit of preset.limits ?? []) console.log(`    Limit: ${limit}`);
+          }
+          console.log("Preset validation reads the daemon's configuration. It does not launch the command.");
+        }
+        if (!healthy) process.exitCode = 1;
+        return;
+      }
       const deps: DoctorDeps = depsOverride ?? {
         exists: existsSync,
         baseDir: import.meta.dirname,
@@ -671,7 +694,6 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),
-        checkWritable: (dirPath: string) => accessSync(dirPath, constants.W_OK),
         specPath: opts.spec ? path.resolve(opts.spec) : undefined,
         // Returns null when the live side is unavailable; a known foreign owner is reported. The conformance check treats null as
         // "unknown" and skips — an unreachable daemon must never read as a matching topology.

@@ -136,15 +136,24 @@ export const execTmuxCommand: ExecFn = async (cmd: string): Promise<string> => {
  * unchanged argv. Other POSIX commands use a resolved path to avoid libuv's
  * repeated PATH spawns on the event loop. Windows keeps the psmux alias on PATH.
  */
-export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<string> => {
+export const execArgvCommand: ArgvExecFn = async (argv, options): Promise<string> => {
   const [bin, ...args] = argv;
   if (!bin) throw new Error("execArgvCommand: empty argv");
   const started = performance.now();
   // Nothing ran when no file was found: a shell also finds tmux through an entry the lookup skips, such as a literal
   // `~/bin`, and reports a missing one as the shell transport does.
-  const opts = { ...tmuxExecOptions, env: tmuxClientEnvironment() };
+  let env: NodeJS.ProcessEnv = tmuxClientEnvironment();
+  if (options?.env) {
+    env={...env};
+    for (const [key,value] of Object.entries(options.env)) {
+      if (!key || /[=\0]/.test(key) || value?.includes("\0")) throw new Error("Invalid process environment entry");
+      if (process.platform === "win32") for (const old of Object.keys(env)) if(old.toUpperCase()===key.toUpperCase())delete env[old];
+      if(value===undefined)delete env[key];else env[key]=value;
+    }
+  }
+  const opts = { ...tmuxExecOptions, env };
   const run = async (file: string | null) => {
-    const command = tmuxServerStartCommand(mayStartTmuxServer(args) ? bin : file ?? bin, args);
+    const command = process.platform === "win32" ? { file: file ?? bin, args } : tmuxServerStartCommand(mayStartTmuxServer(args) ? bin : file ?? bin, args);
     const result = command.file !== "/bin/sh" && !file
       ? await execFileAsync("/bin/sh", ["-c", 'exec "$0" "$@"', bin, ...args], opts)
       : await execFileAsync(command.file, command.args, opts);
@@ -169,6 +178,7 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
     throw withExecOutput(err);
   }
 };
+execArgvCommand.supportsEnvironment = true;
 
 /**
  * Starts a long-lived tmux client (the daemon's control client, tmux-control.ts) as execArgvCommand starts tmux: the

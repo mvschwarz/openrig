@@ -1,5 +1,7 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import path from "node:path";
 import { Command } from "commander";
 import { requirementsCommand } from "../src/commands/requirements.js";
 import { DaemonClient } from "../src/client.js";
@@ -22,23 +24,23 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally {
-      console.log = origLog;
-      console.error = origErr;
-    }
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
     const exitCode = process.exitCode;
+    return { logs, exitCode };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
     process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
+  }
 }
 
 function runningState(port: number): DaemonState {
@@ -93,7 +95,7 @@ describe("Requirements CLI", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 
@@ -172,7 +174,7 @@ describe("Requirements CLI", () => {
     });
 
     const parsed = JSON.parse(capturedBody);
-    expect(parsed.sourceRef).toBe("/my/spec.yaml");
+    expect(parsed.sourceRef).toBe(path.resolve("/my/spec.yaml"));
 
     // Restore handler
     server.removeAllListeners("request");

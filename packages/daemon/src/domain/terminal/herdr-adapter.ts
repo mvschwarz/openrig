@@ -77,10 +77,12 @@ import type {
   HerdrTransportFactory,
 } from "./herdr-transport.js";
 import { blankShellArgv } from "./login-shell.js";
-import { findLiveHerdrWorkspace, fixedSizeWorkspaceNote, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
+import { findLiveHerdrWorkspace, fixedSizeWorkspaceNote, herdrCloseCommand, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import { sameIdSet } from "./rig-viewer-records.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
+import { readWindowsTileAttachArgv, isWindowsTileAttachArgv } from "./windows-tile-attach.js";
+import { renderWindowsLaunchArgv } from "../../adapters/windows-launch.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
 const HERDR_SURFACE_HOST = "herdr";
@@ -237,8 +239,19 @@ function herdrPaneCommand(pane: ComposedPane): string {
 function herdrResumeArgv(pane: ComposedPane, tile: string): string[] | null {
   const agent = herdrAgent(pane);
   if (!agent || !pane.attachArgv) return null;
+  if (readWindowsTileAttachArgv(pane.attachArgv)) return nativeHerdrTileArgv(pane, tile);
+  // SSH tiles retain the existing no-resume contract, including native wrappers.
+  if (isWindowsTileAttachArgv(pane.attachArgv)) return null;
   const argv = ["env", `HERDR_AGENT=${agent}`, `OPENRIG_TILE=${tile}`, ...pane.attachArgv];
   return argv.some((arg) => /['\u0000-\u001f\u007f]/.test(arg)) ? null : argv;
+}
+
+function nativeHerdrTileArgv(pane: ComposedPane, tile?: string): string[] {
+  const agent = herdrAgent(pane);
+  const command = renderWindowsLaunchArgv(pane.attachArgv!, {
+    ...(agent ? { HERDR_AGENT: agent } : {}), ...(tile ? { OPENRIG_TILE: tile } : {}),
+  }) + "\nexit $LASTEXITCODE";
+  return [pane.attachArgv![0]!, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command,"utf16le").toString("base64")];
 }
 
 /** Rounds of the restart-command report, half a second apart: about 3 s for Herdr to detect each tile's agent. */
@@ -248,14 +261,18 @@ export const RESUME_REPORT_INTERVAL_MS = 500;
 /** Herdr's spelling of the shared grid: `right`/`down` splits, and blanks running the person's login shell (cmux's blank-surface precedent). */
 const HERDR_TILE_NODES: TileNodes<HerdrLayoutNode> = {
   // `sh -c` keeps the composed quoting (read-only `-r`, ssh-wrap); a known runtime adds Herdr's detection hint.
-  tile: (pane) => ({ type: "pane", label: pane.label, command: ["sh", "-c", herdrPaneCommand(pane)] }),
+  tile: (pane) => ({ type: "pane", label: pane.label, command: pane.attachArgv && isWindowsTileAttachArgv(pane.attachArgv)
+    ? nativeHerdrTileArgv(pane) : ["sh", "-c", herdrPaneCommand(pane)] }),
   blank: () => ({ type: "pane", label: "", command: blankShellArgv() }),
   split: (direction, ratio, first, second) => ({ type: "split", direction: direction === "across" ? "right" : "down", ratio, first, second }),
 };
 
 /** The equal grid for one page (see `buildTileGrid`): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3 (cols×rows). */
 export function buildGridRoot(panes: ComposedPane[], columns?: number): TileGrid<HerdrLayoutNode> {
-  return buildTileGrid(panes, columns, HERDR_TILE_NODES);
+  const native = panes.find(pane => pane.attachArgv && isWindowsTileAttachArgv(pane.attachArgv));
+  return buildTileGrid(panes, columns, native ? { ...HERDR_TILE_NODES,
+    blank: () => ({type:"pane",label:"",command:[native.attachArgv![0]!,"-NoLogo","-NoProfile"]}),
+  } : HERDR_TILE_NODES);
 }
 
 /** The per-page socket request plan — pure, so it is asserted directly in tests. */
@@ -881,7 +898,8 @@ export class HerdrAdapter implements TerminalProvider {
       return null;
     }
     const socket = this.deps.launch?.socketPath;
-    const close = (id: string) => `${socket ? `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(socket)} herdr` : "herdr"} workspace close ${shellQuote(id)}`;
+    // The platform the readers already use, so a fixture's Linux answers get a Linux command on any host.
+    const close = (id: string) => herdrCloseCommand(readers.platform ?? process.platform, socket, id, { posix: "herdr" });
     for (const id of found.fixedSize) notes.push(fixedSizeWorkspaceNote(id, close(id)));
     for (const id of found.stale) if (!found.fixedSize.includes(id)) notes.push(`Workspace ${id} has an older or different plan for this view and was kept.`);
     for (const id of found.unconfirmed) if (!found.fixedSize.includes(id)) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known

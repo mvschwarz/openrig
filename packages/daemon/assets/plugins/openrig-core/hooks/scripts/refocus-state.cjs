@@ -58,12 +58,12 @@ function acquire(stateFile) {
   throw new Error("state guard still busy");
 }
 
-function openRefocusState(stateFile) {
+function openRefocusState(stateFile, nativeRelease) {
   const report = (operation, error) =>
     process.stderr.write(`refocus: could not ${operation} (${error.code || error.message})\n`);
   let release;
   try {
-    release = acquire(stateFile);
+    release = nativeRelease !== undefined ? nativeRelease : acquire(stateFile);
   } catch (error) {
     report("coordinate state. Continuing with available evidence", error);
   }
@@ -100,4 +100,11 @@ function openRefocusState(stateFile) {
   };
 }
 
-module.exports = { openRefocusState, processExists };
+async function openCoordinatedRefocusState(stateFile) {
+  if (process.platform !== "win32") return openRefocusState(stateFile);
+  let release;
+  try { release = await require("./refocus-state-lock.cjs").acquireNativeStateLock(stateFile, 200); }
+  catch (error) { process.stderr.write(`refocus: could not coordinate native state (${error.code || error.message})\n`); }
+  return openRefocusState(stateFile, release || null);
+}
+module.exports = { openRefocusState, openCoordinatedRefocusState, processExists };

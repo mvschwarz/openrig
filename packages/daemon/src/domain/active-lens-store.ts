@@ -20,6 +20,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
+import { createPrivateTextFile } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 
 export interface ActiveLens {
   specName: string;
@@ -79,10 +82,15 @@ export class ActiveLensStore {
     // is operator UX state, not an audit-record-keeping invariant —
     // losing it across a hard crash is acceptable; the operator
     // re-clicks Activate).
-    const tmp = `${this.filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const tmp = path.join(dir, `.openrig-lens-${randomUUID()}.tmp`);
     try {
-      fs.writeFileSync(tmp, JSON.stringify(lens));
-      fs.renameSync(tmp, this.filePath);
+      if (process.platform === "win32" && fs.existsSync(this.filePath) && fs.lstatSync(this.filePath).isFile()) {
+        createPrivateTextFile(tmp, JSON.stringify(lens));
+        replaceWindowsFilePreservingMetadata(this.filePath, tmp);
+      } else {
+        fs.writeFileSync(tmp, JSON.stringify(lens));
+        fs.renameSync(tmp, this.filePath);
+      }
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
       throw err;

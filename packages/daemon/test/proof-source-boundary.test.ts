@@ -21,6 +21,36 @@ function reads(paths: (missions: string) => Array<[keyof Io, string]>) {
 }
 const handle = () => { const close = vi.fn(); watch.mockImplementation(() => ({ on: vi.fn(), close })); return close; };
 
+it("observes a project policy at the filesystem root without widening recursive coverage", async () => {
+  vi.useFakeTimers();
+  const project = path.parse(path.resolve(".")).root;
+  const missions = path.join(project, "proof-fixture", "missions");
+  resolveProjectRoot.mockReturnValue(project);
+  let revision = "before";
+  readProjectReadiness.mockImplementation((_m: string, _r: unknown, _root: unknown, io?: Io) => {
+    io?.exists(path.join(project, "project.yaml"));
+    return { missions: [{ name: "fixture", revision }] };
+  });
+  handle();
+  const invalidate = vi.fn(), emit = vi.fn();
+  const instance = watchProofSources(missions, invalidate, { emit } as unknown as EventBus);
+  try {
+    expect(instance.observation().state).toBe("watching");
+    const policyWatch = watch.mock.calls.find(([dir, options]) => dir === project && !options.recursive);
+    expect(policyWatch).toBeDefined();
+    expect(watch.mock.calls.filter(([, options]) => options.recursive).map(([dir]) => dir)).toEqual([missions]);
+    revision = "after";
+    policyWatch![2]("change", "unrelated.txt");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(invalidate).not.toHaveBeenCalled();
+    policyWatch![2]("change", "project.yaml");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "proof.sources_changed" }));
+    expect(instance.observation().state).toBe("watching");
+  } finally { instance.close(); }
+});
+
 it("watches only the missions root recursively; the project and evidence outside it get shallow, filtered watches", async () => {
   vi.useFakeTimers();
   const project = path.resolve("fixture/project");

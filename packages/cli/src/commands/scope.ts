@@ -181,6 +181,14 @@ function sliceManifestRef(missionPath: string, slicePath: string): string {
   return path.relative(missionPath, path.join(slicePath, "slice.yaml")).split(path.sep).join("/");
 }
 
+function sameScopeDirectory(first: string, second: string): boolean {
+  const left = fs.statSync(first, { bigint: true }), right = fs.statSync(second, { bigint: true });
+  if (!left.isDirectory() || !right.isDirectory() || left.ino === 0n || right.ino === 0n) {
+    throw new Error("Mission directory identity is unavailable; source and destination could not be compared.");
+  }
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 function rollbackComposition(edits: MissionCompositionEdit[]): void {
   applyMissionCompositionEdits(edits.map((edit) => ({
     manifestPath: edit.manifestPath,
@@ -437,7 +445,7 @@ function buildSliceCreateCommand(): Command {
           if (readmeOnly) {
             const markerBody = body.replace(
               /^(---)(\r?\n)/,
-              "$1$2progress_rail: readme-only$2",
+              (_match, delimiter: string, newline: string) => `${delimiter}${newline}progress_rail: readme-only${newline}`,
             );
             fs.writeFileSync(readmePath, markerBody, "utf8");
           } else {
@@ -503,7 +511,8 @@ function buildSliceShipCommand(): Command {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const target = findMission(missionsRoot, releaseMission);
-        if (target.name === slice.missionName) {
+        const sourceMission = findMission(missionsRoot, slice.missionName);
+        if (sameScopeDirectory(target.absPath, sourceMission.absPath)) {
           throw new ScopeCliError({ fact: "Source and release mission are the same.", consequence: "Slice not shipped.", action: "Choose a different release mission." });
         }
         const targetSlicesDir = path.join(target.absPath, "slices");
@@ -511,7 +520,6 @@ function buildSliceShipCommand(): Command {
         const slug = slice.slug ?? slugify(slice.name);
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
-        const sourceMission = findMission(missionsRoot, slice.missionName);
         const edits = [
           planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
           planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
@@ -851,7 +859,8 @@ function buildSliceMoveCommand(): Command {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const target = findMission(missionsRoot, destMission);
-        if (target.name === slice.missionName) {
+        const sourceMission = findMission(missionsRoot, slice.missionName);
+        if (sameScopeDirectory(target.absPath, sourceMission.absPath)) {
           throw new ScopeCliError({ fact: "Source and destination mission are the same.", consequence: "Slice not moved.", action: "Choose a different destination mission." });
         }
         const targetSlicesDir = path.join(target.absPath, "slices");
@@ -859,7 +868,6 @@ function buildSliceMoveCommand(): Command {
         const slug = slice.slug ?? slugify(slice.name);
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
-        const sourceMission = findMission(missionsRoot, slice.missionName);
         // Cross-mission dependencies cannot remain sibling edges. Name affected dependents at the move.
         const dependencyWarnings = slice.id === null ? [] : listSlices(sourceMission, "all")
           .filter((sibling) => sibling.absPath !== slice.absPath
@@ -1649,7 +1657,7 @@ function buildAuditCommand(): Command {
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
+  const match = /^---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n---/.exec(content);
   return match ? match[1]! : null;
 }
 

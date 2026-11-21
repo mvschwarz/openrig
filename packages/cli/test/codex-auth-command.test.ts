@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { authCommand } from "../src/commands/auth.js";
+import { createPrivateTextFile } from "../src/lib/private-text-file.js";
 
 const NOW = () => "2026-06-26T00:00:00Z";
 let home: string;
@@ -60,7 +61,7 @@ describe("rig auth command surface (OPR.0.4.1.29)", () => {
   });
 
   it("a successful restore distinguishes saved credential bytes from verified sign-in", async () => {
-    fs.writeFileSync(path.join(home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "synthetic-fixture-key" }), { mode: 0o600 });
+    createPrivateTextFile(path.join(home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "synthetic-fixture-key" }));
     await run(["save", "work"]);
     const { out, code } = await run(["switch", "work"]);
     expect(code).toBeUndefined();

@@ -68,7 +68,8 @@ function transportDiagnostic(state: "connect" | "timeout" | "response", detail?:
  * `packages/tui/dist` is the source of truth; an npm-install layout ships
  * the bundled copy next to the cli. Null = not found (caller degrades). */
 export function resolveTuiPath(baseDir: string, exists: (p: string) => boolean = existsSync): string | null {
-  const cliBaseDir = path.basename(baseDir) === "commands" ? path.resolve(baseDir, "..") : baseDir;
+  const basename = path.basename(baseDir);
+  const cliBaseDir = (process.platform === "win32" ? basename.toLowerCase() : basename) === "commands" ? path.resolve(baseDir, "..") : baseDir;
   const monorepo = path.join(path.resolve(cliBaseDir, "../../tui"), "dist/main.js");
   if (exists(monorepo)) return monorepo;
   const bundled = path.join(path.resolve(cliBaseDir, "../tui"), "dist/main.js");

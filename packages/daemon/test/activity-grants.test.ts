@@ -8,11 +8,34 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
-import { runnerGrantIssuer } from "../src/domain/runner-grant-launch.js";
+import { runnerGrantIssuer as createRunnerGrantIssuer } from "../src/domain/runner-grant-launch.js";
+import { renderWindowsLaunchArgv } from "../src/adapters/windows-launch.js";
+import { windowsPowerShell } from "../src/domain/windows-executables.js";
+import { createHash } from "node:crypto";
+const runnerGrantIssuer = (db: Parameters<typeof createRunnerGrantIssuer>[0], tmux: Parameters<typeof createRunnerGrantIssuer>[1]) => createRunnerGrantIssuer(db, tmux, { platform: "linux" });
 import { ActivityGrantStore, grantGeneration, guestActivityEnv } from "../src/domain/activity-grants.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 const cleanups: Array<() => void> = [];
+
+it.runIf(process.platform === "win32").each(["ok", "read", "partial read", "remove"])("passes native run credentials or preserves the install token without POSIX/token argv (%s)", async failure => {
+  const f = fixture(), dir = mkdtempSync(join(tmpdir(), "native-run-grant-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const state = join(dir, "private-fixture.json"), terminal = join(dir, "terminal.cjs"), child = join(dir, "child.cjs");
+  writeFileSync(terminal, `const fs=require('node:fs'),p=${JSON.stringify(state)},s=JSON.parse(fs.readFileSync(p)),failure=${JSON.stringify(failure)};if(process.argv.includes('show-environment')){if(failure==='read')process.exit(1);process.stdout.write(s.key+'='+s.token);if(failure==='partial read')process.exit(1)}else if(process.argv.includes('set-environment')){if(failure==='remove')process.exit(1);s.removed=true;fs.writeFileSync(p,JSON.stringify(s))}else process.exit(1);`);
+  writeFileSync(child, "const crypto=require('node:crypto');process.stdout.write(JSON.stringify({run:process.env.OPENRIG_RUN_ID,generation:process.env.OPENRIG_OCCUPANT_GENERATION,hash:crypto.createHash('sha256').update(process.env.OPENRIG_ACTIVITY_HOOK_TOKEN||'').digest('hex')}));");
+  let token = "";
+  const issue = createRunnerGrantIssuer(f.db, { getPanePid: async () => 101,
+    setSessionEnv: async (_session,key,value) => { token=value;writeFileSync(state,JSON.stringify({key,token})); }, unsetSessionEnv: async () => {} },
+    { platform: "win32", terminalCommand: [process.execPath,terminal], serverArgs: [] });
+  const grant=await issue({nodeId:f.node.id,tmuxSession:"dev-guest@guest-rig",tmuxPane:"%1"} as never,"pi","native-run",0);
+  const command=grant.wrap(renderWindowsLaunchArgv([process.execPath,child]));
+  expect(command).not.toContain(token);expect(command).not.toContain("/bin/sh");
+  const result=spawnSync(windowsPowerShell(),["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(command,"utf16le").toString("base64")],{encoding:"utf8",windowsHide:true,timeout:10000,env:{...process.env,OPENRIG_RUN_ID:"stale-run",OPENRIG_ACTIVITY_HOOK_TOKEN:"legacy-install",OPENRIG_OCCUPANT_GENERATION:"legacy-generation"}});
+  expect(result.status,result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual(failure==="ok" ? {run:"native-run",generation:grant.generation,hash:createHash("sha256").update(token).digest("hex")} : {generation:"legacy-generation",hash:createHash("sha256").update("legacy-install").digest("hex")});
+  await grant.finish(false);
+});
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
 function fixture() {
@@ -317,7 +340,7 @@ describe("actual run grants", () => {
     expect(f.db.prepare("SELECT count(*) AS n FROM activity_grants").get()).toEqual({ n: 0 });
   });
 
-  it.each(["read", "partial read", "remove"] as const)("executes unbound with the original install token when private credential %s fails", async failure => {
+  it.skipIf(process.platform === "win32").each(["read", "partial read", "remove"] as const)("executes unbound with the original install token when private credential %s fails", async failure => {
     const f = run(), dir = mkdtempSync(join(tmpdir(), "grant-fallback-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     writeFileSync(join(dir, "tmux"), '#!/bin/sh\ncase "$1" in show-environment) [ "$TEST_FAIL" = read ] && exit 1; printf "%s=%s\\n" "$TEST_KEY" "$TEST_PRIVATE"; [ "$TEST_FAIL" != "partial read" ];; set-environment) [ "$TEST_FAIL" != remove ];; *) exit 1;; esac\n');
@@ -447,7 +470,7 @@ describe("actual run grants", () => {
     await launch.finish(false);
   });
 
-  it("consumes the private tmux environment before exec without token text in argv or tracing", async () => {
+  it.skipIf(process.platform === "win32")("consumes the private tmux environment before exec without token text in argv or tracing", async () => {
     const f = run();
     const dir = mkdtempSync(join(tmpdir(), "run-grant-transfer-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));

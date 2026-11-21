@@ -9,6 +9,9 @@
 //   unknown   → failure, timeout or non-Codex output: refuse rather than start a possibly
 //               shared seat.
 
+import { resolveCodexCommand } from "./windows-provider-command.js";
+import { prepareWindowsJobProcess } from "./windows-job-process.js";
+
 export type CodexDaemonSupport =
   | { kind: "supported" }
   | { kind: "legacy" }
@@ -39,14 +42,19 @@ export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000,
     const { execFile } = await import("node:child_process");
     const { existsSync } = await import("node:fs");
     const home = seatHome ?? codexHome;
-    const env = { ...process.env, ...(launchPath ? { PATH: launchPath } : {}), ...(home ? { CODEX_HOME: home } : {}) };
+    const env = { ...process.env, ...(launchPath !== undefined ? { PATH: launchPath } : {}), ...(home ? { CODEX_HOME: home } : {}) };
+    const executable = resolveCodexCommand(env, cwd);
+    const launch = process.platform === "win32"
+      ? prepareWindowsJobProcess(executable.command, [...executable.prefix, "--help"], { cwd, env })
+      : { file: executable.command, args: [...executable.prefix, "--help"], options: { cwd, env }, dispose: () => {} };
     let deadline: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
       // execFile closes its pipes on timeout, but can report success if a wrapper
       // already exited zero while a descendant kept them open. Bound the decision
-      // separately; execFile still owns pipe/direct-child cleanup, not the whole tree.
+      // separately. Windows executes through the owning Job helper, so ending
+      // that helper also ends descendants; POSIX retains execFile cleanup.
       deadline = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
-      execFile("codex", ["--help"], { cwd, env, timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf-8" }, (error, stdout) => {
+      const child = execFile(launch.file, launch.args, { ...launch.options, timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf-8" }, (error, stdout) => {
         // Node reports a working directory that doesn't exist as `spawn codex ENOENT`, which reads as a missing Codex.
         const missingCwd = ((error as NodeJS.ErrnoException | null)?.code === "ENOENT" || /\bENOENT\b/.test(String(error?.message)))
           && !existsSync(cwd);
@@ -54,6 +62,7 @@ export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000,
           : missingCwd ? new Error(`the seat's working directory ${cwd} doesn't exist`) : error);
         else resolve(stdout);
       });
+      child?.once("close", launch.dispose);
     }).finally(() => clearTimeout(deadline));
   });
 }

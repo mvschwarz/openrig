@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { parseLinuxProcessArguments } from "./native-process-arguments.js";
+import { readWindowsProcessesStrict } from "./windows-process-table.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -10,8 +11,13 @@ const execFileAsync = promisify(execFile);
 export interface ProcessTableRow {
   pid: number;
   ppid: number;
-  pgid: number;
-  tpgid: number;
+  /** POSIX-only; absent on Windows. Never use a synthetic foreground group. */
+  pgid?: number;
+  tpgid?: number;
+  platform?: "win32";
+  /** An observed Windows PID/parent with unreadable runtime identity; not an omitted process. */
+  identityReadable?: false;
+  executablePath?: string;
   executableName: string;
   /** lstart, in local time: the identity half of pid + start time. */
   startedAt: string;
@@ -46,7 +52,8 @@ export function readProcessTable(): Promise<ProcessTableRow[]> {
 
 /** The same shared read, with the omissions relevant to a caller using absence as evidence. */
 export function readProcessTableCensus(): Promise<ProcessTableCensus> {
-  censusInFlight ??= (process.platform === "linux" ? readProcCensus(procRoot)
+  censusInFlight ??= (process.platform === "win32" ? readWindowsProcessesStrict().then(rows => ({ rows, permissionHiddenPids: [] }))
+    : process.platform === "linux" ? readProcCensus(procRoot)
     : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }))).finally(() => {
       censusInFlight = null;
       inFlight = null;
@@ -58,7 +65,8 @@ export function readProcessTableCensus(): Promise<ProcessTableCensus> {
  *  moment: a shared read still in flight may have listed its processes before a process started. Its permission-hidden
  *  pids are kept, so a caller using absence as evidence can tell it couldn't see every process. */
 export function readProcessTableCensusNow(): Promise<ProcessTableCensus> {
-  return process.platform === "linux" ? readProcCensus(procRoot)
+  return process.platform === "win32" ? readWindowsProcessesStrict().then(rows => ({ rows, permissionHiddenPids: [] }))
+    : process.platform === "linux" ? readProcCensus(procRoot)
     : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }));
 }
 

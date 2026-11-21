@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
+import path from "node:path";
 import { bundleCommand } from "../src/commands/bundle.js";
 import { upCommand } from "../src/commands/up.js";
 import { importGitHubBundle } from "../src/lib/bundle-source.js";
@@ -16,6 +17,7 @@ const view: BundleBehaviour = {
   schema: "openrig.bundle-behaviour/v1", state: "not_generated", reason: "legacy", localInspectCommand: "rig bundle inspect <archive> --json",
   identity: { source: null, configurationId: null, packageDigest: null, assembler: null, generator: { openrigVersion: "test" }, integrity: { digestValid: true, filesVerified: true } },
 };
+const preparedBundlePath = path.resolve("/retained/single.rigbundle");
 
 describe("prepared GitHub bundle view", () => {
   it.each(["up", "install", "inspect"])("%s uses one prepared archive and keeps JSON on one stdout result", async action => {
@@ -24,14 +26,14 @@ describe("prepared GitHub bundle view", () => {
     vi.spyOn(console, "error").mockImplementation(() => { events.push("header"); });
     const post = vi.fn(async (url: string, body: unknown) => {
       events.push(url);
-      expect(body).toMatchObject({ bundlePath: "/retained/single.rigbundle" });
+      expect(body).toMatchObject({ bundlePath: preparedBundlePath });
       if (url === "/api/bundles/inspect") return { status: 200, data: { manifest: {}, digestValid: true, integrityResult: { passed: true }, behaviour: view } };
       expect(url).toBe("/api/bundles/install");
       return { status: 201, data: { status: "completed", marker: "original result" } };
     });
     vi.mocked(importGitHubBundle).mockImplementation(async () => {
       events.push("prepare");
-      return { client: { post }, bundlePath: "/retained/single.rigbundle", res: { status: 201, data: { archiveHash: "same" } } } as never;
+      return { client: { post }, bundlePath: preparedBundlePath, res: { status: 201, data: { archiveHash: "same" } } } as never;
     });
     const deps = { clientFactory: () => { throw new Error("must reuse prepared client"); }, lifecycleDeps: {} } as unknown as StatusDeps;
     const program = new Command().exitOverride();

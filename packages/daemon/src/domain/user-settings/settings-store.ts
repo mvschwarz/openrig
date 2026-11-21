@@ -15,7 +15,9 @@
 // resolveWorkspacePaths) project the raw strings into structured data
 // the daemon's UEP routes + Slice Story View consume.
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, rmdirSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync, realpathSync } from "node:fs";
+import { createWindowsPrivateDirectory } from "../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -653,6 +655,14 @@ function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): s
     case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
     default: return "";
   }
+}
+
+function matchesLegacyWorkspaceDefault(value: unknown, expected: string): boolean {
+  if (value === expected) return true;
+  if (process.platform !== "win32" || typeof value !== "string") return false;
+  if (path.normalize(value) === path.normalize(expected)) return true;
+  try { return realpathSync.native(value) === realpathSync.native(expected); }
+  catch { return false; }
 }
 
 function deriveLegacyWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): string | null {
@@ -1315,7 +1325,7 @@ export class SettingsStore {
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
       const legacyDefault = deriveLegacyWorkspaceDefault(key, wr);
-      if (legacyDefault !== null && fileVal === legacyDefault) {
+      if (legacyDefault !== null && matchesLegacyWorkspaceDefault(fileVal, legacyDefault)) {
         return { value: defaultValue, source: "default", defaultValue };
       }
       // Validate the file-source value too. Hand-edited config.json
@@ -1421,10 +1431,15 @@ export class SettingsStore {
     // Match direct writes: a writable directory must not bypass a read-only
     // target. Opening without truncation also checks native ACL permissions.
     if (existing) closeSync(openSync(target, "r+"));
-    const temporary = `${target}.tmp-${randomUUID()}`;
+    let stagingDirectory: string | undefined;
+    let temporary = path.join(path.dirname(target), `.openrig.tmp-${randomUUID()}`);
     let owned = false;
     let canFallBack = true;
     try {
+      if (existing && process.platform === "win32") {
+        stagingDirectory = createWindowsPrivateDirectory(path.dirname(target));
+        temporary = path.join(stagingDirectory, `.openrig.tmp-${randomUUID()}`);
+      }
       // Atomic replacement requires directory create/rename permission. Keep
       // staged bytes private until the original ownership and mode are restored.
       const fd = openSync(temporary, "wx", 0o600);
@@ -1445,7 +1460,10 @@ export class SettingsStore {
       }
       // chown may clear permission bits, so apply the final mode afterward.
       chmodSync(temporary, existing ? existing.mode & 0o777 : 0o666 & ~process.umask());
-      renameSync(temporary, target);
+      if (existing && process.platform === "win32") {
+        canFallBack = false;
+        replaceWindowsFilePreservingMetadata(target, temporary);
+      } else renameSync(temporary, target);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (canFallBack && (code === "EACCES" || code === "EPERM" || code === "EBUSY")) {
@@ -1457,6 +1475,7 @@ export class SettingsStore {
       throw error;
     } finally {
       if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
+      if (stagingDirectory) try { rmdirSync(stagingDirectory); } catch { /* Retain owned staging if cleanup is unavailable. */ }
     }
   }
 

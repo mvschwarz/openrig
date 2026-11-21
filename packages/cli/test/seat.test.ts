@@ -241,6 +241,8 @@ describe("seat typing guard commands", () => {
     expect(await status({ state: "not_applied", requested: { memoryMax: 16777216 + 2 ** 30 },
       reason: "the seat is not running; the limit applies at its next fresh launch" }))
       .toContain("Process limits: memory_max 1040M: requested, not applied; the seat is not running; the limit applies at its next fresh launch");
+    expect(await status({ state: "applied", requested: { memoryMax: 268435456 }, memoryMax: "268435456", memoryAccounting: "job_commit" }))
+      .toContain("Process limits: memory_max 256M: applied (Windows Job committed-memory limit 268435456 bytes; accounting differs from Linux cgroup memory)");
   });
 
   it("prints the daemon's managed restore delivery failure", async () => {

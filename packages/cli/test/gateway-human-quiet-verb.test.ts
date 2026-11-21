@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // `rig gateway human quiet set|end|clear|show` and the quiet line in `rig gateway human list`. The verbs talk to a
 // recording stub daemon over real HTTP; list's quiet and readiness lookups are injected or served by the same stub.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -40,7 +41,7 @@ describe("rig gateway human quiet", () => {
         res.end(JSON.stringify(reply.body));
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     prevUrl = process.env.OPENRIG_URL; process.env.OPENRIG_URL = url;
     allowFetchTarget(url);

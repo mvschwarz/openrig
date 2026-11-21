@@ -133,7 +133,7 @@ export class Reconciler {
 export async function recordedProcessStillRunning(
   db: Database.Database,
   session: { nodeId: string; sessionName: string },
-  processes: () => Promise<Array<Pick<ProcessTableRow, "pid" | "ppid" | "command" | "startedAt">> | null>,
+  processes: () => Promise<Array<Pick<ProcessTableRow, "pid" | "ppid" | "command" | "startedAt" | "platform">> | null>,
 ): Promise<{ pid: number; parent: { pid: number; command: string } | null } | null> {
   const evidence = new SeatIdentityStore(db).getProcessEvidence(session.nodeId);
   if (!evidence || evidence.sessionName !== session.sessionName) return null;
@@ -145,8 +145,8 @@ export async function recordedProcessStillRunning(
   if (!rows) return null;
   for (const pid of pids) {
     const row = rows.find((r) => r.pid === pid);
-    const started = row ? lstartToMinTs(row.startedAt) : undefined;
-    if (!row || started === undefined || started > observedAt) continue;
+    const started = row?.platform === "win32" ? Date.parse(row.startedAt) / 1000 : row ? lstartToMinTs(row.startedAt) : undefined;
+    if (!row || started === undefined || !Number.isFinite(started) || started > observedAt) continue;
     const parent = rows.find((r) => r.pid === row.ppid);
     return { pid, parent: parent ? { pid: parent.pid, command: parent.command } : null };
   }
@@ -187,7 +187,7 @@ export async function recordedProcessEnded(
   return pids.every((pid) => {
     const row = table.rows.find((r) => r.pid === pid);
     if (!row) return true;
-    const started = lstartToMinTs(row.startedAt);
-    return started !== undefined && started > observedAt;
+    const started = row.platform === "win32" ? Date.parse(row.startedAt) / 1000 : lstartToMinTs(row.startedAt);
+    return started !== undefined && Number.isFinite(started) && started > observedAt;
   });
 }

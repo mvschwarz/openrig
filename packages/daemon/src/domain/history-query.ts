@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { sliceWhole } from "./text-cut.js";
@@ -6,7 +6,7 @@ import { sliceWhole } from "./text-cut.js";
 export type ExecDep = (cmd: string, args: string[]) => Promise<{ stdout: string; exitCode: number }>;
 
 export interface SearchResult {
-  backend: "rg" | "grep" | "none";
+  backend: "rg" | "grep" | "read" | "none";
   excerpts: string[];
   insufficient: boolean;
   noTranscriptDir?: boolean;
@@ -55,7 +55,7 @@ interface HistoryQueryOpts {
 }
 
 export interface SessionSearchResult {
-  backend: "rg" | "grep" | "none";
+  backend: "rg" | "grep" | "read" | "none";
   token: string;
   found: boolean;
   path?: string;
@@ -225,6 +225,13 @@ export class HistoryQuery {
       return { backend: "grep", token: sessionToken, found: true, path: filePath, sizeBytes, excerpts, insufficient: excerpts.length === 0, advisory };
     }
 
+    if (process.platform === "win32") {
+      try {
+        const excerpts = (await this.readMatches([filePath], pattern)).map(line => truncateExcerpt(line));
+        return { backend: "read", token: sessionToken, found: true, path: filePath, sizeBytes, excerpts, insufficient: excerpts.length === 0, advisory };
+      } catch { /* retain an explicit unreadable result below */ }
+    }
+
     return {
       backend: "none",
       token: sessionToken,
@@ -234,7 +241,7 @@ export class HistoryQuery {
       excerpts: [],
       insufficient: true,
       advisory,
-      degraded: { reason: "unreadable", message: "Search backends (rg, grep) both failed on the session JSONL." },
+      degraded: { reason: "unreadable", message: "Available search backends failed on the session JSONL." },
     };
   }
 
@@ -262,7 +269,11 @@ export class HistoryQuery {
     }
 
     // rg failed (exit code >= 2), fall back to grep
-    const logFiles = this.getLogFiles(rigDir);
+    let logFiles: string[];
+    try { logFiles = this.getLogFiles(rigDir); }
+    catch {
+      return { backend: "none", excerpts: [], insufficient: true, error: "Transcript directory could not be listed. Check that it is a readable directory." };
+    }
     if (logFiles.length === 0) {
       return { backend: "grep", excerpts: [], insufficient: true };
     }
@@ -273,6 +284,15 @@ export class HistoryQuery {
     if (grepResult.exitCode === 0 || grepResult.exitCode === 1) {
       const excerpts = this.parseExcerpts(grepResult.stdout);
       return { backend: "grep", excerpts, insufficient: excerpts.length === 0 };
+    }
+
+    if (process.platform === "win32") {
+      try {
+        const excerpts = await this.readMatches(logFiles, pattern);
+        return { backend: "read", excerpts, insufficient: excerpts.length === 0 };
+      } catch {
+        return { backend: "none", excerpts: [], insufficient: true, error: "Search tools and native transcript reading failed. Check transcript access." };
+      }
     }
 
     // Both backends failed (exit code 2+) — honest error
@@ -380,6 +400,32 @@ export class HistoryQuery {
       .filter((line) => line !== "");
   }
 
+  /** Windows ships neither rg nor grep. Stream the same explicit files instead
+   * of treating missing optional tools as proof of absent conversation. */
+  private async readMatches(files: string[], pattern: string): Promise<string[]> {
+    const match = new RegExp(pattern, "i"), excerpts: string[] = [];
+    const append = (line: string) => {
+      if (!match.test(line)) return;
+      const text = stripAnsi(line).trim();
+      if (text) excerpts.push(text);
+    };
+    for (const file of files) {
+      const input = createReadStream(file, { encoding: "utf8" });
+      let pending = "";
+      try {
+        for await (const chunk of input) {
+          pending += chunk;
+          let newline: number;
+          while ((newline = pending.indexOf("\n")) >= 0) {
+            append(pending.slice(0, newline)); pending = pending.slice(newline + 1);
+          }
+        }
+        if (pending) append(pending);
+      } finally { input.destroy(); }
+    }
+    return excerpts;
+  }
+
   searchChat(rigId: string, question: string): ChatSearchResult[] {
     if (!this.chatSearchFn) return [];
     const keywords = extractLiteralKeywords(question);
@@ -389,12 +435,8 @@ export class HistoryQuery {
   }
 
   private getLogFiles(dir: string): string[] {
-    try {
-      return readdirSync(dir)
-        .filter((f) => f.endsWith(".log"))
-        .map((f) => join(dir, f));
-    } catch {
-      return [];
-    }
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".log"))
+      .map((f) => join(dir, f));
   }
 }

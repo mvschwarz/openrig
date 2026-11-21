@@ -187,6 +187,30 @@ it("does not carry a stale working frame into a replacement occupant", async () 
   expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
 });
 
+it.each([
+  { name: "the verified session and PID", frameSession: "worker@fixture", framePid: 4100, expected: "working" },
+  { name: "another session with the same pane and PID", frameSession: "other@fixture", framePid: 4100, expected: "idle-at-prompt" },
+  { name: "the same session with another pane process", frameSession: "worker@fixture", framePid: 4200, expected: "idle-at-prompt" },
+])("accepts only the qualified psmux pane from $name", async ({ frameSession, framePid, expected }) => {
+  let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
+  const session = "worker@fixture", node = "node-fixture";
+  const scoped = (s: string) => `psmux:${Buffer.from(s).toString("base64url")}:%1`;
+  const structural = new SeatStructuralActivityService({ capturePaneContent: async () => null } as never, () => new Date(time));
+  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => time / 1000 - 60 },
+    defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
+  oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  oracle.recordCodexOccupant(node, { paneId: scoped(session), pid: 4100 });
+  for (let i = 0; i < 2; i++) {
+    const capturedAt = new Date(time);
+    const text = screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`)
+      .replace("\n› Ask Codex", "\n• Edited files\n\n› Ask Codex");
+    await structural.pollSeat(session, new Map([[session, { text, capturedAt, pane: { id: scoped(frameSession), pid: framePid } }]]), "codex", null, capturedAt);
+    await oracle.pollSeat(session);
+    time += 1000; elapsed++;
+  }
+  expect(oracle.getSeatState(node)?.activity).toBe(expected);
+});
+
 it("does not compare a new occupant's counter with the predecessor's frame", async () => {
   let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
   const session = "worker@fixture", node = "node-fixture";

@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { extname, isAbsolute, join } from "node:path";
+import { extname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { ATOM_TAXONOMIES, TAXONOMY_TEACHING } from "@openrig/daemon/context-pack-taxonomy";
+import { ATOM_TAXONOMIES, TAXONOMY_TEACHING, validateSafePath } from "@openrig/daemon/context-pack-taxonomy";
 
 // Slice-03 Atom 2 — mirror the daemon's per-segment ref contract at the
 // local install boundary. This must run before creating the context store.
@@ -122,8 +122,9 @@ export function validateContextPackManifestForInstall(manifestPath: string): voi
     if (typeof relPath !== "string" || relPath.length === 0) {
       throw new Error(`manifest at ${manifestPath} files[${i}] missing 'path' (string)`);
     }
-    if (relPath.split(/[\\/]/).includes("..") || isAbsolute(relPath) || relPath.startsWith("\\")) {
-      throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' must be a relative path inside the pack (no '..' segments, no leading '/')`);
+    const pathError = validateSafePath(relPath, "pack file");
+    if (pathError !== null) {
+      throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' must be a relative path inside the pack: ${pathError}`);
     }
     if (!ALLOWED_CONTEXT_PACK_SUFFIXES.has(extname(relPath))) {
       throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' has an unsupported suffix; allowed: ${Array.from(ALLOWED_CONTEXT_PACK_SUFFIXES).join(", ")}`);

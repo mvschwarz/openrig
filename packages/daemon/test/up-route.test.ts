@@ -999,6 +999,10 @@ edges: []
   //     without needing the full daemon harness.
 
   describe("OPR.0.3.2.CT BLOCKER-2: HG-4 3-part error shape", () => {
+    // Native Windows always sends the exact-match `=<name>` target; POSIX passes an ordinary name
+    // through tmuxSessionWord, which prefixes `=` only for a name that is already a target expression.
+    const exactTarget = (name: string): string => (process.platform === "win32" ? `=${name}` : name);
+
     it("returns null when no import_rig stage is blocked/attention_required (normal partial path)", () => {
       const result = {
         rigId: "rig-1",
@@ -1021,8 +1025,8 @@ edges: []
     });
 
     it.each([
-      { server: [], attach: "tmux attach -t dev-impl@conveyor" },
-      { server: ["-S", "/private/selected socket"], attach: "tmux -S '/private/selected socket' attach -t dev-impl@conveyor" },
+      { server: [], attach: `tmux attach -t ${exactTarget("dev-impl@conveyor")}` },
+      { server: ["-S", "/private/selected socket"], attach: `tmux -S '/private/selected socket' attach -t ${exactTarget("dev-impl@conveyor")}` },
     ])("HG-4: blocked + attention_required includes the effective attachment: $attach", ({ server, attach }) => {
       setDaemonTmuxServer(server);
       const result = {
@@ -1079,9 +1083,9 @@ edges: []
       // Plural phrasing
       expect(r!.error.action).toMatch(/^Inspect each affected session/);
       // First 3 hints listed
-      expect(r!.error.action).toContain("tmux attach -t dev-impl@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t dev-qa@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t dev-review@conveyor");
+      expect(r!.error.action).toContain(`tmux attach -t ${exactTarget("dev-impl@conveyor")}`);
+      expect(r!.error.action).toContain(`tmux attach -t ${exactTarget("dev-qa@conveyor")}`);
+      expect(r!.error.action).toContain(`tmux attach -t ${exactTarget("dev-review@conveyor")}`);
       expect(r!.attentionNodes).toHaveLength(3);
     });
 
@@ -1108,9 +1112,9 @@ edges: []
       const r = buildAttentionResponse(result);
       expect(r).not.toBeNull();
       expect(r!.error.action).toMatch(/^Inspect each affected session listed in attentionNodes/);
-      expect(r!.error.action).toContain("tmux attach -t intake-lead@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t plan-planner@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t build-builder@conveyor");
+      expect(r!.error.action).toContain(`tmux attach -t ${exactTarget("intake-lead@conveyor")}`);
+      expect(r!.error.action).toContain(`tmux attach -t ${exactTarget("plan-planner@conveyor")}`);
+      expect(r!.error.action).toContain(`tmux attach -t ${exactTarget("build-builder@conveyor")}`);
       expect(r!.error.action).toContain("plus 1 more listed in attentionNodes");
       expect(r!.error.action).not.toContain("review-reviewer@conveyor");
       expect(r!.attentionNodes).toHaveLength(4);
@@ -1265,7 +1269,7 @@ edges: []
         expect(body.error.fact).toMatch(/require[s]? attention/i);
         expect(body.error.consequence).toMatch(/rig-stub-1/);
         expect(body.error.consequence).toMatch(/rig ps/);
-        expect(body.error.action).toMatch(/tmux attach -t dev-impl@conveyor-attention-route-test/);
+        expect(body.error.action).toMatch(/tmux attach -t =dev-impl@conveyor-attention-route-test/);
         expect(body.error.action).not.toMatch(/rig setup --cwd/);
         // attentionNodes array carried through to operator
         expect(body.attentionNodes).toBeInstanceOf(Array);

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import fs from "node:fs";
@@ -56,7 +57,7 @@ describe("rig provider moves", () => {
         res.end(JSON.stringify(answer.body));
       });
     });
-    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    await listenOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
