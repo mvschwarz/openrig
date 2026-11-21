@@ -23,6 +23,7 @@ import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { withWatchdogReceipts } from "../src/domain/watchdog-delivery-receipts.js";
 import { diagnoseSeatParked } from "../src/domain/parked-query.js";
 
 // S03 R25 RED-FIRST fixture: this is the contract shape migration 073 will ship.
@@ -1438,6 +1439,65 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     repo.recordWatchdogWakeAttempt(timer.ref, "failed:duplicate watchdog callback");
     await repo.drainPendingWakeIntents();
     expect(sent).toHaveLength(3);
+  });
+
+  it("#3704 — a due provider-limit timer resolves its blocker on the first evaluation, with no input attempt", async () => {
+    repo.attachWatchdogJobsRepository(jobs);
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system",
+      destinationSession: "wake-ladder@rig",
+      body: "provider limit for one account pool",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"],
+      nudge: false,
+    });
+    repo.update({
+      qitemId: blocker.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: "external:provider-limit:claude:local",
+      transitionNote: "usage-limit park until stated reset", wakeAfterSeconds: 60,
+    } as never);
+    const timer = repo.getParkWakeStatus(blocker.qitemId)!;
+    const dependent = await item("worker-1@rig");
+    repo.update({
+      qitemId: dependent.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: blocker.qitemId, transitionNote: "usage-limit park on the shared provider/account timer",
+    });
+
+    // `wake-ladder@rig` is no seat: the delivery guard refuses it before any input is written.
+    const send = vi.fn(async () => ({ status: "failed" as const, inputPhase: "not_reached" as const,
+      error: "Cannot establish managed input target wake-ladder@rig; no input written." }));
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus: bus,
+      deliver: withWatchdogReceipts(send, { outbox: new OutboxHandler(db), retryIntervalSeconds: 300, retryCap: 3 }),
+      resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      fireWithoutDelivery: ({ jobId }) => repo.fireUsageLimitTimerWithoutDelivery(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus, retryAt }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt),
+    });
+
+    const result = await engine.evaluate(jobs.getByIdOrThrow(timer.ref));
+    await repo.drainPendingWakeIntents();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result.outcome).toEqual({ action: "terminal", reason: "usage_limit_expiry_fired" });
+    expect(jobs.getById(timer.ref)).toMatchObject({ state: "terminal", terminalReason: "usage_limit_expiry_fired" });
+    expect(repo.getById(blocker.qitemId)?.state).toBe("done");
+    expect(repo.getById(dependent.qitemId)?.state).toBe("pending");
+  });
+
+  it("#3704 — a provider-limit timer that also wakes a row that isn't a blocker keeps its send path", async () => {
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system", destinationSession: "wake-ladder@rig", body: "provider limit",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"], nudge: false,
+    });
+    repo.update({ qitemId: blocker.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: "external:provider-limit:claude:local", transitionNote: "usage-limit park", wakeAfterSeconds: 60 } as never);
+    const ref = repo.getParkWakeStatus(blocker.qitemId)!.ref;
+    const attached = await item("wake-ladder@rig");
+    repo.update({ qitemId: attached.qitemId, actorSession: "wake-ladder@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "shared park", wakeWatchdogId: ref } as never);
+
+    expect(repo.fireUsageLimitTimerWithoutDelivery(ref)).toBeNull();
+    expect(jobs.getById(ref)?.state).toBe("active");
+    expect(repo.getById(blocker.qitemId)?.state).toBe("blocked");
   });
 
   it("S16 initializes its timer baseline so it becomes due at the projected expiry, never immediately", async () => {
