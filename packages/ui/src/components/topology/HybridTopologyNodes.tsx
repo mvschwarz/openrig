@@ -19,6 +19,7 @@ import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { formatRuntimeModel } from "../../lib/runtime-brand.js";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
+import { CopySessionNameButton } from "../CopySessionNameButton.js";
 import { useSelectedHostId } from "../../hooks/useHosts.js";
 import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 
@@ -185,6 +186,13 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           aria-label={`activity: ${activityLabel}${timeInState ? ` ${timeInState.label}` : ""}${activitySource !== "hook" && activitySource !== "none" ? " (activity-grade)" : ""}`}
         />
       </div>
+      {data.canonicalSessionName ? (
+        <CopySessionNameButton
+          sessionName={data.canonicalSessionName}
+          testId={`hybrid-copy-session-name-${data.logicalId}`}
+          className={cn("absolute right-[3.625rem] top-6 z-20", hoverIconClass)}
+        />
+      ) : null}
       {data.rigId && !nodeIsRemote ? (
         <TerminalPreviewPopover
           rigId={data.rigId}
