@@ -1096,12 +1096,16 @@ export class SeatActivityService {
     const chrome = this.latestByRung(seat, "needs-input-chrome");
     const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
     const selfEv = this.latestByRung(seat, "self-report");
+    // A known held limit outranks the seat's own status for needs-input, as its hook evidence does live: Claude's status
+    // reads "waiting" at the limit's own menu, which isn't a person's question. After a restart the limit is held with no
+    // hook evidence yet, so without this the menu read as needs-input. A limit that couldn't be read back (unread) leaves
+    // the status in charge, so a real question isn't hidden.
     const decider =
       chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative"
         ? chrome
         : hooksEv?.needsInput && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
           ? hooksEv
-          : selfEv?.needsInput && this.rungTrust(seat, "self-report") === "authoritative"
+          : selfEv?.needsInput && this.rungTrust(seat, "self-report") === "authoritative" && !usageLimit
             ? selfEv
             : null;
     const confirmedCount = [...seat.permissions.values()].filter(p => p.confirmed).length;
