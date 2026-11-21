@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -35,6 +35,8 @@ import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { pruneWatchdogHistory } from "../src/domain/queue-retention.js";
+import { queueRecoveryOwnedAmong, queueRecoveryOwnsWake, RECOVERY_INDEX_MIN_ROWS } from "../src/domain/queue-wake-ladder.js";
+import { RECOVERY_INDEX_SQL, recoveryTag } from "../src/domain/queue-recovery.js";
 
 const RIG = "test-rig";
 const SEAT = `dev-planner@${RIG}`;
@@ -1139,6 +1141,7 @@ describe("a wake escalation about the seat's own prompt is not that seat's work"
       appendNote: (q, note) => { repo.update({ qitemId: q, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
       recordNudgeResult: (q, result) => repo.recordNudgeAttempt(q, result),
       listOpenIds: (dest) => repo.listOpenObligations(dest, 500).map((r) => r.qitemId),
+      recoveryOwnedAmong: (ids) => queueRecoveryOwnedAmong(db, ids, (id) => repo.getById(id, { waiting: false })),
     };
     const policy = makeParkedOwnerConsumerPolicy({ diagnoseRig: () => diagnosis as never, history: { listForJob: () => [], countForJob: () => 0 },
       rows, occupantGeneration: () => "gen-1", now: () => NOW });
@@ -1210,5 +1213,45 @@ describe("#3315 a parked owner on a tmux server the daemon can't reach", () => {
     expect(store.nudges).toEqual([]);
     gone = false;
     expect((await policy().evaluate(makeJob())).action).toBe("send");
+  });
+});
+
+// The recheck's batch custody read (what startup wires) must answer what the per-row check answers, on both sides of
+// the index threshold: a recheck that missed a recovery-owned row would wake a seat for a row its ladder already owns.
+describe("queueRecoveryOwnedAmong answers the per-row recovery custody check", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true } as never);
+  });
+  afterEach(() => db.close());
+
+  const indexBuilds = <T>(run: () => T): { value: T; builds: number } => {
+    const prepare = db.prepare.bind(db);
+    let builds = 0;
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => { if (sql === RECOVERY_INDEX_SQL) builds++; return prepare(sql); });
+    try { return { value: run(), builds }; } finally { spy.mockRestore(); }
+  };
+
+  it.each([
+    { rows: 3, builds: 0, index: "no index build" },
+    { rows: 5, builds: 1, index: "one index build" },
+  ])("$rows open rows, one of them with an open recovery row: the same set as the per-row check, $index", async ({ rows, builds }) => {
+    expect(rows < RECOVERY_INDEX_MIN_ROWS).toBe(builds === 0);
+    const ids: string[] = [];
+    for (let i = 0; i < rows; i++) {
+      ids.push((await repo.create({ sourceSession: "sender@r", destinationSession: SEAT, body: `obligation ${i}`, nudge: false })).qitemId);
+    }
+    const owned = ids[1]!;
+    await repo.create({ sourceSession: "sender@r", destinationSession: SEAT2, body: "recovery", tags: [recoveryTag(owned)], nudge: false });
+
+    const perRow = new Set(ids.filter((id) => queueRecoveryOwnsWake(db, repo.getById(id))));
+    const batch = indexBuilds(() => queueRecoveryOwnedAmong(db, ids, (id) => repo.getById(id, { waiting: false })));
+    expect(perRow).toEqual(new Set([owned]));
+    expect(batch.value).toEqual(perRow);
+    expect(batch.builds).toBe(builds);
   });
 });
