@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { planAssignment, type AssignmentPlanInput, type PlanSeatFacts } from "../src/domain/provider/assignment-plan.js";
 import type { AccountRef } from "../src/domain/provider/provider-account-refs.js";
-import type { PrecheckResult } from "../src/domain/provider/provider-types.js";
+import type { PlanCheck } from "../src/domain/provider/assignment-plan.js";
 
 // #3625 slice 2: the plan's rules, over plain seat facts and a stand-in precheck.
 
@@ -18,9 +18,9 @@ function seat(session: string, over: Partial<PlanSeatFacts> = {}): PlanSeatFacts
     ...over,
   };
 }
-const SAFE: PrecheckResult = { safe: true };
+const SAFE: PlanCheck = { safe: true };
 
-function plan(input: Partial<AssignmentPlanInput> & Pick<AssignmentPlanInput, "account" | "seats">, precheck = vi.fn(async (): Promise<PrecheckResult> => SAFE)) {
+function plan(input: Partial<AssignmentPlanInput> & Pick<AssignmentPlanInput, "account" | "seats">, precheck = vi.fn(async (_s: PlanSeatFacts): Promise<PlanCheck> => SAFE)) {
   return { result: planAssignment({ daemon: "host-a", rig: "fleet", includeOverrides: false, platform: "linux", ...input }, precheck), precheck };
 }
 
@@ -79,6 +79,10 @@ describe("the assignment plan", () => {
     const p = await plan({ account: CLAUDE, seats: [seat("up@fleet"), seat("down@fleet", { running: false })] }).result;
     expect(p.rows[0]!.continuity).toBe("in place: the seat is relaunched in its own pane and keeps its conversation");
     expect(p.rows[1]!.continuity).toMatch(/^next launch: the reference is saved now/);
+    // The precheck decides: a stopped seat whose next launch wouldn't resume its conversation doesn't claim it would.
+    const stuck = await plan({ account: CLAUDE, seats: [seat("down@fleet", { running: false })] },
+      vi.fn(async (): Promise<PlanCheck> => ({ safe: false, reasons: ["conversation_not_resumable"] }))).result;
+    expect(stuck.rows[0]!.continuity).toBe("not resumable: the precheck found no conversation the seat's next launch would resume");
     const unknown = await plan({ account: CLAUDE, seats: [seat("q@fleet", { running: null })] }).result;
     expect(unknown.rows[0]!.continuity).toBe("unknown: the daemon can't tell whether the seat is running, so whether it keeps its conversation in place or at its next launch");
   });
@@ -91,6 +95,16 @@ describe("the assignment plan", () => {
     const prepared = await plan({ account: CODEX, seats, platform: "darwin", accountHome: "/prepared/home" }).result;
     expect(prepared.rows[0]!.continuity).toBe("fresh successor with handover, on /prepared/home");
     expect(prepared.accountHome).toBe("/prepared/home");
+    expect(prepared.rows[0]!.notes).toEqual(["not checked: whether /prepared/home is signed in as team; the successor uses the login active in that home"]);
+    // Its check is the one the service hands in (the account-home dry run), and its verdict is shown as is.
+    const refused = await plan({ account: CODEX, seats, platform: "darwin", accountHome: "/prepared/home" },
+      vi.fn(async (): Promise<PlanCheck> => ({ safe: false, reasons: ["runtime_switch_unsupported"], message: "only a single-pane seat can" }))).result;
+    expect(refused.rows[0]!.precheck).toEqual({ safe: false, reasons: ["runtime_switch_unsupported"], message: "only a single-pane seat can" });
+    // Homes are compared resolved: the same directory written another way is the same home.
+    const slash = await plan({ account: CODEX, seats: [seat("e@fleet", { runtime: "codex", codexHome: "/homes/a/" })],
+      resolveHome: (h) => h.replace(/\/+$/, "") }).result;
+    expect(slash.rows[0]!.continuity).toBe("in place: the seat restarts on the same conversation");
+    expect(slash.codexHomes.map((h) => h.seats.map((x) => x.seat))).toEqual([["e@fleet"]]);
     // A seat on another home can't take this home's login in place.
     const elsewhere = await plan({ account: CODEX, seats: [seat("d@fleet", { runtime: "codex", codexHome: "/homes/b" })] }).result;
     expect(elsewhere.rows[0]!.continuity).toBe("unsupported in place: the seat runs on /homes/b, and this login is saved in /homes/a");
@@ -110,6 +124,16 @@ describe("the assignment plan", () => {
       { seat: "c2@fleet", rig: "fleet", effect: "would restart" },
       { seat: "peer@other", rig: "other", effect: "not restarted; needs rig seat restart peer@other" },
     ] }]);
+    // A seat's own choice can't keep it off a home that switches: it moves with the home, and the row says so.
+    const reg = { source: "registry" as const, profileRef: "other", recordedAt: "t", profileSaved: true };
+    const moved = await plan({ account: CODEX, seats: [seat("c1@fleet", { runtime: "codex" }), seat("own@fleet", { runtime: "codex", configured: reg }),
+      seat("on@fleet", { runtime: "codex", configured: { ...reg, profileRef: "team" } })] }).result;
+    expect(moved.rows.map((r) => [r.seat, r.effect])).toEqual([["c1@fleet", "change"], ["own@fleet", "change"], ["on@fleet", "unchanged"]]);
+    expect(moved.rows[1]).toMatchObject({ override: "the saved login other (seat registry)",
+      notes: ["moves with its home: the switch makes team the active login of /homes/a, which this seat runs on, so its own choice can't be kept"] });
+    expect(moved.rows[2]!.notes).toEqual(["already on team; moves with its home: the switch makes team the active login of /homes/a, which this seat runs on, so it restarts with it"]);
+    // With nothing else switching that home, the choice is kept.
+    expect((await plan({ account: CODEX, seats: [seat("own@fleet", { runtime: "codex", configured: reg })] }).result).rows[0]!.effect).toBe("kept_override");
     // Moving to a named account home changes no shared home.
     expect((await plan({ account: CODEX, seats: [seat("c1@fleet", { runtime: "codex" })], accountHome: "/prepared" }).result).codexHomes).toEqual([]);
     // Nothing switches in place on macOS, so no home is switched and nothing restarts.
@@ -121,7 +145,7 @@ describe("the assignment plan", () => {
   });
 
   it("shows the precheck's verdict and reasons, and a busy seat as a note, not a refusal", async () => {
-    const precheck = vi.fn(async (s: PlanSeatFacts): Promise<PrecheckResult> => s.session === "bad@fleet"
+    const precheck = vi.fn(async (s: PlanSeatFacts): Promise<PlanCheck> => s.session === "bad@fleet"
       ? { safe: false, reasons: ["credential_outranks_token"], message: "ANTHROPIC_API_KEY would be used instead" } : SAFE);
     const p = await plan({ account: CLAUDE, seats: [seat("bad@fleet"), seat("busy@fleet", { activity: "running" })] }, precheck).result;
     expect(p.rows[0]!.precheck).toEqual({ safe: false, reasons: ["credential_outranks_token"], message: "ANTHROPIC_API_KEY would be used instead" });

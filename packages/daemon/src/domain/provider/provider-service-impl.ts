@@ -36,7 +36,7 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
-import { planAssignment, type PlanSeatFacts } from "./assignment-plan.js";
+import { planAssignment, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
 import { accountRefProblem, ProviderAccountRefsRepository, type AccountRef } from "./provider-account-refs.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
@@ -242,7 +242,8 @@ export class ProviderServiceImpl implements ProviderService {
 
   /** #3625: the plan for moving a rig's seats of one provider to an account this daemon knows by label. Read only: the
    *  per-seat precheck it runs reads the seat (a Codex seat's restart plan stops nothing). */
-  async assignmentPlan(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<AssignmentPlanResult> {
+  async assignmentPlan(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch,
+    successorCheck?: (seat: string, accountHome: string) => Promise<PlanCheck>): Promise<AssignmentPlanResult> {
     const account = new ProviderAccountRefsRepository(this.deps.db).get(input.provider, input.label);
     if (!account) {
       return { ok: false, code: "unknown_account", message: `There's no ${input.provider} account labelled ${input.label} on this daemon (rig provider account list --provider ${input.provider} lists them).` };
@@ -276,8 +277,13 @@ export class ProviderServiceImpl implements ProviderService {
       };
     });
     const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
-      ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform },
-    (seat) => this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat));
+      ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
+      resolveHome: (home) => { try { return fs.realpathSync(home); } catch { return nodePath.resolve(home); } } },
+    // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
+    (seat) => input.accountHome && account.provider === "codex"
+      ? successorCheck ? successorCheck(seat.session, input.accountHome)
+        : Promise.resolve({ safe: false, reasons: ["successor_not_checked"], message: "The account-home dry run isn't available here, so the move wasn't checked." })
+      : this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat));
     return { ok: true, plan };
   }
 

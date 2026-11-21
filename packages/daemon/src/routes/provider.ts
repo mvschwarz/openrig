@@ -370,7 +370,16 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "accountHome is a prepared Codex home: an absolute path, with provider codex" }, 400);
     }
     const result = await svc.assignmentPlan({ rig, provider: provider as AccountRefProvider, label, includeOverrides: c.req.query("includeOverrides") === "1",
-      ...(accountHome !== undefined ? { accountHome } : {}), daemon: getSelfHostId() ?? LOCAL_HOST_ID }, seatRestartOf(c), claudeSeatOf(c));
+      ...(accountHome !== undefined ? { accountHome } : {}), daemon: getSelfHostId() ?? LOCAL_HOST_ID }, seatRestartOf(c), claudeSeatOf(c),
+    // The same dry run `rig provider switch --account-home --dry-run` uses: every gate, nothing started or stored.
+    async (seat, home) => {
+      try {
+        const result = await runtimeSwitchService(c).setRuntime({ seatRef: seat, runtime: "codex", accountHome: home, reason: "assignment plan", dryRun: true });
+        return result.ok ? { safe: true } : { safe: false, reasons: [result.code], message: result.message };
+      } catch (err) {
+        return { safe: false, reasons: ["successor_not_checked"], message: `The account-home dry run couldn't run (${err instanceof Error ? err.message : String(err)}), so the move wasn't checked.` };
+      }
+    });
     return c.json(result, result.ok ? 200 : result.code === "reference_unusable" ? 409 : 404);
   });
 

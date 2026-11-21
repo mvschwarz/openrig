@@ -7,6 +7,9 @@ import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { providerRoutes } from "../src/routes/provider.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
 import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
 import type { SeatRestart } from "../src/domain/provider/provider-service.js";
@@ -84,6 +87,22 @@ describe("the daemon's assignment plan", () => {
     ] }]);
   });
 
+  it("a move to a prepared home is checked by the account-home dry run it's handed, not the in-place precheck", async () => {
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
+    seat("fleet", "c1", "codex", "c1@fleet");
+    const restartPlan = vi.fn<SeatRestart["plan"]>();
+    const dryRun = vi.fn(async () => ({ safe: false as const, reasons: ["runtime_switch_unsupported"], message: "one pane only" }));
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: false, accountHome: "/prepared", daemon: "h" };
+    const result = await service("darwin").assignmentPlan(request, { plan: restartPlan, run: vi.fn() }, undefined, dryRun);
+    expect(dryRun).toHaveBeenCalledWith("c1@fleet", "/prepared");
+    expect(restartPlan).not.toHaveBeenCalled();
+    expect(result.ok && result.plan.rows[0]!.precheck).toEqual({ safe: false, reasons: ["runtime_switch_unsupported"], message: "one pane only" });
+    // Without one, the row says it wasn't checked rather than borrowing the in-place verdict.
+    const unchecked = await service("darwin").assignmentPlan(request, { plan: restartPlan, run: vi.fn() });
+    expect(unchecked.ok && unchecked.plan.rows[0]!.precheck).toMatchObject({ safe: false, reasons: ["successor_not_checked"] });
+    expect(restartPlan).not.toHaveBeenCalled();
+  });
+
   it("refuses an unknown label, naming the list, and an unknown rig", async () => {
     seat("fleet", "c1", "codex", "c1@fleet");
     expect(await service().assignmentPlan({ rig: "fleet", provider: "codex", label: "nope", includeOverrides: false, daemon: "h" })).toEqual({
@@ -111,10 +130,19 @@ describe("the daemon's assignment plan", () => {
 });
 
 describe("GET /api/provider/assignment-plan", () => {
+  // A stand-in tmux that records each call and does nothing: the real restart plan and dry run run, never a live server.
+  let tmuxCalls: string[] = [];
+  const fakeTmux = () => new Proxy({}, { get: (_t, key) => key === "then" || key === "deliveryGuard" ? undefined
+    : (..._args: unknown[]) => { tmuxCalls.push(String(key)); return Promise.resolve([]); } });
+
   function app(): Hono {
     const a = new Hono();
     a.use("*", async (c, next) => {
       c.set("rigRepo" as never, new RigRepository(db));
+      c.set("sessionRegistry" as never, new SessionRegistry(db));
+      c.set("eventBus" as never, new EventBus(db));
+      c.set("discoveryRepo" as never, new DiscoveryRepository(db));
+      c.set("tmuxAdapter" as never, fakeTmux());
       c.set("providerService" as never, service());
       await next();
     });
@@ -129,8 +157,11 @@ describe("GET /api/provider/assignment-plan", () => {
     seat("fleet", "a", "claude-code", "a@fleet");
     seat("fleet", "b", "claude-code", "b@fleet");
     seat("fleet", "x", "codex", "x@fleet");
+    seat("fleet", "s", "claude-code", "s@fleet", "stopped");
+    new ProviderAccountRefsRepository(db).add({ provider: "codex", label: "team", codexHome, login: "team" });
     db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = 'b'").run(JSON.stringify({ label: "max-1", tokenFile: other }));
     const before = everything();
+    const saved = fs.statSync(path.join(codexHome, "auth-profiles", "team.json"));
     const stat = fs.statSync(token);
 
     const res = await app().request("/api/provider/assignment-plan?rig=fleet&provider=claude&account=max-2");
@@ -138,12 +169,30 @@ describe("GET /api/provider/assignment-plan", () => {
     const body = await res.json();
     expect(body).toMatchObject({ ok: true, plan: { daemon: "local", rig: "fleet", provider: "claude", account: { label: "max-2" } } });
     expect(body.plan.rows.map((r: { seat: string; effect: string }) => [r.seat, r.effect])).toEqual([
-      ["a@fleet", "change"], ["b@fleet", "kept_override"], ["x@fleet", "not_affected"]]);
+      ["a@fleet", "change"], ["b@fleet", "kept_override"], ["s@fleet", "change"], ["x@fleet", "not_affected"]]);
+    // A stopped seat: its precheck reads its next launch, and the row follows what it found.
+    expect(body.plan.rows[2]).toMatchObject({ precheck: { safe: false, reasons: ["conversation_not_resumable"] },
+      continuity: "not resumable: the precheck found no conversation the seat's next launch would resume" });
     expect(body.plan.rows[0]).toMatchObject({ precheck: { safe: true }, continuity: "in place: the seat is relaunched in its own pane and keeps its conversation" });
 
     const included = await (await app().request("/api/provider/assignment-plan?rig=fleet&provider=claude&account=max-2&includeOverrides=1")).json();
     expect(included.plan.rows[1].effect).toBe("change");
+    // A Codex plan, in place and to a prepared home, through the same route.
+    const codex = await app().request("/api/provider/assignment-plan?rig=fleet&provider=codex&account=team");
+    expect(codex.status).toBe(200);
+    // The real restart plan answers (this daemon has no Codex adapter); the plan shows its verdict.
+    expect((await codex.json()).plan.rows.find((r: { seat: string }) => r.seat === "x@fleet")).toMatchObject({ effect: "change",
+      precheck: { safe: false, reasons: ["seat_restart_refused"] } });
+    const prepared = await app().request(`/api/provider/assignment-plan?rig=fleet&provider=codex&account=team&accountHome=${encodeURIComponent(dir)}`);
+    expect(prepared.status).toBe(200);
+    // The real account-home dry run answers, not the in-place precheck: this seat has no bound pane.
+    expect((await prepared.json()).plan.rows.find((r: { seat: string }) => r.seat === "x@fleet")).toMatchObject({
+      precheck: { safe: false, reasons: ["runtime_switch_unsupported"] }, continuity: `fresh successor with handover, on ${dir}` });
     expect(everything()).toBe(before);
+    expect(fs.statSync(path.join(codexHome, "auth-profiles", "team.json")).mtimeMs).toBe(saved.mtimeMs);
+    expect(fs.readdirSync(codexHome).sort()).toEqual(["auth-profiles"]);
+    // Whatever the checks asked of tmux, it was only reading.
+    expect(tmuxCalls.filter((k) => !/^(list|has|get|show|capture|display)/i.test(k))).toEqual([]);
     expect(fs.statSync(token).mtimeMs).toBe(stat.mtimeMs);
     expect(JSON.stringify(body)).not.toContain(CONTENT);
   });

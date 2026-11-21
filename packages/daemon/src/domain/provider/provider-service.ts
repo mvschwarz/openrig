@@ -140,7 +140,9 @@ export interface ProviderService {
    *  moves that seat to a login saved in the Codex home it runs on. */
   switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<ProviderSwitchResult>;
   /** #3625: the plan for an assignment; read only. Optional so older or stub services answer 503. */
-  assignmentPlan?(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<AssignmentPlanResult>;
+  /** `successorCheck` is the account-home dry run for a seat moving to a prepared home as a fresh successor. */
+  assignmentPlan?(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch,
+    successorCheck?: (seat: string, accountHome: string) => Promise<import("./assignment-plan.js").PlanCheck>): Promise<AssignmentPlanResult>;
   /** Slice 01: one bounded native read of the usage windows (coalesced); `disabled` while the switch is off. */
   refreshUsage?(provider: "codex" | "claude", token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }>;
 }
