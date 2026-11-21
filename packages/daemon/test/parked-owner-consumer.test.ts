@@ -12,6 +12,7 @@ import {
   RESERVE_PREFIX,
   CLOSE_PREFIX,
   DELIVERED_PREFIX,
+  ESCALATED_PREFIX,
   REFUSED_PREFIX,
   FAILED_PREFIX,
   openPromptRefusals,
@@ -689,6 +690,68 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
 // #1933 — a seat that just handed work off, or just asked a person, has only started waiting. The first reminder
 // waits until its arbitrated waiting state has been unchanged for a grace; a seat still holding the work after it is
 // reminded as before, an unknown start keeps the reminder, and a seat at a prompt gets no grace.
+describe("a delivered reminder whose rows stay unclaimed reaches someone who can act, once", () => {
+  // The rows are pending (never claimed); each sent wake is recorded delivered, as the engine records it.
+  const unclaimedSeat = (state = "pending") => parkedSeat({
+    obligations: { items: ROW_IDS.map((qitemId) => ({ qitemId, state, summary: null })), held: [] },
+  });
+  const harness = (state = "pending") => {
+    const store = new RowStore();
+    const history: WatchdogHistoryEntry[] = [];
+    const told: Array<{ seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string }> = [];
+    let now = Date.parse("2026-10-11T00:00:00.000Z");
+    const evaluate = async (seat: ParkedSeatDiagnosisView) => {
+      const result = await makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store, history), now: () => now,
+        escalateUnclaimed: async (input) => { told.push(input); return [SEAT2]; } }).evaluate(makeJob());
+      if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: String(result.notes?.["primaryRow"]) }));
+      return result;
+    };
+    return { store, told, advance: (ms: number) => { now += ms; },
+      wake: () => evaluate(unclaimedSeat(state)), resume: () => evaluate(parkedSeat({ parked: false })) };
+  };
+
+  it("escalates once when the delivered reminder is older than the bound and its rows are still pending", async () => {
+    const { store, told, advance, wake, resume } = harness();
+    const first = await wake();
+    expect(first.action).toBe("send");
+    await resume();
+    advance(14 * 60_000);
+    await wake();
+    expect(told).toHaveLength(0);
+    advance(2 * 60_000);
+    const repeat = await wake();
+    expect(repeat.action).toBe("skip");
+    expect(told).toEqual([{ seat: SEAT, qitemIds: ROW_IDS, episodeKey: String(first.notes?.["episodeKey"]),
+      deliveredAt: store.transitions.get(String(first.notes?.["primaryRow"]))!.find((t) => t.transitionNote?.startsWith(DELIVERED_PREFIX))!.ts }]);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX)).map((a) => a.note))
+      .toEqual([`${ESCALATED_PREFIX} ${String(first.notes?.["episodeKey"])} to ${SEAT2}`]);
+    // The seat itself isn't woken again, and its reminder isn't reopened.
+    expect(store.appended.filter((a) => a.note.startsWith(RESERVE_PREFIX))).toHaveLength(1);
+  });
+
+  it("doesn't escalate rows the seat claimed", async () => {
+    const { told, advance, wake, resume } = harness("in-progress");
+    await wake();
+    await resume();
+    advance(30 * 60_000);
+    await wake();
+    expect(told).toHaveLength(0);
+  });
+
+  it("doesn't repeat the escalation on a later tick", async () => {
+    const { store, told, advance, wake, resume } = harness();
+    await wake();
+    await resume();
+    advance(16 * 60_000);
+    await wake();
+    advance(60 * 60_000);
+    await wake();
+    await wake();
+    expect(told).toHaveLength(1);
+    expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(1);
+  });
+});
+
 describe("#1933: the first reminder waits a grace after the seat starts waiting", () => {
   const NOW = Date.parse("2026-10-25T03:00:00.000Z");
   const GRACE_MS = 5 * 60_000;
