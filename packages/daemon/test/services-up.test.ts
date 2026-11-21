@@ -8,6 +8,8 @@ import type { ExecFn } from "../src/adapters/tmux.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 function mockExec(responses?: Record<string, string | Error>): ExecFn {
   return async (cmd: string) => {
@@ -21,6 +23,29 @@ function mockExec(responses?: Record<string, string | Error>): ExecFn {
     }
     return "";
   };
+}
+
+/** A local HTTP fixture the wait-target probe can reach; `url` is passed to the spec. */
+async function startHealthServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((_req, res) => { res.writeHead(200); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/v1/sys/health`,
+    close: () => new Promise<void>((resolve) => {
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    }),
+  };
+}
+
+/** A port nothing listens on, so a probe fails by connection refusal. */
+async function closedPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
 }
 
 const COMPOSE_PS_HEALTHY = JSON.stringify({
@@ -81,14 +106,16 @@ pods:
     const composePath = path.join(tmpDir, "docker-compose.yml");
     fs.writeFileSync(composePath, "version: '3'\nservices:\n  vault:\n    image: vault:1.15\n");
 
-    const specPath = writeSpec(`
+    const health = await startHealthServer();
+    try {
+      const specPath = writeSpec(`
 version: "0.2"
 name: services-rig
 services:
   kind: compose
   compose_file: docker-compose.yml
   wait_for:
-    - url: http://localhost:8200/v1/sys/health
+    - url: ${health.url}
 pods:
   - id: infra
     label: Infra
@@ -101,30 +128,32 @@ pods:
     edges: []
 `);
 
-    // Wire a ServiceOrchestrator with mock exec
-    const composeAdapter = new ComposeServicesAdapter(mockExec({
-      "up -d": "",
-      "ps --format json": COMPOSE_PS_HEALTHY,
-      "curl": "200",
-    }));
-    const rigRepo = new RigRepository(db);
-    const serviceOrch = new ServiceOrchestrator({ rigRepo, composeAdapter });
+      // Wire a ServiceOrchestrator with mock exec
+      const composeAdapter = new ComposeServicesAdapter(mockExec({
+        "up -d": "",
+        "ps --format json": COMPOSE_PS_HEALTHY,
+      }));
+      const rigRepo = new RigRepository(db);
+      const serviceOrch = new ServiceOrchestrator({ rigRepo, composeAdapter });
 
-    const setup = createTestApp(db);
-    // Inject service deps into bootstrap orchestrator via reflection
-    (setup.bootstrapOrchestrator as any).deps.serviceOrchestrator = serviceOrch;
-    (setup.bootstrapOrchestrator as any).deps.rigRepo = rigRepo;
+      const setup = createTestApp(db);
+      // Inject service deps into bootstrap orchestrator via reflection
+      (setup.bootstrapOrchestrator as any).deps.serviceOrchestrator = serviceOrch;
+      (setup.bootstrapOrchestrator as any).deps.rigRepo = rigRepo;
 
-    const result = await setup.bootstrapOrchestrator.bootstrap({
-      sourceRef: specPath,
-      mode: "apply",
-    });
+      const result = await setup.bootstrapOrchestrator.bootstrap({
+        sourceRef: specPath,
+        mode: "apply",
+      });
 
-    expect(result.status).toBe("completed");
-    // Service boot stage should appear and succeed
-    const serviceStage = result.stages.find((s) => s.stage === "service_boot");
-    expect(serviceStage).toBeDefined();
-    expect(serviceStage!.status).toBe("ok");
+      expect(result.status).toBe("completed");
+      // Service boot stage should appear and succeed
+      const serviceStage = result.stages.find((s) => s.stage === "service_boot");
+      expect(serviceStage).toBeDefined();
+      expect(serviceStage!.status).toBe("ok");
+    } finally {
+      await health.close();
+    }
   });
 
   it("service boot failure blocks agent launch with honest error", async () => {
