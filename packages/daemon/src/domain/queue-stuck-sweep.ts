@@ -2550,6 +2550,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         ]);
       };
       const keepOpenOrphanedNotice = async (): Promise<void> => {
+        if (deps.queueRepo.deliveryDrains.holds(dest)) return;
         const noticeRow = indexed(() => deps.queueRepo.getById(notice.qitem_id, { waiting: false }));
         if (!noticeRow || noticeRow.state !== "pending" || noticeRow.claimedAt) return;
         const liveTags = deps.db.prepare("SELECT tags FROM queue_items WHERE qitem_id = ?")
@@ -2560,10 +2561,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         await recoverOrphanedUnroutableNotice(noticeRow, source, dest, key, noticeTag, false);
       };
       if (deps.queueRepo.deliveryDrains.holds(dest)) {
-        if (pendingRows.length > 0) {
-          await keepOpenOrphanedNotice();
-          continue;
-        }
+        if (pendingRows.length > 0) continue;
       } else {
         let hasLivePending = false;
         const inspected = new Map<string, {
@@ -2682,10 +2680,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!liveNotice || !["pending", "in-progress", "blocked"].includes(liveNotice.state)) continue;
       const livePair = parseUnroutableNoticeTags(liveNotice.tags);
       if (!livePair || livePair.source !== source || livePair.dest !== dest) continue;
-      if (deps.queueRepo.deliveryDrains.holds(dest) && hasOrdinaryPending()) {
-        await keepOpenOrphanedNotice();
-        continue;
-      }
+      if (deps.queueRepo.deliveryDrains.holds(dest) && hasOrdinaryPending()) continue;
       await deps.queueRepo.update({
         qitemId: notice.qitem_id,
         actorSession: "stuck-sweep@system",

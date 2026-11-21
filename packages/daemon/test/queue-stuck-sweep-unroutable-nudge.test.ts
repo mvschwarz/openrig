@@ -1975,6 +1975,9 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
       prepare: (noticeId: string) => {
         queue.claim({ qitemId: noticeId, destinationSession: "lead@origin" });
       },
+      release: (noticeId: string) => {
+        queue.unclaim(noticeId, "lead@origin", "released claim");
+      },
     },
     {
       label: "claimed (returned to pending with claimedAt preserved)",
@@ -1989,6 +1992,10 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
           transitionNote: "returned to pending while retaining claim",
         });
       },
+      release: (noticeId: string) => {
+        queue.claim({ qitemId: noticeId, destinationSession: "lead@origin" });
+        queue.unclaim(noticeId, "lead@origin", "released retained claim");
+      },
     },
     {
       label: "in-progress (unclaimed via update)",
@@ -2000,6 +2007,14 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
           actorSession: "lead@origin",
           state: "in-progress",
           transitionNote: "working on notice without claim timestamp",
+        });
+      },
+      release: (noticeId: string) => {
+        queue.update({
+          qitemId: noticeId,
+          actorSession: "lead@origin",
+          state: "pending",
+          transitionNote: "returned to unclaimed pending",
         });
       },
     },
@@ -2016,8 +2031,16 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
           transitionNote: "parked on external review",
         });
       },
+      release: (noticeId: string) => {
+        queue.update({
+          qitemId: noticeId,
+          actorSession: "lead@origin",
+          state: "pending",
+          transitionNote: "unblocked back to pending",
+        });
+      },
     },
-  ])("keeps refreshed behavior without handoff or partial reporting when a $label #514 notice sits on a removed rig", async ({ expectedState, expectClaimed, prepare }) => {
+  ])("keeps refreshed behavior without handoff or partial reporting when a $label #514 notice sits on a removed rig, then recovers after release", async ({ expectedState, expectClaimed, prepare, release }) => {
     seedSeat("origin", "coord.lead", "lead@origin");
     seedSeat("ops", "coord.operator", "operator@ops");
     seedSeat("retired", "work.parked", "parked@retired", { running: false, bound: false });
@@ -2124,8 +2147,66 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
       tsUpdated: tsBefore,
     });
     expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // Release control: return the notice to unclaimed pending while origin stays deleted.
+    release(notice!.qitemId);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "pending", claimedAt: null, destinationSession: "lead@origin" });
+
+    // Pass 4 (released, no fallback): must report partial with unreported finding and one gap log.
+    const logs4: string[] = [];
+    const status4 = createStuckSweepStatus();
+    const pass4 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status4,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs4.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass4.outcome).toBe("partial");
+    expect(status4.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(pass4.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: notice!.qitemId,
+      findingQitemId: notice!.qitemId,
+      action: "unreported",
+      destination: "lead@origin",
+    });
+    expect(logs4.filter((line) => line.includes("unreported #514"))).toHaveLength(1);
+
+    // Pass 5 (released, reachable fallback): must hand off the notice to operator@ops and nudge it.
+    nudgesSent = [];
+    const status5 = createStuckSweepStatus();
+    const pass5 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status5,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass5.outcome).toBe("findings");
+    expect(status5.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 1 });
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("handed-off");
+    const openAfterRelease = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag));
+    expect(openAfterRelease).toHaveLength(1);
+    expect(openAfterRelease[0]!).toMatchObject({
+      destinationSession: "operator@ops",
+      handedOffFrom: notice!.qitemId,
+      evidenceRef: notice!.evidenceRef,
+    });
+    expect(nudgesSent.some((n) => n.destination === "operator@ops")).toBe(true);
   });
 
+  // Exercises the defensive !deliveryHeld(noticeRow) guard (matching #3541's pendingFindings check)
+  // using explicit destination-validation and terminal-hold seams; production startup.ts uses
+  // findRigsByName (archived rigs remain accepted) and rig deletion cascades rig_delivery_drains.
   it("keeps refreshed behavior for a delivery-held pending #514 notice on a removed rig until drain and terminal holds lift", async () => {
     const origin = seedSeat("origin", "coord.lead", "lead@origin");
     seedSeat("ops", "coord.operator", "operator@ops");
@@ -2287,10 +2368,35 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(logs5.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
     expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
 
-    // Release the terminal hold while origin stays deleted: sweep must now hand off the notice to operator@ops.
+    // Release the terminal hold while origin stays deleted:
+    // Pass 6a (no fallback) must report partial with one gap log; Pass 6b (reachable fallback) must hand off to operator@ops.
     terminalHeld = false;
     expect(queue.deliveryDrains.holds("lead@origin")).toBe(false);
     expect(queue.acceptsDestination("lead@origin")).toBe(false);
+    const logs6a: string[] = [];
+    const status6a = createStuckSweepStatus();
+    const pass6a = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status6a,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs6a.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass6a.outcome).toBe("partial");
+    expect(status6a.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(pass6a.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: notice!.qitemId,
+      findingQitemId: notice!.qitemId,
+      action: "unreported",
+      destination: "lead@origin",
+    });
+    expect(logs6a.filter((line) => line.includes("unreported #514"))).toHaveLength(1);
+
     nudgesSent = [];
     const status6 = createStuckSweepStatus();
     const pass6 = await runStuckSweep({
@@ -2507,5 +2613,153 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(nudgesSent).toHaveLength(0);
     expect(claimedLogs.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
     expect(queue.getByIdOrThrow(claimedNotice!.qitemId)).toMatchObject({ state: "in-progress", destinationSession: "lead@origin2" });
+  });
+
+  it.each([
+    { label: "aged (group loop)", waitAgeMinutes: 90 },
+    { label: "sub-threshold (close scan)", waitAgeMinutes: 5 },
+  ])("keeps a removed-rig #514 notice open without handoff or partial reporting while the waiting rows' destination is delivery-drained ($label), then recovers when the drain ends", async ({ waitAgeMinutes }) => {
+    seedSeat("origin", "coord.lead", "lead@origin");
+    seedSeat("ops", "coord.operator", "operator@ops");
+    const retired = seedSeat("retired", "work.parked", "parked@retired", { running: false, bound: false });
+    setupTopologyBackedQueue();
+
+    const now = new Date("2026-11-21T06:00:00.000Z");
+    const oldRow = await createNoNudge("lead@origin", "parked@retired", "Aged unreachable task", 90, now);
+
+    // Pass 1: creates open unclaimed #514 notice at lead@origin.
+    const pass1 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass1.outcome).toBe("findings");
+    const noticeTag = unroutableNoticeTag("lead@origin", "parked@retired");
+    const [notice] = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag));
+    expect(notice).toBeDefined();
+    expect(notice!).toMatchObject({ state: "pending", claimedAt: null, destinationSession: "lead@origin" });
+
+    if (waitAgeMinutes < 60) {
+      queue.update({ qitemId: oldRow.qitemId, actorSession: "lead@origin", state: "canceled", transitionNote: "replaced by fresh row" });
+      await createNoNudge("lead@origin", "parked@retired", "Fresh sub-threshold task", waitAgeMinutes, now);
+    }
+
+    // Drain the stuck rows' destination rig (retired) and delete the notice recipient's rig (origin).
+    const jobs = new WatchdogJobsRepository(db);
+    queue.deliveryDrains.begin(
+      retired.rigId,
+      { drainId: "drain-retired", owner: "operator@ops", reviewAt: new Date(now.getTime() + 3_600_000).toISOString() },
+      jobs,
+    );
+    db.prepare("DELETE FROM rigs WHERE name = 'origin'").run();
+    expect(queue.acceptsDestination("lead@origin")).toBe(false);
+    expect(queue.deliveryDrains.holds("lead@origin")).toBe(false);
+    expect(queue.deliveryDrains.holds("parked@retired")).toBe(true);
+
+    const transitionsBefore = queue.listTransitions(notice!.qitemId).length;
+    const tsBefore = queue.getByIdOrThrow(notice!.qitemId).tsUpdated;
+
+    // Pass 2 (destination drained, reachable fallback): both aged and sub-threshold paths keep notice open without handoff or nudge.
+    nudgesSent = [];
+    const status2 = createStuckSweepStatus();
+    const pass2 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status2,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass2.outcome).toBe("clean");
+    expect(status2.snapshot()).toMatchObject({ lastOutcome: "clean", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(nudgesSent).toHaveLength(0);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({
+      state: "pending",
+      claimedAt: null,
+      destinationSession: "lead@origin",
+      tsUpdated: tsBefore,
+    });
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // Pass 3 (destination drained, no fallback): still kept open silently, zero partial/unreported or gap logs.
+    const logs3: string[] = [];
+    const status3 = createStuckSweepStatus();
+    const pass3 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status3,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs3.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass3.outcome).toBe("clean");
+    expect(status3.snapshot()).toMatchObject({ lastOutcome: "clean", findingsUndelivered: 0, findingsRouted: 0 });
+    expect(logs3.filter((line) => line.includes("unreported #514"))).toHaveLength(0);
+    expect(queue.listTransitions(notice!.qitemId)).toHaveLength(transitionsBefore);
+
+    // End the destination drain: Pass 4 (no fallback) reports partial once; Pass 5 (reachable fallback) hands off to operator@ops.
+    queue.deliveryDrains.end(retired.rigId, "drain-retired", jobs);
+    expect(queue.deliveryDrains.holds("parked@retired")).toBe(false);
+
+    const logs4: string[] = [];
+    const status4 = createStuckSweepStatus();
+    const pass4 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status4,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: (line) => logs4.push(line),
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => null,
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass4.outcome).toBe("partial");
+    expect(status4.snapshot()).toMatchObject({ lastOutcome: "partial", findingsUndelivered: 1 });
+    expect(pass4.findings).toContainEqual({
+      kind: "unroutable-notice",
+      qitemId: notice!.qitemId,
+      findingQitemId: notice!.qitemId,
+      action: "unreported",
+      destination: "lead@origin",
+    });
+    expect(logs4.filter((line) => line.includes("unreported #514"))).toHaveLength(1);
+
+    nudgesSent = [];
+    const status5 = createStuckSweepStatus();
+    const pass5 = await runStuckSweep({
+      db,
+      queueRepo: queue,
+      status: status5,
+      unclaimedAgeMinutes: 60,
+      now,
+      log: () => {},
+      isRegisteredHost: () => false,
+      resolveRecoveryAgentSeat: () => "operator@ops",
+      resolveOperatorSeat: () => null,
+    });
+    expect(pass5.outcome).toBe("findings");
+    expect(status5.snapshot()).toMatchObject({ lastOutcome: "findings", findingsUndelivered: 0, findingsRouted: 1 });
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("handed-off");
+    const openAfterDrainEnd = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(noticeTag));
+    expect(openAfterDrainEnd).toHaveLength(1);
+    expect(openAfterDrainEnd[0]!).toMatchObject({
+      destinationSession: "operator@ops",
+      handedOffFrom: notice!.qitemId,
+      evidenceRef: notice!.evidenceRef,
+    });
+    expect(nudgesSent.some((n) => n.destination === "operator@ops")).toBe(true);
   });
 });
