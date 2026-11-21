@@ -179,7 +179,13 @@ describe("Claude wrapper manual attention recovery", () => {
     const valid = mode === "valid" || mode === "no token";
     expect(result.status).toBe(valid ? 200 : 422);
     expect(f.startup()).toBe(valid ? "ready" : "attention_required");
-    expect(f.store.getForNode(f.node.id)?.verdict).toBe(valid ? "verified" : "mismatch");
+    const verdict = f.store.getForNode(f.node.id);
+    if (mode === "unavailable") {
+      expect(verdict).toMatchObject({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+      expect(result.body.detail).toContain("native process listing failed");
+    } else {
+      expect(verdict?.verdict).toBe(valid ? "verified" : "mismatch");
+    }
     if (valid) {
       expect(result.body.evidence.kind).toBe("pane_identity_reverified");
       expect(f.listProcesses).toHaveBeenCalledTimes(2);
