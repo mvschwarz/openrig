@@ -7,6 +7,7 @@ import type { RestoreSeatFacts } from "./restore-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { RestoreOrchestrator } from "./restore-orchestrator.js";
+import { validateSessionFileFormat } from "./resume-token-validation.js";
 
 export const HISTORY_REF_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
@@ -28,6 +29,25 @@ const sourceUnavailable = (rigName: string): SharedHistoryResult => ({ ok: false
   message: `There is no compatible current history source for this seat. To save its current conversation, run rig snapshot ${rigName}; `
     + "to start the seat blank, run rig seat launch <seat> --fresh --reason <why>." });
 const historyUnavailable = (): SharedHistoryResult => ({ ok: false, code: "history_unavailable", message: "This history is no longer available for a resume attempt. Refresh the list." });
+
+/** OMP can have materialized conversations before the first compatible snapshot. Report the
+ * registry identities for this exact seat without scanning disk or making them resume choices. */
+export function listSeatHistories(deps: Parameters<typeof listSharedHistories>[0], rigId: string, nodeId: string) {
+  const captured = listSharedHistories(deps, rigId, nodeId);
+  if (!captured.ok && captured.code !== "source_unavailable") return captured;
+  const db = deps.rigRepo.db;
+  const node = db.prepare("SELECT logical_id, runtime FROM nodes WHERE id = ? AND rig_id = ?")
+    .get(nodeId, rigId) as { logical_id: string; runtime: string } | undefined;
+  if (node?.runtime !== "omp" && node?.runtime !== "omp-tui") return captured;
+  const rows = db.prepare(`SELECT id, resume_type, resume_token FROM sessions
+    WHERE node_id = ? AND resume_type IN ('omp_session_file', 'omp_tui_session_file') ORDER BY id`)
+    .all(nodeId) as { id: string; resume_type: string; resume_token: string | null }[];
+  const recordedHistories = rows.filter(row => HISTORY_REF_RE.test(row.id) && validateSessionFileFormat(row.resume_token, "OMP").ok)
+    .map(row => ({ historySessionId: row.id, resumeType: row.resume_type }));
+  if (!recordedHistories.length) return captured;
+  return captured.ok ? { ...captured, recordedHistories }
+    : { ok: true as const, rigId, nodeId, logicalId: node.logical_id, snapshotId: null, histories: [], recordedHistories };
+}
 
 /** Stored snapshot JSON can be structurally restore-usable while an older
  * session's optional metadata has the wrong JSON type. Such a row is not a

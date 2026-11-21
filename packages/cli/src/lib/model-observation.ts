@@ -20,7 +20,7 @@ export function modelObservation(value: unknown, running = true): ModelObservati
   if (v.status === "observed" && typeof v.model === "string" && (v.source === "runner_reported"
       ? v.model.length > 0 && v.model.length <= 512 && !/[\s\x00-\x1f\x7f]/.test(v.model)
       : /^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(v.model))
-    && ["claude-assistant-response", "codex-turn-context", "codex-world-state", "pi-assistant-response", "runner_reported"].includes(String(v.source))
+    && ["claude-assistant-response", "codex-turn-context", "codex-world-state", "pi-assistant-response", "omp-assistant-response", "omp-tui-selection", "runner_reported"].includes(String(v.source))
     && typeof v.observedAt === "string" && Number.isFinite(Date.parse(v.observedAt)) && generation) {
     return { status: "observed", model: v.model, source: String(v.source), observedAt: v.observedAt, generation, reason: null };
   }

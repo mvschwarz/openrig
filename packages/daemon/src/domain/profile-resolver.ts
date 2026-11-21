@@ -205,7 +205,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // rig-local declarations are not overwritten by discovery.
   let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
   const scanCache = scanCacheFor(ctx.scanScope);
-  if (runtime === "claude-code" || runtime === "codex" || runtime === "pi") {
+  if (runtime === "claude-code" || runtime === "codex" || runtime === "pi" || runtime === "omp-tui") {
     const discoveryPaths = {
       runtime: runtime as SkillRuntime,
       homedir: ctx.homedir ?? osHomedir(),

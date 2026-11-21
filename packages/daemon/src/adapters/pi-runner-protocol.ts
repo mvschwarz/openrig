@@ -292,7 +292,7 @@ export interface PiRunnerLaunchOpts {
   model?: string;
   /** Explicit posture; OMP maps it to --approval-mode, Pi to resource trust. */
   trust: "approve" | "no-approve";
-  /** Pi only: the seat's resolved effort, sent as Pi's own `--thinking <level>` (wins over a model `:level` suffix). */
+  /** The seat's resolved effort, sent as `--thinking <level>` (wins over a model `:level` suffix). */
   thinking?: string;
   /** Exact session file to resume (FR-6). Mutually exclusive with forkRef. */
   sessionFile?: string;
@@ -340,7 +340,7 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
-  const thinking = opts.runtime === "omp" ? undefined : piThinkingValue(opts.thinking);
+  const thinking = piThinkingValue(opts.thinking);
   if (thinking) {
     parts.push("--thinking", shellQuote(thinking));
   }
@@ -370,7 +370,7 @@ export function buildPiChildArgs(opts: {
   sessionsDir: string;
   sessionName: string;
   model?: string;
-  /** Pi only: forwarded as `--thinking` when it has set-effort's shape; Pi warns on a level it does not know. */
+  /** Forwarded as `--thinking` when it has set-effort's shape; Pi warns on a level it does not know. */
   thinking?: string;
   trust: "approve" | "no-approve";
   sessionFile?: string;
@@ -387,7 +387,7 @@ export function buildPiChildArgs(opts: {
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());
   }
-  const thinking = opts.runtime === "omp" ? undefined : piThinkingValue(opts.thinking);
+  const thinking = piThinkingValue(opts.thinking);
   if (thinking) {
     args.push("--thinking", thinking);
   }

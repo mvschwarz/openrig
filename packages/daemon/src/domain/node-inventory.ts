@@ -1006,7 +1006,7 @@ function buildInventoryItem(
   } = ctx;
   const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
   if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
-    throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+    throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness`);
   }
   const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
   const recordedLaunch = currentLaunchObservations.get(row.node_id);

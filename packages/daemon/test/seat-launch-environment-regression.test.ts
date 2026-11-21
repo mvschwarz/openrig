@@ -150,6 +150,19 @@ it("launch_wrapper prefixes before pinned Node interpreter + Codex entry and aft
   expect(JSON.parse(stdout)).toMatchObject({ started: true, node: process.execPath, argv: ["--no-daemon"] });
 });
 
+it("launch_wrapper executes a native OMP command through the public seat environment", async () => {
+  const f = fixture();
+  f.exe(path.join(f.user, "omp"), "#!/bin/sh\nprintf 'omp-started'\n");
+  f.exe(path.join(f.shared, "valid-wrapper"), "#!/bin/sh\nexec \"$@\"\n");
+  f.identity.OPENRIG_RUNTIME = "omp-tui";
+  const command = await f.launch.command("seat@rig", "omp --thinking high", {
+    runtime: "omp-tui", launchWrapper: ["valid-wrapper"],
+  });
+  expect(command).not.toBe(REFUSAL_CMD);
+  expect(command).toContain("omp --thinking high");
+  expect((await f.run(command)).stdout).toBe("omp-started");
+});
+
 it.each([
   "missing-wrapper",
   "non-executable-wrapper",
@@ -170,7 +183,6 @@ it.each([
   "fish-shell",
   "unknown-shell",
   "unsupported-runtime-pi",
-  "unsupported-runtime-omp",
   "unsupported-runtime-terminal",
   "missing-runtime",
 ] as const)("launch_wrapper fails closed without bare fallback on %s", async failure => {
@@ -209,7 +221,6 @@ it.each([
   if (failure === "fish-shell") { f.tmux.getPaneCommand.mockResolvedValue("fish"); runtime = "codex"; }
   if (failure === "unknown-shell") f.tmux.getPaneCommand.mockResolvedValue("unknown");
   if (failure === "unsupported-runtime-pi") runtime = "pi";
-  if (failure === "unsupported-runtime-omp") runtime = "omp";
   if (failure === "unsupported-runtime-terminal") runtime = "terminal";
   if (failure === "missing-runtime") runtime = undefined;
 

@@ -10,7 +10,7 @@
 
 OpenRig runs a team of coding agents on your machine as one system. A local daemon keeps the team's
 state in SQLite and runs each agent as an ordinary Claude Code or Codex session (or a plain
-terminal, a Pi or Oh My Pi (OMP) runner, or a scripted test stub) inside tmux. People and agents drive it through the
+terminal, a Pi or Oh My Pi (OMP) runner, an opt-in native OMP terminal UI, or a scripted test stub) inside tmux. People and agents drive it through the
 `rig` CLI, a terminal UI (TUI) and an MCP server, all of which talk to the daemon over local HTTP.
 The agents themselves are unmodified. What OpenRig adds is the coordination around them: launching
 and restoring agents, delivering messages, keeping durable work in a queue, and giving each agent

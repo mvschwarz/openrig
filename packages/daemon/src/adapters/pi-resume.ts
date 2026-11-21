@@ -71,7 +71,7 @@ export class PiResumeAdapter {
     model?: string | null,
     // OPR.0.4.8.3 Seam B: persisted resolved posture (resource-trust wording for Pi).
     resolvedPosture?: "floor" | "full_bypass" | "auto",
-    // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
+    // The seat's resolved effort, forwarded to the child on resume.
     effort?: string | null,
     launchWrapper?: readonly string[],
   ): Promise<ResumeResult> {
@@ -148,7 +148,7 @@ export class PiResumeAdapter {
         // The model declaration must survive resume: the runner's provider-key
         // allowlist keys off the declared provider (VM leg finding).
         model: model ?? undefined,
-        thinking: this.runtime === "pi" ? effort ?? undefined : undefined,
+        thinking: this.runtime === "pi" || this.runtime === "omp" ? effort ?? undefined : undefined,
         // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
         // YOLO forces `approve` on every restored seat; otherwise the configured posture.
         trust,

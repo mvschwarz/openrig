@@ -868,6 +868,9 @@ login. A source account override or Claude token is cleared only at commit;
 credentials are never converted between runtimes. Pi-to-Pi account changes keep
 Pi settings, but cross-runtime switches resolve settings afresh for the target.
 
+Use `--runtime omp` for the OMP RPC runner or `--runtime omp-tui` for the
+native OMP terminal. Both accept a target `--model` and `--effort`.
+
 A configured `launch_wrapper` carries across runtime switches among Pi, Codex
 and Claude Code. It must support each successor executable and preserve that
 runtime's credential environment. A wrapped Pi seat cannot switch to Claude
@@ -904,7 +907,7 @@ What it costs:
   again afterwards to reach whoever holds the seat.
 - **Leftover files after a failed switch.** The target runtime's prepared seat
   storage and projections can remain.
-- **Codex, Claude Code and Pi, single-pane seats.** Startup slash commands aren't
+- **Single-pane seats running Codex, Claude Code, Pi or either OMP mode.** Startup slash commands aren't
   run by a switch; the dry run lists them.
 
 ## Stop your teams

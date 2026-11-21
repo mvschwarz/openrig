@@ -249,6 +249,26 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     expect(fs._store[`${target}/${skill}`]).toContain("The daemon publishes");
   });
 
+  it.each(["0.1.32", "0.1.35"])("upgrades the %s core install with the native OMP refocus extension and helper", async installed => {
+    const source = "/asset-root/openrig-core";
+    const target = "/home/test/.openrig/plugins/openrig-core";
+    const manifests = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "package.json"];
+    const assets = ["omp/index.js", "hooks/scripts/refocus.cjs"];
+    const bundle = [...manifests, ...assets].map(rel =>
+      [source + "/" + rel, readFileSync(new URL("../assets/plugins/openrig-core/" + rel, import.meta.url), "utf8")]);
+    const fs = mockFs({
+      ...Object.fromEntries(bundle),
+      ...Object.fromEntries(manifests.map(rel => [target + "/" + rel, JSON.stringify({ name: "openrig-core", version: installed })])),
+      ...Object.fromEntries(assets.map(rel => [target + "/" + rel, "previous implementation"])),
+    });
+    const svc = new PluginVendorService({ vendoredAssetsDir: "/asset-root", userPluginsDir: "/home/test/.openrig/plugins", fs, httpClient: vi.fn() });
+    await svc.ensureVendored("openrig-core");
+    const versions = manifests.map(rel => JSON.parse(fs._store[target + "/" + rel]!).version);
+    expect(new Set(versions).size).toBe(1);
+    expect(versions[0]).not.toBe(installed);
+    for (const rel of assets) expect(fs._store[target + "/" + rel]).toBe(fs._store[source + "/" + rel]);
+  });
+
   // #1077 — the relay forwards SessionStart's source, the occupant generation and the resume launch
   // marker. An install at the previous version must receive it rather than keep the old relay.
   it("the shipped core upgrades 0.1.8 installs to the relay that forwards resume launch evidence", async () => {

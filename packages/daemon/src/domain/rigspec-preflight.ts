@@ -19,6 +19,7 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "codex": "codex --version",
   "pi": "pi --version",
   "omp": "omp --version",
+  "omp-tui": "omp --version",
 };
 
 export function unverifiedModelWarning(seat: string, model: string): string {
@@ -596,7 +597,7 @@ function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
 
 /** Probe only OMP seats. An OMP spec must never depend on the Pi binary. */
 export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecFn): Promise<string[]> {
-  if (!rigSpec.pods.some((pod) => pod.members.some((member) => member.runtime === "omp"))) return [];
+  if (!rigSpec.pods.some((pod) => pod.members.some((member) => member.runtime === "omp" || member.runtime === "omp-tui"))) return [];
   try {
     await exec(RUNTIME_COMMANDS["omp"]!);
     return [];

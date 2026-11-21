@@ -597,6 +597,7 @@ describe("RigInstantiator", () => {
   it("rejects flat node launchWrapper on unsupported runtime during instantiate validation", async () => {
     const spec = validSpec({
       nodes: [
+        { id: "bad-omp", runtime: "omp", cwd: "/", launchWrapper: [] },
         { id: "bad-terminal", runtime: "terminal", cwd: "/", launchWrapper: ["mtn", "--"] },
       ],
       edges: [],
@@ -607,7 +608,8 @@ describe("RigInstantiator", () => {
     if (!result.ok) {
       expect(result.code).toBe("validation_failed");
       if (result.code === "validation_failed") {
-        expect(result.errors).toContain('nodes.bad-terminal.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness');
+        expect(result.errors).toContain('nodes.bad-terminal.launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness');
+        expect(result.errors).toContain('nodes.bad-omp.launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness');
       }
     }
     expect(rigRepo.listRigs()).toHaveLength(0);

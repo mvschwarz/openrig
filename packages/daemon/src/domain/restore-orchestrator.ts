@@ -33,6 +33,7 @@ import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import { seatRuntimeHome } from "./seat-runtime-home.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
+import type { OmpTuiResumeAdapter } from "../adapters/omp-tui-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
@@ -261,6 +262,7 @@ export interface RestoreOrchestratorDeps {
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
   ompResume?: OmpResumeAdapter;
+  ompTuiResume?: OmpTuiResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -317,6 +319,7 @@ export class RestoreOrchestrator {
   private claudeResume: ClaudeResumeAdapter;
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
+  private ompTuiResume: OmpTuiResumeAdapter | null;
   private ompResume: OmpResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
@@ -363,6 +366,7 @@ export class RestoreOrchestrator {
     this.claudeResume = deps.claudeResume;
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
+    this.ompTuiResume = deps.ompTuiResume ?? null;
     this.ompResume = deps.ompResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
@@ -833,7 +837,7 @@ export class RestoreOrchestrator {
             const runtime = allNodes.find(current => current.id === node.id)?.runtime ?? node.runtime;
             // Launch needs consistent positive evidence: both samples idle with the same fingerprint, and the
             // bound pane still in this session (a recycled pane id could name another session's shell).
-            if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
+            if (pane && (["claude-code", "codex", "pi", "omp", "omp-tui"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
               && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
               && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
               && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell"
@@ -2881,7 +2885,8 @@ export class RestoreOrchestrator {
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
-        : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
+        : this.codexResume.canResume(resumeType, resumeToken) ? "codex"
+        : this.ompTuiResume?.canResume(resumeType, resumeToken) ? "omp-tui" : this.ompResume?.canResume(resumeType, resumeToken) ? "omp" : "pi";
       const override = new NativePermissionStore(this.db).launchOverride(nodeId, runtime);
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
@@ -3010,8 +3015,11 @@ export class RestoreOrchestrator {
       }
       return { kind: "failed", message: result.message };
     }
-    if (this.ompResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+    const ompResume = this.ompTuiResume?.canResume(resumeType, resumeToken) ? this.ompTuiResume : this.ompResume;
+    if (ompResume?.canResume(resumeType, resumeToken)) {
+      const result = ompResume === this.ompTuiResume
+        ? await this.ompTuiResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort, launchWrapper)
+        : await ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
       if (result.ok) {
         for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);

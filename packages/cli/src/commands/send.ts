@@ -339,6 +339,8 @@ implies --raw and is audit-logged. The answer is typed as keystrokes: letters ma
 be menu shortcuts, and CR/ESC act as keys. An Enter is added when the complete
 answer is visibly staged in a recognized text input, and, away from a recognized
 prompt or menu, when the input box can't be found or read (the result says so).
+At a native OMP menu, send a single Up or Down arrow escape sequence per call.
+OpenRig sends that named key once. Inspect the highlighted choice in the terminal.
 Combining --verify with
 --dangerously-interact never adds an automatic submit retry, even when the daemon
 did not detect a prompt or did not report its disposition. Unknown consumption

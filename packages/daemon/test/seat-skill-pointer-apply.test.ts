@@ -171,7 +171,7 @@ describe("B: `rig skill loadout --seat` reconciles a seat's own selection and te
 });
 
 describe("B: the seat routes", () => {
-  it("inspect a seat by its session, and say what's wrong with an unknown or missing one", async () => {
+  it.each(["codex", "omp-tui"])("inspect a %s seat by its session, and reject unknown or missing seats", async runtime => {
     const { createFullTestDb, createTestApp } = await import("./helpers/test-app.js");
     const { RigRepository } = await import("../src/domain/rig-repository.js");
     const { SessionRegistry } = await import("../src/domain/session-registry.js");
@@ -180,16 +180,16 @@ describe("B: the seat routes", () => {
     try {
       const rigRepo = new RigRepository(db);
       const rig = rigRepo.createRig("seat-routes");
-      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/project" });
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime, cwd: "/project" });
       new SessionRegistry(db).registerSession(node.id, "dev-impl@seat-routes");
-      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "codex" });
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime });
       mkdirSync(join(paths.skillsRoot, "queue-handoff"), { recursive: true });
       writeFileSync(join(paths.skillsRoot, "queue-handoff", "SKILL.md"), "---\nname: queue-handoff\ndescription: Use when handing work on.\n---\n\nbody\n");
       const { app } = createTestApp(db);
       const get = (q: string) => app.request(`/api/skills/seat${q}`, { headers: { Host: "127.0.0.1:7433" } });
       const seen = await get("?session=dev-impl%40seat-routes");
       expect(seen.status).toBe(200);
-      expect(await seen.json()).toMatchObject({ seat: { logicalId: "dev.impl", runtime: "codex" }, storage: paths.root,
+      expect(await seen.json()).toMatchObject({ seat: { logicalId: "dev.impl", runtime }, storage: paths.root,
         skills: [{ id: "queue-handoff", trigger: "Use when handing work on." }] });
       expect((await get("?session=nobody%40nowhere")).status).toBe(404);
       expect((await get("")).status).toBe(400);
@@ -215,13 +215,13 @@ describe("B: the seat routes", () => {
       expect(seen.status).toBe(200);
       expect(await seen.json()).toEqual({
         seat: { sessionName: "dev-impl@seat-routes-pi", runtime: "pi-tui" }, unsupported: true,
-        note: "dev-impl@seat-routes-pi is a pi-tui seat; seat skills are kept for Claude Code and Codex seats",
+        note: "dev-impl@seat-routes-pi is a pi-tui seat; seat skills are kept for Claude Code, Codex and OMP seats",
         storage: null, skills: [], catalogDigest: null, occupant: null, delivery: null,
       });
       const applied = await app.request("/api/skills/seat/apply", { method: "POST", headers: { Host: "127.0.0.1:7433", "Content-Type": "application/json" },
         body: JSON.stringify({ session: "dev-impl@seat-routes-pi" }) });
       expect(applied.status).toBe(404);
-      expect(await applied.json()).toEqual({ error: "dev-impl@seat-routes-pi is a pi-tui seat; seat skills are kept for Claude Code and Codex seats" });
+      expect(await applied.json()).toEqual({ error: "dev-impl@seat-routes-pi is a pi-tui seat; seat skills are kept for Claude Code, Codex and OMP seats" });
     } finally {
       db.close();
     }

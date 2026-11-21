@@ -147,7 +147,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   /** Resolve canonical identity and isolated state for a staged or committed occupant. */
   private runnerLocation(binding: NodeBinding): { sessionName: string; stateRoot: string } {
-    const staged = this.runtime === "pi" && binding.runtimeSwitchFrom;
+    const staged = (this.runtime === "pi" || this.runtime === "omp") && binding.runtimeSwitchFrom;
     const sessionName = staged ? staged.session : binding.tmuxSession!;
     return { sessionName, stateRoot: staged && binding.launchGeneration
       ? piAccountSwitchStateRoot(this.stateRoot, binding.launchGeneration) : this.stateRootForSession(sessionName) };
@@ -161,10 +161,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   /** The pi-runner sidecar reader shape resume-token-capture consumes
    *  (deriveResumeToken's piRunnerStateStore dep). */
-  readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
-    const state = this.readRunnerState(sessionName);
+  readSessionFile(sessionName: string, stagedGeneration?: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
+    const root = stagedGeneration ? piAccountSwitchStateRoot(this.stateRoot, stagedGeneration) : this.stateRootForSession(sessionName);
+    const state = this.readRunnerState(sessionName, root);
     if (state === null) {
-      const { runnerStatePath } = piSeatPaths(this.stateRootForSession(sessionName), sessionName);
+      const { runnerStatePath } = piSeatPaths(root, sessionName);
       return this.fs.exists(runnerStatePath)
         ? { ok: false, reason: "parse_error" }
         : { ok: false, reason: "missing_sidecar" };
@@ -387,8 +388,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         stateRoot: location.stateRoot,
         cwd: binding.cwd,
         model: binding.model,
-        // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
-        thinking: this.runtime === "omp" ? undefined : binding.effort,
+        // Both Pi and OMP accept the seat's resolved effort through --thinking.
+        thinking: binding.effort,
         // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
         // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
         trust,

@@ -9,7 +9,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file" | "omp_tui_session_file";
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -47,6 +47,7 @@ export function resumeTypeForRuntime(runtime: string | null): ResumeType | null 
   if (runtime === "claude-code") return "claude_id";
   if (runtime === "codex") return "codex_id";
   if (runtime === "pi") return "pi_session_file";
+  if (runtime === "omp-tui") return "omp_tui_session_file";
   if (runtime === "omp") return "omp_session_file";
   return null;
 }
@@ -93,7 +94,7 @@ export function validateSessionFileFormat(rawToken: unknown, label = "Pi", optio
   return { ok: true, token };
 }
 
-function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file", token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
+function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file" | "omp_tui_session_file", token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
   const label = resumeType === "pi_session_file" ? "Pi" : "OMP";
   const res = validateSessionFileFormat(token, label);
   if (!res.ok) return res;
@@ -118,7 +119,7 @@ export function validateResumeToken(
   if (token.length === 0) {
     return { ok: false, error: "Resume token is empty." };
   }
-  if (resumeType === "pi_session_file" || resumeType === "omp_session_file") {
+  if (resumeType === "pi_session_file" || resumeType === "omp_session_file" || resumeType === "omp_tui_session_file") {
     return validateSessionFileToken(resumeType, token);
   }
   return validateIdShapedToken(resumeType, token);

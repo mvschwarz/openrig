@@ -19,6 +19,12 @@ describe("rig ps — model lines", () => {
     ]);
   });
 
+  it.each([["omp", "omp-assistant-response"], ["omp-tui", "omp-tui-selection"]])("shows observed %s models and their source", (runtime, source) => {
+    const observation = { status: "observed", model: "openrouter/z-ai/glm-5.3", source, observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null };
+    const [line] = modelLines([seat("helper@rig", runtime, "configured", observation)] as never);
+    expect(line).toContain(`configured configured; last observed openrouter/z-ai/glm-5.3 (${source}`);
+  });
+
   it("labels accepted runner models as reported samples, including the existing community identifier grammar", () => {
     const lines = modelLines([seat("runner@k", "synth", "configured", { status: "observed", model: "provider/会話?model=1", source: "runner_reported",
       observedAt: "2026-10-21T10:00:00Z", generation: "current", reason: null })] as never);

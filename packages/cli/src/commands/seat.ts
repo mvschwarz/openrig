@@ -575,7 +575,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     .option("--snapshot-id <id>", "Validate a reference returned by this list")
     .option("--history-session-id <id>", "Validate a reference returned by this list")
     .option("--json", "Print the daemon response as JSON")
-    .description("List or validate captured histories eligible for a resume attempt (read-only)")
+    .description("List captured resume choices and recorded OMP sessions, or validate a captured choice (read-only)")
     .action(async (opts: { rig: string; nodeId: string; snapshotId?: string; historySessionId?: string; json?: boolean }) => {
       if (!!opts.snapshotId !== !!opts.historySessionId) {
         console.error("Supply both --snapshot-id and --history-session-id to validate a history.");
@@ -591,10 +591,11 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         : await client.get<Record<string, unknown>>(path, { headers: terminalAuthHeaders() });
       if (opts.json || response.status >= 400) console.log(JSON.stringify(response.data, null, 2));
       else {
-        const body = response.data as { snapshotId?: string; history?: { historySessionId: string; resumeType: string; tokenState: string }; histories?: Array<{ historySessionId: string; resumeType: string; tokenState: string }> };
+        const body = response.data as { snapshotId?: string | null; history?: { historySessionId: string; resumeType: string; tokenState: string }; histories?: Array<{ historySessionId: string; resumeType: string; tokenState: string }>; recordedHistories?: Array<{ historySessionId: string; resumeType: string }> };
         console.log(`Current snapshot: ${body.snapshotId ?? "none"}`);
         for (const item of body.history ? [body.history] : body.histories ?? []) console.log(`${item.historySessionId}  ${item.resumeType}  token: ${item.tokenState}`);
         if (!body.history && !body.histories?.length) console.log("No eligible captured histories.");
+        for (const item of body.recordedHistories ?? []) console.log(`${item.historySessionId}  ${item.resumeType}  recorded session (inspection only)`);
       }
       if (response.status >= 400) process.exitCode = response.status >= 500 ? 2 : 1;
     });
@@ -1087,7 +1088,7 @@ identity remains unverified; a version number alone cannot clear it.
   cmd
     .command("set-effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi also accepts off, minimal, xhigh, max)")
+    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi and OMP also accept off, minimal, xhigh, max)")
     .option("--clear", "Remove this seat's explicit choice and go back to its authored or default effort")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.effort_changed event")
     .option("--operator <address>", "Operator recorded on the audit event")
@@ -1097,7 +1098,7 @@ identity remains unverified; a version number alone cannot clear it.
 Only this seat changes; its peers, model and account don't. The running process
 keeps its current effort until the seat's next managed continuation. Whether the
 native session then uses the level is a separate fact this command can't see.
-Works on Claude Code, Codex and Pi seats; Pi gets it as --thinking <level>. Levels
+Works on Claude Code, Codex, Pi and OMP seats; Pi and OMP get --thinking <level>. Levels
 are the runtime's own and are not translated; an unfamiliar one is saved with a warning.
 Examples:
   rig seat set-effort dev-impl@my-rig --effort high --reason "long refactor"
@@ -1416,7 +1417,7 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex, claude-code or pi")
+    .option("--runtime <runtime>", "codex, claude-code, pi, omp or omp-tui")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
@@ -1432,7 +1433,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
+    .description("Move a live Codex, Claude Code, Pi or OMP seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -1446,7 +1447,8 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
+Single-pane seats support Codex, Claude Code, Pi, OMP RPC (omp) and the native OMP UI (omp-tui).
+--dry-run lists the details.
 A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
 up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.

@@ -147,7 +147,8 @@ export class ContextMonitor {
         }
       }
 
-      if (session.runtime !== "pi") await this.normalizeStartupStatus(session, pass);
+      // Usage observation cannot establish that native OMP resumed the requested conversation.
+      if (session.runtime !== "pi" && session.runtime !== "omp-tui") await this.normalizeStartupStatus(session, pass);
       await this.maybeAutoCompact(session, observed);
     }
     this.drainProviderWindowSamples();
@@ -283,8 +284,7 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
-          OR (n.runtime = 'pi' AND s.status = 'running')
-          OR (n.runtime = 'stub' AND s.status = 'running')
+          OR (n.runtime IN ('pi', 'stub', 'omp-tui') AND s.status = 'running')
           OR (
             n.runtime = 'codex'
             AND (

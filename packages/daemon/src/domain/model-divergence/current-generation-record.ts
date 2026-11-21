@@ -263,6 +263,7 @@ export async function resolveLiveCodexThreadId(
 }
 
 export interface PiOccupantRecordInput {
+  runtime?: "pi" | "omp";
   sessionName: string;
   generation: string | null;
   occupantBootAt: string | null;
@@ -361,11 +362,13 @@ export async function resolveIdentityVerifiedPiRecord(
   if (!command.startsWith(head)) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not start with the managed runner arguments` };
   }
-  // The runner's parser keeps the last of a repeated flag, and a Pi launch never passes --runtime,
-  // so either one leaves the runner's identity ambiguous.
+  // Pi omits --runtime. OMP RPC supplies it exactly once on the same managed runner.
   const words = command.split(/\s+/);
   const repeated = ["--session-name", "--state-root", "--cwd", "--launch-id"].filter((flag) => words.filter((word) => word === flag).length !== 1);
-  if (repeated.length > 0 || words.includes("--runtime")) {
+  const runtimeFlags = words.filter(word => word === "--runtime").length;
+  const matchesRuntime = input.runtime === "omp"
+    ? runtimeFlags === 1 && flagValue(words, "--runtime") === "omp" : runtimeFlags === 0;
+  if (repeated.length > 0 || !matchesRuntime) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} has ambiguous identity arguments` };
   }
   const paneLaunchId = flagValue(words, "--launch-id")!;

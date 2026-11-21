@@ -59,13 +59,22 @@ export class ProcessCensus {
         return rows;
       },
       (err) => {
-        // Honest failure: nothing cached, next call retries.
-        if (this.inFlight === run) this.inFlight = null;
+        // Only the latest enumeration can invalidate the cached rows.
+        if (this.inFlight === run) {
+          this.lastRows = null;
+          this.inFlight = null;
+        }
         throw err;
       },
     );
     this.inFlight = run;
     return run;
+  }
+
+  /** Concurrent identity rechecks can share a census started after their final pane lookup. */
+  async listFresh(): Promise<ProcessRow[]> {
+    try { await this.inFlight; } catch { /* The earlier enumeration cannot satisfy this recheck. */ }
+    return this.inFlight ?? this.list({ fresh: true });
   }
 
   /** A CYCLE-SCOPED lister: at most one census underneath for the closure's

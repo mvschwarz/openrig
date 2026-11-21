@@ -753,7 +753,7 @@ When switching into Pi with `--clear-account-home`, OpenRig restores the seat's 
 
 Pi account changes work with or without `launch_wrapper`. The wrapper receives the successor's managed Pi directory;
 it must preserve the selected credentials if you want OpenRig's account choice to apply.
-Use `rig seat set-runtime <seat> --runtime <runtime> --reason "Change provider"` with `pi`, `codex` or `claude-code` for cross-runtime switches.
+Use `rig seat set-runtime <seat> --runtime <runtime> --reason "Change provider"` with `pi`, `codex`, `claude-code`, `omp` or `omp-tui` for cross-runtime switches.
 Those resolve the target's settings afresh rather than keeping the source model or effort;
 see [runtime switching](getting-started.md#move-a-seat-to-the-other-runtime).
 
@@ -938,14 +938,14 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. To keep the profile, put full access in the profile itself, or record a workspace-write or read-only `codex_permissions` envelope, which keeps it. |
 | `codex_permissions` | mapping | no | — | Codex-only sandbox and approval envelope, emitted as explicit flags on every managed launch and resume; see [per-member Codex permissions](#per-member-codex-permissions). |
 | `claude_token` | mapping | no | — | Claude-only `{ label, file }`: the seat's own subscription token file, by absolute path, used from its first launch; see "A seat's own subscription token" under [launch environment](#launch-environment). |
-| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
+| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `omp-tui`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
 | `cwd` | string | yes | — | Working directory for the agent. A relative path resolves against the rig root (the directory containing the rig spec). If that path exists as written, it is used. Otherwise a leading `~` or `~/` expands to the home directory (`~user` does not) and `$VAR` / `${VAR}` expand from the daemon host's environment; a relative result still resolves against the rig root. A reference to an unset variable stays as written, so the cwd is that literal path and works only if it exists. Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. A cwd inside the OpenRig installation fails preflight unless `--cwd` is given. Editing this declaration does not update an existing seat; use [`rig seat set-cwd`](agent-startup-guide.md#change-an-existing-seats-working-directory) to save its future launch directory. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
 | `effort` | string | no | — | Reasoning effort override, trimmed. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`, Pi `--thinking` (see "Pi" below). A non-string value is ignored with an advisory. |
 | `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
 | `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
-| `launch_wrapper` | string[] | no | — | Local `pi`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
+| `launch_wrapper` | string[] | no | — | Local `pi`, `omp-tui`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
 | `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat, each key on its own. `{ tasks_max: N }` (an integer from 1 to 4194304) and `{ memory_max: <size> }` (an integer number of bytes, or `<n>K`, `M`, `G` or `T`, base 1024; a whole number of MiB up to 2^53 − 2^20 bytes) put the seat's own processes in a systemd user scope of their own with `TasksMax=N` and `MemoryMax=<bytes>`; both keys together share that one scope. The other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a CPU limit) is refused. `{}` clears the stored limits when re-applying an authored spec, a mapping replaces them whole, and omitting the key leaves them unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
 | `statusline_throttle` | integer | no | — | Claude members only, opt-in. Runs OpenRig's context collector from the status line at most once every N seconds (1 to 120); `0` clears a stored throttle when re-applying an authored spec, while omitting the key leaves it unchanged. Also settable with `rig seat set-statusline-throttle`. See [Status line throttle](#status-line-throttle-runtime-claude-code). |
 | `pool` | map | no | — | Makes this member the model of a seat pool: `{ max: N, … }`. Stored and validated; it has no runtime effect until the seat pool job is armed. Anything wrong inside the block is an advisory and the block is not used; the spec stays valid. `{}` clears a stored block when re-applying an authored spec, while omitting the key leaves it unchanged. A daemon from 0.7.18 or earlier refuses a spec with this key. See [Seat pool](#seat-pool-pool). |
@@ -1102,7 +1102,7 @@ members:
     launch_wrapper: ["launcher", "exec", "--profile", "seat-a", "--"]
 ```
 
-- **Scope and literal argv:** Local `pi`, `codex`, `claude-code` and supported community-harness members support `launch_wrapper`; legacy flat nodes support it only on `pi`, `codex` and `claude-code`. Other runtimes, including the maintained `openshell-claude` environment path, reject it, including `[]`. Community preset capability and execution requirements are defined in the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch). Each fork uses its target member's own selection. Arguments are literal strings without NUL, CR or LF; spaces, quotes, metacharacters and empty non-executable arguments are preserved.
+- **Scope and literal argv:** Local `pi`, `omp-tui`, `codex`, `claude-code` and supported community-harness members support `launch_wrapper`; legacy flat nodes support it only on `pi`, `codex` and `claude-code`. Other runtimes, including the maintained `openshell-claude` environment path, reject it, including `[]`. Community preset capability and execution requirements are defined in the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch). Each fork uses its target member's own selection. Arguments are literal strings without NUL, CR or LF; spaces, quotes, metacharacters and empty non-executable arguments are preserved.
 - **Executable resolution:** `launch_wrapper[0]` must be an absolute path or bare command name. Preflight and launch resolve it using the daemon's launch `PATH` and working directory, before adding the seat's `rig` bin directory. Relative paths containing `/`, aliases and functions are unsupported for the wrapper itself.
 - **Native child and `exec` contract:** The wrapper prefixes the resolved Codex entry, prefixes the resolved Pi child executable inside the host runner, or prefixes the real Claude executable and native arguments. Managed Claude applies it after rebuilding the environment; pinned continuations retain their executable. The wrapper must `exec` its child in place, preserving working directory, environment, signals, exit status and TTY stdio (Claude/Codex) or RPC pipes (Pi). Supervising wrappers are unsupported.
 - **Classic Claude lookup:** Wrapped classic launch supports bash, zsh, sh and dash and requires `command -v claude` to resolve to an executable file; aliases and functions refuse with `launch_wrapper unavailable; no agent started.` To keep custom flags or environment, put them in a `#!` script named `claude` on `PATH`; the wrapper runs that script ([#1477](https://github.com/mvschwarz/openrig/issues/1477)).
@@ -1358,9 +1358,49 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
 
 - **State:** Each seat uses `$OPENRIG_HOME/state/omp/<seat>/agent` and `sessions/` instead of your default `~/.omp` profile, and runs with that seat directory as `HOME`. OpenRig does not copy OMP credentials. The runner finds the real `omp` binary before switching `HOME`, so a version-manager shim such as mise on the daemon's `PATH` still works.
 - **Credentials:** Provision each seat separately, or put the provider's key variable in `recovery.provider_auth_env_allowlist` (for example `ANTHROPIC_API_KEY` or `MISTRAL_API_KEY`). The allowlist accepts the key variable of every provider in OpenRig's OMP provider map, from `anthropic` through `litellm`. A seat receives a key only when its `model` is written as `provider/id`, such as `anthropic/claude-sonnet-4-5`. Short names such as `opus` pass no key. A provider whose key is scoped to one endpoint also accepts that endpoint's variable: `anthropic`, `openai` and `litellm` each take their `<PROVIDER>_BASE_URL` — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `LITELLM_BASE_URL`. The allowlist admits each variable on its own, so an endpoint named without its key is admitted too, which suits a keyless local proxy. The launch gate admits these endpoint names for OMP seats; the match against the seat's declared `provider/id` happens at the OMP child, which forwards a matching endpoint already in the runner's environment just as it forwards a key. OMP also reads the launch directory's `.env`, so use a trusted working directory.
-- **Approval posture:** The default floor is `--approval-mode always-ask`. Because the runner is headless, OMP approval requests are cancelled and the seat stays in needing-attention after the turn ends, until the next agent run starts. A `full_bypass` permission policy selects `--approval-mode yolo`.
+- **Approval posture:** The default floor is `--approval-mode always-ask`. Because the runner is headless, OMP approval requests are cancelled and the seat stays in needing-attention after the turn ends, until the next agent run starts. A `full_bypass` permission policy selects `--approval-mode yolo`. When the RPC runner receives no resolved launch posture, it honors the existing `OPENRIG_YOLO` setting.
 - **Model errors:** Errors are printed in the pane. A completed assistant failure with a numeric `errorStatus` of 408, 429, 500, 502, 503, 504, or 529 returns to idle at terminal `agent_end`, allowing an ordinary retry. Until that terminal boundary it stays in needing-attention. Intermediate `agent_end(isTerminal:false)` events do not release attention. A statusless failed retry summary retains that classification only when its attempt matches an announced retry and its final error exactly matches the latest typed transient assistant failure in that attempt. New assistant/turn boundaries invalidate the previous failure; unmatched summaries remain runtime errors. Rejected prompts, auth/configuration failures, exhausted retries without a typed transient status, and untyped errors (including text such as `529 overloaded`) retain attention until the next agent run starts. The runner does not classify diagnostic text. A transient failure does not clear a denied approval or another unresolved runtime failure in the same turn.
 - **Restore:** OMP creates its session file after the first persisted turn. A new seat with no persisted turn has no resume token, so a restore leaves it awaiting a decision. Start it fresh with `rig seat launch <seat> --fresh --reason "<why>"`, the command `rig start` and `rig up --existing` print for that seat. After that file exists, OpenRig restores that exact session file. After recovering a Pi or OMP seat whose full rig restore ended in `attention_required` or `failed`, run `rig seat clear-attention <seat>`. OpenRig records `operator_recovered` only when the pane owns the expected runner and its live RPC child, a fresh `get_state` response matches the stored session file, and the daemon confirms that identity. It sends no prompt. Missing or mismatched evidence keeps attention and names the failed check. Runners started before this recovery capability was installed need a managed relaunch before they can supply that proof. `rig seat launch --fresh` refuses a managed seat whose pane is still running unless you add `--stop`, which ends what is running there; add it only when you mean to replace that session. A pane that holds only a shell after a failed start (the harness never started, or returned to the shell, and the pane is an idle shell now) is replaced without `--stop`.
+
+### Native Oh My Pi terminal UI (`runtime: omp-tui`)
+
+Set a member’s `runtime` to `omp-tui` to launch the stock `omp` terminal UI. Keep
+`runtime: omp` for the RPC runner, including its run-bound reporting and optional
+input channel. Each choice has its own state directory and resume-token type.
+
+The TUI loads OpenRig’s seat extension to report readiness, activity, context usage
+and the exact session file. It acknowledges a managed paste in its composer before
+OpenRig sends Enter. If the editor expands tabs or converts line endings to LF,
+the send or startup result reports the change. Approval dialogs appear in the pane. By default the native UI
+uses `always-ask`, including on kernel seats. An explicit `full_bypass` policy selects
+`yolo`. The native UI ignores the ambient `OPENRIG_YOLO` setting. The TUI loads selected native OMP extensions and portable skills at launch.
+If OpenRig cannot read the saved native plugin selection, it keeps the file and
+launches the seat with a warning. It omits those plugin roots for that launch.
+
+Both OMP modes pass an explicit seat effort to the child as `--thinking` on
+launch, runtime switch and resume. This previews a switch to RPC. Use
+`--runtime omp-tui` to preview a switch to the native terminal.
+
+```sh
+rig seat set-runtime editor@team --runtime omp --model openrouter/z-ai/glm-5.3 --effort medium --reason "Review OMP settings" --dry-run
+```
+
+At a native OMP approval menu, this Bash or Zsh command sends one audited Down
+key and leaves the menu open. It moves the highlight without pressing Enter.
+The person at the pane can inspect the choice and decide whether to confirm.
+Access to menu navigation gives a peer no authority to approve a request.
+
+```sh
+rig send editor@team $'\e[B' --dangerously-interact --reason "Inspect the next choice"
+```
+
+`rig ps` shows the model in the current RPC occupant's latest successful
+assistant response, or the current native UI's selected model. A fresh UI can
+report its selection before any provider has answered.
+`rig seat history --rig <rig-id> --node-id <node-id>` also lists recorded OMP session identities
+for inspection, including before a compatible snapshot exists. Recorded
+identities describe the seat's registry entries. A captured resume choice is
+listed separately and requires a compatible snapshot.
 
 ### Terminal Nodes
 
@@ -1770,7 +1810,7 @@ spec can pass `rig spec validate` and then fail at preflight or import. Run
 24. Startup action `idempotent` is a required boolean.
 25. Non-idempotent actions must not include `restore` in `applies_on`.
 26. `applies_on` values must be from: `fresh_start`, `restore`.
-27. `launch_wrapper` is valid on `pi`, `codex`, `claude-code` and supported community-harness members (`[]` included); see the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch) for community capability requirements. It must be an array of strings without NUL/CR/LF, and `launch_wrapper[0]` (when non-empty) must be an absolute path or a bare command name on the daemon `PATH`.
+27. `launch_wrapper` is valid on `pi`, `omp-tui`, `codex`, `claude-code` and supported community-harness members (`[]` included); see the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch) for community capability requirements. It must be an array of strings without NUL/CR/LF, and `launch_wrapper[0]` (when non-empty) must be an absolute path or a bare command name on the daemon `PATH`.
 28. What is inside a member's `pool` block is checked as advisories only, never as errors; see [Seat pool](#seat-pool-pool).
 
 ---

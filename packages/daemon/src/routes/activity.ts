@@ -462,9 +462,26 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   if (switchRole) {
     if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string"
       && !reportedByAnotherRuntime(body)) {
+      const runtime = stringOrNull(body.runtime);
+      let token = body.sessionId;
+      let type = runtime;
+      if (switchRole.targetRuntime === "omp" || switchRole.targetRuntime === "omp-tui" || runtime === "omp" || runtime === "omp-tui") {
+        if (runtime !== switchRole.targetRuntime) return c.json({ ok: true, ignored: switchRole.role, tokenPersisted: false });
+        const validation = validateResumeToken(runtime, stringOrNull(body.sessionFile));
+        const adapters = c.get("runtimeAdapters" as never) as Record<string, {
+          readSessionFile?(session: string, stagedGeneration?: string): { ok: boolean; sessionFile?: string };
+        }> | undefined;
+        const own = runtime === "omp-tui" ? adapters?.[runtime]?.readSessionFile?.(switchRole.stagingSession, body.generation as string)
+          : adapters?.[runtime!]?.readSessionFile?.(body.sessionName as string, body.generation as string);
+        if (!validation.ok || !own?.ok || own.sessionFile !== validation.token || !existsSync(validation.token)) {
+          return c.json({ ok: true, ignored: switchRole.role, tokenPersisted: false });
+        }
+        type = validation.resumeType;
+        token = validation.token;
+      }
       store.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type = ?, successor_resume_token = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND committed_at IS NULL`)
-        .run(stringOrNull(body.runtime), body.sessionId, switchRole.id);
+        .run(type, token, switchRole.id);
     }
     return c.json({ ok: true, ignored: switchRole.role, switchId: switchRole.id, tokenPersisted: false });
   }
@@ -493,7 +510,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     // session file that matches the seat's runner sidecar. Every refusal
     // reports tokenPersisted: false so the OMP runner keeps re-announcing.
     // Pi, Claude, Codex and terminal seats keep the paths below unchanged.
-    if (runtime === "omp" || resolved.runtime === "omp") {
+    if (runtime === "omp" || runtime === "omp-tui" || resolved.runtime === "omp" || resolved.runtime === "omp-tui") {
       if (sessionName !== resolved.sessionName) {
         return c.json({ ok: false, code: "session_not_found", tokenPersisted: false, error: "Session identity does not match the managed seat." }, 404);
       }
@@ -503,12 +520,14 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       // Same occupant-generation gate as Pi below, before any file eligibility.
       const generation = stringOrNull(body.generation);
       let reason: string | null = null;
+      let adoptedGeneration: string | undefined;
       try {
         const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        if (current && current.generationUuid !== generation) adoptedGeneration = current.generationUuid;
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+        } else if (adoptedGeneration && (runtime !== "omp-tui" || !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation))) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
@@ -521,26 +540,51 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
           error: "OMP session identity ignored: emitter is not the registered current occupant.",
         }, 409);
       }
-      const validation = validateResumeToken("omp", stringOrNull(body.sessionFile));
+      const validation = validateResumeToken(runtime!, stringOrNull(body.sessionFile));
       // OMP reports a path before its first turn is written. Persist only
       // materialized history; the runner can re-announce identity later.
       const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
-      const omp = adapters?.["omp"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
-      const ownFile = typeof omp?.readSessionFile === "function" ? omp.readSessionFile(resolved.sessionName) : null;
-      const tokenPersisted = validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
-        ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
-          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
-        : false;
+      type FileRead = { ok: true; sessionFile: string } | { ok: false; reason: string };
+      const omp = adapters?.[runtime!] as { readSessionFile?: (session: string, generation?: string) => FileRead;
+        readLiveSessionFile?: (session: string, generation?: string, targetPane?: string) => Promise<FileRead> } | undefined;
+      const persist = (ownFile: FileRead | undefined): boolean =>
+        validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
+        && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
+      let tokenPersisted: boolean | null;
+      if (adoptedGeneration) {
+        const binding = sessionRegistry.getBindingForNode(resolved.nodeId);
+        if (binding?.attachmentType === "external_cli" || binding?.tmuxSession !== sessionName || !binding.tmuxPane) {
+          return c.json({ ok: false, code: "binding_mismatch", tokenPersisted: false }, 409);
+        }
+        const ownFile = await omp?.readLiveSessionFile?.(resolved.sessionName, generation!, binding.tmuxPane);
+        // Another no-launch adoption can retain this writer while replacing the row that owns its token.
+        // Let the writer retry against that destination with fresh pane evidence.
+        tokenPersisted = store.db.transaction(() => {
+          const current = store.resolveSession({ sessionName, nodeId, runtime });
+          const currentBinding = sessionRegistry.getBindingForNode(resolved.nodeId);
+          if (current?.sessionId !== resolved.sessionId || current.runtime !== runtime || current.sessionName !== sessionName
+            || sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid !== adoptedGeneration
+            || currentBinding?.id !== binding.id || currentBinding.attachmentType !== binding.attachmentType
+            || currentBinding.tmuxSession !== binding.tmuxSession || currentBinding.tmuxPane !== binding.tmuxPane) return null;
+          return persist(ownFile);
+        }).immediate();
+        if (tokenPersisted === null) {
+          return c.json({ ok: false, code: "identity_destination_changed", tokenPersisted: false }, 409);
+        }
+      } else {
+        tokenPersisted = persist(omp?.readSessionFile?.(resolved.sessionName, runtime === "omp-tui" ? generation! : undefined));
+      }
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "omp",
+        runtime: runtime!,
         sessionId,
-        provenance: "rpc",
+        provenance: runtime === "omp-tui" ? "hook" : "rpc",
       });
-      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
+      return c.json({ ok: true, sessionId, provenance: runtime === "omp-tui" ? "hook" : "rpc", tokenPersisted });
     }
 
 /** The seat speaks Pi's RPC protocol through OpenRig's hosted runner: its launch recorded the protocol (agent_runner 2),

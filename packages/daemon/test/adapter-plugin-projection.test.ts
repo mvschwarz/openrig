@@ -1,3 +1,4 @@
+import { memoryProjectionFiles } from "./helpers/omp-files.js";
 // Test suite for plugin-primitive Phase 3a slice 3.1 — adapter plugin
 // directory projection. Per velocity-guard cadence boundary (c)
 // 2026-05-10: prove the runtime adapters copy a real plugin tree
@@ -18,6 +19,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
+import { OmpTuiRuntimeAdapter } from "../src/adapters/omp-tui-runtime-adapter.js";
+import { OmpSeatLauncher } from "../src/adapters/omp-seat-launch.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { NodeBinding } from "../src/domain/types.js";
 
@@ -105,6 +108,39 @@ const OPENRIG_CORE_TREE = {
   "/p/openrig-core/hooks/scripts/activity-relay.cjs": "// relay script body",
   "/p/openrig-core/README.md": "# openrig-core plugin",
 };
+
+describe.each(["claude-code", "codex", "omp-tui"] as const)("shared plugin contract: %s", runtime => {
+  it("projects the same dual-manifest plugin, hook commands and skills, and refreshes changed content", async () => {
+    const files = { ...OPENRIG_CORE_TREE,
+      "/p/openrig-core/package.json": JSON.stringify({ omp: { extensions: ["omp/index.js"] } }),
+      "/p/openrig-core/omp/index.js": "export default function activate() {}",
+      "/p/openrig-core/hooks/claude.json": JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"' }] }] } }),
+      "/p/openrig-core/hooks/codex.json": JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: 'node "${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"' }] }] } }),
+    };
+    const fs = mockClaudeFs(files);
+    Object.assign(fs, memoryProjectionFiles(fs._store));
+    fs.exists = p => p in fs._store || Object.keys(fs._store).some(file => file.startsWith(`${p}/`));
+    fs.copyFile = (src, dest) => { fs._store[dest] = fs.readFile(src); };
+    const tmux = mockTmux();
+    const launcher = new OmpSeatLauncher({ tmux, fsOps: fs, stateRoot: "/state", seatExtensionPath: "/assets/omp/openrig-seat.js" });
+    const adapter = runtime === "omp-tui" ? new OmpTuiRuntimeAdapter({ tmux, fsOps: fs, launcher })
+      : runtime === "codex" ? new CodexRuntimeAdapter({ tmux, fsOps: fs }) : new ClaudeCodeAdapter({ tmux, fsOps: fs });
+    const target = runtime === "omp-tui" ? `${launcher.paths("test").pluginsDir}/openrig-core` : `/cwd/.${runtime === "codex" ? "codex" : "claude"}/plugins/openrig-core`;
+    const plan = { ...makePlan([makePluginEntry("openrig-core", "/p/openrig-core")]), runtime };
+    const result = await adapter.project(plan, makeBinding());
+    expect(result.failed).toEqual([]);
+    expect(result.projected).toEqual(["openrig-core"]);
+    for (const [source, content] of Object.entries(files)) expect(fs._store[target + source.slice("/p/openrig-core".length)]).toBe(content);
+    fs._store["/p/openrig-core/hooks/scripts/activity-relay.cjs"] = "// updated command";
+    await adapter.project(plan, makeBinding());
+    expect(fs._store[`${target}/hooks/scripts/activity-relay.cjs`]).toBe("// updated command");
+    if (runtime === "omp-tui") {
+      expect(launcher.pluginRoots("test")).toEqual([target]);
+      await adapter.project({ ...plan, entries: [] }, makeBinding());
+      expect(launcher.pluginRoots("test")).toEqual([]);
+    }
+  });
+});
 
 // ============================================================
 // Claude Code adapter — plugin tree projection

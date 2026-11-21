@@ -35,7 +35,7 @@ function mockTmux(paneContent?: string): TmuxAdapter {
 }
 
 describe("SessionFingerprinter", () => {
-  it.each(["codex-reporter", "notclaude", "claude-monitor", "claude-monitor-x", ".claude-unwrappx", ".codex-unwrappx"])("does not infer an agent from unrelated process name %s", async (activeCommand) => {
+  it.each(["omp-helper", "codex-reporter", "notclaude", "claude-monitor", "claude-monitor-x", ".claude-unwrappx", ".codex-unwrappx"])("does not infer an agent from unrelated process name %s", async (activeCommand) => {
     const fp = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux(), fsExists: () => false });
     expect(await fp.fingerprint(makePane({ activeCommand }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
   });
@@ -112,6 +112,11 @@ describe("SessionFingerprinter", () => {
 
     expect(result.runtimeHint).toBe("codex");
     expect(result.confidence).toBe("high");
+  });
+
+  it("recognizes native OMP by process name without inventing a managed home or resume token", async () => {
+    const fingerprinter = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux(""), fsExists: () => false });
+    expect(await fingerprinter.fingerprint(makePane({ activeCommand: "/opt/bin/omp" }))).toMatchObject({ runtimeHint: "omp-tui", confidence: "high" });
   });
 
   it("recognizes only an explicit managed OMP runner, not a bare node pane", async () => {

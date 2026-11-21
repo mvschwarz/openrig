@@ -7,7 +7,7 @@ import { piAccountSwitchesSchema } from "../src/db/migrations/151_pi_account_swi
 it("retains an interrupted runtime switch when upgrading to Pi-capable switches", () => {
   const db = createDb();
   try {
-    migrate(db, ALL_MIGRATIONS.filter(migration => migration.name !== piAccountSwitchesSchema.name));
+    migrate(db, ALL_MIGRATIONS.filter(migration => migration.name < piAccountSwitchesSchema.name));
     db.exec("INSERT INTO rigs (id, name) VALUES ('rig', 'upgrade'); INSERT INTO nodes (id, rig_id, logical_id) VALUES ('seat', 'rig', 'dev.build');");
     const insert = db.prepare(`INSERT INTO seat_runtime_switches
       (id, node_id, canonical_session, staging_session, predecessor_pane, predecessor_generation, successor_generation, from_runtime, to_runtime, reason, plan_json, deadline_at)

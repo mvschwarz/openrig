@@ -1296,7 +1296,7 @@ export class RigRepository {
     try { processLimits = parseStoredProcessLimits(row.process_limits, `Seat ${row.id} process_limits`); }
     catch (error) { processLimitsError = (error as Error).message; }
     if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
-      throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+      throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness`);
     }
     return {
       id: row.id,

@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when a person in their own Claude Code, Codex or OMP (Oh My Pi) session mentions OpenRig, rigs or the rig command, or wants a team of coding agents (Claude Code, Codex) on their project. That includes installing, setting up, starting or updating OpenRig, seeing, getting back to or re-attaching to their OpenRig agents (including bringing a stopped team back), TUI or operator, starting or sharing a team, and joining this session to one. Operating a running rig from inside it (fleet recovery, seat handover, watchdog wakes, in-rig upgrades) is the openrig-skills skill.
+description: Use when a person in their own Claude Code, Codex or OMP (Oh My Pi) session mentions OpenRig, rigs or the rig command, or wants a team of coding agents (Claude Code, Codex, OMP) on their project. That includes installing, setting up, starting or updating OpenRig, seeing, getting back to or re-attaching to their OpenRig agents (including bringing a stopped team back), TUI or operator, starting or sharing a team, and joining this session to one. Operating a running rig from inside it (fleet recovery, seat handover, watchdog wakes, in-rig upgrades) is the openrig-skills skill.
 ---
 
 # rigs: your route into OpenRig
@@ -224,6 +224,12 @@ commands; if the two ever differ, this step is right.
 
   Carry their constraints, which logins they have (an installed provider that isn't signed in doesn't count), and any
   permission choice they made, chosen or declined, in either handoff.
+
+  If they want an Oh My Pi (OMP) seat, mention that it can also open OMP's own terminal UI, with approval dialogs
+  in the seat's pane. Pass the seat name and mode to the operator. Use `runtime: omp` (RPC) by default. If they ask
+  for the native UI, pass `runtime: omp-tui` for that seat. On an existing installation, `rig seat set-runtime --help`
+  lists the runtime choices that version supports.
+
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way, by the route they chose. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay

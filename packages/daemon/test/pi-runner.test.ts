@@ -1184,15 +1184,14 @@ describe("--thinking in the runner command and the pi child argv", () => {
   const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "approve" as const, launchId: "L1" };
   const childBase = { sessionsDir: "/sd", sessionName: SESSION, trust: "approve" as const };
 
-  it("runner command carries --thinking after --model, only when non-blank, never for omp", () => {
+  it("runner command carries --thinking after --model, only when non-blank for Pi and OMP", () => {
     const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "pi", model: "zai/glm", thinking: " high " });
     expect(cmd).toContain("--model 'zai/glm' --thinking 'high'");
     expect(cmd.indexOf("--thinking")).toBeGreaterThan(cmd.indexOf("--launch-id"));
     for (const thinking of [undefined, "", "  "]) {
       expect(buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "pi" }));
     }
-    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", thinking: "high" })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "omp" }));
-    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", thinking: "high" })).not.toContain("--thinking");
+    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp" })).not.toContain("--thinking");
   });
 
   it("only a value of set-effort's shape is sent: Pi's levels and unknown words go through, flag-shaped and spaced values are left out", () => {
@@ -1214,18 +1213,18 @@ describe("--thinking in the runner command and the pi child argv", () => {
     expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 4)).toEqual(["--model", "openrouter/x:high", "--thinking", "low"]);
   });
 
-  it("child argv: --thinking present with a value, absent when blank, never for omp", () => {
+  it("child argv: --thinking present with a value, absent when blank for Pi and OMP", () => {
     expect(buildPiChildArgs({ ...childBase, thinking: "xhigh" })).toEqual(expect.arrayContaining(["--thinking", "xhigh"]));
     for (const thinking of [undefined, "", " "]) {
       expect(buildPiChildArgs({ ...childBase, thinking })).not.toContain("--thinking");
     }
-    expect(buildPiChildArgs({ ...childBase, runtime: "omp", thinking: "high" })).toEqual(buildPiChildArgs({ ...childBase, runtime: "omp" }));
+    expect(buildPiChildArgs({ ...childBase, runtime: "omp" })).not.toContain("--thinking");
   });
 
-  it("parseRunnerArgs round-trips the command's --thinking into the child argv", () => {
-    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking: "medium" });
+  it.each(["pi", "omp"] as const)("round-trips the %s runner command's --thinking into the child argv", runtime => {
+    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime, thinking: "medium" });
     const parsed = parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, "")));
-    expect(buildPiChildArgs({ ...childBase, thinking: parsed.thinking })).toEqual(expect.arrayContaining(["--thinking", "medium"]));
+    expect(buildPiChildArgs({ ...childBase, runtime: parsed.runtime, thinking: parsed.thinking })).toEqual(expect.arrayContaining(["--thinking", "medium"]));
   });
 
   it("parseRunnerArgs round-trips the command's --command and custom runtime", () => {

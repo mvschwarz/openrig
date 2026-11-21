@@ -54,7 +54,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
-import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult } from "./runtime-adapter.js";
+import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult, type PreparedInput } from "./runtime-adapter.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
 import type { HookBridge } from "./hook-bridge.js";
@@ -795,6 +795,27 @@ export function communityHarnessPaneActivity(classification: PaneActivityClassif
     : classification;
 }
 
+/** Read OMP's bottom-anchored model picker. A copy of the menu above new output or a composer is history. */
+function currentOmpModelPicker(lines: string[]): boolean {
+  if (!/^[╰└]─+[╯┘]$/u.test(lines.at(-1) ?? "")) return false;
+  let header = lines.length - 2;
+  while (header >= 0 && /^[│├]/u.test(lines[header]!)) header--;
+  if (!/^[╭┌]─+\s*Switch (?:Task )?Model\s*─*[╮┐]$/iu.test(lines[header] ?? "")) return false;
+  // OMP clips the hints on narrow panes. Its mode-specific status still identifies the picker there.
+  return /^│\s*(?:Session-only switch|Task subagent switch|Quick role switch)\b/i.test(lines[header + 1] ?? "")
+    || /\bmodels\s*·[^·│]*use for (?:this session|Task subagents)\b|\broles\s*·[^·│]*apply role model\b/i.test(lines.at(-2) ?? "");
+}
+
+function endsAtOmpApproval(linesBelowHints: string[]): boolean {
+  const frameBottom = /^╰─+╯$/u;
+  if (linesBelowHints.every(line => frameBottom.test(line))) return true;
+  // Stock OMP can keep its running timer and empty composer gutter below the modal.
+  // Require the complete layout so menu text quoted above later output cannot trigger this fallback.
+  const [border = "", status = "", gutter] = linesBelowHints;
+  return linesBelowHints.length === 3 && frameBottom.test(border) && gutter === "╰─"
+    && /^\p{Script=Braille}(?:-\S+)?\s+\d+[smh](?:\s|$)/u.test(status);
+}
+
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   if (options.composerSnapshot) {
     const snapshot = options.composerSnapshot;
@@ -809,6 +830,23 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
+  }
+
+  if (options.runtime === "omp-tui") {
+    if (currentOmpModelPicker(lastNonBlank)) {
+      return { state: "attention", reason: "selection_prompt", evidence: "OMP model picker" };
+    }
+    // A permission can outlast the hook freshness window. Stock OMP can draw a panel divider
+    // between Deny and the navigation footer. The draft/steering footer has different keys.
+    const rows = lastNonBlank.slice(-20);
+    const footer = rows.map(row => /\bchoose · [^·]+ select · [^·]+ approve · [^·]+ deny\b/u.test(row)).lastIndexOf(true);
+    const choiceLabel = (row: string) => row.replace(/^[^\p{L}\p{N}]+|[\s│┃║]+$/gu, "");
+    let lastChoice = footer - 1;
+    if (/^├─+┤$/u.test(rows[lastChoice] ?? "")) lastChoice--;
+    if (footer >= 0 && endsAtOmpApproval(rows.slice(footer + 1)) && lastChoice >= 1 && choiceLabel(rows[lastChoice]!) === "Deny" &&
+        rows.slice(Math.max(0, lastChoice - 11), lastChoice).some(row => /^Approve(?: Once)?$/.test(choiceLabel(row)))) {
+      return { state: "attention", reason: "permission_prompt", evidence: "OMP approval menu" };
+    }
   }
 
   const piConfirmation = findCurrentPiDialog(paneContent);
@@ -2313,6 +2351,7 @@ export interface BroadcastResult {
 
 export interface TransportReadinessChecker {
   checkReady?(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult>;
+  prepareInput?(sessionName: string, text: string): PreparedInput;
 }
 
 interface SessionTransportDeps {
@@ -2323,8 +2362,7 @@ interface SessionTransportDeps {
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
   agentActivityStore?: AgentActivityStore;
-  // A positive-picker override requires a working audit sink. Other explicit interaction attempts
-  // audit too, but an unavailable sink stays advisory so an already accepted send is not refused.
+  // Picker overrides and native OMP navigation keys require a working audit sink.
   eventBus?: EventBus;
   /** Slice 13: an opted-in Claude seat's hook bridge. Absent, every seat gets typed delivery as before. */
   hookBridge?: HookBridge;
@@ -3882,6 +3920,10 @@ export class SessionTransport {
     let draftAdvised = false;
     // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
     const promptOverride = Boolean(opts?.dangerouslyInteract);
+    // An OMP menu distinguishes a terminal arrow key from its escape bytes pasted into the editor.
+    const ompArrow = runtime === "omp-tui" && promptOverride && /\x1b(?:\[|O)[AB]/.test(text);
+    const arrowKey = ompArrow && text.length === 3
+      ? (text.endsWith("A") ? "Up" : "Down") : undefined;
     // Positive evidence of an interactive prompt: there an Enter after a consumed answer lands in the next prompt.
     let overrideAtPrompt = false;
     if (waitForIdleMs === undefined || promptOverride) {
@@ -3893,10 +3935,14 @@ export class SessionTransport {
       }, opts?.dangerouslyInteract === true);
 
       // Explicit interaction selects key input even when readiness cannot recognize the prompt.
-      // Only bypassing a positive picker requires a successful audit; other states already sent.
+      // A named OMP key always requires a successful audit, as does overriding a recognized prompt.
       if (opts?.dangerouslyInteract) {
         overrideAtPrompt = readiness.state === "needs_input";
-        if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
+        if (ompArrow && !arrowKey) {
+          return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "omp_menu_navigation_unavailable",
+            error: "OMP navigation takes exactly one Up or Down key per send." };
+        }
+        if ((arrowKey || readiness.state === "needs_input") && (!opts.reason || opts.reason.trim().length === 0)) {
           return {
             ok: false,
             sessionName,
@@ -3908,7 +3954,7 @@ export class SessionTransport {
         const target = this.tmuxAdapter.deliveryGuard?.maybeTarget(sessionName);
         // Native menus retain their audited key-driving path. Otherwise inspect under the same lease,
         // after buffer preparation, immediately before the adapter's final identity check and paste.
-        if (target && readiness.state !== "needs_input") {
+        if (target && !arrowKey && readiness.state !== "needs_input") {
           overrideBeforePaste = async () => {
             const unchecked = opts.typeWithoutChecking === true;
             const snapshot = unchecked ? null : await this.readWithinDeadline("session_transport.override_input",
@@ -3933,11 +3979,13 @@ export class SessionTransport {
           };
         }
         const audit = overrideBeforePaste ? { ok: true as const } : this.recordPromptOverride(auditInput);
-        if (!audit.ok && readiness.state === "needs_input") {
+        if (!audit.ok && (arrowKey || readiness.state === "needs_input")) {
           return {
             ok: false,
             sessionName,
             reason: "prompt_override_audit_unavailable",
+            sent: false,
+            inputPhase: "not_reached",
             activity: readiness,
             error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
           };
@@ -4078,11 +4126,25 @@ export class SessionTransport {
       if (writeIssued && error && typeof error === "object") (error as { inputAttempted?: boolean }).inputAttempted = true;
       throw error;
     };
+    let inputReceived: PreparedInput | undefined;
+    if (runtime === "omp-tui" && !promptOverride) {
+      try {
+        const adapter = this.runtimeAdapters["omp-tui"];
+        if (!adapter?.prepareInput) throw new Error("OMP input acknowledgement unavailable; no text was sent.");
+        inputReceived = adapter.prepareInput(sessionName, text);
+      } catch (error) {
+        return observe({ ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "send_failed", outcome: "failed", error: (error as Error).message });
+      }
+    }
     const textResult = await this.runStage(
       "session_transport.send_text",
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
+        if (arrowKey) return this.tmuxAdapter.sendKeys(sessionName, [arrowKey], () => {
+          if (checkOriginal) originalCheck?.assertCurrent();
+          beforePaste?.();
+        }, { beforeKeys: async () => { await checkOriginal?.(); await preserveInput?.(); } });
         if (checkOriginal) return this.tmuxAdapter.sendText(sessionName, text, () => { beforeOriginalInput(); beforePaste?.(); }, {
           ...(promptOverride ? { bracketed: false } : {}), beforePaste: async () => { await overrideBeforePaste?.(); await checkOriginal(); if (preserveInput) await preserveInput(); },
         });
@@ -4092,7 +4154,8 @@ export class SessionTransport {
         return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
-    ).catch(tagIssued);
+    ).catch(error => { inputReceived?.cancel?.(); return tagIssued(error); });
+    if (!textResult.ok) inputReceived?.cancel?.();
     if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
       return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     }
@@ -4108,10 +4171,13 @@ export class SessionTransport {
         // The adapter's draft checks run before the paste (only file/buffer preparation precedes them), and its
         // after-paste observation cannot fail the write, so a draft_* receipt proves the target input was never reached.
         inputPhase: policyRefusal ? "not_reached" as const : "attempted" as const,
-        error: `Failed to send text to '${sessionName}': ${textResult.message}`,
+        error: `Failed to send ${arrowKey ?? "text"} to '${sessionName}': ${textResult.message}`,
         ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });
     }
+    if (arrowKey) return observe({ ok: true, sessionName, sent: true, verified: false,
+      outcome: "rendered-unconfirmed", promptInteraction: "unverified",
+      warning: [sendAdvisory, `Sent the ${arrowKey} key once. Inspect the result in the OMP terminal. No Enter was sent.`].filter(Boolean).join(" ") });
     try { opts?.onInputEffect?.("pasted", { text }); } catch { /* Observation cannot change a completed paste. */ }
 
     // From the successful paste to Enter the text may sit in the seat's input. Any throw in this span is
@@ -4120,8 +4186,15 @@ export class SessionTransport {
     let submitResult;
     let enterIssued = false; // set as the Enter key is handed to the adapter
     try {
-      // 4. Wait 200ms (spike-proven delay)
-      await this.sleep(200);
+      // Native OMP acknowledges complete paste dispatch; a fixed delay races slow terminal ingestion.
+      if (inputReceived) {
+        try {
+          const warning = await inputReceived();
+          if (warning) sendAdvisory = [sendAdvisory, warning].filter(Boolean).join(" ");
+        } catch (error) {
+          return observe({ ok: false, sessionName, sent: true, inputPhase: "written", reason: "submit_failed", outcome: "failed", error: (error as Error).message });
+        }
+      } else await this.sleep(200);
 
       // With transport.verify_input_box on, one bounded read of the input box and its pane process before
       // Enter (a 500 ms budget after the 200 ms wait). It only reports: nothing here decides whether Enter is sent.
@@ -4559,16 +4632,15 @@ export class SessionTransport {
       hookActivity.reason !== "permission_request_pending" &&
       hookActivity.reason !== "permission_prompt_cleared"
     ) {
-      // Fresh hook (within the 15s send window): authoritative for any state, except a current Claude
-      // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
-      // hook gets the same current-dialog check as a fresh running one.
+      // A person can open a Claude or native OMP picker after the last hook. Even a fresh idle
+      // report needs the same current-dialog check as a running report before typing.
       if (this.hookFreshForSend(hookActivity, now)) {
         // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
         // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
         // the pane probe below don't read the declaration.
         const dialogRead = declaredCapabilities("typed", input.runtime).observe.dialog === "supported";
         // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
-        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && (input.runtime === "claude-code" || input.runtime === "omp-tui")) {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4826,8 +4898,7 @@ export class SessionTransport {
   }
 
   // Record actor/reason with the actual readiness, never a fabricated prompt classification.
-  // Report an unavailable sink to the caller: a positive-picker override still fails closed,
-  // while other readiness states keep their existing accepted-send behavior with an advisory.
+  // The caller uses this result before sending a picker override or native OMP navigation key.
   private recordPromptOverride(input: {
     sessionName: string;
     readiness: AgentActivity;

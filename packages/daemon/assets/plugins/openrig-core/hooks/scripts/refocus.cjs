@@ -59,9 +59,19 @@ function liveDelivery(claim) {
   return false;
 }
 
+function clearPending(state) {
+  delete state.pendingOn;
+  delete state.pendingAt;
+  delete state.pendingFailure;
+  delete state.pendingRevision;
+}
+
+// "omp" is Oh My Pi, whose plugin entry (omp/index.js) runs this script at OMP's own events. Like Codex it has an exact
+// post-compaction event, so it never uses Claude's transcript-growth threshold or Claude's pasted-content envelope.
 function runtime() {
   const index = process.argv.indexOf("--runtime");
-  return index >= 0 && process.argv[index + 1] === "codex" ? "codex" : "claude";
+  const value = index >= 0 ? process.argv[index + 1] : null;
+  return value === "codex" || value === "omp" ? value : "claude";
 }
 
 function enabled(value, fallback = true) {
@@ -148,7 +158,7 @@ function readConfiguredContent(home) {
 // runtime's default below applies. A runtime defaults on only once a native run has shown the packet
 // reaching the agent and leading to the right next action; neither has yet. With it off, every path
 // below is unchanged.
-const WORK_PACKET_DEFAULT = { claude: false, codex: false };
+const WORK_PACKET_DEFAULT = { claude: false, codex: false, omp: false };
 function workPacketEnabled() {
   return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, WORK_PACKET_DEFAULT[runtime()] === true);
 }
@@ -368,6 +378,8 @@ function runsForThisSeatsProject(env = process.env) {
   try { input = JSON.parse((await readStdin()) || "{}") || {}; } catch {}
   const event = input.hook_event_name || "UserPromptSubmit";
   const harness = runtime();
+  const prepareForOmp = harness === "omp" && event === "UserPromptSubmit" && input.omp_prepare === true;
+  const acceptForOmp = harness === "omp" && event === "OmpRefocusAccepted";
 
   // The acknowledgement is never an actionable restore turn. The managed
   // marker below also holds earlier/later peer messages, not just this prompt.
@@ -460,6 +472,7 @@ function runsForThisSeatsProject(env = process.env) {
   const claim = { id: crypto.randomUUID(), pid: process.pid, at: Date.now(), promptId };
   try {
     state = start.read();
+    if (acceptForOmp && !state) return;
     try { size = fs.statSync(transcriptPath).size; } catch {}
     if (state === null) {
       // First observation for this occupant: the baseline is its OWN current size —
@@ -469,14 +482,9 @@ function runsForThisSeatsProject(env = process.env) {
       state = { lastBytes: size, baselineAt: new Date().toISOString() };
       if (start.exclusive) start.write(state);
     } else if (size > 0 && size < Number(state.lastBytes || 0)) {
-      // Shrink invalidates growth-based due state, not an exact PostCompact event
-      // awaiting its actionable restore turn.
-      if (state.pendingOn !== "PostCompact") {
-        delete state.pendingOn;
-        delete state.pendingAt;
-        delete state.pendingFailure;
-        delete state.pendingRevision;
-      }
+      // Shrink invalidates growth-based due state. An exact compaction or native /refocus still needs delivery.
+      const explicitOmpRequest = harness === "omp" && state.pendingOn === "UserPromptSubmit";
+      if (state.pendingOn !== "PostCompact" && !explicitOmpRequest) clearPending(state);
       state.lastReset = { at: new Date().toISOString(), fromBytes: Number(state.lastBytes || 0), toBytes: size };
       state.lastBytes = size;
       if (start.exclusive) start.write(state);
@@ -500,6 +508,19 @@ function runsForThisSeatsProject(env = process.env) {
       }
       state.seenDeferred = { ...state.seenDeferred, [kind]: deferred.pendingRevision };
       if (start.exclusive) start.write(state);
+    }
+
+    if (acceptForOmp) {
+      // A late message from an older preparation cannot discharge a newer compaction.
+      const deliveryId = firstString(input.omp_delivery_id);
+      if (start.exclusive && deliveryId && state.pendingOn && deliveryId === state.pendingRevision) {
+        clearPending(state);
+        if (size > 0) state.lastBytes = size;
+        state.firedAt = new Date().toISOString();
+        state.firedOn = "UserPromptSubmit";
+        start.write(state);
+      }
+      return;
     }
 
     const lastBytes = Number(state.lastBytes || 0);
@@ -580,8 +601,15 @@ function runsForThisSeatsProject(env = process.env) {
 
     state.pendingOn ||= event;
     state.pendingAt ||= new Date().toISOString();
+    if (prepareForOmp && (onDemand || !state.pendingRevision)) state.pendingRevision = crypto.randomUUID();
     state.deliveryClaim = { ...claim, bytes: size };
     claimed = start.exclusive && start.write(state);
+    if (prepareForOmp && !claimed) {
+      if (onDemand) start.writeDeferred("other", {
+        pendingOn: event, pendingAt: state.pendingAt, pendingRevision: state.pendingRevision,
+      });
+      return;
+    }
   } finally {
     start.close();
   }
@@ -594,7 +622,7 @@ function runsForThisSeatsProject(env = process.env) {
   const configured = readConfiguredContent(home);
   const failed = rendered.failed || Boolean(configured.failure);
   // A post-compaction refocus still pending after a failed attempt is a retry of it, not a second compaction.
-  const why = onDemand
+  const why = onDemand || (prepareForOmp && state.pendingOn === "UserPromptSubmit")
     ? "on demand"
     : state.pendingOn === "PostCompact"
       ? state.pendingFailure
@@ -657,6 +685,7 @@ function runsForThisSeatsProject(env = process.env) {
     }
   }
   const output = JSON.stringify({
+    ...(prepareForOmp ? { ompRevision: state.pendingRevision, ompComplete: !failed } : {}),
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
       additionalContext,
@@ -674,7 +703,7 @@ function runsForThisSeatsProject(env = process.env) {
       const latest = finish.read();
       if (latest?.deliveryClaim?.id !== claim.id) return;
       delete latest.deliveryClaim;
-      if (!error && promptId) latest.lastPromptId = promptId;
+      if (!error && promptId && !prepareForOmp) latest.lastPromptId = promptId;
       const samePending = latest.pendingRevision === state.pendingRevision;
       if (failed || error) {
         if (samePending) {
@@ -683,19 +712,14 @@ function runsForThisSeatsProject(env = process.env) {
             || `the refocus could not be written: ${String(error?.message ?? error).replace(/\s+/g, " ").trim()}`;
           latest.pendingFailure = failure.length > PENDING_FAILURE_MAX ? `${failure.slice(0, PENDING_FAILURE_MAX - 1)}…` : failure;
         }
-      } else {
+      } else if (!prepareForOmp) {
         if (size > 0 && latest.lastReset?.at === state.lastReset?.at) latest.lastBytes = size;
         latest.firedAt = new Date().toISOString();
         latest.firedOn = event;
         // Writer completion, not a model-context receipt. A shortened output names its omitted tail and full-text file.
         if (contextOutput) latest.contextOutput = contextOutput;
         else delete latest.contextOutput;
-        if (samePending) {
-          delete latest.pendingOn;
-          delete latest.pendingAt;
-          delete latest.pendingFailure;
-          delete latest.pendingRevision;
-        }
+        if (samePending) clearPending(latest);
       }
       finish.write(latest);
     } finally {

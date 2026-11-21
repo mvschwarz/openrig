@@ -26,7 +26,7 @@ import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-elig
 import { currentRestoreSnapshot } from "../domain/current-restore-snapshot.js";
 import { latestRuntimeHomeRecord, observeRuntimeHome, readRuntimeHomeState, selectedHomePlan, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
 import { transportSenderSession } from "./require-sender-identity.js";
-import { HISTORY_REF_RE, listSharedHistories } from "../domain/shared-history-selection.js";
+import { HISTORY_REF_RE, listSeatHistories, listSharedHistories } from "../domain/shared-history-selection.js";
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
 import { observeSolePane } from "../domain/pane-binding-observation.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
@@ -304,7 +304,7 @@ startupRoutes.get("/:rigId", async (c) => {
 
 startupRoutes.get("/:rigId/nodes/:nodeId/history", (c) => {
   if (new URL(c.req.url).search) return c.json({ ok: false, code: "invalid_request", message: "This list takes no query fields." }, 400);
-  const result = listSharedHistories(sharedHistoryDeps(c), c.req.param("rigId"), c.req.param("nodeId"));
+  const result = listSeatHistories(sharedHistoryDeps(c), c.req.param("rigId"), c.req.param("nodeId"));
   return c.json(result, result.ok ? 200 : result.code === "seat_unavailable" ? 404 : 409);
 });
 

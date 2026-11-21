@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
@@ -32,6 +32,25 @@ function fakeSeat(files: Record<string, string>) {
 }
 
 describe("OMP runtime adapter exact session tokens", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([
+    [undefined, "yolo"],
+    ["floor", "always-ask"],
+  ] as const)("preserves the RPC approval setting on launch and resume with posture %s", async (launchPosture, mode) => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    const { fs, tmux } = fakeSeat({ [currentFile]: "session" });
+    const runner = { stateRoot, runnerEntryPath: "/daemon/pi-runner.js" };
+    const sleep = async () => {};
+    const rpc = new OmpRuntimeAdapter({ ...runner, fsOps: fs, tmux, sleep });
+    const restore = new OmpResumeAdapter(tmux, fs, runner, { sleep });
+    expect((await rpc.launchHarness({ tmuxSession: seat, cwd: "/work", launchPosture } as never, { name: seat })).ok).toBe(true);
+    expect((await restore.resume(seat, "omp_session_file", currentFile, "/work", undefined, launchPosture)).ok).toBe(true);
+    const commands = vi.mocked(tmux.sendShellCommand).mock.calls.map(([, command]) => command);
+    expect(commands).toHaveLength(2);
+    for (const command of commands) expect(command).toContain(`--runtime omp --approval-mode ${mode}`);
+  });
+
   it.each([true, false])("binds fresh OMP authority to builtin0 and finishes exact grant, ready=%s", async ready => {
       const { fs, tmux } = fakeSeat({});
       const finish = vi.fn(async (_ok: boolean) => {}), dispatched = vi.fn();

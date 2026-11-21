@@ -299,6 +299,25 @@ describe("ContextMonitor", () => {
     });
   });
 
+  it.each(["attention_required", "failed"])("records native OMP usage without promoting an unresolved %s start", async status => {
+    const { node, sessionName } = seedClaudeNode();
+    db.prepare("UPDATE nodes SET runtime = 'omp-tui' WHERE id = ?").run(node.id);
+    const runnerObservations = { getRunnerObservation: vi.fn() };
+    store = new ContextUsageStore(db, { stateDir: tmpDir, codexHomeDir, runnerObservations });
+    db.prepare("UPDATE sessions SET startup_status = ?, resume_type = 'omp_tui_session_file', resume_token = ? WHERE session_name = ?")
+      .run(status, "/expected/conversation.jsonl", sessionName);
+    const checkReady = vi.fn(async () => ({ ready: true }));
+    monitor = new ContextMonitor(db, store, undefined, undefined, { "omp-tui": { checkReady } });
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_id: "different-conversation", source: "omp_extension", sampled_at: new Date().toISOString() });
+    await monitor.pollOnce();
+    const usage = store.getForNode(node.id, sessionName);
+    expect(usage).toMatchObject({ availability: "known", usedPercentage: 67, source: "omp_extension_json" });
+    expect(store.getForNodes([{ nodeId: node.id, currentSessionName: sessionName }]).get(node.id)).toEqual(usage);
+    expect(runnerObservations.getRunnerObservation).not.toHaveBeenCalled();
+    expect(checkReady).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE session_name = ?").get(sessionName)).toEqual({ startup_status: status });
+  });
+
   // T2: pollOnce discovers running Codex sessions and persists usage from token_count events
   it("pollOnce discovers running Codex sessions and persists context usage", async () => {
     const { node: codexNode, sessionName, threadId } = seedCodexNode();

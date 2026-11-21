@@ -206,6 +206,35 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{busy=false;send({type:'agen
       if (runner === 2) fs.rmSync(preset, { force: true }); fs.rmSync(paths.seatRoot, { recursive: true, force: true }); fs.rmSync(root, { recursive: true, force: true });
     }
   }, 30000);
+  it("selects the native OMP launcher only for an omp-tui member", async () => {
+    const daemon = await createDaemon({ tmuxExec: async () => "", cmuxFactory: async () => { throw Error("fixture: no cmux"); } });
+    try {
+      const { deps } = daemon;
+      const rig = deps.rigRepo.createRig("omp-mode-selection");
+      const node = deps.rigRepo.addNode(rig.id, "worker", { runtime: "omp-tui", cwd: OPENRIG_HOME });
+      const session = "worker@omp-mode-selection";
+      deps.sessionRegistry.registerSession(node.id, session);
+      const paths = piSeatPaths(path.join(OPENRIG_HOME, "state", "omp-tui"), session);
+      const send = vi.spyOn(deps.tmuxAdapter, "sendShellCommand").mockImplementation(async (_seat, command) => {
+        expect(command).toContain("'--approval-mode' 'always-ask'");
+        expect(command).toContain("openrig-seat.js");
+        expect(command).not.toContain("pi-runner");
+        const { launchId } = JSON.parse(fs.readFileSync(paths.runnerStatePath, "utf8"));
+        const file = path.join(paths.sessionsDir, "session.jsonl");
+        fs.writeFileSync(file, "history");
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify({ launchId, ready: true, sessionFile: file, updatedAt: "t" }));
+        return { ok: true };
+      });
+      const adapter = deps.runtimeAdapters!["omp-tui"]!;
+      expect(deps.runtimeAdapters!.omp!.runtime).toBe("omp");
+      const binding = { nodeId: node.id, tmuxSession: session, cwd: OPENRIG_HOME } as import("../src/domain/runtime-adapter.js").NodeBinding;
+      expect(await adapter.launchHarness(binding, { name: session })).toMatchObject({ ok: true, resumeType: "omp_tui_session_file" });
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      daemon.eventLoopMonitor.stop(); daemon.contextMonitor.stop(); daemon.deps.seatActivityService?.stop(); daemon.db.close();
+    }
+  });
+
   it("the assembled OMP launch and direct resume issue distinct private builtin0 run grants", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "startup-omp-authority-"));
     const seat = "worker@omp-authority";

@@ -5,6 +5,8 @@
 // the environment that hook runs with, and goes through the real route, recorder and activity oracle.
 import { createRequire } from "node:module";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -42,7 +44,8 @@ const codex = (hook_event_name: string, transcript_path: string | null = codexRo
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function seat(runtime: "claude-code" | "codex") {
+type TestRuntime = "claude-code" | "codex" | "omp" | "omp-tui";
+function seat(runtime: TestRuntime, adapters = {}) {
   const clock = { at: Date.parse("2026-11-08T08:00:00.000Z") };
   const now = () => new Date(clock.at);
   const db = createFullTestDb();
@@ -71,6 +74,7 @@ function seat(runtime: "claude-code" | "codex") {
     c.set("activityHookToken" as never, "fixture" as never);
     c.set("seatActivityService" as never, oracle as never);
     c.set("sessionRegistry" as never, sessions as never);
+    c.set("runtimeAdapters" as never, adapters as never);
     c.set("eventBus" as never, eventBus as never);
     await next();
   });
@@ -78,10 +82,10 @@ function seat(runtime: "claude-code" | "codex") {
   // What the seat's own harness has in its environment, and so what any process it starts inherits.
   const seatEnv: Env = { OPENRIG_SESSION_NAME: name, OPENRIG_NODE_ID: node.id, OPENRIG_RUNTIME: runtime,
     OPENRIG_OCCUPANT_GENERATION: sessions.currentOccupantTenure(node.id)!.generationUuid };
-  const post = async (payload: Payload) => {
+  const post = async (payload: Payload, expectedStatus = 200) => {
     const res = await app.request("/api/activity/hooks", { method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer fixture" }, body: JSON.stringify(payload) });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(expectedStatus);
     return await res.json() as Payload;
   };
   /** One run of the shipped relay, as its main() posts: the activity report, then on a SessionStart the identity
@@ -96,7 +100,7 @@ function seat(runtime: "claude-code" | "codex") {
     return replies;
   };
   /** A runtime switch to `target` that has staged its successor and not yet committed; the successor's environment. */
-  const stageSwitch = (target: "claude-code" | "codex"): Env => {
+  const stageSwitch = (target: TestRuntime): Env => {
     const successor = "0b9d8c7e-0000-4000-8000-00000000s001";
     db.prepare(`INSERT INTO seat_runtime_switches (id, node_id, canonical_session, staging_session, predecessor_pane, successor_pane,
       predecessor_generation, successor_generation, from_runtime, to_runtime, phase, reason, plan_json, deadline_at)
@@ -105,9 +109,15 @@ function seat(runtime: "claude-code" | "codex") {
     return { ...seatEnv, OPENRIG_RUNTIME: target, OPENRIG_OCCUPANT_GENERATION: successor };
   };
   return {
-    hook, post, seatEnv, now, stageSwitch,
+    hook, post, seatEnv, now, stageSwitch, app,
+    adopt: (pane: string | null = "%1") => {
+      sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: pane });
+      return sessions.registerClaimedSession(node.id, name, "adopt");
+    },
+    rebind: () => sessions.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%2" }),
+    successor: () => db.prepare("SELECT successor_resume_type, successor_resume_token FROM seat_runtime_switches").get(),
     activity: () => oracle.getSeatState(node.id)?.activity,
-    token: () => db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(session.id),
+    token: (id = session.id) => db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(id),
     successorToken: () => (db.prepare("SELECT successor_resume_token AS t FROM seat_runtime_switches WHERE id = 'sw1'").get() as { t: string | null }).t,
     identityEvents: () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.session_identity'").get() as { n: number }).n,
   };
@@ -201,6 +211,95 @@ describe("#2702: a runtime switch's staged successor keeps its own id through a 
     expect(s.successorToken()).toBe(own.stdin.session_id);
     await s.hook(helper, successorEnv);
     expect(s.successorToken()).toBe(own.stdin.session_id);
+  });
+});
+
+describe("OMP session identity through the activity endpoint", () => {
+  function history() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-identity-"));
+    cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    return path.join(dir, "conversation.jsonl");
+  }
+  it.each(["omp", "omp-tui"] as const)("stages the materialized %s file under its own resume type", async runtime => {
+    const file = history();
+    const reads: unknown[][] = [];
+    const s = seat("claude-code", { [runtime]: { readSessionFile(...args: unknown[]) {
+      reads.push(args); return { ok: true, sessionFile: file };
+    } } });
+    const env = s.stageSwitch(runtime);
+    const body = { runtime, eventFamily: "session_identity", hookEvent: "SessionStart", sessionId: "native-id",
+      sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
+    await s.post(body);
+    expect(s.successorToken()).toBeNull();
+    fs.writeFileSync(file, "history");
+    await s.app.request("/api/activity/hooks", { method: "POST", headers: { authorization: "Bearer fixture", "content-type": "application/json" },
+      body: JSON.stringify({ ...body, generation: "unrelated-generation" }) });
+    await s.post({ ...body, runtime: "codex" });
+    expect(s.successorToken()).toBeNull();
+    await s.post(body);
+    expect(reads.at(-1)).toEqual(runtime === "omp" ? [body.sessionName, body.generation] : ["openrig-switch-sw1", body.generation]);
+    expect(s.successor()).toEqual({ successor_resume_type: runtime === "omp" ? "omp_session_file" : "omp_tui_session_file", successor_resume_token: file });
+  });
+
+  it("accepts the native seat's file and requires live process evidence on same-process adoption", async () => {
+    const file = history();
+    const next = history();
+    fs.writeFileSync(file, "history"); fs.writeFileSync(next, "new conversation");
+    let live = false;
+    const s = seat("omp-tui", { "omp-tui": { readSessionFile: () => ({ ok: true, sessionFile: file }),
+      readLiveSessionFile: async () => live ? { ok: true, sessionFile: next } : { ok: false, reason: "process_unreadable" } } });
+    const env = s.seatEnv;
+    const body = { runtime: "omp-tui", eventFamily: "session_identity", hookEvent: "SessionStart", sessionId: "native-id",
+      sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
+    expect(await s.post(body)).toMatchObject({ tokenPersisted: true });
+    expect(s.token()).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
+    const adopted = s.adopt();
+    expect(await s.post({ ...body, sessionFile: next })).toMatchObject({ tokenPersisted: false });
+    live = true;
+    expect(await s.post({ ...body, sessionFile: next })).toMatchObject({ tokenPersisted: true });
+    expect(s.token(adopted.id)).toEqual({ resume_type: "omp_tui_session_file", resume_token: next });
+    expect(s.token()).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
+  });
+
+  it("waits for an exact pane binding before reading a retained native writer's identity", async () => {
+    const file = history(); fs.writeFileSync(file, "conversation");
+    const inspected: Array<string | undefined> = [];
+    const s = seat("omp-tui", { "omp-tui": { readLiveSessionFile: async (_session: string, _generation: string, pane?: string) => {
+      inspected.push(pane);
+      return { ok: true, sessionFile: file };
+    } } });
+    const row = s.adopt(null);
+    const env = s.seatEnv;
+    const body = { runtime: "omp-tui", eventFamily: "session_identity", hookEvent: "SessionStart", sessionId: "native-id",
+      sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
+    expect(await s.post(body, 409)).toMatchObject({ code: "binding_mismatch", tokenPersisted: false });
+    expect(inspected).toEqual([]);
+    expect(s.token(row.id)).toEqual({ resume_type: null, resume_token: null });
+    s.rebind();
+    expect(await s.post(body)).toMatchObject({ tokenPersisted: true });
+    expect(inspected).toEqual(["%2"]);
+  });
+
+  it.each(["adoption", "rebind"])("retries native identity when %s changes the destination during the file read", async change => {
+    const file = history(); fs.writeFileSync(file, "new conversation");
+    let duringRead: (() => void) | undefined;
+    const s = seat("omp-tui", { "omp-tui": { readLiveSessionFile: async () => {
+      duringRead?.(); duringRead = undefined;
+      return { ok: true, sessionFile: file };
+    } } });
+    const first = s.adopt();
+    let destination = first;
+    duringRead = () => { if (change === "adoption") destination = s.adopt(); else s.rebind(); };
+    const env = s.seatEnv;
+    const body = { runtime: "omp-tui", eventFamily: "session_identity", hookEvent: "SessionStart", sessionId: "native-id",
+      sessionFile: file, sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION };
+    expect(await s.post(body, 409)).toMatchObject({ code: "identity_destination_changed", tokenPersisted: false });
+    expect(s.token(first.id)).toEqual({ resume_type: null, resume_token: null });
+    expect(s.token(destination.id)).toEqual({ resume_type: null, resume_token: null });
+    expect(s.identityEvents()).toBe(0);
+    expect(await s.post(body)).toMatchObject({ tokenPersisted: true });
+    expect(s.token(destination.id)).toEqual({ resume_type: "omp_tui_session_file", resume_token: file });
+    if (change === "adoption") expect(s.token(first.id)).toEqual({ resume_type: null, resume_token: null });
   });
 });
 

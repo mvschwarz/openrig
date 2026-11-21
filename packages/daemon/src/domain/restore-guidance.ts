@@ -61,7 +61,7 @@ export function seatGuidanceFile(
   if (recorded) return recorded;
   const fileName = runtime === "claude-code"
     ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
-    : runtime === "codex" || runtime === "pi" || runtime === "omp" ? "AGENTS.md" : null;
+    : runtime === "codex" || runtime === "pi" || (runtime === "omp" || runtime === "omp-tui") ? "AGENTS.md" : null;
   return fileName ? nodePath.join(cwd, fileName) : null;
 }
 

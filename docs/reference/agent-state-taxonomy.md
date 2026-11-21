@@ -145,7 +145,7 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   a degraded rung goes, with one declared exception: for a pi or omp seat or a community
   harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
   own, since the pane can be quiet mid-turn.
-- **pi and omp runner hooks**: OpenRig's runner reads the child's RPC event stream and posts
+- **Pi and OMP RPC runner hooks**: OpenRig's runner reads the child's RPC event stream and posts
   each turn boundary (`agent_start`, `turn_start`, tool calls, `agent_end`; attention). These
   decide working, idle and needs-input. Unlike Claude and Codex hooks, an idle or attention
   boundary holds until the next one instead of expiring after 15 s; a working boundary still
@@ -230,3 +230,5 @@ LIFECYCLE); see the
   the state of that art — subordinates them to hooks wherever hooks cover the lifecycle,
   and marks viewer screens `skip_state_update` because scrollback lies. Pane reading
   stays fallback-tier only.
+
+The optional OMP terminal UI (`omp-tui`) reports lifecycle events through its seat extension. It sends idle and working heartbeats and reports approval prompts while the agent waits for input.
