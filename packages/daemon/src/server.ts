@@ -1010,12 +1010,9 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
-    const indexHtml = fs.readFileSync(uiIndexPath, "utf-8");
-    const tokenScript = deps.terminalBearerToken
-      ? `<script>if(!window.localStorage.getItem("openrig.terminalBearerToken"))window.localStorage.setItem("openrig.terminalBearerToken",${JSON.stringify(deps.terminalBearerToken)})</script>`
-      : "";
-    const injected = tokenScript ? indexHtml.replace("</head>", `${tokenScript}</head>`) : indexHtml;
-    return c.html(injected);
+    // The page is served as built. The UI takes its tokens from its address's fragment (#termToken=…&mcToken=…), given
+    // once by the person who holds them, and keeps them in that browser.
+    return c.html(fs.readFileSync(uiIndexPath, "utf-8"));
   });
 
   return app;

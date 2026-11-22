@@ -68,6 +68,11 @@ approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` 
 `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
 refused for want of it, `rig host` and the TUI say what to set.
 
+The web UI takes its tokens from its address. To use its token-protected actions (terminals, Mission Control writes),
+open it once at `http://<daemon>/#termToken=<terminal token>&mcToken=<auth token>`. The tokens go after `#`, a part of
+the address the browser keeps to itself and never sends. The page keeps them in that browser and takes them out of the
+address. With neither token set, the UI needs nothing.
+
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
 The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
