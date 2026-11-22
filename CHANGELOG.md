@@ -10,7 +10,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ## [0.7.21]
 
-OpenRig 0.7.21 is a patch of ordinary team fixes. An agent can find a team's declared entry point when the team has no single lead. A mission's execution view reads in short, paced steps and stops when the caller leaves. A seat pool's agents stay out of exports, and a bad pool block is named where you will see it. A Pi seat's posted usage feeds the context lane. It also fixes a run of smaller daemon, CLI, terminal, scope and skill problems.
+OpenRig 0.7.21 is a patch of ordinary team fixes. An agent can find a team's declared entry point when the team has no single lead. The daemon narrows one source of stalls when reading a mission's execution view. A seat pool's agents stay out of exports, and a bad pool block is named where you will see it. A Pi seat's posted usage feeds the context lane. It also fixes a run of smaller daemon, CLI, terminal, scope and skill problems.
 
 ### Before you upgrade
 
@@ -42,7 +42,7 @@ This release adds no database migration. Coming from 0.7.19 or earlier, 0.7.20's
 
 A roster entry can declare `lead_of`, a team name. When the daemon names no single lead for a rig (no `delegates_to` root, several, or one without a session) and exactly one entry in the rig declares a team, `rig_team` reports that entry as the rig's lead, marked declared, with its team and a note that it is that team's entry point and doesn't manage the network or its other participants. Two or more declarations give no lead, and the note names them; the same seat and team declared in two rosters counts once, and one seat declaring two teams counts as two. This tells an agent where to hand a team's work; nothing routes work automatically. ([#3593](https://github.com/mvschwarz/openrig/pull/3593), [#3606](https://github.com/mvschwarz/openrig/pull/3606))
 
-When `rig attach --self` fails, the CLI keeps the daemon's error and adds one line naming the unjoined route: `rig queue create --destination <seat> --return-route auto --summary "<the goal>" --body-file <file>`. The `rigs` skill says to take that route when the attach fails, names the fewer-prompts route in its top rules, and says what to do when the person's own app refuses a relay: tell them what was refused and why, let them choose, and don't retry another way. This release ships that guidance; it doesn't claim a measured change in how agents behave. ([#3569](https://github.com/mvschwarz/openrig/pull/3569), [#3574](https://github.com/mvschwarz/openrig/pull/3574))
+When `rig attach --self` receives an HTTP error from the daemon, the CLI's text output keeps the error and adds one line naming the unjoined route: `rig queue create --destination <seat> --return-route auto --summary "<the goal>" --body-file <file>`. With `--json`, it prints the daemon's result instead, without that added line. The `rigs` skill says to take that route when the attach fails, names the fewer-prompts route in its top rules, and says what to do when the person's own app refuses a relay: tell them what was refused and why, let them choose, and don't retry another way. This release ships that guidance; it doesn't claim a measured change in how agents behave. ([#3569](https://github.com/mvschwarz/openrig/pull/3569), [#3574](https://github.com/mvschwarz/openrig/pull/3574))
 
 `rig gateway human add` for a person with no connector binding says that they are reached only in the TUI's Feed and Steering until a binding is added, and names the command that adds one. ([#3590](https://github.com/mvschwarz/openrig/pull/3590))
 
@@ -54,7 +54,7 @@ An explicitly held seat that has never launched, with no assigned work, session,
 
 ### Daemon
 
-Opening one mission's execution view reads its candidates in time-sized windows that yield to other daemon work, reads the queue once instead of twice, and stops when its caller disconnects. The stuck sweep's candidate read shares that pacing. This narrows one source of daemon stalls; it isn't a cure for every stall or a release-wide speed-up. ([#3558](https://github.com/mvschwarz/openrig/pull/3558))
+On a file-backed WAL database, when the main connection is not already in a transaction, a mission's execution view reads its candidates in size-adjusted windows, yielding between them and checking whether the caller has disconnected. The queue is scanned once instead of twice; the stuck sweep's candidate read uses the same conditional pacing. The time target is a soft bound: opening the database, native I/O or processing a large row can still block. Other database modes and calls inside a transaction retain the synchronous read. This narrows one source of daemon stalls; it isn't a cure for every stall or a release-wide speed-up. ([#3558](https://github.com/mvschwarz/openrig/pull/3558))
 
 The daemon's writable SQLite connection keeps temporary storage in memory, so a sandbox whose temp directory refuses writes no longer fails nested writes inside a transaction. Large temporary structures may use more memory. ([#3486](https://github.com/mvschwarz/openrig/pull/3486))
 
@@ -62,7 +62,7 @@ A Pi seat that posts usage facts feeds the context lane: `rig usage top`, `rig p
 
 ### Seat pools
 
-`rig spec export` and `rig bundle create` leave a seat pool's agents out and write the model member with its pool block. An edge that touches a pool agent is left out and named in a "Not carried" line. `rig bundle create` no longer refuses a pooled rig for drift without `--allow-drift`; real drift still refuses. A bad `pool:` block shows its advisory in the warnings you see on preflight, import, launch, `rig expand` and the other paths, and a pod bundle drops a malformed block with a warning instead of failing. The seat pool stays off: nothing arms or dispatches a pool. ([#3546](https://github.com/mvschwarz/openrig/pull/3546), [#3547](https://github.com/mvschwarz/openrig/pull/3547))
+`rig spec export` leaves a seat pool's agents out and writes the model member with its pool block; an edge that touches a pool agent is left out and named in a "Not carried" line. `rig bundle create` no longer refuses a pooled rig for drift without `--allow-drift`; real drift still refuses. A bad `pool:` block shows its advisory in the warnings you see on preflight, import, launch, `rig expand` and the other paths, and a pod bundle drops a malformed block with a warning instead of failing. The seat pool stays off: nothing arms or dispatches a pool. ([#3546](https://github.com/mvschwarz/openrig/pull/3546), [#3547](https://github.com/mvschwarz/openrig/pull/3547))
 
 ### Terminal, scope and reference
 
