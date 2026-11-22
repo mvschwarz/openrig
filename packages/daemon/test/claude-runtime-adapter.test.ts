@@ -60,7 +60,8 @@ function makeBinding(cwd = "/project"): NodeBinding {
 it.each(["fresh", "resume", "fork"] as const)("delivers oversized composed Claude settings by file on %s input", async kind => {
   const stateDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-settings-"));
   const tmux = mockTmux();
-  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir });
+  // A resume of a blank pane under Claude's process runs the longer wait; this cell is about the command sent.
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir, sleep: async () => {} });
   const deny = Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`);
   const result = await adapter.launchHarness({ ...makeBinding(), claudePermissions: { deny } }, {
     name: "dev-builder@workshop", ...(kind === "resume" ? { resumeToken: "previous" } : {}),
@@ -80,7 +81,7 @@ it.each(["fresh", "resume", "fork"] as const)("delivers oversized composed Claud
 it("checks the captured settings actually sent on a provider continuation", async () => {
   const tmux = mockTmux();
   const stateDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-settings-"));
-  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir });
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir, sleep: async () => {} });
   const result = await adapter.launchHarness({ ...makeBinding(), claudeExecutable: "/native/claude",
     claudeLaunch: { args: [`--settings=${JSON.stringify({ custom: "x".repeat(131072) })}`], warnings: [] } },
   { name: "dev-builder@workshop", resumeToken: "previous" });
@@ -97,7 +98,7 @@ it("a continuation of an OpenRig settings file sends the new auto-mode block and
   const stateDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-settings-"));
   const name = "builder@fixture", context = { openrigHome: stateDir, session: name };
   const live = transportClaudeSettings(["--settings", JSON.stringify({ custom: "x".repeat(70000), autoMode: { environment: ["old"] } })], context, []);
-  const tmux = mockTmux(), adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir });
+  const tmux = mockTmux(), adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir, sleep: async () => {} });
   try {
     const result = await adapter.launchHarness({ ...makeBinding(), claudeExecutable: "/native/claude",
       claudeLaunch: { args: live, warnings: [] }, claudeAutoMode: { environment: ["new"] } }, { name, resumeToken: "same" });
@@ -980,7 +981,7 @@ describe("Claude Code runtime adapter", () => {
 
   it("launchHarness sends correct resume command with token", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
 
@@ -1114,10 +1115,19 @@ describe("Claude Code runtime adapter", () => {
       return { result, reads, tmux };
     };
 
-    it("doesn't end the wait on Claude's process alone, and lets it stand with a note when the first window ends", async () => {
+    it("doesn't end the wait on Claude's process alone, and lets it stand with a note when the longer wait ends", async () => {
       const { result, reads } = await run({ paneCommand: "claude" });
       expect(result).toMatchObject({ ok: true, resumeToken: "abc-123", warnings: expect.arrayContaining([CLAUDE_PROCESS_ONLY_RESUME]) });
-      expect(reads).toBe(17);
+      // The 30 polls the readiness bound gives, then the final read; no budget past the existing longer wait.
+      expect(reads).toBe(31);
+    });
+
+    it("gives Claude's process alone the longer wait when the first window ends, so a trust dialog drawn after it is met", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      // Claude's process from the first read, nothing drawn through the 16-read window, then its trust dialog.
+      const { result } = await run({ paneCommand: "claude", screen: (read) => (read < 20 ? "" : dialog) });
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+        error: "Claude is waiting for workspace trust approval before the session can become interactive." });
     });
 
     it("meets the trust dialog Claude draws after its process starts, instead of reporting a resume", async () => {

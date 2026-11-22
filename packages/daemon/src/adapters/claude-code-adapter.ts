@@ -878,7 +878,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // the occupant), not on every poll. A shell label can't tell Claude having exited from the launch script not having
       // started it yet, and the occupant can change while we wait, so the process tree decides.
       const windowEnd = attempt === windowAttempts - 1;
-      if (booting && (windowEnd || (slowStart && (attempt - windowAttempts + 1) % checkEvery === 0))) {
+      // Claude's process with nothing drawn yet gets the longer wait at the window's end too: its trust dialog can be drawn
+      // after the quick window. In the longer wait it sleeps and polls (above), as it does after a boot.
+      const processOnly = probe.status === "resumed" && probe.basis === "process";
+      if (windowEnd ? booting || processOnly : booting && slowStart && (attempt - windowAttempts + 1) % checkEvery === 0) {
         if (await this.paneReturnedToShell(binding, await this.tmux.getPaneCommand(tmuxSession))) {
           // Provably back at its shell: the final check reports it. If it isn't by then, the seat is kept.
           if (slowStart) { attempts = attempt + 1; break; }
