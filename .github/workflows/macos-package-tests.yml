@@ -15,8 +15,8 @@ on:
 permissions:
   contents: read
 
-# No workflow-level concurrency: GitHub keeps one pending run per group, so a comment review's run in an approval's
-# group would replace a waiting approval run. The package jobs take their group from the plan instead.
+# No concurrency group, at the workflow or the job: GitHub keeps one pending run per group and a newer one replaces it,
+# so any shared group would let a later run, even another approval of the same head, replace a waiting approval run.
 
 jobs:
   plan:
@@ -25,7 +25,6 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       head: ${{ steps.plan.outputs.head }}
-      group: ${{ steps.plan.outputs.group }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,10 +43,6 @@ jobs:
     # approval of the current head; a manual run and every other event use names that aren't required checks. No entry
     # is skipped by a job-level condition, because a skipped job reports success.
     name: ${{ matrix.check }}
-    # Only approval runs for the same approved head share a group, and none is cancelled; any other run has its own.
-    concurrency:
-      group: ${{ needs.plan.outputs.group }}-${{ matrix.package }}
-      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.package == 'daemon' && 90 || 60 }}
     strategy:

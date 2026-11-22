@@ -73,7 +73,7 @@ test("anything that isn't a counting approval of the current head runs no macOS 
 });
 
 test("a manual run tests the suites under names no required check uses", () => {
-  const manual = planMacosPackageTests("workflow_dispatch", {}, "41");
+  const manual = planMacosPackageTests("workflow_dispatch", {});
   assert.equal(manual.eligible, false);
   assert.deepEqual(manual.matrix, MANUAL_ENTRIES);
   assert.ok(manual.matrix.every((entry) => entry.os === "macos-latest" && entry.package !== "none"));
@@ -86,25 +86,23 @@ test("a manual run tests the suites under names no required check uses", () => {
   assert.deepEqual(MACOS_ENTRIES.map((entry) => entry.check), REQUIRED_MACOS);
 });
 
-test("a later review can't replace a waiting approval run: only approvals of the same head share a group", () => {
-  const approved = planMacosPackageTests("pull_request_review", approval(), "100");
-  assert.equal(approved.group, `macos-package-tests-approved-7-${HEAD}`);
-  // A comment review, CodeRabbit's included, arriving while the approval run waits.
-  const comment = planMacosPackageTests("pull_request_review", approval({ review: { state: "commented" } }), "101");
-  assert.notEqual(comment.group, approved.group);
-  assert.equal(comment.group, "macos-package-tests-other-101");
-  // Every non-approval run has a group of its own, so none can replace another either.
-  const another = planMacosPackageTests("pull_request_review", approval({ review: { state: "commented" } }), "102");
-  assert.notEqual(another.group, comment.group);
-  for (const [name, plan] of [
-    ["an approval from someone without write access", planMacosPackageTests("pull_request_review", approval({ review: { author_association: "CONTRIBUTOR" } }), "103")],
-    ["an approval of an older head", planMacosPackageTests("pull_request_review", approval({ review: { commit_id: OLDER } }), "104")],
-    ["a manual run", planMacosPackageTests("workflow_dispatch", {}, "105")],
-  ]) assert.notEqual(plan.group, approved.group, name);
-  // A second approval of the same head joins the first one's group, where nothing is cancelled.
-  assert.equal(planMacosPackageTests("pull_request_review", approval(), "106").group, approved.group);
-  // Another head's approval has its own group.
-  assert.notEqual(planMacosPackageTests("pull_request_review", approval({ head: OLDER, review: { commit_id: OLDER } }), "107").group, approved.group);
+test("three approvals of one head each run, and nothing can replace a waiting approval run", () => {
+  // Approval A running, B waiting, then C: each is its own run of both suites on the same head, with no group to share.
+  const plans = [1, 2, 3].map(() => planMacosPackageTests("pull_request_review", approval()));
+  for (const plan of plans) {
+    assert.equal(plan.eligible, true);
+    assert.equal(plan.head, HEAD);
+    assert.deepEqual(checks(plan), REQUIRED_MACOS);
+    assert.equal("group" in plan, false, "the plan names no concurrency group");
+  }
+  // A comment review between them is a placeholder run of its own, also with no group.
+  const comment = planMacosPackageTests("pull_request_review", approval({ review: { state: "commented" } }));
+  assert.deepEqual(checks(comment), [PLACEHOLDER_CHECK]);
+  assert.equal("group" in comment, false);
+  // The workflow gives no run a group to wait in: not at the workflow, not at either job.
+  const doc = YAML.parse(readFileSync(path.join(WORKFLOWS, "macos-package-tests.yml"), "utf8"));
+  assert.equal(doc.concurrency, undefined);
+  for (const [id, job] of Object.entries(doc.jobs)) assert.equal(job.concurrency, undefined, id);
 });
 
 test("the plan script writes the matrix and head for the workflow", () => {
@@ -115,7 +113,7 @@ test("the plan script writes the matrix and head for the workflow", () => {
     writeFileSync(eventPath, JSON.stringify(event));
     writeFileSync(outputPath, "");
     execFileSync(process.execPath, [path.join(ROOT, "scripts", "ci-macos-ready-plan.mjs")], {
-      env: { PATH: process.env.PATH, GITHUB_EVENT_NAME: "pull_request_review", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath, GITHUB_RUN_ID: "9" },
+      env: { PATH: process.env.PATH, GITHUB_EVENT_NAME: "pull_request_review", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath },
       stdio: "pipe",
     });
     const output = Object.fromEntries(readFileSync(outputPath, "utf8").trim().split("\n").map((line) => {
@@ -124,7 +122,7 @@ test("the plan script writes the matrix and head for the workflow", () => {
     }));
     assert.equal(output.eligible, eligible);
     assert.equal(output.head, head);
-    assert.equal(output.group, planMacosPackageTests("pull_request_review", event, "9").group);
+    assert.equal(output.group, undefined);
     assert.deepEqual(JSON.parse(output.matrix), planMacosPackageTests("pull_request_review", event).matrix);
   }
 });
@@ -144,16 +142,16 @@ test("the macOS workflow runs only on an approval or by hand, and never skips a 
   assert.deepEqual(Object.keys(doc.on).sort(), ["pull_request_review", "workflow_dispatch"]);
   assert.deepEqual(doc.on.pull_request_review.types, ["submitted"]);
   assert.deepEqual(doc.permissions, { contents: "read" });
-  // No workflow-level group: one there would let any review's run replace a waiting approval run.
+  // No concurrency group anywhere: any shared group would let a later run replace a waiting approval run.
   assert.equal(doc.concurrency, undefined);
-  assert.equal(doc.jobs.plan.outputs.group, "${{ steps.plan.outputs.group }}");
+  assert.equal(doc.jobs.plan.outputs.group, undefined);
 
   const job = doc.jobs["package-tests"];
   assert.equal(job.if, undefined, "a job-level condition would report a skipped required check as successful");
   assert.equal(job.name, "${{ matrix.check }}");
   assert.deepEqual(job.needs, "plan");
   assert.equal(job.strategy.matrix.include, "${{ fromJSON(needs.plan.outputs.matrix) }}");
-  assert.deepEqual(job.concurrency, { group: "${{ needs.plan.outputs.group }}-${{ matrix.package }}", "cancel-in-progress": false });
+  assert.equal(job.concurrency, undefined);
   assert.equal(doc.jobs.plan.steps.at(-1).run, "node scripts/ci-macos-ready-plan.mjs");
 
   const guard = job.steps.find((step) => step.name === "Check that the checkout is the approved head merged into main");
