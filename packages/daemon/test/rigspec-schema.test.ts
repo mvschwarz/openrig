@@ -38,6 +38,20 @@ const VALID_RIG = {
 };
 
 describe("RigSpec schema (pod-aware)", () => {
+  it.each([true, false, undefined])("round-trips default_onboarding_pack = %s", value => {
+    const raw = { ...VALID_RIG, ...(value === undefined ? {} : { default_onboarding_pack: value }) };
+    expect(RigSpecSchema.validate(raw).valid).toBe(true);
+    const yaml = RigSpecCodec.serialize(RigSpecSchema.normalize(raw));
+    if (value === undefined) expect(yaml).not.toContain("default_onboarding_pack");
+    else expect(RigSpecCodec.parse(yaml)).toHaveProperty("default_onboarding_pack", value);
+  });
+
+  it.each(["false", null, 0])("rejects non-boolean default_onboarding_pack = %s", value => {
+    const result = RigSpecSchema.validate({ ...VALID_RIG, default_onboarding_pack: value });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("default_onboarding_pack: must be a boolean");
+  });
+
   it.each(["model", "label"])("rejects non-string member %s values in canonical validation", field => {
     for (const value of [null, 7, {}, [], true]) {
       const rig = structuredClone(VALID_RIG);

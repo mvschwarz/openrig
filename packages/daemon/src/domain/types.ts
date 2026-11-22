@@ -1526,6 +1526,8 @@ export interface RigSpec {
   env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
+  /** Override the daemon's default onboarding pack setting for this rig. */
+  defaultOnboardingPack?: boolean;
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;

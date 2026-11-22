@@ -1000,6 +1000,32 @@ profiles:
     db.close();
   });
 
+  it.each([true, false])("projects the rig override and the inherited default independently (daemon default %s)", async daemonDefault => {
+    const { db, inst, adapter, rigRepo } = setup(undefined, undefined, undefined, () => daemonDefault);
+    try {
+      const rigs = [{ name: "overridden", override: !daemonDefault }, { name: "inherited" }];
+      for (const { name, override } of rigs) {
+        const spec = makeRigSpec({ name, defaultOnboardingPack: override });
+        const materialized = await inst.materialize(RigSpecCodec.serialize(spec), RIG_ROOT);
+        if (!materialized.ok) throw new Error(JSON.stringify(materialized));
+        const { rigId } = materialized.result;
+        const node = rigRepo.getRig(rigId)?.nodes[0];
+        if (!node) throw new Error(`No seat materialized for ${name}`);
+
+        vi.mocked(adapter.deliverStartup).mockClear();
+        const launched = await inst.launchPersistedFresh(rigId, node.id);
+        expect(launched, JSON.stringify(launched)).toMatchObject({ status: "launched" });
+        const delivered = vi.mocked(adapter.deliverStartup).mock.calls.flatMap(([files]) => files.map(file => file.path));
+        expect(delivered).toEqual(expect.arrayContaining(["openrig-start.md", "openrig-context-entry.md"]));
+        expect(delivered.filter(file => file.startsWith("openrig-onboarding-"))).toEqual(
+          (override ?? daemonDefault) ? ["openrig-onboarding-01.md", "openrig-onboarding-02.md"] : [],
+        );
+      }
+    } finally {
+      db.close();
+    }
+  });
+
   it("does not rewrite an existing rig when onboarding is enabled for future launches", async () => {
     let onboardingEnabled = false;
     const { db, inst } = setup(undefined, undefined, undefined, () => onboardingEnabled);
