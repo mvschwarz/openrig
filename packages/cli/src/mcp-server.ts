@@ -60,6 +60,15 @@ function rigNotFound(handle: string): TextResult {
   return errorResult(JSON.stringify({ error: message }), "rig_not_found", message);
 }
 
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
+}
+
 /** structuredContent is an object, so a list comes back as { items }. */
 function structured(data: unknown): Record<string, unknown> {
   if (data && typeof data === "object" && !Array.isArray(data)) return data as Record<string, unknown>;
@@ -1054,7 +1063,7 @@ export function mintUnknownSender(): string {
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; principalSource?: "file" | "grant-service"; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
   /** HTTP disconnect/legacy cancellation, combined with the SDK's per-call cancellation for bounded reads. */
   requestSignal?: AbortSignal;
   /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
@@ -1186,7 +1195,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const worded = (tool: string, description: string, annotations: ToolAnnotations): { title?: string; description: string; annotations: ToolAnnotations } => {
     const plain = PLAIN_WORDING[tool];
     if (!plain || !(access?.external || tool === "rig_whoami") || !description.startsWith(plain.replaces)) return { description, annotations };
-    return { title: plain.title, description: plain.with + description.slice(plain.replaces.length), annotations: { ...annotations, title: plain.title } };
+    const network = tool === "rig_team" && options.principalSource === "grant-service";
+    const title = network ? "Show my network" : plain.title;
+    const opening = network ? plain.with.replace("on your team", "on your network") : plain.with;
+    return { title, description: opening + description.slice(plain.replaces.length), annotations: { ...annotations, title } };
   };
   const caller = access ? { authenticated: true, principal: access.principal } : { authenticated: false, identity: "declared" };
   /** For an authenticated non-owner: the error for an item it can't reach (or can't read), else null. `owner` asks
@@ -2007,6 +2019,16 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (handedOffFrom) params.set("handedOffFrom", handedOffFrom);
         params.set("limit", String(limit ?? 100));
         const res = await hostGet(target, `/api/queue/list?${params.toString()}`);
+        // The daemon's page marker rides beside the items, as limit and truncated, with a line when the page was cut,
+        // as the CLI prints one. A daemon that doesn't send it leaves the result as it was.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        const paged = (result: TextResult): TextResult => !page || result.isError ? result : {
+          ...result,
+          content: page.truncated
+            ? [...result.content, { type: "text", text: `This page stops at the limit of ${page.limit} and more items match; pass a larger limit to see the rest.` }]
+            : result.content,
+          structuredContent: { ...result.structuredContent, limit: page.limit, truncated: page.truncated },
+        };
         const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom, tags }) : null;
         if (ignored) {
           const message = `The daemon didn't apply ${ignored}, so this list isn't filtered by it; it needs a newer daemon.`;
@@ -2016,17 +2038,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (scope && res.status < 400 && Array.isArray(res.data)) {
           const view = externalView(scope);
           const rows = res.data.filter((row) => scope.item(row)).map(withoutDaemonLinkedRows);
-          const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
+          const result = paged(mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true }));
           // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
           // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list. The
           // default list holds open items only, so its empty answer says no open requests, never none at all.
           const inbox = access?.external && (owned || mine) && !destination && !source && !state && tags.length === 0 && !since && !handedOffFrom;
-          if (!inbox || rows.length > 0) return result;
+          // A cut page can't say that nothing is addressed to the caller.
+          if (!inbox || rows.length > 0 || page?.truncated) return result;
           const team = teamPhrase(rosterTeamName(rostersFolder(), sessionName!.split("@")[1] ?? "").name);
           const message = `No ${all ? "" : "open "}requests are addressed to you on ${team}.`;
           return { ...result, content: [...result.content, { type: "text", text: message }], structuredContent: { ...result.structuredContent, message } };
         }
-        return mapResult(res, undefined, { structured: true });
+        return paged(mapResult(res, undefined, { structured: true }));
       } catch (err) {
         return caught(err);
       }
