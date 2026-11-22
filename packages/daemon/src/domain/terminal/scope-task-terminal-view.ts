@@ -8,10 +8,10 @@ import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
 import { projectTaskOwners, type TaskSeat, type TaskTerminalView } from "./task-terminal-view.js";
 
 export interface ScopeViewError { code: "scope_unsupported" | "scope_not_found" | "scope_ambiguous" | "scope_unavailable"; error: string }
-type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds">>;
+type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds" | "catalogMissionsRoots">>;
 interface Scope { name: string; id?: string; title: string; source: string; mission?: string; missionSource?: string }
 interface Mission { name: string; source: string; manifest?: string }
-interface ScopeIndex { slices: Scope[]; missions: Mission[]; claims: Map<string, Set<string>>; missionIssues: string[] }
+interface ScopeIndex { slices: Scope[]; missions: Mission[]; claims: Map<string, Set<string>>; missionIssues: string[]; skippedCatalogRoots: string[] }
 const MAX_ENTRIES = 4096, MAX_HEADER_BYTES = 16384, MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_ROWS = 50000, MAX_TAG_BYTES = 16384, MAX_TOTAL_TAG_BYTES = 8 * 1024 * 1024;
 class ScopeLimit extends Error {}
@@ -22,7 +22,7 @@ const unavailable = (error: string): ScopeViewError => ({ code: "scope_unavailab
  * for retiring viewers. No inferred project, substring match or remote I/O. */
 function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
   let entries = 0, bytes = 0;
-  const scopes: Scope[] = [], missions: Mission[] = [], missionIssues: string[] = [];
+  const scopes: Scope[] = [], missions: Mission[] = [], missionIssues: string[] = [], skippedCatalogRoots: string[] = [];
   const seenRoots = new Set<string>(), scopeBySource = new Map<string, Scope>(), missionBySource = new Map<string, Mission>();
   const list = (dir: string, visit: (name: string) => void) => {
     const handle = fs.opendirSync(dir);
@@ -68,32 +68,57 @@ function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
     scopeBySource.set(source, scope); scopes.push(scope);
   };
   try {
-    for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots].entries()) {
-      let real: string;
-      try { real = fs.realpathSync(root); }
-      catch (error) {
-        // Explicit legacy compatibility roots may not exist. The primary
-        // configured index and every existing root must remain readable.
-        if (position > 0 && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-      if (seenRoots.has(real)) continue;
-      seenRoots.add(real);
-      list(root, name => {
-        const dir = path.join(root, name), nested = path.join(dir, "slices");
-        let isMission = false;
-        try { isMission = fs.statSync(nested).isDirectory(); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-        if (isMission) {
-          const mission = addMission(dir, name);
-          list(nested, child => add(path.join(nested, child), child, name, mission.source));
-        } else {
-          add(dir, name); // Preserve existing flat-slice lookup and header accounting.
-          const manifest = path.join(dir, "mission.yaml");
-          try { if (fs.statSync(manifest).isFile()) addMission(dir, name, manifest); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") missionIssues.push("Mission declarations could not be enumerated completely."); }
+    // Catalogued projects' missions roots (#3553) are walked after the configured roots, so a mission or slice that lives under a catalogued project's root resolves even when `workspace.slices_root` is empty. Missing catalog roots are skipped like any other optional root.
+    for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots, ...(index.catalogMissionsRoots ?? [])].entries()) {
+      const catalogued = position >= 1 + index.additionalSliceRoots.length;
+      const snapshot = catalogued ? {
+        scopes: [...scopes], missions: [...missions],
+        scopeBySource: new Map(scopeBySource), missionBySource: new Map(missionBySource),
+        scopeMissions: scopes.map(scope => [scope, scope.mission, scope.missionSource] as const),
+      } : undefined;
+      try {
+        let real: string;
+        try { real = fs.realpathSync(root); }
+        catch (error) {
+          // Explicit legacy compatibility roots may not exist. The primary
+          // configured index and every existing root must remain readable.
+          if (position > 0 && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw error;
         }
-      });
+        if (seenRoots.has(real)) continue;
+        seenRoots.add(real);
+        list(root, name => {
+          const dir = path.join(root, name), nested = path.join(dir, "slices");
+          let isMission = false;
+          try { isMission = fs.statSync(nested).isDirectory(); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+          if (isMission) {
+            const mission = addMission(dir, name);
+            list(nested, child => add(path.join(nested, child), child, name, mission.source));
+          } else {
+            add(dir, name); // Preserve existing flat-slice lookup and header accounting.
+            const manifest = path.join(dir, "mission.yaml");
+            try { if (fs.statSync(manifest).isFile()) addMission(dir, name, manifest); }
+            catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                if (catalogued) throw error;
+                missionIssues.push("Mission declarations could not be enumerated completely.");
+              }
+            }
+          }
+        });
+      } catch (error) {
+        if (!snapshot || error instanceof ScopeLimit) throw error;
+        scopes.splice(0, scopes.length, ...snapshot.scopes);
+        missions.splice(0, missions.length, ...snapshot.missions);
+        scopeBySource.clear(); snapshot.scopeBySource.forEach((scope, source) => scopeBySource.set(source, scope));
+        missionBySource.clear(); snapshot.missionBySource.forEach((mission, source) => missionBySource.set(source, mission));
+        for (const [scope, mission, missionSource] of snapshot.scopeMissions) {
+          scope.mission = mission; scope.missionSource = missionSource;
+        }
+        // An unreadable catalogued root is skipped and named in skippedCatalogRoots so the other roots' views keep working; the configured roots stay strict.
+        skippedCatalogRoots.push(root);
+      }
     }
   } catch (error) {
     return unavailable(error instanceof ScopeLimit ? `${error.message} This index is too large for this bounded read; use a smaller configured index or a qitem view.`
@@ -104,7 +129,7 @@ function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
     if (!key) continue;
     const owners = claims.get(key) ?? new Set<string>(); owners.add(scope.source); claims.set(key, owners);
   }
-  return { slices: scopes, missions, claims, missionIssues };
+  return { slices: scopes, missions, claims, missionIssues, skippedCatalogRoots };
 }
 function selectSlice(scopes: Scope[], key: string): Scope | ScopeViewError {
   if (!key || key.trim() !== key || /[\\/\x00-\x1f\x7f]/.test(key)) return { code: "scope_not_found", error: "Invalid slice name or id." };
@@ -153,17 +178,24 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
   if (!/^(slice|mission):/.test(view)) return { code: "scope_unsupported", error: "Authoritative following for this scope kind is not implemented." };
   const identities = readIndex();
   if ("code" in identities) return identities;
+  const selectionError = (error: ScopeViewError): ScopeViewError => {
+    if (error.code === "scope_not_found" && identities.skippedCatalogRoots.length) {
+      // A scope living only in an unreadable catalogued root is unavailable, not gone, so a viewer following it is not retired.
+      return unavailable(`Unreadable catalogued roots: ${identities.skippedCatalogRoots.join(", ")}. A scope living only in an unreadable catalogued root reads as unavailable, not gone, so a viewer following it is not retired.`);
+    }
+    return error;
+  };
   const kind = view.startsWith("mission:") ? "mission" : "slice";
   let id: string, name: string, sliceKeys: Set<string>, missionKey: string | undefined, scope: Scope | undefined;
   let collidingKeys = new Map<string, Set<string>>();
   if (kind === "slice") {
     const selected = selectSlice(identities.slices, view.slice(6));
-    if ("code" in selected) return selected;
+    if ("code" in selected) return selectionError(selected);
     scope = selected;
     id = scope.id ?? scope.name; name = scope.title; sliceKeys = new Set([scope.name, ...(scope.id ? [scope.id] : [])]);
   } else {
     const selected = selectMission(identities, view.slice(8));
-    if ("code" in selected) return selected;
+    if ("code" in selected) return selectionError(selected);
     id = name = missionKey = selected.mission.name; sliceKeys = selected.sliceKeys; collidingKeys = selected.collidingKeys;
   }
   // At most two linear index passes per resolve, never a scan per queue row.
@@ -244,7 +276,9 @@ export function createScopedTaskResolver(db: Database.Database, index: IndexCont
       let reusable = false;
       try {
         const primary = fs.realpathSync(index.slicesRoot);
-        reusable = observed() && index.additionalSliceRoots.every(root => {
+        // A catalog root outside the primary root's namespace is unwatched like any other optional root: reuse no cached generation across it.
+        const extraRoots = [...index.additionalSliceRoots, ...(index.catalogMissionsRoots ?? [])];
+        reusable = observed() && extraRoots.every(root => {
           try { const real = fs.realpathSync(root); return real === primary || real.startsWith(primary + path.sep); }
           catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
         });

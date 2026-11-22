@@ -199,6 +199,9 @@ export interface SliceIndexerOpts {
   slicesRoot: string;
   /** Additional compatible roots to scan after the primary root. */
   additionalSliceRoots?: string[];
+  /** Catalogued projects' missions roots (#3553). Carried for terminal mission/slice view index contexts only; the indexer's own listing keeps using `slicesRoot` + `additionalSliceRoots`.
+   * When a getter is given, the roots are re-read on every access, so a project added after daemon start joins terminal scope resolution without a restart. */
+  catalogMissionsRoots?: readonly string[] | (() => readonly string[]);
   /** Root directory containing dogfood-evidence directories. */
   dogfoodEvidenceRoot: string | null;
   /** SQLite handle for read-only joins to queue_items + transitions + actions. */
@@ -382,6 +385,7 @@ export class SliceIndexer {
    *  the db handle elsewhere. Internal callers continue to use it
    *  the same way; read-only consumer outside the class. */
   readonly db: Database.Database;
+  private readonly catalogMissionsRootsSource: readonly string[] | (() => readonly string[]);
   private readonly cacheTtlMs: number;
   private listingCache: CachedListing | null = null;
   private detailCache: Map<string, CachedSlice> = new Map();
@@ -405,9 +409,17 @@ export class SliceIndexer {
     this.missionId = opts.missionId;
     this.slicesRoot = opts.slicesRoot;
     this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
+    this.catalogMissionsRootsSource = opts.catalogMissionsRoots ?? [];
     this.dogfoodEvidenceRoot = opts.dogfoodEvidenceRoot;
     this.db = opts.db;
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  }
+
+  /** Returns an array source unchanged, or calls a getter on every access. Any throw degrades to an empty list, so catalog discovery failure keeps today's fallback of no catalog roots. */
+  get catalogMissionsRoots(): readonly string[] {
+    if (typeof this.catalogMissionsRootsSource !== "function") return this.catalogMissionsRootsSource;
+    try { return this.catalogMissionsRootsSource(); }
+    catch { return []; }
   }
 
   /** Returns true when any configured slice root exists on disk. */
