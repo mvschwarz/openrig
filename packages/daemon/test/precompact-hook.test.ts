@@ -13,7 +13,7 @@
 //   HG-8  neither set → existing restore-instructions only (no custom append)
 //   Inline + file both contribute when both are set
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -348,24 +348,201 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(existsSync(join(tmpDir, "packets"))).toBe(false);
   });
 
-  it("asks a restore that runs past its time limit to stop, and gives the manual-route note once it has", () => {
-    // The hook runs restore-from-jsonl.mjs from its own folder, so a copy beside a slow stand-in tests the time limit
-    // without a multi-GB transcript.
+  // The hook runs restore-from-jsonl.mjs from its own folder, so a copy beside a slow stand-in tests the wait without a
+  // multi-GB transcript.
+  function slowSkill(standIn: string): string {
     const scripts = join(tmpDir, "skill", "scripts");
     mkdirSync(scripts, { recursive: true });
     copyFileSync(HOOK_SCRIPT, join(scripts, "precompact-hook.mjs"));
-    writeFileSync(join(scripts, "restore-from-jsonl.mjs"), "setTimeout(() => {}, 60_000);\n");
+    writeFileSync(join(scripts, "restore-from-jsonl.mjs"), standIn);
+    return join(scripts, "precompact-hook.mjs");
+  }
+  const pendingDir = () => join(openrigHome, "compaction", "restore-pending");
+  // The seat's files, named from the sentinel the hook writes first (its key is the fixture's session name).
+  const sentinelFile = () => join(pendingDir(), readdirSync(pendingDir()).find((f) => f.endsWith(".expected.json"))!);
+  const markerFile = () => sentinelFile().replace(/\.expected\.json$/, ".json");
+  const sentinel = () => JSON.parse(readFileSync(sentinelFile(), "utf8"));
+  const readJson = (file: string) => JSON.parse(readFileSync(file, "utf8"));
+  // The bridge's status reaches the agent as informational context, never as stderr.
+  function bridgeContext(input?: Record<string, unknown>): string {
+    const run = runBridge(openrigHome, input);
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    const out = JSON.parse(run.stdout);
+    expect(out.continue).toBe(true);
+    expect(out.hookSpecificOutput.hookEventName).toBe(input?.hook_event_name ?? "UserPromptSubmit");
+    return out.hookSpecificOutput.additionalContext;
+  }
+
+  it("a packet that takes longer than the wait keeps building in the background; the hook says so, and the finisher writes the marker", async () => {
+    const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
+const out = process.argv[process.argv.indexOf("--out") + 1];
+setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 2000);
+`);
     const started = Date.now();
-    const { stdout, status } = runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "500" }, join(scripts, "precompact-hook.mjs"));
-    expect(Date.now() - started).toBeLessThan(15_000);
+    const { stdout, status } = runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "300" }, hook);
+    expect(Date.now() - started).toBeLessThan(1900);
     expect(status).toBe(0);
     const payload = JSON.parse(stdout);
     expect(payload.continue).toBe(true);
-    expect(payload.systemMessage).toContain("Claude compaction restore packet generation failed: asked to stop after 0.5 s, to try to stay inside the PreCompact hook's 30-second budget (a large transcript takes longer). After compaction, load the claude-compaction-restore skill and run restore-from-jsonl manually.");
-    // Only the expected sentinel, written first; no marker points at a packet that wasn't made.
-    const pending = readdirSync(join(openrigHome, "compaction", "restore-pending"));
-    expect(pending.length).toBe(1);
-    expect(pending[0]!.endsWith(".expected.json")).toBe(true);
+    expect(payload.systemMessage).toContain("Claude compaction restore packet is still being built");
+    expect(payload.systemMessage).toContain(markerFile());
+    expect(payload.systemMessage).toContain("If no marker appears, load the claude-compaction-restore skill and run restore-from-jsonl manually.");
+    expect(sentinel().packetJob).toMatchObject({ jobId: expect.any(String), pid: expect.any(Number), resultPath: expect.any(String) });
+    expect(existsSync(markerFile())).toBe(false);
+    // Meanwhile the bridge tells the agent the packet is being built, not that the write may have failed, and says it once.
+    const building = bridgeContext({ hook_event_name: "SessionStart" });
+    expect(building).toContain("the restore packet is still being built");
+    expect(building).toContain("This is informational, not an action request.");
+    expect(runBridge(openrigHome).stdout).toBe("");
+    await vi.waitFor(() => expect(existsSync(markerFile())).toBe(true), { timeout: 15_000, interval: 100 });
+    const marker = JSON.parse(readFileSync(markerFile(), "utf8"));
+    expect(marker.jobId).toBe(sentinel().packetJob.jobId);
+    expect(marker.outputDir).toBe(join(tmpDir, "packets", "late-packet"));
+    expect(marker.restoreInstruction).toContain(`Pre-compaction restore seed packet prepared at ${join(tmpDir, "packets", "late-packet")}`);
+  });
+
+  it("a background build that fails is recorded, and the bridge names the failure", async () => {
+    const hook = slowSkill(`setTimeout(() => { process.stderr.write("the transcript could not be read"); process.exit(1); }, 1000);\n`);
+    const { stdout } = runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
+    expect(JSON.parse(stdout).systemMessage).toContain("still being built");
+    const { resultPath } = sentinel().packetJob;
+    await vi.waitFor(() => expect(existsSync(resultPath)).toBe(true), { timeout: 15_000, interval: 100 });
+    expect(JSON.parse(readFileSync(resultPath, "utf8"))).toMatchObject({ ok: false, reason: "the transcript could not be read" });
+    expect(existsSync(markerFile())).toBe(false);
+    expect(bridgeContext()).toContain("the restore packet build failed: the transcript could not be read");
+  });
+
+  it("a background build that ended without a result reads as ended, not as still building", () => {
+    const hook = slowSkill(`setTimeout(() => {}, 60_000);\n`);
+    runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "100" }, hook);
+    const job = sentinel().packetJob;
+    // The finisher is detached into its own process group; stop it and the restore it started.
+    process.kill(-job.pid, "SIGKILL");
+    const ended = spawnSync("sh", ["-c", `while kill -0 ${job.pid} 2>/dev/null; do sleep 0.05; done`], { timeout: 10_000 });
+    expect(ended.status).toBe(0);
+    expect(bridgeContext()).toContain("the restore packet build ended without a packet or a recorded failure");
+  });
+
+  it("a packet built within the wait is reported as before, with its marker", () => {
+    const { stdout } = runHook(openrigHome, true);
+    expect(JSON.parse(stdout).systemMessage).toContain("Pre-compaction restore seed packet prepared");
+    expect(existsSync(markerFile())).toBe(true);
+    expect(JSON.parse(readFileSync(sentinel().packetJob.resultPath, "utf8"))).toMatchObject({ ok: true });
+  });
+
+  // A marker from another build in the seat's marker file after the new sentinel (an earlier compaction's, written in place
+  // after the hook moved the file aside): the bridge still counts only the current build's.
+  function writeEarlierMarker(delivered: boolean): void {
+    writeFileSync(markerFile(), JSON.stringify({
+      version: 1, outputDir: join(tmpDir, "packets", "earlier-packet"), transcriptPath: join(tmpDir, "transcript.jsonl"),
+      deliveryCount: delivered ? 1 : 0, deliveredAt: delivered ? "2026-11-20T00:00:00.000Z" : null,
+    }));
+  }
+
+  it("an earlier compaction's delivered marker doesn't hide the new build: the agent hears it's building, then that it failed, once each", async () => {
+    const hook = slowSkill(`setTimeout(() => { process.stderr.write("the transcript could not be read"); process.exit(1); }, 1500);\n`);
+    runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
+    writeEarlierMarker(true);
+    expect(bridgeContext({ hook_event_name: "SessionStart" })).toContain("the restore packet is still being built");
+    const { resultPath } = sentinel().packetJob;
+    await vi.waitFor(() => expect(existsSync(resultPath)).toBe(true), { timeout: 15_000, interval: 100 });
+    expect(bridgeContext()).toContain("the restore packet build failed: the transcript could not be read");
+    expect(runBridge(openrigHome).stdout).toBe("");
+    expect(runBridge(openrigHome, { hook_event_name: "PostCompact" }).stdout).toBe("");
+    expect(readJson(markerFile())).toMatchObject({ deliveryCount: 1, outputDir: join(tmpDir, "packets", "earlier-packet") });
+  });
+
+  it("an earlier compaction's undelivered marker isn't delivered for the new build and doesn't clear its sentinel; the new packet is delivered", async () => {
+    const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
+const out = process.argv[process.argv.indexOf("--out") + 1];
+setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 1500);
+`);
+    runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
+    writeEarlierMarker(false);
+    expect(bridgeContext()).toContain("the restore packet is still being built");
+    expect(readJson(markerFile())).toMatchObject({ deliveryCount: 0, outputDir: join(tmpDir, "packets", "earlier-packet") });
+    expect(existsSync(sentinelFile())).toBe(true);
+    const { jobId, resultPath } = sentinel().packetJob;
+    await vi.waitFor(() => expect(existsSync(resultPath)).toBe(true), { timeout: 15_000, interval: 100 });
+    const [sentinelPath, markerPath] = [sentinelFile(), markerFile()];
+    const delivered = bridgeContext();
+    expect(delivered).toContain("OpenRig compaction restore packet is available");
+    expect(delivered).toContain(join(tmpDir, "packets", "late-packet"));
+    expect(readJson(markerPath)).toMatchObject({ jobId, deliveryCount: 1 });
+    expect(existsSync(sentinelPath)).toBe(false);
+  });
+
+  it("two builds for one seat that finish out of order keep their own files, and the newer build's packet is the one delivered", async () => {
+    // The first build to start (A) is slow; the second (B) is fast.
+    const flag = join(tmpDir, "first-build-started");
+    const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
+const out = process.argv[process.argv.indexOf("--out") + 1];
+const first = !fs.existsSync(${JSON.stringify(flag)}); fs.writeFileSync(${JSON.stringify(flag)}, "");
+setTimeout(() => { const dir = path.join(out, first ? "packet-a" : "packet-b"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, first ? 2500 : 0);
+`);
+    runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
+    const a = sentinel().packetJob;
+    const { stdout } = runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "10000" }, hook);
+    const b = sentinel().packetJob;
+    expect(b.jobId).not.toBe(a.jobId);
+    expect(b.resultPath).not.toBe(a.resultPath);
+    // B finished while A was still running: A didn't remove B's job, and B published its marker.
+    expect(JSON.parse(stdout).systemMessage).toContain(join(tmpDir, "packets", "packet-b"));
+    expect(existsSync(a.resultPath)).toBe(false);
+    expect(readJson(markerFile())).toMatchObject({ jobId: b.jobId, outputDir: join(tmpDir, "packets", "packet-b") });
+    await vi.waitFor(() => expect(existsSync(a.resultPath)).toBe(true), { timeout: 15_000, interval: 100 });
+    // A kept its packet but didn't publish over B; each removed only its own job.
+    const resultA = readJson(a.resultPath);
+    expect(resultA).toMatchObject({ ok: true, published: false, outputDir: join(tmpDir, "packets", "packet-a") });
+    expect(readJson(markerFile())).toMatchObject({ jobId: b.jobId });
+    expect(readJson(b.resultPath)).toMatchObject({ jobId: b.jobId, ok: true, published: true });
+    expect(readdirSync(dirname(a.resultPath)).filter((f) => f.endsWith(".job.json"))).toEqual([]);
+    // Even if A's marker lands over B's late, the bridge delivers B's packet from B's own result and puts B's marker back.
+    const markerPath = markerFile();
+    writeFileSync(markerPath, JSON.stringify(resultA.marker));
+    expect(bridgeContext()).toContain(join(tmpDir, "packets", "packet-b"));
+    expect(readJson(markerPath)).toMatchObject({ jobId: b.jobId, deliveryCount: 1 });
+    // And A's marker landing after B was delivered is no compaction's marker, so it's never delivered.
+    writeFileSync(markerPath, JSON.stringify(resultA.marker));
+    expect(runBridge(openrigHome).stdout).toBe("");
+  });
+
+  it("the hook moves an earlier compaction's marker aside, so the marker file is absent while the new build runs, and keeps its bytes", async () => {
+    runHook(openrigHome, true); // an earlier compaction, built within the wait
+    const marker = markerFile();
+    expect(bridgeContext()).toContain("OpenRig compaction restore packet is available");
+    const earlier = readFileSync(marker, "utf8");
+    const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
+const out = process.argv[process.argv.indexOf("--out") + 1];
+setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 1500);
+`);
+    runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(marker.replace(/\.json$/, ".superseded.json"), "utf8")).toBe(earlier);
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true), { timeout: 15_000, interval: 100 });
+    expect(readJson(marker)).toMatchObject({ jobId: sentinel().packetJob.jobId, outputDir: join(tmpDir, "packets", "late-packet") });
+  });
+
+  it("restore-from-jsonl --until-byte 0 reads an empty prefix, not the whole transcript", () => {
+    const transcript = join(tmpDir, "zero.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ sessionId: "zero", cwd: tmpDir, message: { role: "user", content: "written after the bound" } })}\n`);
+    const script = join(dirname(HOOK_SCRIPT), "restore-from-jsonl.mjs");
+    const run = spawnSync(process.execPath, [script, "--out", join(tmpDir, "zero-out"), "--json", "--until-byte", "0", transcript], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(readFileSync(JSON.parse(run.stdout).narrative, "utf8")).not.toContain("written after the bound");
+  });
+
+  it("restore-from-jsonl --until-byte reads only the transcript as it was at that size", () => {
+    const transcript = join(tmpDir, "bounded.jsonl");
+    const first = `${JSON.stringify({ sessionId: "bounded", cwd: tmpDir, message: { role: "user", content: "before compaction" } })}\n`;
+    writeFileSync(transcript, first + `${JSON.stringify({ sessionId: "bounded", cwd: tmpDir, message: { role: "user", content: "appended after" } })}\n`);
+    const script = join(dirname(HOOK_SCRIPT), "restore-from-jsonl.mjs");
+    const run = spawnSync(process.execPath, [script, "--out", join(tmpDir, "bounded-out"), "--json", "--until-byte", String(Buffer.byteLength(first)), transcript], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    const narrative = readFileSync(JSON.parse(run.stdout).narrative, "utf8");
+    expect(narrative).toContain("before compaction");
+    expect(narrative).not.toContain("appended after");
   });
 });
 

@@ -181,6 +181,34 @@ line; when that notice is filed doesn't change.
 
 `rig mcp token revoke grok` refuses its next request. The rows it worked, and their answers, stay.
 
+## Embed the HTTP endpoint from Node.js
+
+An ESM application can start and close the same HTTP endpoint without running the CLI:
+
+```js
+import { startMcpHttpServer } from "@openrig/cli/mcp.js";
+
+const endpoint = await startMcpHttpServer({
+  daemonUrl: "http://127.0.0.1:7433",
+  host: "127.0.0.1",
+  port: 7434,
+  tokenFile: "/absolute/path/to/mcp-http-tokens.json",
+});
+// endpoint.url is the MCP URL; endpoint.authenticated says whether authentication is configured.
+// Keep the endpoint for as long as the application serves it, then:
+await endpoint.close();
+```
+
+`McpHttpOptions`, `McpAccess`, `McpPrincipal`, `McpGrant` and `GrantServiceOptions` are exported types;
+`McpHttpConfigError` is the endpoint's configuration error. Importing the module starts neither an endpoint
+nor a daemon. Start the daemon separately, and use the existing token commands above to manage grants.
+The CLI commands, authentication and tool scope work as before. No package exports map is added, so
+existing deep imports and CommonJS extension lookup keep their previous resolution; `@openrig/cli/mcp.js`
+is the documented entry.
+
+This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
+additional adapter callbacks that those options do not implement.
+
 ## Assistants connected through a grant service
 
 With `rig mcp serve --http --grant-service <url>`, an outside service answers each connection's key with its grant

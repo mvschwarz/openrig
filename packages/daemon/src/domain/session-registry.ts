@@ -206,6 +206,9 @@ export class SessionAddressConflict extends Error {
 
 export class SessionRegistry {
   readonly db: Database.Database;
+  /** #3634: fired after a session of a node is recorded as running, so a daemon-owned per-rig job that archive
+   *  retired comes back when a seat of that rig runs again (restore or launch without unarchive). */
+  onSessionRunning?: (nodeId: string) => void;
   private watchdogRegistrationObserver?: WatchdogRegistrationObserver;
   constructor(db: Database.Database, watchdogRegistrationObserver?: WatchdogRegistrationObserver) {
     this.db = db;
@@ -342,6 +345,7 @@ export class SessionRegistry {
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
     try { new ActivityGrantStore(this.db).reconcileBinding(nodeId); }
     catch { /* Optional run attribution must not fail an already registered claimed session. */ }
+    this.onSessionRunning?.(nodeId);
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -533,6 +537,10 @@ export class SessionRegistry {
     this.db
       .prepare("UPDATE sessions SET status = ?, intentionally_stopped = 0, last_seen_at = datetime('now') WHERE id = ?")
       .run(status, sessionId);
+    if (status === "running" && this.onSessionRunning) {
+      const row = this.db.prepare("SELECT node_id FROM sessions WHERE id = ?").get(sessionId) as { node_id: string } | undefined;
+      if (row) this.onSessionRunning(row.node_id);
+    }
   }
 
   /** A supported stop is distinct from an observed exit. Any later status write
