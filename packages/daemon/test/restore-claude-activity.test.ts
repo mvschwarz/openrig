@@ -74,7 +74,11 @@ describe("contained Claude restore activity resources", () => {
       createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })),
       sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
       getPaneCommand: vi.fn(async () => "claude"), capturePaneContent: vi.fn(async () => ""),
-      listSessions: async () => [], listWindows: async () => [], listPanes: async () => [],
+      getPanePid: vi.fn(async () => 4242),
+      listSessions: async () => [], listWindows: async () => [],
+      // Startup has a live local runtime. Exact joined-resume proof still has
+      // no native conversation evidence, as the resource tests assert below.
+      listPanes: async () => [{ id: "%1", index: 0, cwd, width: 80, height: 24, active: true }],
       hasSession: async () => false,
     } as unknown as TmuxAdapter;
     const collector = path.join(root, "collector.cjs");

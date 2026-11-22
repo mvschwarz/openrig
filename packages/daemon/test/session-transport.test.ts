@@ -4359,7 +4359,9 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
         checkReady: vi.fn(async () => readiness(panes[Math.min(reads++, panes.length - 1)]!)),
         launchHarness: vi.fn(async () => ({ ok: true })),
       };
-      const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: mockTmux(), sleep: async () => {} });
+      const tmux = mockTmux({ listPanes: async () => [{ id: "%1" }], getPaneCommand: async () => "claude" });
+      tmux.getPanePid = async () => 4242;
+      const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
       const result = await orchestrator.startNode({
         rigId: rig.id, nodeId: node.id, sessionId: session.id,
         binding: { id: "b1", nodeId: node.id, tmuxSession: "worker-1@test-rig", tmuxWindow: null, tmuxPane: null,

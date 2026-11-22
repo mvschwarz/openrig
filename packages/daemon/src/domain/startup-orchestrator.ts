@@ -9,7 +9,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { isClaudeResumeType } from "../adapters/claude-resume.js";
 import type { StartupAction, StartupProofSelection, StartupFailureStage } from "./types.js";
 import type {
-  RuntimeAdapter, NodeBinding, ResolvedStartupFile,
+  RuntimeAdapter, NodeBinding, ResolvedStartupFile, HarnessLaunchResult,
   ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
@@ -27,7 +27,8 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeResumeLaunch, verifyPaneEmptyShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { PiCommunityRuntimeAdapter } from "../adapters/pi-community-runtime-adapter.js";
 import { join } from "node:path";
@@ -418,6 +419,7 @@ export class StartupOrchestrator {
     let appliedLaunch: AppliedLaunchObservation | undefined;
     let activityGrantId: string | undefined;
     let resumedProcess: { pid: number; startedAt: string } | undefined;
+    let launchedExecutable: Extract<HarnessLaunchResult, { ok: true }>["launchedExecutable"];
     const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
@@ -697,6 +699,7 @@ export class StartupOrchestrator {
             activityGrantId = launchResult.activityGrantId;
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
+            launchedExecutable = launchResult.launchedExecutable;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
               await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim(), launchResult.launchedProcess);
             }
@@ -1052,7 +1055,47 @@ export class StartupOrchestrator {
       ], undefined, false, undefined, false, "assisted_startup", false);
     }
 
-    // 8. Mark ready
+    // Finish awaited startup effects before observing the runtime this result certifies (#3578).
+    // Held messages are never replayed, so a seat that starts with some is told once, as the launch is (#2431).
+    const heldNotice = input.binding.tmuxSession ? heldMessagesNotice(this.db, input.nodeId, input.sessionName ?? input.binding.tmuxSession) : null;
+    if (heldNotice) {
+      warnings.push(heldNotice);
+      await this.sessionTransport.send(input.binding.tmuxSession!, heldNotice, { openrigNotice: true }).catch(() => undefined);
+    }
+
+    // Local native runtimes and terminal seats need a new pane observation after launch and context delivery,
+    // not the periodic reconciler's cached verdict. Guest and runner-backed adapters own their readiness proof.
+    if (!input.adapter.environment && input.binding.tmuxSession
+      && (input.adapter.runtime === "claude-code" || input.adapter.runtime === "codex" || input.adapter.runtime === "terminal")) {
+      const current = () => {
+        const session = this.sessionRegistry.getSessionsForRig(input.rigId).filter(s => s.nodeId === input.nodeId).at(-1);
+        const binding = this.sessionRegistry.getBindingForNode(input.nodeId);
+        return session?.id === input.sessionId && session.status === "running"
+          && (!binding || binding.tmuxSession === input.binding.tmuxSession);
+      };
+      const session = this.sessionRegistry.getSessionsForRig(input.rigId).find(s => s.id === input.sessionId);
+      const changed = (): StartupResult => ({ ok: false, startupStatus: "attention_required",
+        errors: ["The selected session changed during startup runtime observation; its records were preserved."] });
+      const identity = await rebindAndVerifyPaneIdentity({ db: this.db, sessionRegistry: this.sessionRegistry,
+        tmux: this.tmuxAdapter, nodeId: input.nodeId, sessionName: input.binding.tmuxSession,
+        runtime: input.adapter.runtime, expectedResumeToken: session?.resumeToken,
+        launchedExecutable, listProcesses: this.listProcesses, assertCurrent: current });
+      if (!current()) return changed();
+      if (!identity.ok && identity.reason === "tmux_unavailable") {
+        this.recordSubmissionWarning(deliveryInput, `Startup runtime observation is unavailable: ${identity.detail}`);
+      } else if (!identity.ok) {
+        // Only a newly observed empty shell can license failed-start recovery. An unreadable pane is unknown.
+        const emptyShell = input.adapter.runtime !== "terminal" && current()
+          && await verifyPaneEmptyShell({ target: this.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? input.binding.tmuxSession,
+            tmux: this.tmuxAdapter, listProcesses: this.listProcesses }).catch(() => false);
+        if (!current()) return changed();
+        return this.fail(deliveryInput, "attention_required", [`Startup runtime identity is unverified: ${identity.detail}`],
+          undefined, false, undefined, false, "identity_verification", false, undefined,
+          emptyShell ? "returned_to_shell" : "runtime_identity_unverified");
+      }
+    }
+
+    // 8. Mark ready only after the completion observation.
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     const submission = deliveryInput.submissionWarnings.length
       ? { status: deliveryInput.stagedSubmissionWarning ? "staged" as const : "unverified" as const,
@@ -1061,13 +1104,6 @@ export class StartupOrchestrator {
           ...(deliveryInput.stagedSubmissionWarning ? { warning: deliveryInput.stagedSubmissionWarning } : {}) }
       : undefined;
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
-
-    // Held messages are never replayed, so a seat that starts with some is told once, as the launch is (#2431).
-    const heldNotice = input.binding.tmuxSession ? heldMessagesNotice(this.db, input.nodeId, input.sessionName ?? input.binding.tmuxSession) : null;
-    if (heldNotice) {
-      warnings.push(heldNotice);
-      await this.sessionTransport.send(input.binding.tmuxSession!, heldNotice, { openrigNotice: true }).catch(() => undefined);
-    }
 
     return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(routerLine ? { routerLine } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }

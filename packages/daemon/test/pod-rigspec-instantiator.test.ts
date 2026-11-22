@@ -42,7 +42,9 @@ function mockTmux(): TmuxAdapter {
     hasSession: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242),
+    getPaneCommand: vi.fn(async () => "claude"),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
   } as unknown as TmuxAdapter;
 }
@@ -97,7 +99,9 @@ describe("PodRigInstantiator", () => {
     const eventBus = new EventBus(db);
     const tmux = mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, ...(launcherDeps ?? {}) });
-    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {},
+      listProcesses: async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242, executableName: "codex",
+        command: "codex", argv: ["codex"], startedAt: "Sat Jan  1 12:00:00 2000" }] });
     const adapter = mockAdapter();
     const codexAdapter = mockAdapter("codex");
     const files = fsFiles ?? { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") };
@@ -162,7 +166,8 @@ describe("PodRigInstantiator", () => {
 
   it.each(["pi", "omp"])("does not invent an unresolved launch pane for grant-owning %s", async runtime => {
     const adapter = mockAdapter(runtime);
-    const { db, inst } = setup(undefined, { [runtime]: adapter });
+    const { db, inst, tmux } = setup(undefined, { [runtime]: adapter });
+    vi.mocked(tmux.listPanes).mockResolvedValue([]);
     try {
       const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = runtime;
       expect((await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT)).ok).toBe(true);
