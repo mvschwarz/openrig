@@ -73,6 +73,20 @@ describe("S19 A7 — the derived diagnosis, both park causes", () => {
     expect(d.reason).toMatch(/needs.input|permission/i);
   });
 
+  it("usage-limit park: a typed limit reads unknown but stopped, so open work is PARKED with the reset named; an empty board isn't", () => {
+    const usageLimit = { rung: "lifecycle-hooks" as const, observedAt: "2026-08-26T23:00:00.000Z", resetsAt: "2026-08-27T12:00:00.000Z" };
+    const state = oracleState({ activity: "unknown", decidedBy: "lifecycle-hooks", usageLimit });
+    const d = diagnoseSeatParked(deps(state, [pendingRow]), SEAT);
+    expect(d.parked).toBe(true);
+    expect(d.activity.value).toBe("unknown");
+    expect(d.reason).toContain("at its usage limit (resets 2026-08-27T12:00:00.000Z)");
+    expect(diagnoseSeatParked(deps(oracleState({ activity: "unknown", usageLimit: { ...usageLimit, resetsAt: null } }), [pendingRow]), SEAT).reason)
+      .toContain("at its usage limit (no reset stated)");
+    expect(diagnoseSeatParked(deps(state, []), SEAT).parked).toBe(false);
+    // Unknown with no typed limit (a limit that couldn't be read back after a restart) still supports no verdict.
+    expect(diagnoseSeatParked(deps(oracleState({ activity: "unknown", decidedBy: null }), [pendingRow]), SEAT).parked).toBe("indeterminate");
+  });
+
   it("working with obligations is NOT parked", () => {
     const d = diagnoseSeatParked(deps(oracleState({ activity: "working" }), [pendingRow]), SEAT);
     expect(d.parked).toBe(false);
