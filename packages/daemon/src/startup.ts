@@ -9,7 +9,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown } from "./domain/compaction-restore-notice.js";
+import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -146,7 +146,7 @@ import { QueueRepository, isBlockerLive, type QueueDestinationAdvisory } from ".
 import { describeDefaultReceiver, permissionDeciderFor } from "./domain/default-receiver.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
-import { OutboxHandler } from "./domain/outbox-handler.js";
+import { HELD_SENDER_NOTICE_PREFIX, OutboxHandler } from "./domain/outbox-handler.js";
 import { ProjectClassifier } from "./domain/project-classifier.js";
 import { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
 import { ClassificationAttemptLedger } from "./domain/classification-attempts.js";
@@ -160,6 +160,7 @@ import {
   WatchdogPolicyEngine,
 } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
+import { KeepAliveSupervisor } from "./domain/keep-alive-supervisor.js";
 import {
   ContinuityPolicyMaterializer,
   createContinuityCutoverBaton,
@@ -171,6 +172,8 @@ import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destina
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
+import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -588,6 +591,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const runnerChannel = new RunnerChannel(new ActivityGrantStore(db), outboxHandlerInstance, undefined, eventBus);
   queueRepoInstance.attachOutbox(outboxHandlerInstance);
   outboxHandlerInstance.reconcileAbandonedSending("watchdog-occurrence-");
+  // A held row's sender notice the prior process was sending may have landed: it reads unknown, and isn't sent again (#48).
+  outboxHandlerInstance.reconcileAbandonedSending(HELD_SENDER_NOTICE_PREFIX);
   // Reconcile only the prior process's claims, before transport/producers/timers can start new sends.
   let reconciledWakeIntents = 0;
   try {
@@ -749,6 +754,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // A seat seen running or idle is reachable: re-send wakes recorded unroutable before it was bound (#2789).
     void queueRepoInstance.retryUnroutableWakesOnReachable(sessionName, state)
       .catch(error => console.warn(`Reachable-seat wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+    // An idle seat may have cleared the draft its draft-aware guard held a wake for (#48).
+    void queueRepoInstance.retryDraftHeldWakesOnIdle(sessionName, state)
+      .catch(error => console.warn(`Draft-held wake retry: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
     rexSeatActivity?.(sessionName, { activity, runtime });
   };
@@ -1419,7 +1427,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // tracker emits a single `kernel.agent.degraded` event for
   // observability. The kernel rig is still the only rig the daemon
   // auto-boots; other rigs require explicit operator-initiated
-  // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
+  // `rig up` / `rig restore` per amended IMPL-PRD §16.2. Once the daemon
+  // runs, a seat of any rig that declares keep_alive also comes back when
+  // it falls (the keep-alive supervisor below, #2940); one stopped on
+  // purpose stays down.
   const runtimeAdaptersMap = withCommunityHarnessResolver({
     "claude-code": claudeAdapter,
     "codex": codexAdapter,
@@ -1465,6 +1476,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       console.warn(`kernel-boot: skipped due to error: ${err instanceof Error ? err.message : String(err)}`);
     } catch { /* logging must never throw */ }
   }
+
+  // #2940: a seat that declares keep_alive is relaunched when it falls while the daemon runs. Built after the boot
+  // reconcile and the kernel boot, which keeps boot-time recovery (a kernel's restore registered here makes the
+  // supervisor leave that rig alone); it acts only on its own ticks, from when index.ts starts it after the listener
+  // binds, and it stops first at shutdown. Its launch is the one-seat launch `rig seat start` uses, with the same adapters.
+  const keepAliveSupervisor = new KeepAliveSupervisor({
+    db, eventBus, reconciler, restoreOrchestrator, adapters: runtimeAdaptersMap,
+    fsOps: { exists: (p: string) => fs.existsSync(p) },
+  });
 
   // Discovery services
   const tmuxScanner = new TmuxDiscoveryScanner({ tmuxAdapter });
@@ -1700,6 +1720,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
     }),
     restoreOrchestrator,
+    keepAliveSupervisor,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize
     rigSpecExporter,
     rigSpecPreflight,
@@ -2211,6 +2232,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
     let resolvedSlicesRoot = "";
     let resolvedWorkspaceRoot = "";
+    let resolvedCatalogPath = "";
     try {
       const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
       const resolvedConfig = new SettingsStoreCtor().resolveConfig();
@@ -2218,6 +2240,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         resolvedSlicesRoot = resolvedConfig.workspaceSlicesRoot;
       }
       resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
+      resolvedCatalogPath = resolvedConfig.workspaceCatalogPath;
     } catch {
       // SettingsStore unavailable — keep roots empty; routes return 503.
     }
@@ -2234,6 +2257,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           nodePath.join(resolvedWorkspaceRoot, "slices"),
         ].filter((root) => root !== slicesRoot)
       : [];
+    // #3553 — terminal mission/slice views resolve through the same project catalog as the Projects view, which re-reads the catalog on every call. The roots are re-read through the getter whenever a scope index is built. A missing catalog degrades to today's configured roots; an unreadable catalog or catalogued project is named as unavailable, and the readable roots still serve.
+    let catalogMissionsRoots: readonly string[] | (() => import("./domain/workspace/project-read.js").CatalogMissionsRoots) = [];
+    if (resolvedCatalogPath) {
+      try {
+        const { catalogMissionsRoots: catalogRoots } = await import("./domain/workspace/project-read.js");
+        const catalogPath = resolvedCatalogPath;
+        catalogMissionsRoots = () => catalogRoots(catalogPath);
+      } catch {
+        catalogMissionsRoots = [];
+      }
+    }
     // S27 (OPR.0.5.6.27) — wire the execution view once the slices root is
     // resolved; the thunk re-reads nothing (path resolution stays startup's).
     viewProjectorInstance.setExecutionDeps({
@@ -2254,6 +2288,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const sliceIndexer = new SliceIndexer({
       slicesRoot,
       additionalSliceRoots,
+      catalogMissionsRoots,
       dogfoodEvidenceRoot: resolvedDogfoodRoot || null,
       db,
     });
@@ -2532,6 +2567,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
       return since == null ? null : new Date(since).toISOString();
     });
+    // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
+    // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
+    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
+    const seatPoolSlots = new SeatPoolSlotsRepository(db);
+    const seatPoolPolicy = makeSeatPoolPolicy({
+      readBlock: (modelNodeId) => rigRepo.getNodePool(modelNodeId),
+      readSlots: (modelNodeId) => seatPoolSlots.forModel(modelNodeId),
+    });
+    void seatPoolPolicy;
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
       jobsRepo: watchdogJobsRepoInstance,
@@ -2990,6 +3034,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
           onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
           onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
+          onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
@@ -3030,6 +3076,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
+  // #3688: a removed seat's open compaction notices close; nothing is left to deliver to or take up their steps.
+  wireCompactionNoticeSeatRemoval(eventBus, queueRepoInstance, seatNameCarried(db));
   const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
   const { PiCompactionRequestStore } = await import("./domain/pi-compaction-request-store.js");
   if (sessionTransport) deps.piCompactionService = new PiCompactionService({

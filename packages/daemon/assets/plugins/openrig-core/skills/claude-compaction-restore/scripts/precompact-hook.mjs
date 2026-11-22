@@ -21,6 +21,9 @@ const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compacti
 // wait (tests shorten it); it isn't capped at the default.
 const timeoutOverride = Number(process.env.OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS);
 const restoreTimeoutMs = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 25_000;
+// A transcript larger than this gets a packet from its last TAIL_BYTES only, so it's made inside the budget (a 2.95 GB
+// transcript took 69 s whole). A smaller one gets the whole-session packet, unchanged.
+const TAIL_BYTES = 256 * 1024 * 1024;
 const defaultRestoreInstruction =
   "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
 
@@ -362,6 +365,7 @@ try {
     // The transcript as it stands now: compaction appends to it once this hook returns, and the packet is of what came
     // before.
     args.push("--until-byte", String(fs.statSync(input.transcript_path).size), input.transcript_path);
+    if (fs.statSync(input.transcript_path).size > TAIL_BYTES) args.push("--tail-bytes", String(TAIL_BYTES));
   }
 
   const customMessage = readClaudeCompactionMessage();

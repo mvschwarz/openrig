@@ -429,8 +429,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       ...(body.urgent === true ? { urgent: { by: derivedActor ?? "unknown" } } : {}),
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
       ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
-      // Recipients not yet started when the caller goes away are not written; started ones keep their results.
-      signal: c.req.raw.signal,
+      // With waitForIdleMs (a direct API caller; the CLI refuses --wait-for-idle on a fan-out), recipients not
+      // yet started when the caller goes away are not written, as for a single send (#1513): a canceled wait
+      // must not type later. Without it (every `rig broadcast` and `rig send --to/--pod/--rig`), the fan-out runs
+      // to the end after the caller goes away, so a client deadline doesn't drop the recipients it hadn't reached
+      // yet (#3726); each one's outcome is recorded below as usual.
+      ...(body.waitForIdleMs !== undefined ? { signal: c.req.raw.signal } : {}),
     });
 
     // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED

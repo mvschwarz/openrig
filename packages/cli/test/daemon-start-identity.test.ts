@@ -163,6 +163,45 @@ describe("child-bound startup", () => {
         expect(f.lock.release).toHaveBeenCalledWith(false);
       } finally { progress.mockRestore(); }
     });
+    it("returns pending at a configured 30-second readiness wait, naming that limit, without stopping the child or releasing the reservation", async () => {
+      vi.useFakeTimers();
+      const progress = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const f = fixture(); const fetch = f.deps.fetch;
+        f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
+        const started = Date.now();
+        const result = startDaemon({ ...opts, readinessWaitSeconds: 30 }, f.deps).catch((e: Error) => e);
+        await vi.runAllTimersAsync();
+        const outcome = await result;
+        expect(Date.now() - started).toBe(30_000);
+        expect((outcome as Error).message).toMatch(/pending after the readiness deadline \(child PID 12345\)/);
+        expect(progress).toHaveBeenCalledWith(expect.stringContaining("30s limit"));
+        expect(f.files.has(STATE_FILE)).toBe(false);
+        expect(f.deps.kill).not.toHaveBeenCalled();
+        expect(f.lock.release).toHaveBeenCalledWith(true);
+      } finally { progress.mockRestore(); }
+    });
+    it("keeps waiting past 180 seconds at a configured 240-second wait and publishes the same child verified at 200 seconds", async () => {
+      vi.useFakeTimers();
+      const progress = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const f = fixture(); const fetch = f.deps.fetch; const began = Date.now();
+        f.deps.fetch = async (url) => {
+          const response = await fetch(url);
+          if (Date.now() - began < 200_000) throw Object.assign(new Error("still initializing"), { code: "ECONNREFUSED" });
+          return response;
+        };
+        const pending = startDaemon({ ...opts, readinessWaitSeconds: 240 }, f.deps).catch((error: Error) => error);
+        await vi.runAllTimersAsync();
+        const outcome = await pending;
+        expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+        expect(Date.now() - began).toBe(200_000);
+        expect(progress).toHaveBeenCalledWith(expect.stringContaining("240s limit"));
+        expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: f.child.pid });
+        expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+        expect(f.lock.release).toHaveBeenCalledWith(false);
+      } finally { progress.mockRestore(); }
+    });
     it("keeps a quick verified start immediate without a waiting progress line", async () => {
       vi.useFakeTimers();
       const progress = vi.spyOn(console, "error").mockImplementation(() => {});

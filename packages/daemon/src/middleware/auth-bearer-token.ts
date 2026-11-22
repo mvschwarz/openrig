@@ -70,7 +70,7 @@ function unauthorizedBody(reason: string, diagnosticContext?: "terminal"): {
       : "Mission Control write verbs require a bearer token because the daemon may be bound on a non-loopback interface (tailnet) where unauthenticated mutation would be unsafe.",
     what_to_do: diagnosticContext === "terminal"
       ? "Use the daemon's terminal bearer token with `Authorization: Bearer <token>`: OPENRIG_TERMINAL_BEARER_TOKEN, or OPENRIG_AUTH_BEARER_TOKEN when terminal auth falls back to it."
-      : "Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`. In the web UI, open it once with #mcToken=<token> after its address.",
+      : "Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`.",
   };
 }
 
