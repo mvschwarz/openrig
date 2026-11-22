@@ -17,7 +17,7 @@ import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { restoreExistingRigUnattended, automaticRestoreInProgress } from "../src/domain/existing-rig-restore.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ProcessTableRow } from "../src/domain/process-table.js";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockNativeRuntime } from "./helpers/test-app.js";
 import type { RigSpec } from "../src/domain/types.js";
 
 // #2940: a seat that declares keep_alive is relaunched when it falls while the daemon runs, through the one-seat launch,
@@ -1079,6 +1079,8 @@ describe("KeepAliveSupervisor and daemon start's automatic restore (#2940)", () 
       launchHarness: vi.fn(async () => ({ ok: true as const })) };
     setup = createTestApp(db, {
       adapters: { codex: harness } as never,
+      // The seat's Codex process as the daemon observes it, so a started harness reads ready (#3584).
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable: (id, node) => setup.podInstantiator.canLaunchPersistedFresh(id, node),
       podInstantiatorFsOps: { exists: (file) => file.replaceAll("\\", "/").endsWith("/agents/impl/agent.yaml"), readFile: () => agentYaml },
