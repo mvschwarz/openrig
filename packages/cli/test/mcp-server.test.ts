@@ -1925,6 +1925,25 @@ describe("MCP host routing", () => {
     expect(create?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
   });
 
+  it("checks a landed same-id retry on the selected remote host before applying new-work backoff", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-123";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const box = recordingRemote();
+    const local = mockClient();
+    local.get = vi.fn(async () => ({ status: 404, data: {} }));
+    const result = await run(local, {
+      seat: "impl@team",
+      access: { principal: "local", owner: false, rigs: ["team"], roots: [], newWorkRetryAfterMs: 9000 },
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", qitemId: "qitem-already-remote", destination: "qa@team", body: "already landed" });
+    expect(result.isError).toBeFalsy();
+    expect(box.calls.find(call => call.path === "/api/queue/qitem-already-remote")?.headers.Authorization).toBe("Bearer tok-123");
+    expect(box.calls.some(call => call.path === "/api/queue/create")).toBe(true);
+    expect(local.get).not.toHaveBeenCalledWith("/api/queue/qitem-already-remote");
+  });
+
   it("a remote send names the calling seat as the sender", async () => {
     const box = recordingRemote();
     const result = await run(mockClient(), {

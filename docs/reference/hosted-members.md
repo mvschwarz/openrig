@@ -218,6 +218,8 @@ your application supplies the function and owns its credential authority.
 The resolver receives `{ bearer, instance, methods, signal }` on each request. `instance` is this daemon's
 reported instance id, not a client parameter. `methods` lists the JSON-RPC methods in message order; it is empty
 for non-POST requests or an unreadable body. It is operation metadata, not permission to run those methods.
+The POST body is read within the shared bounded budget before the resolver decides; authentication refusals
+take precedence over parse errors, not over reading the body.
 A successful result has this shape:
 
 ```ts
@@ -240,8 +242,11 @@ Core does not create or start it during resolution. The principal's opaque `sour
 `grant`, `version` and `label`, are attribution, never credentials. `access.principal` is normalized to that id.
 `external.objects` uses the existing object/action capability evaluator. With `external.peerSeats`, only those
 exact peers are in scope for destinations, rows and team members; rig selection follows the named seat addresses.
+The `rigs` list is ignored when `peerSeats` is supplied.
 Without `peerSeats`, the existing rig-scoped rule remains. Without peers or rigs, only the caller's own rows are
 in scope. An external work profile has `owner: false` and `workspace: false`.
+A non-external result can instead be an owner or workspace caller, carrying the embedding's full authority;
+the embedding owns that choice.
 
 A result may also reduce the profile with `readOnly: true`, or set `newWorkRetryAfterMs`. Read-only connections
 are offered only read operations and cannot invoke hidden writes. Backoff holds only new creates, returns a
@@ -264,8 +269,14 @@ metadata and the configured task destination can also be used with a resolver.
 A token-file entry can optionally carry `objects`, `peerSeats`, `readOnly` and `newWorkRetryAfterSeconds`.
 `objects` selects the scoped work profile above; `peerSeats` requires `objects`. An entry without these fields
 keeps its existing rig, workspace and owner behavior. The read-only reduction and new-work delay also work on
-ordinary local grants. Rotation preserves the optional fields, and a malformed optional profile affects only
-requests using that entry, not other valid grants. No service or service-shaped principal id is needed.
+ordinary local grants. Rotation preserves the optional fields. A malformed field gets a warning naming the
+field and its repair, and a conservative reading: `readOnly` becomes true, invalid peers become an empty list,
+and invalid object actions are disabled while valid object limits remain. A peer list without `objects` allows
+no object actions. These cases never restore owner, workspace or unrestricted legacy access.
+
+An unusable `newWorkRetryAfterSeconds` uses the bounded 600-second new-work delay with a warning. Reads,
+existing-work settlement and landed same-ID retries remain usable; the authenticated token does not become
+unavailable. Other grants are unaffected. No service or service-shaped principal id is needed.
 
 ## Assistants connected through a grant service
 

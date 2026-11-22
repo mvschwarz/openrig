@@ -138,14 +138,15 @@ export function addGrant(file: string, grant: Omit<McpGrant, "tokenSha256" | "cr
   if (grant.person !== undefined && !PERSON_ENTITY_ID.test(grant.person)) {
     return Promise.reject(new Error(`--person needs a registered person's entity id (as rig gateway human list shows it), not '${grant.person}'.`));
   }
-  if (!localCallerProfile.safeParse(grant).success) return Promise.reject(new Error("The optional caller profile is malformed."));
+  const profile = localCallerProfile(grant, (field, repair) =>
+    console.error(`rig mcp token add: grant ${JSON.stringify(grant.name)}, field ${JSON.stringify(field)}: ${repair}`));
   return withGrantsLock(file, () => {
     const grants = readStoredGrants(file) ?? [];
     if (grants.some((existing) => existing.name === grant.name)) {
       throw new Error(`'${grant.name}' already has a grant; revoke it first to issue a new token`);
     }
     const token = `orm_${randomBytes(32).toString("base64url")}`;
-    const { person, ...scope } = grant;
+    const { person, ...scope } = { ...grant, ...profile };
     grants.push({ ...scope, seat: grant.seat.trim(), ...(person !== undefined ? { person } : {}), tokenSha256: sha256(token),
       createdAt: new Date().toISOString() });
     writeGrants(file, grants);
@@ -455,6 +456,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   if (opts.oauth && !service && !resolver) throw new McpHttpConfigError("--oauth-resource and --oauth-issuer need --grant-service or a caller resolver");
   const discovery = opts.oauth ? oauthDiscovery(opts.oauth) : undefined;
   const warnedBindings = new Set<string>();
+  const warnedProfiles = new Set<string>();
   const loadGrants = () => readGrants(opts.tokenFile, grantName => {
     if (warnedBindings.has(grantName)) return;
     warnedBindings.add(grantName);
@@ -640,13 +642,17 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
         }
         access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true,
           ...(grant.person !== undefined ? { person: grant.person } : {}) };
-        const profile = localCallerProfile.safeParse(grant);
-        if (!profile.success) { refuse(res, unavailable("this token's optional caller profile is unusable")); return; }
-        if (profile.data.objects !== undefined) access = { ...access, owner: false, workspace: false,
-          external: { objects: profile.data.objects, ...(profile.data.peerSeats !== undefined ? { peerSeats: profile.data.peerSeats } : {}),
+        const profile = localCallerProfile(grant, (field, repair) => {
+          const key = `${grant.name}\u0000${field}\u0000${repair}`;
+          if (warnedProfiles.has(key)) return;
+          warnedProfiles.add(key);
+          console.error(`rig mcp serve --http: token-file grant ${JSON.stringify(grant.name)}, field ${JSON.stringify(field)}: ${repair}`);
+        });
+        if (profile.objects !== undefined) access = { ...access, owner: false, workspace: false,
+          external: { objects: profile.objects, ...(profile.peerSeats !== undefined ? { peerSeats: profile.peerSeats } : {}),
             ...(grant.person !== undefined ? { person: grant.person } : {}) } };
-        if (profile.data.readOnly) access.readOnly = true;
-        if (profile.data.newWorkRetryAfterSeconds !== undefined) access.newWorkRetryAfterMs = Math.min(600, profile.data.newWorkRetryAfterSeconds) * 1000;
+        if (profile.readOnly) access.readOnly = true;
+        if (profile.newWorkRetryAfterSeconds !== undefined) access.newWorkRetryAfterMs = profile.newWorkRetryAfterSeconds * 1000;
         seat = grant.seat;
         // A token-file grant has a name and nothing more: no grant id or version is invented for it.
         principal = { source: "file", id: grant.name };

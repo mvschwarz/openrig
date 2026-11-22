@@ -951,7 +951,7 @@ async function namedSeats(client: DaemonClient, rigName: string, name: string, a
   return seatsNamed(await addressableSeats(client, rigName, addressable), name);
 }
 
-/** A seat of a rig that the caller may address: its actual session, that session's own name before `@`, its pod-member form,
+/** A seat of a rig that the caller may address: its in-scope canonical or logical address, its name before `@`, its pod-member form,
  *  and its logical id's member (the part after its pod), the last two null for a seat of a rig without pods. */
 type AddressableSeat = { session: string; own: string; podMember: string | null; member: string | null };
 
@@ -974,8 +974,9 @@ async function addressableSeats(client: DaemonClient, rigName: string, addressab
     // none yet can't be named, so it's left out rather than read as a broken team.
     if (dot === -1 && !recorded) continue;
     const podMember = dot === -1 ? null : `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
-    const session = recorded ?? `${podMember}@${rigName}`;
-    if (!addressable(session)) continue;
+    const logical = podMember === null ? null : `${podMember}@${rigName}`;
+    const session = [recorded, logical].find((name): name is string => name !== null && addressable(name));
+    if (!session) continue;
     seats.push({ session, own: session.slice(0, -(rigName.length + 1)), podMember, member: dot === -1 ? null : logicalId.slice(dot + 1) });
   }
   return seats;
@@ -1810,7 +1811,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // Check scope before looking up the configured receiver: configuration never expands a grant or reveals
         // another rig's destination. An explicit destination continues through the existing path below.
         if (!scope?.destination(destination)) return outOfScope("Configured task destination");
-        // The receiver is exactly one seat this connection may address, and the item goes to that seat's actual session.
+        // The receiver is exactly one seat this connection may address, using its in-scope canonical or logical address.
         const at = destination.lastIndexOf("@");
         let seats: string[];
         try {
@@ -1886,7 +1887,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         let landed: boolean | undefined = false;
         if (qitemId) {
           try {
-            const existing = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+            const existing = await hostGet(target, `/api/queue/${encodeURIComponent(qitemId)}`);
             landed = existing.status < 400 ? true : existing.status === 404 ? false : undefined;
           } catch { landed = undefined; }
         }

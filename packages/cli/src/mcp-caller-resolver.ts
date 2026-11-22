@@ -16,7 +16,8 @@ export type CallerResolution =
 const text = z.string().max(200).refine(value => value.trim() !== "");
 const seat = z.string().regex(/^[^\s@]+@[^\s@]+$/);
 const version = z.union([z.number().finite(), z.string().max(64).refine(value => value.trim() !== "")]);
-const objects = z.record(z.string(), z.array(z.string()));
+const operations = z.array(z.string());
+const objects = z.record(z.string(), operations);
 const delay = z.number().finite().nonnegative();
 const access = z.object({
   principal: text, owner: z.boolean(), rigs: z.array(z.string()), roots: z.array(z.string()), workspace: z.boolean(),
@@ -50,7 +51,41 @@ export function normalizeCallerResolution(value: unknown): CallerResolution | un
   return { ...caller, access: profile };
 }
 
-/** The optional token-file work profile uses the same evaluator as resolved callers. */
-export const localCallerProfile = z.object({ objects: objects.optional(), peerSeats: z.array(seat).optional(),
-  readOnly: z.boolean().optional(), newWorkRetryAfterSeconds: delay.optional(),
-}).refine(value => value.peerSeats === undefined || value.objects !== undefined);
+/** Keep valid token-file limits; an unusable field narrows only that capability in the existing evaluator. */
+export function localCallerProfile(value: {
+  objects?: unknown; peerSeats?: unknown; readOnly?: unknown; newWorkRetryAfterSeconds?: unknown;
+}, warn: (field: string, repair: string) => void): {
+  objects?: Record<string, string[]>; peerSeats?: string[]; readOnly?: boolean; newWorkRetryAfterSeconds?: number;
+} {
+  const profile: ReturnType<typeof localCallerProfile> = {};
+  if (value.objects !== undefined) {
+    profile.objects = {};
+    const entries = z.record(z.string(), z.unknown()).safeParse(value.objects);
+    if (!entries.success) warn("objects", "Set an object-to-operation-list map; object actions are disabled until repaired.");
+    else profile.objects = Object.fromEntries(Object.entries(entries.data).map(([name, actions]) => {
+      const parsed = operations.safeParse(actions);
+      if (!parsed.success) warn(`objects.${name}`, "Set an array of operation names; this object's actions are disabled until repaired.");
+      return [name, parsed.success ? parsed.data : []];
+    }));
+  }
+  if (value.peerSeats !== undefined) {
+    const parsed = z.array(seat).safeParse(value.peerSeats);
+    profile.peerSeats = parsed.success ? parsed.data : [];
+    if (!parsed.success) warn("peerSeats", "Set an array of member@rig addresses; no peers are allowed until repaired.");
+    if (profile.objects === undefined) {
+      profile.objects = {};
+      warn("peerSeats", "Add an objects map alongside peerSeats; object actions are disabled until repaired.");
+    }
+  }
+  if (value.readOnly !== undefined) {
+    const parsed = z.boolean().safeParse(value.readOnly);
+    profile.readOnly = parsed.success ? parsed.data : true;
+    if (!parsed.success) warn("readOnly", "Set true or false; this grant is read-only until repaired.");
+  }
+  if (value.newWorkRetryAfterSeconds !== undefined) {
+    const parsed = delay.safeParse(value.newWorkRetryAfterSeconds);
+    profile.newWorkRetryAfterSeconds = parsed.success ? Math.min(600, parsed.data) : 600;
+    if (!parsed.success) warn("newWorkRetryAfterSeconds", "Set a finite nonnegative number; new work waits up to 600 seconds until repaired, while existing work remains usable.");
+  }
+  return profile;
+}
