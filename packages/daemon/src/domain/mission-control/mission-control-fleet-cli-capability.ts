@@ -71,9 +71,10 @@ const RIG_QUEUE_SQL = `SELECT destination_session, state, ts_updated, blocked_on
             OR source_session LIKE ?
           ORDER BY ts_updated DESC, rowid DESC LIMIT 100`;
 // The same rows one rowid window at a time, for readRowsCooperatively: each window's own latest 100, which together hold
-// the latest 100 overall.
+// the latest 100 overall. NOT INDEXED keeps each window on its rowid range: with idx_queue_items_ts_updated present, the
+// planner may otherwise walk that index for the ORDER BY, which visits every row of the table in every window.
 const RIG_QUEUE_WINDOW_SQL = `SELECT rowid AS rid, destination_session, state, ts_updated, blocked_on
-           FROM queue_items
+           FROM queue_items NOT INDEXED
           WHERE queue_items.rowid > ? AND queue_items.rowid <= ?
             AND (destination_session LIKE ? OR source_session LIKE ?)
           ORDER BY ts_updated DESC, rowid DESC LIMIT 100`;
@@ -247,19 +248,22 @@ export class MissionControlFleetCliCapability {
 
   /** A rig's latest 100 rows by update time. A suffix LIKE can't use an index, so the statement walks rows until it has
    *  100, which is every row for a quiet rig. On a WAL file it's read on its own read-only connection one rowid window
-   *  at a time, yielding to the event loop between windows (readRowsCooperatively), and then ordered here. Inside a
-   *  transaction, on a memory database or on a non-WAL file, it's the statement on the main connection. */
+   *  at a time, yielding to the event loop between windows (readRowsCooperatively). Only the running latest 100 are kept
+   *  as windows arrive, so no stretch grows with the queue. Inside a transaction, on a memory database or on a non-WAL
+   *  file, it's the statement on the main connection. */
   private async readRigQueueRows(pattern: string): Promise<RigQueueRow[]> {
     const file = cooperativeReadFile(this.db);
     if (!file) {
       return runSyncSite("mission_control.rig_queue_summary", () => this.db.prepare(RIG_QUEUE_SQL).all(pattern, pattern) as RigQueueRow[]);
     }
-    const read = await readRowsCooperatively<RigQueueRow & { rid: number }>(file, "queue_items", RIG_QUEUE_WINDOW_SQL, [pattern, pattern]);
     // ts_updated is ISO-8601 text, where JS's string order is SQLite's BINARY order.
-    return read.rows
-      .sort((a, b) => (a.ts_updated < b.ts_updated ? 1 : a.ts_updated > b.ts_updated ? -1 : b.rid - a.rid))
-      .slice(0, 100)
-      .map(({ rid: _rid, ...row }) => row);
+    const newestFirst = (a: RigQueueRow & { rid: number }, b: RigQueueRow & { rid: number }) =>
+      (a.ts_updated < b.ts_updated ? 1 : a.ts_updated > b.ts_updated ? -1 : b.rid - a.rid);
+    let latest: Array<RigQueueRow & { rid: number }> = [];
+    await readRowsCooperatively<RigQueueRow & { rid: number }>(file, "queue_items", RIG_QUEUE_WINDOW_SQL, [pattern, pattern], undefined, undefined, {
+      onWindow: (rows) => { if (rows.length > 0) latest = [...latest, ...rows].sort(newestFirst).slice(0, 100); },
+    });
+    return latest.map(({ rid: _rid, ...row }) => row);
   }
 
   /** Test/observability helper: clear the once-per-session log set. */
