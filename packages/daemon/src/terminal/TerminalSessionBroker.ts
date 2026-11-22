@@ -311,8 +311,10 @@ export class TerminalSessionBroker {
       // otherwise stale terminal input would reach the seat after teardown.
       if (this.torndown) return;
       const write = async () => {
-        if (msg.type === "keys") await this.tmux.sendKeys(this.sessionName, msg.keys);
-        else if (msg.type === "text") await this.tmux.sendText(this.sessionName, msg.text);
+        const result = msg.type === "keys"
+          ? await this.tmux.sendKeys(this.sessionName, msg.keys)
+          : await this.tmux.sendText(this.sessionName, msg.text);
+        if (!result.ok) throw Object.assign(new Error(result.message ?? "Terminal input was not sent."), { code: result.code });
       };
       if (this.tmux.humanInput) await this.tmux.humanInput(this.sessionName, write);
       else await write();

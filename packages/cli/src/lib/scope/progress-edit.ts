@@ -65,9 +65,18 @@ function bodyStartIndex(lines: string[]): number {
 /** Keep source indices while hiding code examples from the progress grammar. */
 function progressLines(lines: string[]): string[] {
   let fence: { marker: string; length: number } | null = null;
+  let comment = false;
   const start = bodyStartIndex(lines);
   return lines.map((line, i) => {
     if (i < start) return "";
+    if (comment) {
+      if (line.includes("-->")) comment = false;
+      return "";
+    }
+    if (!fence && /^ {0,3}<!--/.test(line)) {
+      comment = !line.includes("-->");
+      return "";
+    }
     const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (match) {
       const marker = match[1]![0]!;

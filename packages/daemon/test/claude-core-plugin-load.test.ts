@@ -70,7 +70,9 @@ function fakeTmux(created: Array<{ name: string; env: Record<string, string> | u
     createSession: async (name: string, _c?: string, env?: Record<string, string>) => { created.push({ name, env }); return { ok: true as const }; },
     setSessionEnv: async (_s: string, key: string, value: string) => { sessionEnvCalls.push(`set ${key}=${value}`); },
     unsetSessionEnv: async (_s: string, key: string) => { sessionEnvCalls.push(`unset ${key}`); },
-    killSession: async () => ({ ok: true as const }), listPanes: async () => [], listSessions: async () => [], listWindows: async () => [],
+    killSession: async () => ({ ok: true as const }), listSessions: async () => [], listWindows: async () => [],
+    listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+    getPanePid: async () => 4242, getPaneCommand: async () => "claude",
     hasSession: async () => false, sendText: async () => ({ ok: true as const }), sendKeys: async () => ({ ok: true as const }),
   } as unknown as TmuxAdapterType;
 }

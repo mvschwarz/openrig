@@ -64,6 +64,9 @@ export interface NodeEntry {
   configuredAccount?: string | null;
   model: string | null;
   modelObservation?: ModelObservation;
+  /** #3513: the Remote Control session the seat's own hooks last reported (null sessionId: seen absent); null or absent
+   *  when no observation applies. A last-seen observation, not proof of a live connection. */
+  remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -118,6 +121,7 @@ export interface NodeEntry {
     sampledAt: string;
     evidence: string | null;
     rawEvent?: string | null;
+    rawSubtype?: string | null;
     stale?: boolean;
     fallback?: boolean;
   };
@@ -232,6 +236,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "launchWrapper",
   "model",
   "modelObservation",
+  "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
   "startupStatus",
@@ -728,12 +733,23 @@ function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
 }
 
+/** #3571: a current Claude authentication or billing failure the daemon serves as the seat's activity, with Claude's
+ *  own error value when it is a plain identifier. Null for anything else, a generic provider error included. */
+export function providerFailureReason(n: NodeEntry): string | null {
+  const activity = n.agentActivity;
+  if (activity?.rawEvent !== "StopFailure" || activity.stale === true
+    || (activity.reason !== "provider_auth_error" && activity.reason !== "provider_billing_error")) return null;
+  const raw = activity.rawSubtype;
+  return raw && /^[a-z0-9_]{1,64}$/.test(raw) ? `${activity.reason} (${raw})` : activity.reason;
+}
+
 /** Why a seat that needs attention does, from what the daemon recorded: a missing session, a startup error, a held
- *  message, a missing required file, or the served needs-input reason. Otherwise "reason unavailable". */
+ *  message, a missing required file, the served needs-input reason, or a provider authentication or billing failure.
+ *  Otherwise "reason unavailable". */
 export function attentionReason(n: NodeEntry): string {
   return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
     ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
-    ?? questionReason(n) ?? "reason unavailable";
+    ?? questionReason(n) ?? providerFailureReason(n) ?? "reason unavailable";
 }
 
 /** Whether the daemon serves a live question for the seat, with its own precedence: the arbitrated needs-input answer,
@@ -802,6 +818,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    // #3513: only a served observation; its time says when it was last seen.
+    if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
     // status, without the raw evidence; recorded running is not a check that the process is alive.
     if (n.storedSessionStatus !== undefined) compact.storedSessionStatus = n.storedSessionStatus;
@@ -1161,10 +1179,14 @@ Exit codes:
         return;
       }
 
-      // OPR.0.4.4.21 FR-1: ONE O(rigs) fetch including archived so the
-      // count line can be computed; visibility is split client-side below
+      // OPR.0.4.4.21 FR-1: the count line needs the archived count. #3636: the daemon sends it beside the default
+      // (active-only) list as a header, so the archived rigs aren't folded just to be counted. A daemon without the
+      // header gets the earlier single fetch, archived included; visibility is split client-side below either way
       // (JSON keeps today's default of excluding archived — parity).
-      const res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
+      let res = await client.get<PsEntry[]>(opts.includeArchived ? "/api/ps?includeArchived=true" : "/api/ps");
+      const countHeader = opts.includeArchived ? null : res.headers?.get("x-openrig-archived-count") ?? null;
+      const headerCount = countHeader !== null && /^\d+$/.test(countHeader) ? Number(countHeader) : null;
+      if (!opts.includeArchived && res.status < 400 && headerCount === null) res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
 
       if (res.status >= 400) {
         const reason = (res.data as unknown as { error?: unknown } | null)?.error;
@@ -1181,7 +1203,7 @@ Exit codes:
       // --include-archived they are dropped from BOTH renders here, exactly
       // as the daemon default used to do. archivedCount feeds the FR-1
       // count line only.
-      const archivedCount = all.filter((e) => e.isArchived === true).length;
+      const archivedCount = headerCount ?? all.filter((e) => e.isArchived === true).length;
       const visible = opts.includeArchived ? all : all.filter((e) => e.isArchived !== true);
 
       const rigScoped = opts.rig
@@ -1191,7 +1213,20 @@ Exit codes:
       // A --rig that names no rig is a lookup that missed, not an empty fleet: say so (as rig chatroom,
       // env and parked do) instead of "No rigs" or a zero summary. --json keeps its empty result.
       if (!opts.json && opts.rig && rigScoped.length === 0) {
-        if (all.some((e) => (e.rigName ?? e.name) === opts.rig)) {
+        const named = (entries: unknown) => Array.isArray(entries) && entries.some((e: PsEntry) => (e.rigName ?? e.name) === opts.rig);
+        // From the header path the list holds no archived rig: look at the archived ones on this miss only.
+        let archivedRig = named(all);
+        if (!archivedRig && headerCount !== null && headerCount > 0) {
+          const archived = await client.get<PsEntry[]>("/api/ps?archived=only");
+          // A failed lookup hasn't shown the rig is missing: report it as the first rig-list read does.
+          if (archived.status >= 400) {
+            console.error(`Failed to fetch rig list from daemon (HTTP ${archived.status}). Check daemon status with: rig status`);
+            process.exitCode = 2;
+            return;
+          }
+          archivedRig = named(archived.data);
+        }
+        if (archivedRig) {
           console.error(`Rig '${opts.rig}' is archived. Show it with: rig ps --rig ${opts.rig} --include-archived`);
         } else {
           console.error(`Rig '${opts.rig}' not found. List rigs with: rig ps`);
