@@ -139,6 +139,15 @@ export function findingTitle(kind: StuckFindingKind, rowId: string, ageMinutes: 
   }
 }
 
+/** The sweep's own session: the sender of a finding that comes back to the person whose row it's about. */
+const STUCK_SWEEP_SESSION = "stuck-sweep@system";
+
+/** A person's notice that their row waits for a seat that couldn't be woken: it names that seat. It keeps the
+ *  `Checked on <row>: ` start, so the sweep still reads it as a title it wrote. */
+function personNoticeTitle(rowId: string, seat: string, ageMinutes: number): string {
+  return `Checked on ${rowId}: it's waiting for ${seat}, which couldn't be woken (${ageMinutes} ${ageMinutes === 1 ? "minute" : "minutes"})`;
+}
+
 /** A standing notice's title: whose work, and how many items nobody has picked up. */
 function backlogTitle(whose: string, count: number): string {
   return `Checked on ${whose}: ${count} ${count === 1 ? "item" : "items"} nobody has picked up`;
@@ -632,7 +641,7 @@ export function custodyHeadline(rowId: string, targets: string[], ageMinutes: nu
     : `Custody not checked: no successor of ${rowId} in this store (${ageMinutes} min)`;
 }
 
-function evidenceBody(db: Database.Database, c: Candidate): string {
+function evidenceBody(db: Database.Database, c: Candidate, personNotice = false): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
       .map((target) => `- ${target}\n  ${verificationCommand(target)}\n` +
@@ -660,8 +669,12 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
     `age: ${c.ageMinutes} min\n` +
     `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
     `why: ${c.why}\n` +
-    `This is a diagnostic about ${c.row.qitemId}, not a second assignment. Read ${c.row.qitemId} and act on it: pick it up, resume, route or park it, as fits; ` +
-    `the sweep closes this finding itself once ${c.row.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${c.row.qitemId}.`
+    (personNotice
+      ? `This is a notice from OpenRig, not a task for you: ${c.row.qitemId} is waiting for ${c.row.destinationSession}, which couldn't ` +
+        `be woken (why, above). It reaches ${c.row.destinationSession} once that seat can be woken, and the sweep closes this notice ` +
+        `itself once ${c.row.qitemId} is no longer stuck.`
+      : `This is a diagnostic about ${c.row.qitemId}, not a second assignment. Read ${c.row.qitemId} and act on it: pick it up, resume, route or park it, as fits; ` +
+        `the sweep closes this finding itself once ${c.row.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${c.row.qitemId}.`)
   );
 }
 
@@ -1704,17 +1717,27 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const now_ = freshCandidate(c.kind, c.row.qitemId, c.jobId);
         if (!now_) continue;
         routeCandidate(now_); // its destination, reason and targets as they are now
+        // A person's own row (their answer or ask) waits on a seat that couldn't be woken, and its finding comes back to
+        // them. Nothing in it is theirs to do, so it reaches them as a notice from OpenRig: an update from the sweep, never
+        // an ask from themselves. When who is a person can't be read, the finding is written as before.
+        let personNotice = false;
+        if (c.kind === "undelivered-wake" && !now_.verificationTargets && now_.route === now_.row.sourceSession) {
+          try { personNotice = deps.queueRepo.isHumanDestination(now_.route); } catch { personNotice = false; }
+        }
         const input = {
           // A finding folded into a parent's notice (#2988) holds its id without owning the row: a new one gets its own.
           qitemId: freshRecoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
           // The detector is machinery, not a seat: the obligation's own creator is the
-          // finding's source (the workflow-exception precedent).
-          sourceSession: c.row.sourceSession,
+          // finding's source (the workflow-exception precedent), except on a person's notice about their own row.
+          sourceSession: personNotice ? STUCK_SWEEP_SESSION : c.row.sourceSession,
           destinationSession: now_.route,
-          body: evidenceBody(deps.db, now_) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
+          body: evidenceBody(deps.db, now_, personNotice) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
           summary: now_.verificationTargets
             ? custodyHeadline(c.row.qitemId, now_.verificationTargets, now_.ageMinutes)
-            : findingTitle(c.kind, c.row.qitemId, now_.ageMinutes),
+            : personNotice
+              ? personNoticeTitle(c.row.qitemId, now_.row.destinationSession, now_.ageMinutes)
+              : findingTitle(c.kind, c.row.qitemId, now_.ageMinutes),
+          ...(personNotice ? { humanIntent: "update" as const } : {}),
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
             ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),
@@ -1755,7 +1778,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const target = sourceAgent(live.row.sourceSession, now_.route);
         if (target) {
           try {
-            await createFinding({ ...input, destinationSession: target,
+            // To an agent: the finding as it always was, never a person's notice.
+            await createFinding({ ...input, destinationSession: target, sourceSession: c.row.sourceSession, humanIntent: undefined,
+              summary: personNotice ? findingTitle(c.kind, c.row.qitemId, now_.ageMinutes) : input.summary,
               tags: input.tags.filter((tag) => tag !== ESCALATION_HOP_TAG || live.row.tags?.includes(tag)),
               body: `${evidenceBody(deps.db, live)}\nOriginal finding destination ${now_.route} references a missing rig. This finding goes to the originating agent.` });
             othersMayHaveRun();

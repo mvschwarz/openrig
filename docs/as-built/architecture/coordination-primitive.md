@@ -186,6 +186,9 @@ the exception: its finding tries the row's creator, then the operator agent
 unaccepted address, a bound terminal seat, and OpenRig's own machinery
 (`daemon@kernel` or a `@system` actor), so the finding's own wake isn't sent to the seat that just failed to
 take one. If neither can be used, it stays with the original seat and says why.
+When the finding goes back to a creator who is a person (their answer or ask waits on a seat that couldn't be woken),
+it reaches them as a notice from OpenRig: an update (`humanIntent: update`) from `stuck-sweep@system`, titled with the
+seat it waits for, saying nothing in it is theirs to do. When the human registry can't be read, it's written as before.
 Overdue claims go to their destination. Repeated detections reuse the existing finding without changing
 its route; when the source condition resolves, the sweep closes its own finding.
 Previously, falling out of a reporting query could itself close a delivery or
