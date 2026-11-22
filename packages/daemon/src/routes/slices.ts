@@ -65,7 +65,7 @@ export function slicesRoutes(): Hono {
     // One request-local policy reader for every readiness in this response
     // (the listing and the project readiness below); never across requests.
     const readPolicy = createProofPolicyRead();
-    const listing = deps.indexer.withMembershipBatch(() => {
+    const listing = await deps.indexer.withMembershipBatchCooperatively(() => {
       const all = deps.indexer.list();
       let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
       // Workflows in Spec Library v0: optional lens filter — narrow to
@@ -164,12 +164,12 @@ export function slicesRoutes(): Hono {
   //    segment; we parse the rest of the path manually for nested
   //    relative paths like "screenshots/foo.png" or
   //    "headed-browser/screenshots/bar.png".
-  app.get("/:name/proof-asset/*", (c) => {
+  app.get("/:name/proof-asset/*", async (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
     if ("response" in selected) return selected.response;
     const { deps, qualified } = selected;
-    let slice = qualified ? null : deps.indexer.get(name);
+    let slice = qualified ? null : await deps.indexer.getCooperatively(name);
     if (!qualified && (!slice || !slice.proofPacket)) {
       return c.json({ error: "proof_packet_not_found" }, 404);
     }
@@ -183,7 +183,7 @@ export function slicesRoutes(): Hono {
     if (!relPath || relPath.includes("..")) {
       return c.json({ error: "proof_asset_path_invalid" }, 400);
     }
-    slice ??= deps.indexer.get(name);
+    slice ??= await deps.indexer.getCooperatively(name);
     if (!slice || !slice.proofPacket) {
       return c.json({ error: "proof_packet_not_found" }, 404);
     }
@@ -201,7 +201,7 @@ export function slicesRoutes(): Hono {
 
   // 3) Doc serving for the Docs tab — markdown content of a single file
   //    inside the slice folder. Path-traversal guarded by the projector.
-  app.get("/:name/doc/*", (c) => {
+  app.get("/:name/doc/*", async (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name, { includeEvidenceRoot: false });
     if ("response" in selected) return selected.response;
@@ -214,18 +214,20 @@ export function slicesRoutes(): Hono {
     if (!relPath || relPath.includes("..")) {
       return c.json({ error: "doc_path_invalid" }, 400);
     }
+    // readDoc's get() then answers from the record this caches.
+    await deps.indexer.getCooperatively(name);
     const content = deps.projector.readDoc(name, relPath);
     if (content === null) return c.json({ error: "doc_not_found" }, 404);
     return c.json({ relPath, content });
   });
 
   // 4) Dynamic `/:name` LAST so the literal routes above are not shadowed.
-  app.get("/:name", (c) => {
+  app.get("/:name", async (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
     if ("response" in selected) return selected.response;
     const { deps } = selected;
-    const slice = deps.indexer.get(name);
+    const slice = await deps.indexer.getCooperatively(name);
     if (!slice) return c.json({ error: "slice_not_found", name }, 404);
     const payload = deps.projector.project(slice);
     return c.json(payload);

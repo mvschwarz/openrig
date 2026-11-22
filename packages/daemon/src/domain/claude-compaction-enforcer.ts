@@ -493,6 +493,23 @@ export interface RestoreUptakeUnknown {
   waitedMinutes: number;
 }
 
+/** #3688: a seat's compaction debt ended without a delivery, so the notices it opened can be settled with the reason.
+ *  `owed_unknown`: OpenRig stopped retrying, or stopped a preparation whose live generation can't be read, and can't
+ *  tell whether the seat still needs the steps. */
+export interface CompactionDebtEnded {
+  sessionName: string;
+  reason: "compaction_cancelled" | "attempt_superseded" | "occupant_replaced" | "owed_unknown";
+  /** compaction_cancelled: the attempt the cancel ended. attempt_superseded: the new attempt, whose notices stay.
+   *  owed_unknown: the attempt OpenRig stopped retrying. */
+  attemptId?: string;
+  /** occupant_replaced: the retiring occupant's generation; null when it wasn't recorded. owed_unknown without an
+   *  attemptId: the generation of the occupant the stopped preparation was for. */
+  occupantGeneration?: string | null;
+  /** occupant_replaced: the live generation OpenRig found in its place, after a restart or on a poll. Absent: OpenRig
+   *  invalidated the occupant's state (a handover, runtime switch or fresh launch, which may still roll back). */
+  observedGeneration?: { live: string; when: "restart" | "poll" };
+}
+
 export interface RestoreDeliveryFailure {
   sessionName: string;
   attemptId: string;
@@ -802,6 +819,7 @@ export class ClaudeCompactionEnforcer {
   private readonly onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
   private readonly onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
   private readonly onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
+  private readonly onCompactionDebtEnded?: (ended: CompactionDebtEnded) => Promise<void> | void;
   private readonly terminalPolicies?: TerminalPolicyStore;
 
   constructor(
@@ -814,6 +832,8 @@ export class ClaudeCompactionEnforcer {
       onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
       /** No RESTORED note appeared beside a done attempt's map within the wait. Once per attempt; nothing is resent. */
       onRestoreUptakeUnknown?: (unknown: RestoreUptakeUnknown) => Promise<void>;
+      /** #3688: a cancel, a new attempt or a replaced occupant ended the debt, or a restart stopped retrying it. */
+      onCompactionDebtEnded?: (ended: CompactionDebtEnded) => Promise<void> | void;
       restoreUptakeWaitMs?: number;
       terminalPolicies?: TerminalPolicyStore;
       dedupWindowMs?: number;
@@ -845,6 +865,7 @@ export class ClaudeCompactionEnforcer {
     this.onRestoreDeliveryFailure = opts?.onRestoreDeliveryFailure;
     this.onRestoreDeliveryComplete = opts?.onRestoreDeliveryComplete;
     this.onRestoreUptakeUnknown = opts?.onRestoreUptakeUnknown;
+    this.onCompactionDebtEnded = opts?.onCompactionDebtEnded;
     this.restoreUptakeWaitMs = opts?.restoreUptakeWaitMs ?? RESTORE_UPTAKE_WAIT_MS_DEFAULT;
     this.onPreparationFailure = opts?.onPreparationFailure;
     this.terminalPolicies = opts?.terminalPolicies;
@@ -1253,7 +1274,7 @@ export class ClaudeCompactionEnforcer {
     if (stageGen != null) {
       const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
       if (liveGen != null && liveGen !== stageGen) {
-        this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
+        this.invalidateOccupant(input.sessionName, stageGen); // drop the retired-generation ghost stage
         return { triggered: false, reason: "stale_generation" };
       }
     }
@@ -1652,6 +1673,7 @@ export class ClaudeCompactionEnforcer {
     startedAt = this.now()): PreparationAttempt {
     const attemptId = randomUUID();
     this.restoreUptake.delete(input.sessionName); // a new attempt replaces the last one's uptake check
+    this.noticeDebtEnded({ sessionName: input.sessionName, reason: "attempt_superseded", attemptId });
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
     const preparationRoot = policy.preparationRoot || null;
     const fallbackMapPath = path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
@@ -2039,18 +2061,19 @@ export class ClaudeCompactionEnforcer {
   }
 
   /** A cancel after `done` is written on the completed record, so a restart doesn't bring the check back. */
-  private cancelRestoreUptake(session: string): void {
+  private cancelRestoreUptake(session: string): string | undefined {
     const watch = this.restoreUptake.get(session);
-    if (!watch) return;
+    if (!watch) return undefined;
     this.restoreUptake.delete(session);
     const file = path.join(path.dirname(watch.mapPath), COMPACTION_RECORD_FILE);
     const record = readCompactionRecord(file);
-    if (record?.attemptId !== watch.attemptId) return;
+    if (record?.attemptId !== watch.attemptId) return watch.attemptId;
     const temporary = `${file}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(temporary, `${JSON.stringify({ ...record, uptakeCancelledAt: this.now() })}\n`, { mode: 0o600 });
       fs.renameSync(temporary, file);
     } catch { try { fs.rmSync(temporary, { force: true }); } catch { /* nothing to clean */ } }
+    return watch.attemptId;
   }
 
   /** A delivered restore isn't proof the seat took it up. When no RESTORED note newer than the map appears beside it within
@@ -2069,7 +2092,11 @@ export class ClaudeCompactionEnforcer {
     watch.notifying = true;
     const unknown: RestoreUptakeUnknown = { sessionName: session, attemptId: watch.attemptId, mapPath: watch.mapPath,
       doneAt: new Date(watch.doneAt).toISOString(), waitedMinutes: Math.round(this.restoreUptakeWaitMs / 60_000) };
-    void Promise.resolve().then(() => this.onRestoreUptakeUnknown?.(unknown)).then(() => {
+    void Promise.resolve().then(() => {
+      // A cancel or a new attempt that ran before this turn replaced the check, so its notice is no longer owed.
+      if (this.restoreUptake.get(session) !== watch) return;
+      return this.onRestoreUptakeUnknown?.(unknown);
+    }).then(() => {
       if (this.restoreUptake.get(session) === watch) this.restoreUptake.delete(session);
     }, error => {
       delete watch.notifying;
@@ -2128,7 +2155,16 @@ export class ClaudeCompactionEnforcer {
       if (attempt.status === "stopped" || attempt.status === "compact-sent") continue;
       const generation = this.resolveOccupantGeneration?.(session)
         ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
-      if (generation !== attempt.occupantGeneration) this.stopPreparation(session, "stale_generation");
+      if (generation !== attempt.occupantGeneration) {
+        this.stopPreparation(session, "stale_generation");
+        // #3688: only a known, different occupant replaced this attempt's. An unreadable generation closes nothing; the
+        // preparing occupant's notice says the state is now unknown.
+        if (attempt.occupantGeneration !== null) {
+          this.noticeDebtEnded(generation !== null
+            ? { sessionName: session, reason: "occupant_replaced", occupantGeneration: attempt.occupantGeneration, observedGeneration: { live: generation, when: "poll" } }
+            : { sessionName: session, reason: "owed_unknown", occupantGeneration: attempt.occupantGeneration });
+        }
+      }
       else if (!enabled && (attempt.mode === "automatic" || attempt.policyWasEnabled)) this.stopPreparation(session, "disabled");
       // A held map that stopped reading ready (its file or marker gone) stops the attempt (#2682).
       else if (attempt.prepared && !attempt.compactInFlight && !this.mapReady(attempt)) this.stopPreparation(session, "preparation_incomplete");
@@ -2215,7 +2251,8 @@ export class ClaudeCompactionEnforcer {
    * - An automatic preparation is waited on rather than begun again. A prompt whose delivery wasn't recorded may have
    *   reached the seat, so it is never sent again.
    * - A manual preparation stops, because its caller is gone.
-   * A record of another occupant, or in any other shape (see `readCompactionRecord`), is left alone. An open post-compact
+   * A record of another occupant is not resumed, and its notices settle (#3688); one in any other shape (see
+   * `readCompactionRecord`) is left alone. An open post-compact
    * record older than the recovery window isn't resumed; it reads as stranded, at the stage it owes.
    */
   recoverAfterRestart(input: { sessionName: string; cwd?: string | null; runtime: string | null }, preparationRoot: string | null): void {
@@ -2247,6 +2284,14 @@ export class ClaudeCompactionEnforcer {
     // This process's own record (another enforcer in it) is live state, not a predecessor's.
     if (record.daemon === this.daemonInstance) return;
     const live = this.resolveOccupantGeneration?.(session) ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
+    // #3688: a different occupant holds the seat after the restart (a reboot's relaunch mints a new generation without
+    // the invalidator), so this attempt's steps, uptake check and preparation are no longer owed, in any phase. Each
+    // branch below already ignores a known other occupant's record.
+    if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) {
+      this.noticeDebtEnded({ sessionName: session, reason: "occupant_replaced", occupantGeneration: record.occupantGeneration,
+        observedGeneration: { live, when: "restart" } });
+      return;
+    }
     if (record.phase === "done") {
       // #3389: a sequence that went ahead without the seat's report still owes one more if the report comes late.
       if (record.occupantGeneration !== null && live === record.occupantGeneration) {
@@ -2281,7 +2326,6 @@ export class ClaudeCompactionEnforcer {
       }
       return;
     }
-    if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) return;
     const stale = this.now() - record.updatedAt > this.restartRecoveryWindowMs;
     // A /compact whose send had begun, or whose outcome was lost, is never sent again; its restore steps are owed in case it
     // ran. Only the first step reconciles that possible write; later input follows ordinary delivery settings.
@@ -2322,7 +2366,11 @@ export class ClaudeCompactionEnforcer {
       else this.reconcilePreparations();
       return;
     }
-    if (stale) { this.stranded.set(session, { ...record, phase }); return; }
+    if (stale) {
+      this.stranded.set(session, { ...record, phase });
+      this.noticeDebtEnded({ sessionName: session, reason: "owed_unknown", attemptId: record.attemptId });
+      return;
+    }
     this.records.set(session, newest);
     this.pendingPostCompactRestore.set(session, phase);
     this.pendingStageGeneration.set(session, record.occupantGeneration);
@@ -2395,8 +2443,11 @@ export class ClaudeCompactionEnforcer {
   }
 
   cancelPreparation(session: string): PreparationState | null {
-    this.cancelRestoreUptake(session);
+    const uptakeEnded = this.cancelRestoreUptake(session);
     const attempt = this.pendingPreCompactPrep.get(session);
+    // #3688: the attempt whose remaining steps or uptake check this cancel ends; a cancel that ends none settles nothing.
+    const ended = attempt?.attemptId
+      ?? (this.pendingPostCompactRestore.has(session) ? this.records.get(session)?.record.attemptId : undefined) ?? uptakeEnded;
     if (attempt) attempt.cancelled = true;
     const record = this.records.get(session)?.record;
     if (record) this.persist(session, record.attemptId, { preparationFailures: undefined,
@@ -2425,6 +2476,7 @@ export class ClaudeCompactionEnforcer {
       // A cancel also ends an uncertain /compact's owed restore, so a restart doesn't resume it.
       if (attempt?.compact === "uncertain") this.persistStage(session, "ended");
     }
+    if (ended) this.noticeDebtEnded({ sessionName: session, reason: "compaction_cancelled", attemptId: ended });
     return this.getPreparationState(session);
   }
 
@@ -2454,7 +2506,10 @@ export class ClaudeCompactionEnforcer {
    * (census 1f): that map was NEVER deleted on drain, so a same-name successor read a stale terminal
    * record. Occupant-scoped (no atom-B): the retiring occupant is gone, so a name match IS the ghost.
    */
-  invalidateOccupant(sessionName: string): void {
+  invalidateOccupant(sessionName: string, retiringGeneration?: string): void {
+    // #3688: the generation the retiring occupant's notices were opened under, read before its state is dropped.
+    const occupantGeneration = retiringGeneration ?? this.records.get(sessionName)?.record.occupantGeneration
+      ?? this.pendingStageGeneration.get(sessionName) ?? this.pendingPreCompactPrep.get(sessionName)?.occupantGeneration ?? null;
     this.restoreUptake.delete(sessionName);
     this.stopPreparation(sessionName, "stale_generation");
     this.lastEnded.delete(sessionName);
@@ -2473,6 +2528,19 @@ export class ClaudeCompactionEnforcer {
     this.restoreCarry.delete(sessionName);
     this.manualCompactionState.delete(sessionName);
     this.pendingStageGeneration.delete(sessionName); // GHOST-STAGE (b): drop the captured queue-time gen
+    this.noticeDebtEnded({ sessionName, reason: "occupant_replaced", occupantGeneration });
+  }
+
+  /** #3688: settling a notice is bookkeeping. It runs after the caller (a handover runs this inside its transaction), and
+   *  a failure leaves a safe diagnostic without changing the cancel, attempt or handover that ended the debt. It doesn't
+   *  wait for the successor's generation: `rig seat launch --fresh` invalidates before the new occupant is minted, and the
+   *  dropped state is gone either way, so OpenRig no longer owes those steps. */
+  private noticeDebtEnded(ended: CompactionDebtEnded): void {
+    if (!this.onCompactionDebtEnded) return;
+    void Promise.resolve().then(() => this.onCompactionDebtEnded?.(ended)).catch(error => {
+      console.warn("[compaction] debt-ended notice failed", { sessionName: ended.sessionName, reason: ended.reason,
+        errorClass: error instanceof Error ? error.name : typeof error });
+    });
   }
 
   private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {

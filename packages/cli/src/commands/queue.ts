@@ -350,6 +350,15 @@ async function withClient<T>(
   }
 }
 
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
+}
+
 function printResult(json: boolean, body: unknown, status: number): void {
   if (isIndeterminateRemoteWrite(status, body)) {
     console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
@@ -1574,6 +1583,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's ` +
                 `host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path` +
                 (created.returnRouteBasis === "issued-actor" ? `. Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+            } else if (created.returnRouteBasis === "inherited") {
+              console.error(`Return route: ${route}, carried from the routed work you hold. This work's questions and its seats' prompts ` +
+                `(not choice dialogs) go to that conversation as tasks.`);
             } else {
               console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
                 `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
@@ -2478,6 +2490,9 @@ Examples:
           }
         }
         printResult(useJson, res.data, res.status);
+        // The rows stay on stdout as they were; only a page the daemon says it cut adds a line on stderr.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        if (page?.truncated) console.error(`this page stops at --limit ${page.limit} and more rows match; pass a larger --limit to see the rest`);
       }, remote !== undefined, remote);
     });
 
