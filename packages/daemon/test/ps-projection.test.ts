@@ -640,6 +640,34 @@ describe("PsProjectionService", () => {
       expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), null)).toBe(true);
     });
 
+    // #3571: a current Claude auth or billing StopFailure counts, as attention and never as a question.
+    const stopFailure = (error: string, reason: string, over: Partial<AgentActivity> = {}): AgentActivity => ({
+      ...idleActivity("unknown"), reason, rawEvent: "StopFailure", rawSubtype: error, evidence: error, runtime: "claude-code", ...over,
+    } as AgentActivity);
+    const claudeSeat = baseEntry({ runtime: "claude-code" } as Partial<NodeInventoryEntry>);
+    it("#3571: counts a current Claude auth or billing failure, which an arbitrated clear doesn't cancel", () => {
+      expect(seatNeedsAttention(claudeSeat, stopFailure("authentication_failed", "provider_auth_error"), null)).toBe(true);
+      expect(seatNeedsAttention(claudeSeat, stopFailure("billing_error", "provider_billing_error"), false)).toBe(true);
+    });
+    it.each([
+      { name: "a generic provider error", activity: stopFailure("server_error", "provider_error") },
+      { name: "an unlisted value", activity: stopFailure("auth_expired", "provider_error") },
+      { name: "a stale report", activity: stopFailure("authentication_failed", "stale_runtime_hook", { stale: true }) },
+      { name: "a generation-mismatched report", activity: stopFailure("billing_error", "generation_mismatch", { stale: true }) },
+      { name: "another runtime's report", activity: stopFailure("authentication_failed", "provider_auth_error", { runtime: "codex" }) },
+      { name: "a typed reason on another event", activity: stopFailure("authentication_failed", "provider_auth_error", { rawEvent: "Notification" }) },
+      { name: "a reason the value doesn't map to", activity: stopFailure("server_error", "provider_auth_error") },
+      { name: "the other typed reason", activity: stopFailure("authentication_failed", "provider_billing_error") },
+      { name: "a report marked stale", activity: stopFailure("authentication_failed", "provider_auth_error", { stale: true }) },
+      { name: "a fallback reading", activity: stopFailure("authentication_failed", "provider_auth_error", { fallback: true }) },
+    ])("#3571: doesn't count $name", ({ activity }) => {
+      expect(seatNeedsAttention(claudeSeat, activity, null)).toBe(false);
+    });
+    it("#3571: doesn't count a Claude failure on a seat of another runtime", () => {
+      const codexSeat = baseEntry({ runtime: "codex" } as Partial<NodeInventoryEntry>);
+      expect(seatNeedsAttention(codexSeat, stopFailure("authentication_failed", "provider_auth_error"), null)).toBe(false);
+    });
+
     it("#180 review: arbitratedNeedsInputSignal is tri-state over observed needs-input evidence", () => {
       const zero = { count: 0, reason: null };
       const observed = (rung: EvidenceRungId) => ({ rung, observedAt: new Date().toISOString() });

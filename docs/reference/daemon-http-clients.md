@@ -12,7 +12,8 @@ listed here can change.
 `OPENRIG_URL` has no `pid`. `reachable` is `true` when the daemon answered its health probe, `false` when it is
 positively down, and `null` when that isn't confirmed (see `rig status` in
 [the command reference](../as-built/cli-reference.md#status)). It reads the recorded state and probes; it never
-starts a daemon.
+starts a daemon. A supervisor that keeps the daemon running reads it as described in
+[Run the daemon under a supervisor](getting-started.md#run-the-daemon-under-a-supervisor).
 
 The CLI itself finds the daemon in these orders:
 
@@ -67,11 +68,6 @@ or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; t
 approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
 `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
 refused for want of it, `rig host` and the TUI say what to set.
-
-The web UI takes its tokens from its address. To use its token-protected actions (terminals, Mission Control writes),
-open it once at `http://<daemon>/#termToken=<terminal token>&mcToken=<auth token>`. The tokens go after `#`, a part of
-the address the browser keeps to itself and never sends. The page keeps them in that browser and takes them out of the
-address. With neither token set, the UI needs nothing.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
