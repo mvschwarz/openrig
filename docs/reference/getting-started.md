@@ -189,16 +189,16 @@ agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent codex
 # OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs" --skill rigs --agent pi
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent pi
 ```
 
-**OMP:** this pin installs the shared skill only. The `v0.7.20` skill does not yet include OMP attachment guidance,
-and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+**OMP:** this pin installs the shared skill only. The `v0.7.21` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
+but complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
 signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
 `/reload-plugins` first.
 
@@ -218,11 +218,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.20/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -956,6 +956,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | A restored seat still counts as needing attention after its prompt was answered | After a full restore of a Claude or Codex seat, the daemon clears this by itself once the seat reads running or idle and passes its check. If it still counts, check its `restoreOutcome` in `rig ps --nodes --json` (the RESTORE column): when it is `attention_required`, run `rig seat clear-attention <seat>`, which says which check failed; answering the prompt again or running `rig seat continue` doesn't change it. For a partial restore, submit any startup text left in the input box without sending it again, and wait for the agent to respond before clearing attention. See [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. For a long restore, choose a caller budget for the whole operation, for example `rig up <rig> --existing --timeout 900` (positive whole seconds; default 120). This also works with `--host` and `--plan`, and changes neither per-seat readiness nor retry behavior. If the caller's wait expires, that is not a rollback: check `rig ps` before running it again. `rig launch` still uses a 120 s caller wait. |
+| The daemon exits with code 69 after one `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>` line | Its listener couldn't bind that address, so the daemon didn't start; it writes no shutdown receipt and records no stop. For `EADDRINUSE`, inspect what holds the port before stopping it, or run `rig daemon start --port <unused-port>`. A supervisor should treat exit 69 as needing a look before another start, not as a crash to restart. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | `rig status`, `rig terminal open` or `rig daemon start --wait-for-kernel` says a seat "needs attention" or "is waiting on a person" | The daemon flags that seat, and the line gives its recorded reason: a startup that failed or stopped at a sign-in, trust or other gate, a held message, a missing required file, or a question. "Is waiting on a person" means the daemon sees a live question you can answer in that seat's terminal. Look at it with `rig capture <seat>` or in its tile, then follow the row above that matches its message. "Couldn't check" means the check itself failed; it says nothing either way. |
 | A Codex seat, including the kernel's operator, answers every turn with a model error such as "… not supported when using Codex with a ChatGPT account" | Its Codex sign-in works, but that account can't run the model; the kernel picks its runtimes from the providers chosen at setup and their sign-ins, not from which models an account can run. If Claude Code is signed in, move just that seat: `rig seat set-runtime <seat> --runtime claude-code --reason "<model> isn't available to this Codex account"` (`--dry-run` first). Otherwise give it a model the account can run with `rig seat set-model <seat> --model <id> --reason "…"`, then start it again with `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. |
