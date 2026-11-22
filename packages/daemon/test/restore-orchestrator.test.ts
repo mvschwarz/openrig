@@ -145,6 +145,7 @@ describe("RestoreOrchestrator", () => {
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     freshLaunch?: RestoreOrchestratorDeps["freshLaunch"];
     harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
+    armContinuity?: RestoreOrchestratorDeps["armContinuity"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -159,6 +160,7 @@ describe("RestoreOrchestrator", () => {
       freshLaunch: opts?.freshLaunch,
       seatSkillSelection: opts?.seatSkillSelection,
       harnessNotStartedNotice: opts?.harnessNotStartedNotice,
+      armContinuity: opts?.armContinuity,
     });
   }
 
@@ -625,6 +627,31 @@ describe("RestoreOrchestrator", () => {
     expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.id).toBe(replacement.id);
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it("#3579 a resumed seat gets its continuity notice armed once, by rig and node", async () => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const armed: Array<[string, string]> = [];
+    const orch = createOrchestrator({ claude: mockClaudeResume(), listProcesses: nativeLineage("claude-code", "carried-conversation"),
+      armContinuity: async (rigId, nodeId) => { armed.push([rigId, nodeId]); return null; } });
+    const first = await orch.launchSingleNode(original.rigId, "lead");
+    expect(first.launched?.[0]?.status).toBe("resumed");
+    expect(armed).toEqual([[original.rigId, first.launched![0]!.nodeId]]);
+  });
+
+  it("#3579 a continuity notice that cannot be armed warns on the restore and leaves the resumed seat resumed", async () => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const orch = createOrchestrator({ claude: mockClaudeResume(), listProcesses: nativeLineage("claude-code", "carried-conversation"),
+      armContinuity: async () => "continuity policy was not re-armed for node x: its spec could not be read" });
+    const result = await orch.launchSingleNode(original.rigId, "lead");
+    expect(result.launched?.[0]?.status).toBe("resumed");
+    expect(JSON.stringify(result)).toContain("continuity policy was not re-armed for node x");
   });
 
   it.each(["intact ledger", "pruned predecessor"])("#1822 resumes the second named agent after a periodic capture between separate launches (%s)", async (mode) => {
