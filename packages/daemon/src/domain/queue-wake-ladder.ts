@@ -7,6 +7,7 @@ import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookState, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
+import { PERMISSION_REQUEST_GRACE_MS } from "./seat-activity-service.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
@@ -1145,6 +1146,8 @@ export function makePermissionPromptReader(deps: {
   getPromptStart?: (destination: string, generation: string) => string | null | undefined;
   /** The oracle's pane check of a Codex seat's permission requests, read as the refusal path reads it. */
   getCodexPermissionState?: CodexPermissionStateRead;
+  /** The oracle's arbitrated seat state, which answers a Codex request it doesn't track, as on the refusal path. */
+  getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "needsInputEvidence"> | null | undefined;
   log?: (line: string) => void;
 }): (destination?: string) => PermissionPromptObservation[] {
   return (onlyDestination) => (deps.db.prepare(`SELECT n.id AS nodeId, s.session_name AS destination, n.runtime
@@ -1164,8 +1167,15 @@ export function makePermissionPromptReader(deps: {
         || runtime === "claude-code" && hook?.rawEvent === "PermissionRequest";
       const permissionPending = current && latestHookPermissionPending(hook, runtime);
       const checked = permissionPending ? deps.getCodexPermissionState?.(nodeId, hook!.eventAt) : null;
+      // A request the oracle doesn't track (it was rebuilt after the request): its own pane read, past the request's grace,
+      // answers before the bare hook does. A pane it can't read leaves the hook's "blocked".
+      const raisedMs = Date.parse(hook?.eventAt ?? "");
+      const paneRead = permissionPending && !checked && Number.isFinite(raisedMs)
+        ? classifyPromptAfterRefusal(deps.getSeatState?.(nodeId), new Date(raisedMs + PERMISSION_REQUEST_GRACE_MS).toISOString())
+        : "unknown";
       const state = !current ? "unknown"
         : checked ? checked
+        : paneRead !== "unknown" ? paneRead
         : retainedState === "needs_input" && permission || permissionPending ? "blocked"
         : hook?.rawEvent === "PermissionPromptCleared" || retainedState === "running" || retainedState === "idle" ? "clear" : "unknown";
       let prompt: string | null | undefined;
