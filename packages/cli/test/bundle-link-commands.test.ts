@@ -45,6 +45,18 @@ describe("bundle link command dispatch", () => {
     expect(f.post.mock.calls.find(c => c[0] === "/api/bundles/install")![1]).toMatchObject({ targetRoot: path.resolve("project"), cwdOverride: path.resolve("work"), plan: true });
   });
 
+  it("up applies a custom wait budget to the bundle install without retrying", async () => {
+    f.post.mockImplementation(async (url: string) => {
+      if (url === "/api/bundles/install") throw new Error("lost response");
+      return { status: 500, data: { error: "inspection unavailable" } };
+    });
+    await new Command().addCommand(upCommand(deps)).parseAsync(["up", link, "--timeout", "900", "--json"], { from: "user" });
+    expect(f.post.mock.calls.map(c => c[0])).toEqual(["/api/bundles/inspect", "/api/bundles/install"]);
+    expect(f.post).toHaveBeenLastCalledWith("/api/bundles/install", expect.any(Object), { timeoutMs: 900_000 });
+    expect(String(log.mock.calls[0]?.[0])).toContain("outcome is unknown");
+    expect(String(log.mock.calls[0]?.[0])).toContain("/tmp/owned/bundle.rigbundle");
+  });
+
   it.each(["up", "install"])("%s forwards opt-in, explicit opt-out and omission distinctly", async verb => {
     for (const [flag, expected] of [["--non-interruptive", true], ["--no-non-interruptive", false], [undefined, undefined]] as const) {
       f.post.mockClear();

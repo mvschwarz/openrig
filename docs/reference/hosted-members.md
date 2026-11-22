@@ -277,6 +277,13 @@ pair, the person's assistant can read the team's questions waiting on them and s
 Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
 unusable `person` withholds only these two tools while the grant's other tools keep working.
 
+A token-file grant can be bound to a person the same way, without a grant service:
+`rig mcp token add <name> --seat <seat> --person <entity_id>`. That connection is offered `rig_question_list` and
+`rig_question_answer` for that registered person, beside its seat's own tools, and answers through the same path as
+below. The person is only ever the one named with `--person`: never the seat, and never an `--owner` grant's. The
+answer's audit names the route as `file-grant`, with the grant's name as its principal; a token-file grant has no grant
+id or version. Revoking the grant stops both tools on its next request.
+
 - **Register the person** on the instance, once:
   `rig gateway human add <entity_id> --display-name "<name>" --delivery-class B --default`.
   Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
@@ -287,7 +294,7 @@ unusable `person` withholds only these two tools while the grant's other tools k
 - **`rig_question_answer`** takes the question, the revision the person saw, and either the options they chose (one per
   question) or exactly what they typed. It records through Steering's own write path (`answer` for an ask, `resolve` for a
   park), as the person, so Steering shows the same answer and the asker's work continues once. The answer's audit names the
-  route it came by: the caller's seat, the grant's principal and the grant's id and version.
+  route it came by: the caller's seat, the grant's principal and, for a grant service's grant, its id and version.
 - **What it says back:** a success names what was submitted (`submitted`), never a fresh read of the question's answers.
   - `answered`;
   - `recorded`, when parts of the question are still unanswered;
@@ -311,4 +318,4 @@ unusable `person` withholds only these two tools while the grant's other tools k
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
   isn't rung; work it leaves unclaimed past the unclaimed age is listed in one notice instead, which goes to its person, else
   its rows' shared creator, the operator agent or the member itself.
-- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant service's grant that names its person, which records that person's own answers (above).
+- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant that names its person (a grant service's, or a token-file grant with `--person`), which records that person's own answers (above).

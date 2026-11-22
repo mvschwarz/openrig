@@ -32,6 +32,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     json: false,
     tailBytes: 0,
+    untilByte: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -44,6 +45,8 @@ function parseArgs(argv) {
     }
     else if (arg === "--cwd") args.cwd = argv[++i];
     else if (arg === "--json") args.json = true;
+    // Read only the first N bytes: the transcript as it was when the PreCompact hook ran, before compaction appends to it.
+    else if (arg === "--until-byte") args.untilByte = Number(argv[++i]);
     else if (!arg.startsWith("-") && !args.jsonl) args.jsonl = arg;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -56,8 +59,10 @@ function parseArgs(argv) {
 // From a byte offset (a tail packet), the stream starts one byte early and drops its first line: that's the rest of the
 // line the cut fell in, or empty when the cut falls at a line start. It ends at the size recorded when the tail was
 // chosen, so lines appended while it reads stay out of the packet and out of the range its coverage line names.
-async function* readJsonLines(file, start = 0, size = 0) {
-  const range = start ? { start: start - 1, end: size - 1 } : { start: 0 };
+async function* readJsonLines(file, start = 0, untilByte = null) {
+  if (untilByte === 0) return; // an explicit bound of 0 is an empty prefix; an absent one reads the whole file
+  const bounded = Number.isInteger(untilByte) && untilByte > 0 ? { end: untilByte - 1 } : {};
+  const range = start ? { start: start - 1, ...bounded } : bounded;
   const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", ...range }), crlfDelay: Infinity });
   let index = 0;
   let skip = start > 0;
@@ -290,7 +295,7 @@ function discoverDocs(cwd) {
   return [...docs].sort();
 }
 
-async function analyze(jsonlPath, cwd, staging, start = 0, size = 0) {
+async function analyze(jsonlPath, cwd, staging, start = 0, untilByte = null) {
   const registry = createRegistry();
   const transcript = createTextSink(path.join(staging, "transcript.txt"));
   const narrative = createTextSink(path.join(staging, "transcript-narrative.txt")); // R4: message-turns only (assistant/user text), no tool bodies
@@ -300,7 +305,7 @@ async function analyze(jsonlPath, cwd, staging, start = 0, size = 0) {
   let records = 0;
   let firstTimestamp = null;
 
-  for await (const record of readJsonLines(jsonlPath, start, size)) {
+  for await (const record of readJsonLines(jsonlPath, start, untilByte)) {
     records += 1;
     if (!firstTimestamp && typeof record.timestamp === "string") firstTimestamp = record.timestamp;
     registry.tick();
@@ -387,7 +392,7 @@ async function analyze(jsonlPath, cwd, staging, start = 0, size = 0) {
     files: rankedFiles,
     docs: discoverDocs(effectiveCwd),
     // Only a tail packet says what it covers, so a whole-session packet's summary is unchanged.
-    ...(start ? { coverage: { fromByte: start, bytes: size - start, firstTimestamp } } : {}),
+    ...(start ? { coverage: { fromByte: start, bytes: untilByte - start, firstTimestamp } } : {}),
   };
 }
 
@@ -525,11 +530,12 @@ async function main() {
   staging = fs.mkdtempSync(path.join(outRoot, ".partial-"));
   let summary;
   let outputPaths;
-  // --tail-bytes N reads only the transcript's last N bytes (the PreCompact hook asks for it on a large transcript).
-  const size = fs.statSync(jsonlPath).size;
+  // --tail-bytes N reads only the transcript's last N bytes (the PreCompact hook asks for it on a large transcript),
+  // counted back from --until-byte when one is given.
+  const size = Number.isInteger(args.untilByte) && args.untilByte >= 0 ? args.untilByte : fs.statSync(jsonlPath).size;
   const start = args.tailBytes && args.tailBytes < size ? size - args.tailBytes : 0;
   try {
-    summary = await analyze(jsonlPath, cwd, staging, start, size);
+    summary = await analyze(jsonlPath, cwd, staging, start, start ? size : args.untilByte);
     outputPaths = writeOutputs(summary, outRoot, staging);
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
