@@ -643,8 +643,9 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
   intendedNodeId?: string;
-  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
-  stage?: "harness_not_started";
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so.
+   *  `resume_rolled_back`: its resume failed and the blank session it launched was rolled back, so no agent runs in it. */
+  stage?: "harness_not_started" | "resume_rolled_back";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
