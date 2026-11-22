@@ -2679,8 +2679,11 @@ export class QueueRepository {
           // A reopened ask whose direct answer changed: the stored return keeps its first
           // words, so the changed answer must still reach the asker as a linked correction.
           // An exact retry returns at the replay check above and never reaches this branch.
+          // The id derives from the cumulative direct-answer count: it only grows across
+          // reopens, so B and C never collide on the deterministic id (a corrections+added
+          // sum would repeat for a direct-only second question).
           const added = (journal.directAnswers ?? []).slice(directAnswersAtEntry);
-          const updateId = humanAnswerId(ask.qitemId, `relay-return-update:${journal.corrections.length + added.length}`);
+          const updateId = humanAnswerId(ask.qitemId, `relay-return-update:${(journal.directAnswers ?? []).length}`);
           deliver(updateId, `Direct answer changed on a reopened ask: ${ask.summary ?? ask.qitemId}`,
             `Direct answer from ${input.actorSession} on ${ask.qitemId} changed after reopen. The stored return keeps its id and history; the words now stand as:\n\n${added.map(a => `${a.questionId ?? "general"}: ${a.text}`).join("\n")}\n\nIn reply to: ${ask.qitemId}.`, "human-answer-correction");
         }

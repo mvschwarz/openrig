@@ -250,9 +250,28 @@ it("returns a changed direct answer to the asker after a reopen, without duplica
   const updates = f.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND body LIKE ?")
     .all(asker, "%changed after reopen%");
   expect(updates.length).toBe(1);
+  const bReplyId = updates[0]?.qitem_id;
   // An exact retry returns at the replay check and adds no duplicate.
   expect((await f.correct({ questionId: "second", decision: "B." })).status).toBe(200);
-  const after = f.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND body LIKE ?")
+  expect(f.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND body LIKE ?")
+    .all(asker, "%changed after reopen%")).toEqual(updates);
+  // A second reopen changes the answer again: C must get its OWN linked reply,
+  // not a re-derivation of B's id (direct-only corrections keep corrections at 0).
+  expect((await f.post(`/api/queue/${f.ask.qitemId}/update`, relaySeat,
+    { state: "pending", reopen: true, transitionNote: "revise again" })).status).toBe(200);
+  expect((await f.correct({ questionId: "second", decision: "C." })).status).toBe(200);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "done", closureReason: "relayed-answer" });
+  const rows = f.db.prepare("SELECT qitem_id, body FROM queue_items WHERE destination_session = ? AND body LIKE ?")
     .all(asker, "%changed after reopen%");
-  expect(after).toEqual(updates);
+  expect(rows.length).toBe(2);
+  expect(new Set(rows.map(r => r.qitem_id)).size).toBe(2);
+  expect(rows.find(r => r.qitem_id === bReplyId)?.body).toContain("B.");
+  expect(rows.find(r => r.qitem_id !== bReplyId)?.body).toContain("C.");
+  expect(f.repo.getById(returnId ?? "")?.body).not.toContain("B.");
+  expect(f.repo.getById(returnId ?? "")?.body).not.toContain("C.");
+  // Exact retry of C is still absorbed.
+  expect((await f.correct({ questionId: "second", decision: "C." })).status).toBe(200);
+  const after2 = f.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND body LIKE ?")
+    .all(asker, "%changed after reopen%");
+  expect(after2.map(r => r.qitem_id)).toEqual(rows.map(r => r.qitem_id));
 });
