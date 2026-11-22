@@ -60,15 +60,37 @@ it("preserves source history and verbatim routes without copying outside work or
   expect(result.origin).not.toHaveProperty("generation");
 });
 
-it("resolves each scope exactly and includes only explicitly selected erasure receipts", () => {
+it("includes all erasure receipts when exporting the whole host", () => {
   seed();
-  expect(readQueueTransfer(db, { kind: "host" }).scope.qitemIds).toEqual(["qitem-a", "qitem-b"]);
+  const host = readQueueTransfer(db, { kind: "host" });
+  expect(host.scope.qitemIds).toEqual(["qitem-a", "qitem-b", "qitem-erased", "qitem-unrelated"]);
+  expect(host.erasedIds.map(row => row.qitemId)).toEqual(["qitem-erased", "qitem-unrelated"]);
+  expect(host.erasedRigs.map(row => row.rigId)).toEqual(["rig-demo", "rig-other"]);
+});
+
+it("selects only local endpoints and includes receipts for named rigs or IDs", () => {
+  seed();
   const rig = readQueueTransfer(db, { kind: "rig", names: ["demo"] });
   expect(rig.scope.qitemIds).toEqual(["qitem-a"]);
   expect(rig.erasedRigs.map(row => row.rigId)).toEqual(["rig-demo"]);
-  expect(readQueueTransfer(db, { kind: "mission", names: ["demo"] }).scope.qitemIds).toEqual(["qitem-a"]);
-  expect(readQueueTransfer(db, { kind: "slice", names: ["one"] }).scope.qitemIds).toEqual(["qitem-a"]);
   expect(readQueueTransfer(db, { kind: "qitems", names: ["qitem-erased"] }).erasedIds.map(row => row.qitemId)).toEqual(["qitem-erased"]);
+});
+
+it.each([{ kind: "mission", name: "demo" }, { kind: "slice", name: "one" }] as const)(
+  "includes only traceable erasure receipts when exporting a $kind", ({ kind, name }) => {
+    seed();
+    db.exec("INSERT INTO queue_erased_ids VALUES ('qitem-a', '0', 'delete')");
+    const result = readQueueTransfer(db, { kind, names: [name] });
+    expect(result.scope.qitemIds).toEqual(["qitem-a"]);
+    expect(result.erasedIds.map(row => row.qitemId)).toEqual(["qitem-a"]);
+    expect(result.erasedRigs.map(row => row.rigId)).toEqual(["rig-demo"]);
+  },
+);
+
+it("refuses host-qualified rig selectors instead of selecting foreign work", () => {
+  seed();
+  db.exec("UPDATE queue_items SET source_session = 'a@demo@elsewhere' WHERE qitem_id = 'qitem-b'");
+  expect(() => readQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere"] })).toThrow(/selection_invalid:.*unqualified/);
 });
 
 it("leaves claims, unrelated work and late reports untouched across disjoint exports", () => {
