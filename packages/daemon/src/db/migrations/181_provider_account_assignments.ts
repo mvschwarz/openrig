@@ -5,6 +5,11 @@ import type { Migration } from "../migrate.js";
  * (the label, its reference in words, who asked and when), and each seat's latest applied result: one of the six kinds,
  * with its detail, any recovery command, the seat's activity when it was switched, and the reference it was given. A
  * reference only, never credential bytes. Both go with their rig, and a result with its seat.
+ *
+ * With the applied reference, a result keeps the label it came from and that account's reference as the apply used it
+ * (applied_label, applied_account). A later result that moved nothing (unchanged, refused, failed) replaces the seat's
+ * latest label and kind, but not these, so a seat that still follows an earlier apply is known to be on that apply's
+ * account, and a label later pointed at another reference isn't mistaken for it.
  */
 export const providerAccountAssignmentsSchema: Migration = {
   name: "181_provider_account_assignments.sql",
@@ -32,6 +37,8 @@ export const providerAccountAssignmentsSchema: Migration = {
       ref_kind TEXT,
       codex_home TEXT,
       codex_login TEXT,
+      applied_label TEXT,
+      applied_account TEXT,
       applied_at TEXT NOT NULL,
       PRIMARY KEY (rig_id, provider, node_id)
     );
