@@ -410,8 +410,11 @@ What reads these declarations:
   learn the pane's columns and rows, so a browser terminal wraps lines where the agent's pane does. The size arrives
   as a binary frame holding UTF-8 JSON, `{"type":"geometry","cols":<n>,"rows":<n>}`: once when the viewer joins,
   before any output, and again whenever the pane's size changes (checked about every two seconds). Terminal output
-  is always a text frame, so set `binaryType = "arraybuffer"` and read only binary frames as size frames. With
-  `terminal.fixed_geometry` on, the frame reports the pinned 90 by 27. When the size can't be read, no frame is sent
+  is always a text frame, so set `binaryType = "arraybuffer"` and read only binary frames as size frames. xterm.js's
+  `AttachAddon` writes every frame to the terminal, binary ones included, so a viewer using it should leave
+  `?geometry=1` off or read the socket's messages itself. With `terminal.fixed_geometry` on, the frame reports the
+  pinned 90 by 27, or the window's own size when OpenRig didn't pin it: someone fixed its size by hand, or its sizing
+  couldn't be read. When the size can't be read, no frame is sent
   and the socket stays open. The viewer is told the size and never sets it: the socket still has no resize message.
   Without the flag, the socket's frames are unchanged.
 

@@ -1308,4 +1308,25 @@ describe("pane size for a viewer that asked (geometry)", () => {
     await broker.attach(sized);
     expect(sized.sizes).toEqual([[80, 24], [80, 24]]);
   });
+
+  it("a viewer that leaves while scrolling back to live is told nothing more, neither a size nor the screen", async () => {
+    let hold: Promise<void> | null = null;
+    let release = () => {};
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: async () => { if (hold) await hold; return "screen"; },
+      getPaneCursorPosition: async () => ({ x: 0, y: 0, width: 80, height: 24 }),
+    }), { pollMs: 10 }));
+    await broker.attach(makeSub()); // keeps the broker alive across the detach
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    await broker.scroll(sized, 5);
+    hold = new Promise((r) => { release = r; });
+    const back = broker.scroll(sized, 0); // the repaint waits on tmux
+    broker.detach(sized);
+    const told = sized.order.length;
+    release();
+    await back;
+    expect(sized.order.length).toBe(told);
+    expect(sized.sizes).toEqual([[80, 24]]);
+  });
 });

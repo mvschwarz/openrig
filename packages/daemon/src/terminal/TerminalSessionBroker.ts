@@ -381,6 +381,8 @@ export class TerminalSessionBroker {
     let cursor: TmuxCursorPosition | null = null;
     try { snapshot = await this.tmux.capturePaneScreen(this.sessionName, { escapeSequences: true }); } catch { snapshot = null; }
     try { cursor = await this.tmux.getPaneCursorPosition(this.sessionName); } catch { cursor = null; }
+    // A viewer that left during these reads gets nothing: telling it the size would record it again after detach.
+    if (!this.subscribers.has(sub)) return;
     this.sendGeometry(sub, cursor);
     if (snapshot !== null) {
       try { sub.send(screenSnapshotEscape(snapshot, cursor)); } catch { /* dead */ }
