@@ -9,7 +9,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown } from "./domain/compaction-restore-notice.js";
+import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -2987,6 +2987,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
           onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
           onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
+          onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
@@ -3027,6 +3029,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
+  // #3688: a removed seat's open compaction notices close; nothing is left to deliver to or take up their steps.
+  wireCompactionNoticeSeatRemoval(eventBus, queueRepoInstance, seatNameCarried(db));
   const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
   const { PiCompactionRequestStore } = await import("./domain/pi-compaction-request-store.js");
   if (sessionTransport) deps.piCompactionService = new PiCompactionService({
