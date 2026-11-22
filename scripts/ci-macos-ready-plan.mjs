@@ -8,7 +8,12 @@
 //
 // The matrix is never empty and no entry is ever skipped by a job-level condition, because GitHub reports a skipped
 // job as successful and that would satisfy a required check without a test. When the event isn't an approval of the
-// current head, the matrix holds one placeholder entry whose check name is not a required context.
+// current head, the matrix holds one placeholder entry whose check name is not a required context. A manual run tests
+// the suites under names that aren't required either, so only an approval of the current head reports the required ones.
+//
+// The plan also names the concurrency group of the package jobs. GitHub keeps one pending run per group and a newer
+// one replaces it, so only approval runs for the same approved head share a group; every other run gets a group of its
+// own and can never replace a waiting approval run.
 
 import { appendFileSync, readFileSync } from "node:fs";
 
@@ -16,18 +21,21 @@ export const MACOS_ENTRIES = [
   { package: "daemon", os: "macos-latest", check: "package-tests (daemon)" },
   { package: "cli", os: "macos-latest", check: "package-tests (cli)" },
 ];
+export const MANUAL_ENTRIES = [
+  { package: "daemon", os: "macos-latest", check: "macOS manual run (daemon)" },
+  { package: "cli", os: "macos-latest", check: "macOS manual run (cli)" },
+];
 export const PLACEHOLDER_CHECK = "review-ready macOS (not triggered)";
 const COUNTING_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const SHA = /^[0-9a-f]{40}$/;
 
-function placeholder(reason) {
-  return { eligible: false, reason, head: "", matrix: [{ package: "none", os: "ubuntu-latest", check: PLACEHOLDER_CHECK }] };
-}
-
-export function planMacosPackageTests(eventName, event) {
+export function planMacosPackageTests(eventName, event, runId = "") {
+  const ownGroup = (kind) => `macos-package-tests-${kind}-${runId || "unknown"}`;
+  const placeholder = (reason) => ({ eligible: false, reason, head: "", group: ownGroup("other"),
+    matrix: [{ package: "none", os: "ubuntu-latest", check: PLACEHOLDER_CHECK }] });
   if (eventName === "workflow_dispatch") {
-    // A manual run on a branch. Its check runs don't satisfy a required check in a ruleset; it's for trying the suites.
-    return { eligible: true, reason: "manual run", head: "", matrix: MACOS_ENTRIES };
+    // A manual run tests the dispatched branch as it is, under names no required check uses.
+    return { eligible: false, reason: "manual run under non-required names", head: "", group: ownGroup("manual"), matrix: MANUAL_ENTRIES };
   }
   if (eventName !== "pull_request_review") return placeholder(`event ${eventName || "(none)"} doesn't run the macOS suites`);
   if (event?.action !== "submitted") return placeholder(`review action ${event?.action ?? "(none)"} isn't a submitted review`);
@@ -39,16 +47,17 @@ export function planMacosPackageTests(eventName, event) {
   }
   if (!SHA.test(String(review.commit_id ?? "")) || !SHA.test(String(head ?? ""))) return placeholder("the approved commit or the head is missing");
   if (review.commit_id !== head) return placeholder(`the approval names ${review.commit_id}, but the head is now ${head}`);
-  return { eligible: true, reason: `approval of the current head ${head}`, head, matrix: MACOS_ENTRIES };
+  const number = event.pull_request?.number ?? "unknown";
+  return { eligible: true, reason: `approval of the current head ${head}`, head, group: `macos-package-tests-approved-${number}-${head}`, matrix: MACOS_ENTRIES };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const eventName = process.env.GITHUB_EVENT_NAME ?? "";
   const event = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
-  const plan = planMacosPackageTests(eventName, event);
-  const lines = [`eligible=${plan.eligible}`, `head=${plan.head}`, `matrix=${JSON.stringify(plan.matrix)}`];
+  const plan = planMacosPackageTests(eventName, event, process.env.GITHUB_RUN_ID ?? "");
+  const lines = [`eligible=${plan.eligible}`, `head=${plan.head}`, `group=${plan.group}`, `matrix=${JSON.stringify(plan.matrix)}`];
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join("\n")}\n`);
-  const summary = plan.eligible ? `macOS package suites run: ${plan.reason}.` : `macOS package suites not run: ${plan.reason}.`;
+  const summary = plan.eligible ? `Required macOS package suites run: ${plan.reason}.` : `Required macOS package suites not run: ${plan.reason}.`;
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
   console.log(summary);
 }

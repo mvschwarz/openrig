@@ -116,9 +116,10 @@ are not yet runnable checks.
 `.github/workflows/tests.yml` runs on pull requests to `main` and on manual dispatch, all on
 Node 22. Each suite is its own job, so one failure doesn't hide the others. No provider
 credentials are supplied. The macOS `package-tests (daemon)` and `package-tests (cli)` run from
-`.github/workflows/macos-package-tests.yml` instead: for a review that approves the pull request's
-current head, and on manual dispatch. A push after the approval leaves the new head waiting for those
-two required checks until it's approved again; `scripts/ci-macos-ready-plan.mjs` makes that decision.
+`.github/workflows/macos-package-tests.yml` instead, for a review that approves the pull request's
+current head. A push after the approval leaves the new head waiting for those two required checks until
+it's approved again; `scripts/ci-macos-ready-plan.mjs` makes that decision. A manual dispatch runs the
+same suites under names that aren't required checks.
 
 | Job | Runner | What it does |
 |---|---|---|

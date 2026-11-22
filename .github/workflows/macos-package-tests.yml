@@ -3,7 +3,7 @@ name: macOS package tests
 # Runs the macOS package suites (daemon, cli) for a head a maintainer approved, not for every push. Both are
 # required checks, so a pull request's head merges only after an approval of that exact head starts this workflow
 # and both suites pass on it. A push after the approval leaves the new head without these checks until it is
-# approved again. scripts/ci-macos-ready-plan.mjs makes the decision, and scripts/ci-macos-ready-plan.test.mjs
+# approved again. A manual dispatch runs the same suites under names that aren't required checks. scripts/ci-macos-ready-plan.mjs makes the decision, and scripts/ci-macos-ready-plan.test.mjs
 # tests it. The Linux suites stay in tests.yml and run on every push.
 # No provider credentials or operator configuration are supplied; the suites deny external networking.
 
@@ -15,10 +15,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # One run per approved head. A run already queued or running is never cancelled.
-  group: macos-package-tests-${{ github.event.pull_request.number || github.ref }}-${{ github.event.review.commit_id || github.sha }}
-  cancel-in-progress: false
+# No workflow-level concurrency: GitHub keeps one pending run per group, so a comment review's run in an approval's
+# group would replace a waiting approval run. The package jobs take their group from the plan instead.
 
 jobs:
   plan:
@@ -27,6 +25,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       head: ${{ steps.plan.outputs.head }}
+      group: ${{ steps.plan.outputs.group }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,10 +40,14 @@ jobs:
 
   package-tests:
     needs: plan
-    # Each entry's check name comes from the plan: `package-tests (daemon)` and `package-tests (cli)` for an
-    # approval of the current head, otherwise one placeholder that is not a required check. No entry is skipped
-    # by a job-level condition, because a skipped job reports success.
+    # Each entry's check name comes from the plan: `package-tests (daemon)` and `package-tests (cli)` only for an
+    # approval of the current head; a manual run and every other event use names that aren't required checks. No entry
+    # is skipped by a job-level condition, because a skipped job reports success.
     name: ${{ matrix.check }}
+    # Only approval runs for the same approved head share a group, and none is cancelled; any other run has its own.
+    concurrency:
+      group: ${{ needs.plan.outputs.group }}-${{ matrix.package }}
+      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.package == 'daemon' && 90 || 60 }}
     strategy:
