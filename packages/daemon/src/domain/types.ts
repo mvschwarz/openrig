@@ -616,6 +616,15 @@ export interface RestoreResult {
   excludedNodes?: RestoreExcludedNode[];
   /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
   harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
+  /** Seats this restore left stopped on purpose, outside `nodes` so they don't count in `rigResult`: a seat pool agent
+   *  the pool drained (#3395) stays down until the pool brings it back. Present only when there is one. */
+  keptDown?: RestoreKeptDownNode[];
+}
+
+export interface RestoreKeptDownNode {
+  nodeId: string;
+  logicalId: string;
+  reason: "drained pool agent, not started";
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
