@@ -180,6 +180,7 @@ describe("TerminalSessionBroker", () => {
         firstStarted();
         await new Promise<void>((resolve) => { releaseFirst = resolve; });
       }
+      return { ok: true as const };
     });
     const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ sendText })));
     await broker.attach(makeSub());

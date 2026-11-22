@@ -264,6 +264,33 @@ describe("classifyPaneRuntimeMatch", () => {
 });
 
 describe("SeatIdentityReconciler.reconcileAll", () => {
+  it("timestamps a verified Codex verdict at its native proof, before the final pane census", async () => {
+    const db = createFullTestDb();
+    let now = NOW();
+    const proofAt = new Date(now.getTime() + 2000);
+    const later = new Date(now.getTime() + 3000);
+    let snapshots = 0;
+    try {
+      seedSeat(db, { nodeId: "c1", sessionName: "c1@rig", pane: "%1", runtime: "codex" });
+      const tmux = {
+        ...makeTmux({ sessions: ["c1@rig"] }),
+        readAllPaneProcesses: async () => {
+          if (snapshots === 2) now = later;
+          return new Map([["%1", { pid: 10, command: "codex" }]]);
+        },
+      };
+      const listProcesses = async () => {
+        if (++snapshots === 2) now = proofAt;
+        return [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex", command: "codex",
+          argv: ["codex"], startedAt: "Sat Jan 1 12:00:00 2000" }];
+      };
+      await new SeatIdentityReconciler({ db, tmux, listProcesses, now: () => now }).reconcileAll();
+      expect(new SeatIdentityStore(db).getForNode("c1")).toMatchObject({
+        verdict: "verified", observedAt: proofAt.toISOString(),
+      });
+    } finally { db.close(); }
+  });
+
   it("shares two native observations across wrapped Codex seats and rejects later stale or missing proof", async () => {
     const db = createFullTestDb();
     for (const n of [1, 2]) {
@@ -625,6 +652,30 @@ describe("SeatIdentityReconciler — bounded polling", () => {
 });
 
 describe("definitive Core exit ends exact run authority", () => {
+  it.each([true, false])("preserves the grant when an older absence loses to a newer verdict, empty census=%s", async emptyCensus => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
+      const grants = new ActivityGrantStore(db);
+      const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
+        binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+      grants.activate(grant.grantId);
+      const store = new SeatIdentityStore(db);
+      store.upsert({ nodeId: "n1", sessionName: "s1@rig", verdict: "verified", evidenceSource: "pane_process", reason: null,
+        observedAt: new Date(NOW().getTime() + 1000).toISOString(),
+        evidence: { registeredPane: "%1", observedPid: 101, observedCommand: "node", matchedLayer: 1 },
+      });
+      const tmux = {
+        ...makeTmux({ sessions: emptyCensus ? [] : ["different@rig"] }),
+        probeSession: async () => ({ state: "absent" as const }),
+      };
+      await new SeatIdentityReconciler({ db, tmux, now: NOW,
+        readProcessTableCensus: async () => ({ rows: [], permissionHiddenPids: [] }) }).reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("verified");
+      expect(grants.get(grant.grantId)?.revokedAt).toBeNull();
+    } finally { db.close(); }
+  });
 
   it.each(["present", "unreadable"] as const)("does not revoke on unreadable pane PID when session census is %s, then recovers", async census => {
     const db = createFullTestDb();
@@ -847,7 +898,8 @@ describe("launch-recorded community runner Core process evidence", () => {
     const f = fixture();
     f.listProcesses.mockImplementation(async () => { f.registry.updateBinding("n1", { tmuxPane: "%2" }); return [f.root]; });
     await f.rec.reconcileAll();
-    expect(f.verdict()?.verdict).toBe("unconfirmed");
+    // The sweep drops the superseded selection instead of publishing even an unconfirmed verdict for it.
+    expect(f.verdict()).toBeNull();
     expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
   });
 

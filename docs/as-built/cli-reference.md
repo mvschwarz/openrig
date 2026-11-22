@@ -1176,8 +1176,11 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-resume-token <session>` | — | `--token-stdin`<br>`--reason <text>` **required**<br>`--json` |
 
-A `rig seat stop` that successfully kills the current session records that it
-was intentionally stopped. With other healthy members running, the rig's `lifecycleState` in
+A `rig seat stop` records its stop request before it stops anything, and a
+successful kill confirms that the seat was intentionally stopped. A stop that
+times out or only partly takes effect keeps the request pending (`stopRequested`
+in `--full` node JSON) instead of reporting the seat as exited; see
+[checked seat stop](../reference/checked-seat-stop.md#the-stop-request). With other healthy members running, the rig's `lifecycleState` in
 `rig ps` and the TUI stays `running`; the stopped member no longer makes it
 `degraded`. Stopping every member
 leaves the rig `stopped`. Node JSON exposes `intentionallyStopped` in compact,
@@ -1188,9 +1191,11 @@ Process counts still reflect reality: stopping one of two members leaves
 resume information, and attention diagnostics remain available. A crash or
 attention condition on another member still affects the rig lifecycle.
 
-Stop intent survives daemon restarts and audit retention. It applies only to the
-latest exited session while the seat has no binding; a subsequent session status
-change clears it, and a new session starts without it. Existing exits are not
+Stop intent survives daemon restarts and audit retention. `intentionallyStopped`
+applies only to the latest exited session while the seat has no binding. A later
+status write or observation doesn't clear the intent; a new session, from an
+explicit start, starts without it. A seat that declares `keep_alive` is never
+relaunched while its latest session carries the intent. Existing exits are not
 backfilled as intentional stops. If the session disappears between the live
 probe and the stop, its unexplained exit still affects rig health. The internal
 stop in `rig seat launch --fresh --stop` does not record final stop intent, so a

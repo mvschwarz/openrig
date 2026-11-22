@@ -1,3 +1,5 @@
+import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
+import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
 import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
@@ -367,6 +369,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   workflowBoundPodSchema,
   seatPoolSchema,
   remoteControlObservationsSchema,
+  sessionStopAttemptSchema,
+  nodeKeepAliveSchema,
   providerAccountRefsSchema,
   providerAccountAssignmentsSchema,
 ];

@@ -6,7 +6,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
 import Database from "better-sqlite3";
-import { SeatLaunchEnvironment, publicSeatEnvironment, resolveLaunchWrapperArgv } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, publicSeatEnvironment, resolveLaunchWrapperArgv, WRAPPED_CLAUDE_LOOKUP_REFUSAL } from "../src/domain/seat-launch-environment.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
@@ -283,7 +283,10 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
       if (!["none", "errexit"].includes(kind)) {
         for (const file of [functionLog, childLog, w.log]) expect(existsSync(file), file).toBe(false);
         expect(result.code, result.stderr).not.toBe(0);
-        expect(result.stderr).toContain("launch_wrapper unavailable; no agent started.");
+        // #3746: the refusal names which it is, and never prints the alias's or function's text.
+        expect(result.stderr).toContain(WRAPPED_CLAUDE_LOOKUP_REFUSAL(kind === "function" ? "function" : "alias"));
+        expect(result.stderr).not.toContain("launch_wrapper unavailable");
+        expect(result.stderr).not.toContain("--alias-flag");
       } else {
         expect(result.code, result.stderr).toBe(0);
         const args = ["--resume", "same-id"];
