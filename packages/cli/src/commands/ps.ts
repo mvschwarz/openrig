@@ -1161,10 +1161,14 @@ Exit codes:
         return;
       }
 
-      // OPR.0.4.4.21 FR-1: ONE O(rigs) fetch including archived so the
-      // count line can be computed; visibility is split client-side below
+      // OPR.0.4.4.21 FR-1: the count line needs the archived count. #3636: the daemon sends it beside the default
+      // (active-only) list as a header, so the archived rigs aren't folded just to be counted. A daemon without the
+      // header gets the earlier single fetch, archived included; visibility is split client-side below either way
       // (JSON keeps today's default of excluding archived — parity).
-      const res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
+      let res = await client.get<PsEntry[]>(opts.includeArchived ? "/api/ps?includeArchived=true" : "/api/ps");
+      const countHeader = opts.includeArchived ? null : res.headers?.get("x-openrig-archived-count") ?? null;
+      const headerCount = countHeader !== null && /^\d+$/.test(countHeader) ? Number(countHeader) : null;
+      if (!opts.includeArchived && res.status < 400 && headerCount === null) res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
 
       if (res.status >= 400) {
         const reason = (res.data as unknown as { error?: unknown } | null)?.error;
@@ -1181,7 +1185,7 @@ Exit codes:
       // --include-archived they are dropped from BOTH renders here, exactly
       // as the daemon default used to do. archivedCount feeds the FR-1
       // count line only.
-      const archivedCount = all.filter((e) => e.isArchived === true).length;
+      const archivedCount = headerCount ?? all.filter((e) => e.isArchived === true).length;
       const visible = opts.includeArchived ? all : all.filter((e) => e.isArchived !== true);
 
       const rigScoped = opts.rig
@@ -1191,7 +1195,14 @@ Exit codes:
       // A --rig that names no rig is a lookup that missed, not an empty fleet: say so (as rig chatroom,
       // env and parked do) instead of "No rigs" or a zero summary. --json keeps its empty result.
       if (!opts.json && opts.rig && rigScoped.length === 0) {
-        if (all.some((e) => (e.rigName ?? e.name) === opts.rig)) {
+        const named = (entries: unknown) => Array.isArray(entries) && entries.some((e: PsEntry) => (e.rigName ?? e.name) === opts.rig);
+        // From the header path the list holds no archived rig: look at the archived ones on this miss only.
+        let archivedRig = named(all);
+        if (!archivedRig && headerCount !== null && headerCount > 0) {
+          const archived = await client.get<PsEntry[]>("/api/ps?archived=only");
+          archivedRig = archived.status < 400 && named(archived.data);
+        }
+        if (archivedRig) {
           console.error(`Rig '${opts.rig}' is archived. Show it with: rig ps --rig ${opts.rig} --include-archived`);
         } else {
           console.error(`Rig '${opts.rig}' not found. List rigs with: rig ps`);

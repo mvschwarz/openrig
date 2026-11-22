@@ -346,6 +346,12 @@ export class PsProjectionService {
    * with a node whose latest registration is `running`. The fold never turns any
    * other node into a running one, so the other rigs can't add to the sum (#3636).
    */
+  /** How many rigs are archived, read from the archived_at index (`idx_rigs_archived`) without folding them, so the count
+   *  line `rig ps` prints doesn't cost an archived listing (#3636). */
+  countArchivedRigs(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM rigs WHERE archived_at IS NOT NULL").get() as { n: number }).n;
+  }
+
   countRunningSeats(): number {
     const rigIds = this.db.prepare(`
       SELECT DISTINCT n.rig_id FROM nodes n
