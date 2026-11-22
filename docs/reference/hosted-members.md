@@ -37,6 +37,18 @@ Assistants that run on your machine can reach OpenRig's MCP server locally. Many
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
 - **`rig_whoami`** answers the seat its grant names, though the member has no session.
 
+To wait for one task's answer in the same read, call `rig_queue_show` with its `qitemId` and optional `waitSeconds`
+(an integer from 0 to 50). Omitted or zero keeps today's immediate read. A positive wait holds only while that item
+is `pending` or `in-progress`; a claim, progress note or another item's change does not finish it. It returns at once
+when the item leaves those states, including `blocked`, `done`, `handed-off`, `failed`, `denied` or `canceled`.
+State, closure reason, resolution, transitions and any visible successor keep their usual meaning; no successor is
+automatically followed. At the bound the current item returns with an additive top-level
+`waited: { outcome: "timeout", seconds: <requested bound> }`. A timeout is not an answer or completed work.
+Cancellation or a disconnected HTTP call releases the wait without changing the durable task. The read uses the
+same grant scope as an immediate read; another member's private task is still refused. Keep the caller's MCP timeout
+above the requested bound (the usual SDK default is 60 seconds); only this daemon call gets a longer timeout, not
+ordinary requests. `GET /api/queue/:qitemId?waitSeconds=<bound>` offers the same wait to daemon API callers.
+
 ## Asking a person while keeping the work
 
 When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
@@ -169,6 +181,34 @@ line; when that notice is filed doesn't change.
 
 `rig mcp token revoke grok` refuses its next request. The rows it worked, and their answers, stay.
 
+## Embed the HTTP endpoint from Node.js
+
+An ESM application can start and close the same HTTP endpoint without running the CLI:
+
+```js
+import { startMcpHttpServer } from "@openrig/cli/mcp.js";
+
+const endpoint = await startMcpHttpServer({
+  daemonUrl: "http://127.0.0.1:7433",
+  host: "127.0.0.1",
+  port: 7434,
+  tokenFile: "/absolute/path/to/mcp-http-tokens.json",
+});
+// endpoint.url is the MCP URL; endpoint.authenticated says whether authentication is configured.
+// Keep the endpoint for as long as the application serves it, then:
+await endpoint.close();
+```
+
+`McpHttpOptions`, `McpAccess`, `McpPrincipal`, `McpGrant` and `GrantServiceOptions` are exported types;
+`McpHttpConfigError` is the endpoint's configuration error. Importing the module starts neither an endpoint
+nor a daemon. Start the daemon separately, and use the existing token commands above to manage grants.
+The CLI commands, authentication and tool scope work as before. No package exports map is added, so
+existing deep imports and CommonJS extension lookup keep their previous resolution; `@openrig/cli/mcp.js`
+is the documented entry.
+
+This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
+additional adapter callbacks that those options do not implement.
+
 ## Assistants connected through a grant service
 
 With `rig mcp serve --http --grant-service <url>`, an outside service answers each connection's key with its grant
@@ -237,6 +277,13 @@ pair, the person's assistant can read the team's questions waiting on them and s
 Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
 unusable `person` withholds only these two tools while the grant's other tools keep working.
 
+A token-file grant can be bound to a person the same way, without a grant service:
+`rig mcp token add <name> --seat <seat> --person <entity_id>`. That connection is offered `rig_question_list` and
+`rig_question_answer` for that registered person, beside its seat's own tools, and answers through the same path as
+below. The person is only ever the one named with `--person`: never the seat, and never an `--owner` grant's. The
+answer's audit names the route as `file-grant`, with the grant's name as its principal; a token-file grant has no grant
+id or version. Revoking the grant stops both tools on its next request.
+
 - **Register the person** on the instance, once:
   `rig gateway human add <entity_id> --display-name "<name>" --delivery-class B --default`.
   Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
@@ -247,7 +294,7 @@ unusable `person` withholds only these two tools while the grant's other tools k
 - **`rig_question_answer`** takes the question, the revision the person saw, and either the options they chose (one per
   question) or exactly what they typed. It records through Steering's own write path (`answer` for an ask, `resolve` for a
   park), as the person, so Steering shows the same answer and the asker's work continues once. The answer's audit names the
-  route it came by: the caller's seat, the grant's principal and the grant's id and version.
+  route it came by: the caller's seat, the grant's principal and, for a grant service's grant, its id and version.
 - **What it says back:** a success names what was submitted (`submitted`), never a fresh read of the question's answers.
   - `answered`;
   - `recorded`, when parts of the question are still unanswered;
@@ -271,4 +318,4 @@ unusable `person` withholds only these two tools while the grant's other tools k
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
   isn't rung; work it leaves unclaimed past the unclaimed age is listed in one notice instead, which goes to its person, else
   its rows' shared creator, the operator agent or the member itself.
-- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant service's grant that names its person, which records that person's own answers (above).
+- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant that names its person (a grant service's, or a token-file grant with `--person`), which records that person's own answers (above).

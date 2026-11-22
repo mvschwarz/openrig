@@ -175,6 +175,7 @@ packagesRoutes.post("/plan", async (c) => {
     conflicts: refined.conflicts.length,
     noOps: refined.noOps.length,
     rejected: policyResult.rejected.length,
+    ...(refined.warnings?.length ? { warnings: refined.warnings } : {}),
   });
 });
 
@@ -304,6 +305,7 @@ packagesRoutes.post("/install", async (c) => {
     verification,
     ...(policyResult.rejected.length > 0 ? { policyRejected: policyResult.rejected } : {}),
     ...(result.notes?.length ? { notes: result.notes } : {}),
+    ...(refined.warnings?.length ? { warnings: refined.warnings } : {}),
   }, 201);
 });
 

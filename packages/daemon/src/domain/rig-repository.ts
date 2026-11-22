@@ -371,6 +371,11 @@ export class RigRepository {
    *  protection arms in the same act that creates the rig. Wired at startup;
    *  optional so repo construction stays dependency-free. */
   onRigCreated?: (rig: Rig) => void;
+  /** #3634 — the same act for archive, unarchive and delete: fired after the row changed, so a daemon-owned
+   *  per-name job follows the rig on every path (routes, instantiator, teardown, lifecycle). */
+  onRigArchived?: (rig: { id: string; name: string }) => void;
+  onRigUnarchived?: (rig: { id: string; name: string }) => void;
+  onRigDeleted?: (rig: { id: string; name: string }) => void;
   constructor(db: Database.Database) {
     this.db = db;
   }
@@ -1140,6 +1145,13 @@ export class RigRepository {
     return rows.map((r) => this.rowToRig(r));
   }
 
+  /** #3634: the names that still have an unarchived row (every name before migration 042). */
+  listUnarchivedRigNames(): string[] {
+    const where = this.hasRigColumn("archived_at") ? " WHERE archived_at IS NULL" : "";
+    const rows = this.db.prepare(`SELECT DISTINCT name FROM rigs${where} ORDER BY name`).all() as Array<{ name: string }>;
+    return rows.map((r) => r.name);
+  }
+
   getRigSummaries(filter?: RigArchiveFilter): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null; hasServices: boolean; archivedAt: string | null }> {
     const cond = archiveWhereClause("r.archived_at", filter);
     const where = cond ? `WHERE ${cond}` : "";
@@ -1183,6 +1195,7 @@ export class RigRepository {
     const result = this.db
       .prepare("UPDATE rigs SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND archived_at IS NULL")
       .run(rigId);
+    if (result.changes > 0) this.fireRigHook(this.onRigArchived, rigId);
     return result.changes > 0;
   }
 
@@ -1191,11 +1204,22 @@ export class RigRepository {
     const result = this.db
       .prepare("UPDATE rigs SET archived_at = NULL, updated_at = datetime('now') WHERE id = ? AND archived_at IS NOT NULL")
       .run(rigId);
+    if (result.changes > 0) this.fireRigHook(this.onRigUnarchived, rigId);
     return result.changes > 0;
   }
 
   deleteRig(rigId: string): void {
-    this.db.prepare("DELETE FROM rigs WHERE id = ?").run(rigId);
+    const rig = this.onRigDeleted
+      ? this.db.prepare("SELECT id, name FROM rigs WHERE id = ?").get(rigId) as { id: string; name: string } | undefined
+      : undefined;
+    const result = this.db.prepare("DELETE FROM rigs WHERE id = ?").run(rigId);
+    if (rig && result.changes > 0) this.onRigDeleted?.(rig);
+  }
+
+  private fireRigHook(hook: ((rig: { id: string; name: string }) => void) | undefined, rigId: string): void {
+    if (!hook) return;
+    const rig = this.db.prepare("SELECT id, name FROM rigs WHERE id = ?").get(rigId) as { id: string; name: string } | undefined;
+    if (rig) hook(rig);
   }
 
   deleteNode(nodeId: string): void {

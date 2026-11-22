@@ -157,7 +157,10 @@ export function diagnoseSeatParked(
     held,
   };
 
-  const activityKnown = state !== null && state.activity !== "unknown";
+  // A typed usage limit is positive evidence the turn ended: the seat reads unknown (a limit is neither work nor rest),
+  // but it's stopped at its limit, so its open work is parked and reminded as an idle seat's is.
+  const limit = state?.usageLimit ?? null;
+  const activityKnown = state !== null && (state.activity !== "unknown" || limit !== null);
   const activity: SeatParkedDiagnosis["activity"] = {
     value: state?.activity ?? "unknown",
     needsInput: state?.needsInput ?? { count: 0, reason: null },
@@ -187,14 +190,14 @@ export function diagnoseSeatParked(
     };
   }
 
-  const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0;
+  const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0 || limit !== null;
   const parked = stopped && (open.length > 0 || unhealthyHeld.length > 0);
   const unconsumed = unhealthyHeld.filter((row) => row.wake?.unconsumed);
   const served = held.filter((row) => row.servedByOwnReminder).length;
   const reason = parked
     ? state.needsInput.count > 0
       ? `needs-input (${state.needsInput.reason ?? "unanswered block"}) with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
-      : `idle-at-prompt with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
+      : `${limit ? `at its usage limit (${limit.resetsAt ? `resets ${limit.resetsAt}` : "no reset stated"})` : "idle-at-prompt"} with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
     : stopped
       ? held.length > 0
         ? served > 0
