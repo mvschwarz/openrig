@@ -1,7 +1,7 @@
 import type { Migration } from "../migrate.js";
 
 export const queueTransferStagingSchema: Migration = {
-  name: "182_queue_transfer_staging.sql",
+  name: "190_queue_transfer_staging.sql",
   sql: `
     CREATE TABLE queue_transfer_staging (
       import_id TEXT PRIMARY KEY NOT NULL,

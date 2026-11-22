@@ -5,7 +5,7 @@ import { sessionLaunchedCwdSchema } from "../../src/db/migrations/174_session_la
 import { nodeStatuslineThrottleSchema } from "../../src/db/migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "../../src/db/migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "../../src/db/migrations/179_remote_control_observations.js";
-import { queueTransferStagingSchema } from "../../src/db/migrations/182_queue_transfer_staging.js";
+import { queueTransferStagingSchema } from "../../src/db/migrations/190_queue_transfer_staging.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "../../src/db/migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";
