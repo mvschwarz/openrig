@@ -896,7 +896,8 @@ rig provider account remove budget --provider claude
   one that group or others can read is added with a warning.
   A Codex reference is a Codex home and the name of a login saved there (`rig auth list --codex-home <home>` lists
   them).
-- Only the reference is stored. The file isn't read or copied, and no credential passes through OpenRig.
+- Only the reference is stored, never a credential. Adding or checking a Claude reference looks at the file's
+  permissions, not its contents, and copies nothing; the seat's own shell reads the file when Claude starts with it.
 - Adding an account checks the reference first. If the check fails, nothing is stored and the refusal says why.
 - Removing a label a rig is assigned to goes ahead with a warning naming those rigs. Their seats, the seats'
   credentials, and the recorded assignment and results stay as they were. Status shows the reference as missing, and
