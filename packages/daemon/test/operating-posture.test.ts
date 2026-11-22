@@ -139,6 +139,21 @@ it("reads one authored slice named by its directory and by its SPEC id as one wo
   expect(t.service.resolve({ qitemId: "alpha", workstreamId: "other-2" })).toMatchObject({ posture: "unknown", reason: expect.stringContaining("conflicting workstreamId") });
 });
 
+it("treats a trailing-empty qualified workstream as absent, so the row's slice tag selects the workstream binding", async () => {
+  const t = await setup();
+  await t.queue.create({ qitemId: "tagged-slice", sourceSession: "author@demo", destinationSession: "owner@demo", body: "Scoped work", tags: ["project:alpha", "mission:release", "slice:work-1"], nudge: false });
+  expect((await t.put("delegated", "mission", "alpha/release")).status).toBe(200);
+  expect((await t.put("human-led", "workstream", "alpha/release/work-1")).status).toBe(200);
+  expect(t.service.resolve({ qitemId: "tagged-slice", workstreamId: "alpha/release/" })).toMatchObject({
+    posture: "human-led",
+    binding: { id: "workstream:alpha/release/work-1" },
+    grantsAuthority: false,
+    context: { projectId: "alpha", missionId: "release", workstreamId: "alpha/release/work-1" },
+  });
+  // A real mismatch behind a trailing-empty qualifier is still refused.
+  expect(t.service.resolve({ qitemId: "tagged-slice", workstreamId: "alpha/other/" })).toMatchObject({ posture: "unknown" });
+});
+
 it("preserves legacy binding bytes through migration and never infers delegation from an ergonomic mode", async () => {
   const db = createDb(); cleanup.push(() => db.close()); migrate(db, ALL_MIGRATIONS.slice(0, -1));
   const store = new RigModeStore(db); store.setBinding("global_host", null, "focus", record("focus", "global_host"));

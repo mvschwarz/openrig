@@ -134,7 +134,7 @@ export class OperatingPostureService {
       const parts = ctx.workstreamId.split("/");
       if (parts.length !== 3) throw new Error("use project/mission/slice-id workstream identity");
       merge("projectId", parts[0], "workstream qualifier"); merge("missionId", parts[1], "workstream qualifier");
-      ctx.workstreamId = parts[2];
+      ctx.workstreamId = parts[2] || undefined;
     }
     if (ctx.workstreamId) workstreamNames.push({ value: ctx.workstreamId, source: "input" });
     let destination: string | null = null;
