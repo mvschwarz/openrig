@@ -1861,6 +1861,9 @@ Every deliberate HELD row should name its continuation and one live wake:
 
 A live blocker qitem supplied with --on also wakes the row when resolved.
 
+--on external:<name> with no wake is an event-only hold: it stays visible, no
+reminder fires, and rig queue resolve <qitemId> --decision "..." ends it.
+
 HELD is only for a row that must stay on the queue while waiting. Work with a
 workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .action(async (qitemId: string, opts: {
