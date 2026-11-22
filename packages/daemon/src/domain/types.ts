@@ -137,6 +137,8 @@ export interface Session {
 export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+/** A seat's current usage-limit reading: when OpenRig recorded it, and the reset it states. */
+export type UsageLimitReading = { asOf: string; resetsAt: string };
 
 /** Facts a runner reports about its own process; launch authentication is not independent native verification. */
 export interface RunnerObservations {
@@ -246,7 +248,7 @@ export type RigEvent =
       hookBridgeUnavailable?: string;
       /** The seat's current usage-limit reading when the send started, for a send whose text reached the input: its
        *  agent isn't expected to read the text before the stated reset. */
-      usageLimit?: { asOf: string; resetsAt: string } }
+      usageLimit?: UsageLimitReading }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */

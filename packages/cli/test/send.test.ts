@@ -292,6 +292,18 @@ describe("Send CLI", () => {
     expect(result.stdout).toContain(`Notice: ${notice}`);
   });
 
+  it("a --host text send that fails with the usage-limit record (HTTP 502) prints the notice beside the failure", async () => {
+    const seat = ["limited", "remote-rig"].join("@");
+    const notice = "The seat was at its usage limit when this send started (OpenRig recorded it at 2026-11-19T19:40:00.000Z; it resets at 2026-11-19T23:00:00.000Z). The message reached its input, or may have; the agent isn't expected to read it before then.";
+    const post = vi.fn(async () => ({ status: 502, data: { ok: false, sessionName: seat, error: "delivery uncertain: the paste may not have landed",
+      usageLimit: { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z", notice } } }));
+    const testDeps: SendDeps = { ...runningDeps(port), clientFactory: () => ({ post }) as unknown as DaemonClient,
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "remote-fixture", transport: "http", url: "http://fixture.test:7433" }] } }) };
+    const result = await captureChannels(() => makeCmd(testDeps).parseAsync(["node", "rig", "send", seat, "hello", "--host", "remote-fixture"]));
+    expect(result.stdout.join("\n")).not.toContain("Sent to");
+    expect(result.stderr).toContain(`Notice: ${notice}`);
+  });
+
   it.each([false, true])("native pending and unknown receipts bypass every pane check and remedial Enter (json=%s)", async json => {
     for (const unknown of [false, true]) {
       const posts: Array<{ path: string; body: Record<string, unknown> }> = [];

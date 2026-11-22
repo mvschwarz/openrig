@@ -943,6 +943,13 @@ async function runCrossHostSend(
  * DIFFERENT terminal bearer surfaces as the structured permission-gate step
  * (never a hang, never silent). Remedy documented in cli-reference.md.
  */
+/** The remote seat's usage-limit notice, as a local send prints it: its agent isn't expected to read the text before
+ *  the stated reset. */
+function printRemoteUsageLimit(data: Record<string, unknown>, write: (line: string) => void): void {
+  const notice = (data["usageLimit"] as { notice?: unknown } | undefined)?.notice;
+  if (typeof notice === "string") write(`Notice: ${notice}`);
+}
+
 async function runHttpHostSend(
   host: HttpHostEntry,
   session: string,
@@ -1012,6 +1019,8 @@ async function runHttpHostSend(
       console.error(`  ${unconfirmedGuidance.consequence}`);
       console.error(`  ${unconfirmedGuidance.action}`);
     }
+    // A failed or uncertain send whose text may have reached the input carries the record too, as a local failure prints it.
+    printRemoteUsageLimit(remoteData, console.error);
     return;
   }
 
@@ -1024,9 +1033,7 @@ async function runHttpHostSend(
   }
   console.log(`Sent to ${session}`);
   if (data["envelopeOmitted"]) console.log(exactTextNote(session));
-  // The remote seat's usage limit, as a local send prints it: the agent isn't expected to read this before its reset.
-  const usageLimit = data["usageLimit"] as { notice?: unknown } | undefined;
-  if (typeof usageLimit?.notice === "string") console.log(`Notice: ${usageLimit.notice}`);
+  printRemoteUsageLimit(data, console.log);
   const advisory = data["warning"] as string | undefined;
   if (advisory) {
     console.log(`Advisory: ${advisory}`);
