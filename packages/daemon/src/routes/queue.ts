@@ -15,7 +15,7 @@ import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js"
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
-import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+import { inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
@@ -53,6 +53,8 @@ import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 import { feedPerspective } from "../domain/feed-perspective.js";
+import { waitForQueueItem } from "../domain/queue-read-wait.js";
+import { exemptSlowOpRequest } from "../domain/slow-op-recorder.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -816,7 +818,7 @@ export function queueRoutes(): Hono {
     const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
-    let route = requestedRoute === undefined ? null
+    let route: { address: string; basis: ReturnRouteBasis } | null = requestedRoute === undefined ? null
       : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
@@ -893,6 +895,12 @@ export function queueRoutes(): Hono {
     try {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
+      // Work a seat gives out as a new row keeps the route of the one routed row it holds, so its prompts still reach the
+      // person's conversation (return-route.ts). A route named here, or none at all, is unchanged.
+      if (requestedRoute === undefined && !route) {
+        const inherited = inheritedReturnRoute(getRepo(c).db, sourceSession, body.destinationSession!);
+        if (inherited) route = { address: inherited, basis: "inherited" };
+      }
       const item = await getRepo(c).create({
         qitemId: createId,
         sourceSession,
@@ -1839,11 +1847,16 @@ export function queueRoutes(): Hono {
   });
 
   // GET /:qitemId — show one
-  app.get("/:qitemId", (c) => {
+  app.get("/:qitemId", async (c) => {
     const qitemId = c.req.param("qitemId");
     const repo = getRepo(c);
-    const item = repo.getById(qitemId);
+    const seconds = Number(c.req.query("waitSeconds") ?? "0");
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 50) {
+      return c.json({ error: "invalid_wait_seconds", message: "waitSeconds must be an integer from 0 to 50" }, 400);
+    }
+    const { item, parked, waited } = await waitForQueueItem(repo, getEventBus(c), qitemId, seconds, c.req.raw.signal);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
+    if (parked) exemptSlowOpRequest(c);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
     // The owner notification level is what the Slack selector keys on: a registered person who
@@ -1851,6 +1864,7 @@ export function queueRoutes(): Hono {
     const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      ...(waited ? { waited } : {}),
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
       // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.

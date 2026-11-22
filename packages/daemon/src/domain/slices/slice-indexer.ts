@@ -21,6 +21,7 @@ import { parseScopeTags } from "./qitem-membership.js";
 import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
 import { cooperativeReadFile, readRowsCooperatively } from "../execution-candidate-reader.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { runSyncSite } from "../sync-site-wrap.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
 
@@ -862,46 +863,48 @@ export class SliceIndexer {
     }
 
     const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
-    for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
-      if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
-      const scope = parseTypedQueueScope(row.tags);
-      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
-      const taggedProject = scope.projects.values().next().value;
-      // A former id a catalogued project declares counts as that project (#3261).
-      const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
-      const firstSlice = scope.slices.values().next().value!;
-      const candidates = targetsBySliceToken.get(firstSlice);
-      if (!candidates) continue;
+    runSyncSite("slices.queue_counts_scan", () => {
+      for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+        if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
+        const scope = parseTypedQueueScope(row.tags);
+        if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
+        const taggedProject = scope.projects.values().next().value;
+        // A former id a catalogued project declares counts as that project (#3261).
+        const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
+        const firstSlice = scope.slices.values().next().value!;
+        const candidates = targetsBySliceToken.get(firstSlice);
+        if (!candidates) continue;
 
-      let uniqueMatch: TargetScope | null = null;
-      for (const target of candidates) {
-        if (rowProject !== undefined && target.projectId !== rowProject) continue;
-        let allSlicesMatch = true;
-        for (const slice of scope.slices) {
-          if (!target.sliceKeys.has(slice)) {
-            allSlicesMatch = false;
+        let uniqueMatch: TargetScope | null = null;
+        for (const target of candidates) {
+          if (rowProject !== undefined && target.projectId !== rowProject) continue;
+          let allSlicesMatch = true;
+          for (const slice of scope.slices) {
+            if (!target.sliceKeys.has(slice)) {
+              allSlicesMatch = false;
+              break;
+            }
+          }
+          if (!allSlicesMatch) continue;
+          let allMissionsMatch = true;
+          for (const mission of scope.missions) {
+            if (!target.missionKeys.has(mission)) {
+              allMissionsMatch = false;
+              break;
+            }
+          }
+          if (!allMissionsMatch) continue;
+          if (uniqueMatch) {
+            uniqueMatch = null;
             break;
           }
+          uniqueMatch = target;
         }
-        if (!allSlicesMatch) continue;
-        let allMissionsMatch = true;
-        for (const mission of scope.missions) {
-          if (!target.missionKeys.has(mission)) {
-            allMissionsMatch = false;
-            break;
-          }
-        }
-        if (!allMissionsMatch) continue;
-        if (uniqueMatch) {
-          uniqueMatch = null;
-          break;
-        }
-        uniqueMatch = target;
+
+        if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
+        uniqueMatch.counts[row.state as ObservedQueueState]++;
       }
-
-      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
-      uniqueMatch.counts[row.state as ObservedQueueState]++;
-    }
+    });
 
     return result;
   }
@@ -1479,7 +1482,9 @@ export class SliceIndexer {
         step = build.next(this.db.prepare(TYPED_MEMBERSHIP_SQL).iterate() as Iterable<TypedMembershipRow>);
       } else {
         const scan = this.db.prepare(step.value.tagsColumnPresent ? FALLBACK_MEMBERSHIP_SQL : FALLBACK_BODY_MEMBERSHIP_SQL);
-        build.next(scan.iterate() as Iterable<FallbackMembershipRow>);
+        // The build reads the whole scan as one batch, so this labels the scan as main did. The cooperative read's
+        // windows aren't labelled: each is bounded, and a label writes two log records per call.
+        runSyncSite("slices.membership_term_scan", () => build.next(scan.iterate() as Iterable<FallbackMembershipRow>));
         step = build.next(null);
       }
     }
@@ -1545,15 +1550,17 @@ export class SliceIndexer {
     if (!tableAbsent && tagsColumnPresent) {
       const typedRows = (yield { kind: "typed" }) as Iterable<TypedMembershipRow>;
       const scanOrder = new Map<string, number>();
-      for (const r of typedRows) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
-        scanOrder.set(r.qitem_id, scanOrder.size);
-        for (const tagged of parseScopeTags(r.tags).slices) {
-          const bucket = typedBySlice.get(tagged);
-          if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
-          else if (bucket.length < 500) bucket.push(r.qitem_id);
+      runSyncSite("slices.membership_typed_scan", () => {
+        for (const r of typedRows) {
+          if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
+          scanOrder.set(r.qitem_id, scanOrder.size);
+          for (const tagged of parseScopeTags(r.tags).slices) {
+            const bucket = typedBySlice.get(tagged);
+            if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
+            else if (bucket.length < 500) bucket.push(r.qitem_id);
+          }
         }
-      }
+      });
 
       // A tag may name a slice by its frontmatter id instead of its directory
       // name. Fold such rows into that slice's bucket. The id map is read only

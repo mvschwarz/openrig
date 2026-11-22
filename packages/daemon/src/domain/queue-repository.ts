@@ -863,6 +863,13 @@ function queryLinkedSuccessor(db: Database.Database, sourceQitemId: string, targ
 /** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
 let successorScope: { db: Database.Database; covers: (source: string, target: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
 
+/** How far before its oldest seat-naming source createLinkedSuccessorLookup still reads a seat's chained rows: a clock step. */
+const SUCCESSOR_CLOCK_SLACK_MS = 24 * 3_600_000;
+/** How old a source may be for its seat targets to be read in the batch; an older one's take the per-row query. */
+const SUCCESSOR_RECENT_BOUND_MS = 7 * 24 * 3_600_000;
+/** A target that can only be a row's id: a session name always carries `@` or the legacy `r<nn>-` form. */
+const BARE_QITEM_ID = /^qitem-[^@]*$/;
+
 /** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
  *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
  *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
@@ -871,8 +878,14 @@ let successorScope: { db: Database.Database; covers: (source: string, target: st
  *  not the source itself. The index covers the targets each source's own row names (its closure_target, each
  *  comma-separated part of it, and its handed_off_to), the ones the sweep and the row's handoff advisory ask about, so the
  *  chain_of_record arm reads only successors whose id or destination is one of them, through the primary key and the
- *  destination index, instead of every row's chain. Any other source or target keeps the per-row query, so every answer is
- *  the per-row query's. For a covered source and target, a snapshot from its first has() until invalidate(): the caller
+ *  destination index, instead of every row's chain. A seat target's chained rows are read through the creation index,
+ *  only from a day before the oldest source that names a seat: no writer chains a row that didn't exist yet, though a
+ *  caller's own chainOfRecord on create can name an id before it exists. So for a covered seat target, a "yes" is the
+ *  per-row query's and a "no" is a candidate the caller confirms live before acting on it (the stuck sweep does, before
+ *  it creates or keeps a custody finding). A source more than a week old (or undated) leaves its seat targets
+ *  uncovered, so one old source can't widen that read for the rest. Any other source or target keeps the per-row query.
+ *  For a covered source and
+ *  target, a snapshot from its first has() until invalidate(): the caller
  *  invalidates it whenever other code could have run. Any other target is read as it is now. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn for a
  *  covered source and target. builtMs() is how long the build of the index as it is now took (0 while it is not built),
  *  so a caller can tell when rebuilding after each invalidate() costs more than it saves. */
@@ -892,23 +905,45 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
     const targetsOf: Index["targetsOf"] = new Map();
     const ids = JSON.stringify([...sources]);
     runSyncSite("queue.linked_successors.build", () => {
-      const named = db.prepare(`SELECT qitem_id, closure_target, handed_off_to FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))`)
-        .all(ids) as Array<{ qitem_id: string; closure_target: string | null; handed_off_to: string | null }>;
+      const named = db.prepare(`SELECT qitem_id, closure_target, handed_off_to, ts_created FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))`)
+        .all(ids) as Array<{ qitem_id: string; closure_target: string | null; handed_off_to: string | null; ts_created: string }>;
+      // A seat target's chained rows are read only from the oldest seat-naming source's creation, less a clock step:
+      // every writer stamps ts_created at insert and chains rows that already exist. A source whose targets are all row
+      // ids doesn't set that bound (the id arm reads them unbounded), and an old or undated source's seat targets are
+      // left to the per-row query, so the range read through idx_queue_items_created stays recent.
+      const recentFrom = Date.now() - SUCCESSOR_RECENT_BOUND_MS;
+      const seatTargets = new Set<string>();
+      let oldest = Infinity;
       for (const r of named) {
         const own = new Set<string>();
         for (const target of [r.closure_target, ...(r.closure_target ?? "").split(",").map((part) => part.trim()), r.handed_off_to]) if (target) own.add(target);
+        const created = Date.parse(r.ts_created);
+        for (const target of [...own]) {
+          if (BARE_QITEM_ID.test(target)) continue;
+          if (created >= recentFrom) { seatTargets.add(target); oldest = Math.min(oldest, created); } else own.delete(target);
+        }
         targetsOf.set(r.qitem_id, own);
       }
       const targets = JSON.stringify([...new Set([...targetsOf.values()].flatMap((own) => [...own]))]);
+      // INDEXED BY holds the seat arm to the creation-time range. Left to choose, the daemon's SQLite walked the whole
+      // table in primary-key order to feed the UNION's merge, and the destination index holds each seat's whole
+      // history; with the index named, a plan that can't use it fails to prepare instead of scanning.
+      const seatArm = seatTargets.size === 0 ? "" : `
+         UNION
+         SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s INDEXED BY idx_queue_items_created, json_each(s.chain_of_record) j
+          WHERE s.destination_session IN (SELECT value FROM json_each(?)) AND s.ts_created >= ?
+            AND s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
+            AND j.value IN (SELECT value FROM json_each(?))`;
       const rows = db.prepare(
         `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
           WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
          UNION
          SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
-          WHERE (s.qitem_id IN (SELECT value FROM json_each(?)) OR s.destination_session IN (SELECT value FROM json_each(?)))
+          WHERE s.qitem_id IN (SELECT value FROM json_each(?))
             AND s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
-            AND j.value IN (SELECT value FROM json_each(?))`,
-      ).all(ids, targets, targets, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+            AND j.value IN (SELECT value FROM json_each(?))${seatArm}`,
+      ).all(ids, targets, ids, ...(seatArm ? [JSON.stringify([...seatTargets]), new Date(oldest - SUCCESSOR_CLOCK_SLACK_MS).toISOString(), ids] : []),
+      ) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
       for (const r of rows) {
         const list = bySource.get(r.source);
         const entry = { qitemId: r.qitem_id, destination: r.destination_session };
@@ -4985,9 +5020,9 @@ export class QueueRepository {
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
   /** Bounded recorded relations for an opened request/result. No inference from seats, summaries or timestamps. */
   relatedTo(qitemId: string, limit = 101): Array<{ item: QueueItem; relation: "reply-to" | "handed-off-from" | "blocked-on" }> {
-    const rows = this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
+    const rows = runSyncSite("queue.related_to", () => this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
       WHERE reply_to = ? OR handed_off_from = ? OR blocked_on = ? ORDER BY rowid LIMIT ?`)
-      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>;
+      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>);
     return rows.flatMap(row => {
       const item = this.getById(row.qitem_id);
       if (!item) return [];
@@ -5231,9 +5266,9 @@ export class QueueRepository {
   /** The decisions made on a person's behalf under one mode application, oldest first: for the account when they're back. */
   delegatedDecisionsFor(applicationId: string): QueueItem[] {
     if (!this.hasDelegatedDecisionColumn) return [];
-    const rows = this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
+    const rows = runSyncSite("queue.delegated_decisions", () => this.db.prepare(`SELECT * FROM queue_items WHERE delegated_decision IS NOT NULL
         AND json_extract(delegated_decision, '$.applicationId') = ?
-      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[];
+      ORDER BY json_extract(delegated_decision, '$.decidedAt'), qitem_id`).all(applicationId) as QueueItemRow[]);
     return rows.map((row) => this.rowToItem(row));
   }
 
@@ -5503,13 +5538,13 @@ export class QueueRepository {
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(101, Math.floor(opts.limit!))) : 20;
     const receipts = `SELECT qitem_id, ts, transition_note FROM queue_transitions` +
       (detectTable(this.db, "queue_transitions_archive") ? ` UNION ALL SELECT qitem_id, ts, transition_note FROM queue_transitions_archive` : "");
-    const rows = this.db.prepare(`
+    const rows = runSyncSite("queue.delivered_human_updates", () => this.db.prepare(`
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
         AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
-    `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
+    `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>);
     return rows.map((row) => {
       const deliveryOutcome: "posted" | "accepted" = row.delivery_receipt.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)
         ? "accepted"

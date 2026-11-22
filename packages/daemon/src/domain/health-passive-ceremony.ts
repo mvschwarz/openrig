@@ -9,6 +9,7 @@ import { validateMissionComposition } from "./lifecycle-manifest.js";
 import { healthHash, type HealthPolicyStore } from "./health-policy.js";
 import type { HealthDetectorObservation, HealthObservationSource, HealthSourceCoverage } from "./health-detectors.js";
 import { isOpenRigSender } from "../lib/pane-envelope.js";
+import { runSyncSite } from "./sync-site-wrap.js";
 import { adaptQueueTransitionEvidence, boundHealthEvidence, deriveHealthSourceFreshness, healthEpisodeId, type HealthScope, type PassiveCeremony, type CeremonyProgressAssessment } from "./health-projection.js";
 
 const detector = "process.ceremony-amplification";
@@ -257,8 +258,8 @@ export class PassiveCeremonySource implements HealthObservationSource {
 
   /** Every `health-lineage:<id>` tag's rows, exact tag match, ids only (all closedBoundaries uses). */
   private readLineageRows(): Map<string, string[]> {
-    const rows = this.queue.db.prepare("SELECT qitem_id AS id, tags FROM queue_items WHERE tags LIKE '%health-lineage:%'")
-      .all() as Array<{ id: string; tags: string | null }>;
+    const rows = runSyncSite("health.lineage_rows", () => this.queue.db.prepare("SELECT qitem_id AS id, tags FROM queue_items WHERE tags LIKE '%health-lineage:%'")
+      .all() as Array<{ id: string; tags: string | null }>);
     const index = new Map<string, string[]>();
     for (const row of rows) {
       let tags: unknown;
