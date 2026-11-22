@@ -28,7 +28,7 @@ it.each(["proof", "slices"])("serves another event-loop turn during the %s proje
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sliceIndexer" as never, { isReady: () => true, slicesRoot: missions,
-      withMembershipBatch: (fn: () => unknown) => fn(), list: () => [],
+      withMembershipBatch: (fn: () => unknown) => fn(), withMembershipBatchCooperatively: async (fn: () => unknown) => fn(), list: () => [],
       observedQueueCounts: () => new Map(), missionAuthoredStatuses: () => ({}),
     } as never);
     c.set("sliceDetailProjector" as never, {} as never);
