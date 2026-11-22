@@ -1069,6 +1069,27 @@ describe("MCP Server", () => {
     expect(local.get("rig_whoami")?.annotations).toEqual({ readOnlyHint: true, title: "Show this connection" });
   });
 
+  it.each([
+    ["grant-service", "Show my network"],
+    ["file", "Show my team"],
+    ["local-authority", "Show my team"],
+  ] as const)("rig_team title follows the authenticated %s principal source", async (principalSource, title) => {
+    const server = createMcpServer(mockClient(), { seat: "participant@team", principalSource,
+      access: { principal: "opaque-principal", owner: false, rigs: ["team"], roots: [], workspace: false,
+        external: { objects: { team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "source-title-control", version: "1" });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const tool = (await client.listTools()).tools.find(tool => tool.name === "rig_team");
+      expect(tool?.title).toBe(title);
+      expect(tool?.annotations?.title).toBe(title);
+      expect(tool?.annotations?.readOnlyHint).toBe(true);
+      expect(tool?.description).toContain(principalSource === "grant-service" ? "on your network" : "on your team");
+    } finally { await client.close(); await server.close(); }
+  });
+
   it("rig_down calls POST /api/down with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,

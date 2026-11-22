@@ -1093,7 +1093,7 @@ export function mintUnknownSender(): string {
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; principalSource?: string; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
   /** HTTP disconnect/legacy cancellation, combined with the SDK's per-call cancellation for bounded reads. */
   requestSignal?: AbortSignal;
   /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
@@ -1214,7 +1214,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const worded = (tool: string, description: string, annotations: ToolAnnotations): { title?: string; description: string; annotations: ToolAnnotations } => {
     const plain = PLAIN_WORDING[tool];
     if (!plain || !(access?.external || tool === "rig_whoami") || !description.startsWith(plain.replaces)) return { description, annotations };
-    return { title: plain.title, description: plain.with + description.slice(plain.replaces.length), annotations: { ...annotations, title: plain.title } };
+    const network = tool === "rig_team" && options.principalSource === "grant-service";
+    const title = network ? "Show my network" : plain.title;
+    const opening = network ? plain.with.replace("on your team", "on your network") : plain.with;
+    return { title, description: opening + description.slice(plain.replaces.length), annotations: { ...annotations, title } };
   };
   const caller = access ? { authenticated: true, principal: access.principal } : { authenticated: false, identity: "declared" };
   /** For an authenticated non-owner: the error for an item it can't reach (or can't read), else null. `owner` asks

@@ -151,13 +151,15 @@ It's context only: nothing escalates or routes to a declared lead. A value that 
 
 The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
 rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
-external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the
+external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. A version 1 roster may
+omit `name` or set it to `""`; then `rig.displayName` is omitted, without a name warning or a stand-in name. Other roster
+validation is unchanged. Older daemons still require a non-empty name. A non-empty name follows the
 label rule; one that breaks it isn't shown, and
 `rig.displayNameProblem` says why. When an external caller's default list of its own open items is empty,
 `rig_queue_list` adds a line its assistant can repeat, such as
 `No open requests are addressed to you on the team "Sam's team".` (a list of every state says `No requests …`).
-If the owner hasn't named the team, the name is `Your OpenRig team`, and the line says `on your OpenRig team`. Without
-that roster, or with a name that can't be shown, there's no display name, and the line says `on your OpenRig team`.
+Without an authored team name, or with a name that can't be shown, there's no display name, and the line says
+`on your OpenRig team`.
 
 Labels, names and caveats are as the roster's writer last authored them, not live observations. Presence is OpenRig's
 own reading. When some rosters can't be read, or this daemon's host id isn't known yet, `rig_team` says so in

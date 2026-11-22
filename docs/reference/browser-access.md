@@ -14,8 +14,7 @@ comes from a web page, only when that page is the OpenRig UI or a page you allow
 - The web UI, when it is turned on (`rig config set ui.enabled true`, then restart the daemon) and
   opened over `http` on the daemon's own port at any address the daemon accepts, including its
   Tailscale name. A UI page served any other way, such as over `https` through your own domain,
-  also needs its exact origin in `OPENRIG_ALLOWED_ORIGINS`, then a daemon restart. A daemon with a bearer token set
-  also needs the token given to the UI once; see "Bearer tokens" in [daemon HTTP clients](daemon-http-clients.md).
+  also needs its exact origin in `OPENRIG_ALLOWED_ORIGINS`, then a daemon restart.
 
 ### When you see a refusal
 

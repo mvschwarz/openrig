@@ -242,6 +242,16 @@ LIFECYCLE); see the
   live seat passes its check, and `rig seat clear-attention <seat>` runs that check on
   demand; `rig seat continue` doesn't change it
   ([startup guide](agent-startup-guide.md#after-a-restored-seats-prompt)).
+- **Stop request:** `stopRequested: true` in node inventory is a `rig seat stop` or `rig down`
+  that was recorded and isn't confirmed yet, for example after a timeout or a partial kill. The
+  seat isn't reported as exited until it's confirmed, and observing the session doesn't clear
+  the request ([checked seat stop](checked-seat-stop.md#the-stop-request)).
+- **Keep-alive:** `keepAlive: true` marks a seat that declares `keep_alive`, and
+  `keepAliveIncident` (`attempts`, `exhausted`, `lastError`, `lastAttemptAt`) its current
+  recovery after a fall. An exhausted incident makes the seat's lifecycle `attention_required`
+  while it isn't running, so it raises `needsAttention` until someone starts or stops it (a stop
+  request, pending or confirmed, ends that at once, and the daemon's next check ends the incident)
+  ([keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive)).
 
 ## Rejected oracles — dated receipts (2026-08-26), so nobody re-derives them expensively
 

@@ -418,8 +418,12 @@ export class SeatDeliveryGuard {
   /** Multi-seat restore takes leases in stable order before any rig mutation.
    * Nested per-seat launch joins these leases; it must not reacquire them.
    * `custodyIds` are seats the operation only records (metadata, never input): they get a custody lease in the same sorted
-   * pass, so a paused or draft-aware seat isn't refused and its mode, draft and binding stay as they are. */
-  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>, custodyIds: readonly string[] = []): Promise<T> {
+   * pass, so a paused or draft-aware seat isn't refused and its mode, draft and binding stay as they are.
+   * `draftChecked`: managed compaction's writes (preparation, /compact, restore) go to a live seat through draft-aware's
+   * own write checks, so a draft-aware seat isn't refused for being active; a draft or an unreadable input still holds each
+   * write. Launch, snapshot restore and runtime switch don't pass it and keep the refusal. */
+  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>, custodyIds: readonly string[] = [],
+    { draftChecked = false }: { draftChecked?: boolean } = {}): Promise<T> {
     const writing = new Set(nodeIds);
     const ids = [...new Set([...nodeIds, ...custodyIds])].sort();
     const acquire = async (index: number): Promise<T> => {
@@ -428,7 +432,7 @@ export class SeatDeliveryGuard {
       if (this.ownsLifecycle(id)) return acquire(index + 1);
       return this.leased(id, async () => {
         const lease = this.scope.getStore()!.get(id)!;
-        if (lease.config?.mode === "draft-aware" && !lease.queueOnlyLifecycle) {
+        if (lease.config?.mode === "draft-aware" && !lease.queueOnlyLifecycle && !draftChecked) {
           // Only a positively absent input may receive fresh startup/resume writes.
           // An active protected seat requires an explicit guard mode change first.
           const absent = !lease.target.pane || await this.inputAbsent?.(lease.target) === true;
