@@ -40,10 +40,12 @@ function fixture(deps: { resolve?: unknown; fetchImpl?: typeof fetch; brokenBus?
   app.route("/api/events", eventsRoute);
   const post = (path: string, body: unknown) => app.request(path, { method: "POST",
     headers: { "Content-Type": "application/json", "X-OpenRig-Session": "sender@src-rig" }, body: JSON.stringify(body) });
+  const postAnonymous = (path: string, body: unknown) => app.request(path, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const events = (type: string) => (db.prepare("SELECT payload FROM events WHERE type = ? ORDER BY seq").all(type) as Array<{ payload: string }>)
     .map((row) => JSON.parse(row.payload) as Record<string, unknown>);
   const rows = () => (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n;
-  return { db, bus, outbox, post, events, rows, app };
+  return { db, bus, outbox, post, postAnonymous, events, rows, app };
 }
 
 describe("#3728 (1) a refusal the daemon sees leaves one event, and the response is unchanged", () => {
@@ -62,6 +64,13 @@ describe("#3728 (1) a refusal the daemon sees leaves one event, and the response
     const res = await f.post("/api/queue/create", { destinationSession: "dev@dst-rig", body: "x", returnRoute: "not an address" });
     expect(res.status).toBe(400);
     expect(f.events("queue.create_refused")).toMatchObject([{ reason: "invalid_return_route", status: 400, destinationSession: "dev@dst-rig" }]);
+  });
+
+  it("a create with no sender header records the actor it resolved from the body claim", async () => {
+    const f = fixture();
+    const res = await f.postAnonymous("/api/queue/create", { sourceSession: "claimed@src-rig", destinationSession: "dev@dst-rig" });
+    expect(res.status).toBe(400);
+    expect(f.events("queue.create_refused")).toMatchObject([{ sourceSession: "claimed@src-rig", reason: "body is required" }]);
   });
 
   it("a queue create naming an unregistered host is a refusal that names the host", async () => {
@@ -102,6 +111,14 @@ describe("#3728 (1) a refusal the daemon sees leaves one event, and the response
     expect(PRUNABLE_EVENT_TYPES).toEqual(expect.arrayContaining(["queue.create_refused", "queue.create_remote_unknown", "transport.send_refused"]));
   });
 
+  it("a send whose outbox record cannot be written is still recorded as a refusal", async () => {
+    const f = fixture({ advisory: { code: "destination_status", status: "missing", destinationSession: "ghost@nowhere", availableDestinations: [], message: "No live seat." } });
+    vi.spyOn(f.outbox, "record").mockImplementation(() => { throw new Error("disk full"); });
+    const res = await f.post("/api/transport/send", { session: "ghost@nowhere", text: "keep this" });
+    expect(res.status).toBe(503);
+    expect(f.events("transport.send_refused")).toMatchObject([{ session: "ghost@nowhere", reason: "destination_not_found_unrecorded", status: 503 }]);
+  });
+
   it("an event log that cannot be written does not change the refusal", async () => {
     const f = fixture({ brokenBus: true });
     const res = await f.post("/api/queue/create", { destinationSession: "dev@dst-rig" });
@@ -137,6 +154,21 @@ describe("#3728 (3) a forwarded write whose result is unknown is its own event, 
     expect(f.events("queue.create_remote_unknown")).toEqual([{ type: "queue.create_remote_unknown", qitemId: "qitem-remote-1",
       sourceSession: "sender@src-rig", destinationSession: "dev@dst-rig", hostId: "vps-b", failureClass: "unreachable" }]);
     expect(f.events("queue.create_refused")).toEqual([]);
+  });
+
+  it("a timed-out forward with no qitemId records the id the daemon minted, the one it forwarded", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const forwarded: string[] = [];
+    const hung = ((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      forwarded.push((JSON.parse(init.body as string) as { qitemId: string }).qitemId);
+      init.signal!.addEventListener("abort", () => reject(new Error("aborted")));
+    })) as unknown as typeof fetch;
+    const f = fixture({ fetchImpl: hung });
+    const pending = f.post("/api/queue/create", { destinationSession: "dev@dst-rig", body: "x", hostId: "vps-b" });
+    await vi.advanceTimersByTimeAsync(10_001);
+    await pending;
+    expect(forwarded).toHaveLength(1);
+    expect(f.events("queue.create_remote_unknown")).toMatchObject([{ qitemId: forwarded[0] }]);
   });
 
   it("a forward the remote host itself refused is a refusal, with the host named", async () => {

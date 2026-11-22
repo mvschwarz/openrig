@@ -153,6 +153,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
             sessionName: body.session, destinationStatus, outboxIds: [recordId],
             warning: "Message recorded in the sender outbox, not delivered. No forwarding or automatic reassignment was performed." });
         } catch {
+          // Nothing was kept, so the refusal itself is what the log keeps (#3728).
+          recordRefusal(c.get("eventBus" as never) as EventBus | undefined, { type: "transport.send_refused", senderSession: derivedActor,
+            session: body.session, reason: "destination_not_found_unrecorded", status: 503 });
           return c.json({ ok: false, outcome: "unconfirmed", sent: false, persisted: null, destinationStatus,
             ...(recordId ? { outboxIds: [recordId] } : {}), error: "Message-record storage is unconfirmed; no delivery was attempted." }, 503);
         }
