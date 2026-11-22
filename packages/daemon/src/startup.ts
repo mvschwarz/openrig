@@ -2595,6 +2595,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
       return since == null ? null : new Date(since).toISOString();
     });
+    // #3508's one usage-limit reader: the watchdog's parked-row wakes and every send's record use it alike.
+    const readUsageLimitState = (session: string) => readWatchdogUsageLimitState({ db, activity: agentActivityStore,
+      structuralActivity: name => seatStructuralActivityService.getStructuralActivity(name) }, session);
+    sessionTransport.setUsageLimitObserver(readUsageLimitState);
     // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
@@ -2612,8 +2616,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       deliver: makeWatchdogDeliver({
         sessionTransport,
         outbox: outboxHandlerInstance,
-        readUsageLimitState: session => readWatchdogUsageLimitState({ db, activity: agentActivityStore,
-          structuralActivity: name => seatStructuralActivityService.getStructuralActivity(name) }, session),
+        readUsageLimitState,
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),

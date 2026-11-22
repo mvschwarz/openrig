@@ -139,6 +139,8 @@ export interface Session {
 export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+/** A seat's current usage-limit reading: when OpenRig recorded it, and the reset it states. */
+export type UsageLimitReading = { asOf: string; resetsAt: string };
 
 /** Facts a runner reports about its own process; launch authentication is not independent native verification. */
 export interface RunnerObservations {
@@ -250,7 +252,10 @@ export type RigEvent =
       /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
        *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
        *  named by `transport.hook_bridge_fallback` instead. */
-      hookBridgeUnavailable?: string }
+      hookBridgeUnavailable?: string;
+      /** The seat's current usage-limit reading when the send started, for a send whose text reached the input: its
+       *  agent isn't expected to read the text before the stated reset. */
+      usageLimit?: UsageLimitReading }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
@@ -611,6 +616,15 @@ export interface RestoreResult {
   excludedNodes?: RestoreExcludedNode[];
   /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
   harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
+  /** Seats this restore left stopped on purpose, outside `nodes` so they don't count in `rigResult`: a seat pool agent
+   *  the pool drained (#3395) stays down until the pool brings it back. Present only when there is one. */
+  keptDown?: RestoreKeptDownNode[];
+}
+
+export interface RestoreKeptDownNode {
+  nodeId: string;
+  logicalId: string;
+  reason: "drained pool agent, not started";
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";

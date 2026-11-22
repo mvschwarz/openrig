@@ -80,9 +80,12 @@ it("reads a newer hook clear or existing cached positive activity; an unreadable
   expect(readWatchdogUsageLimitState({ db: f.db, activity: { getLatestForNode: () => { throw new Error("read failed"); } } }, seat)).toBeNull();
 });
 
-it("wires the daemon's real activity store and cached seat activity into watchdog delivery", () => {
+it("wires the daemon's real activity store and cached seat activity into watchdog delivery and every send's record", () => {
   const src = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
-  expect(src).toMatch(/deliver:\s*makeWatchdogDeliver\(\{[\s\S]*?readUsageLimitState:\s*session => readWatchdogUsageLimitState\(\{ db, activity: agentActivityStore,\s*structuralActivity: name => seatStructuralActivityService.getStructuralActivity\(name\)/);
+  // One reader for both: the parked-row wake and the transport's usage-limit record on a send.
+  expect(src).toMatch(/const readUsageLimitState = \(session: string\) => readWatchdogUsageLimitState\(\{ db, activity: agentActivityStore,\s*structuralActivity: name => seatStructuralActivityService.getStructuralActivity\(name\) \}, session\);/);
+  expect(src).toMatch(/sessionTransport\.setUsageLimitObserver\(readUsageLimitState\);/);
+  expect(src).toMatch(/deliver:\s*makeWatchdogDeliver\(\{[\s\S]*?\breadUsageLimitState,/);
 });
 
 it.each([1, 301])("a cached idle/redraw frame does not clear the retained limit after %s seconds", seconds => {

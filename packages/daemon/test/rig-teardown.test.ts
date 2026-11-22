@@ -588,14 +588,30 @@ describe("RigTeardownOrchestrator", () => {
   });
 
   // T10: rig.stopped event
-  it("rig.stopped event emitted", async () => {
-    const { rigId } = seedRig();
-    const td = buildTeardown();
+  it("`rig down` persists `rig.stopped` while it still holds the lifecycle lease of every node (the existing assertion, extended).", async () => {
+    const { rigId, nodeId } = seedRig();
+    const other = rigRepo.addNode(rigId, "qa");
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(other.id, "r01-qa").id, "running");
+    const tmux = mockTmux();
+    const guard = new SeatDeliveryGuard(db, (target) => resolveGuardTarget(db, target));
+    guard.recoverActivation();
+    tmux.deliveryGuard = guard;
+    // When rig.stopped reaches subscribers, which nodes' lifecycle leases the down still holds, and whether it's stored.
+    const atStopped: Array<{ leases: boolean[]; stored: number }> = [];
+    eventBus.subscribe((event) => {
+      if (event.type !== "rig.stopped") return;
+      atStopped.push({
+        leases: [nodeId, other.id].map((id) => guard.ownsLifecycle(id)),
+        stored: (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'rig.stopped' AND seq = ?").get(event.seq) as { n: number }).n,
+      });
+    });
+    const td = buildTeardown(tmux);
 
     await td.teardown(rigId);
 
     const events = db.prepare("SELECT type FROM events WHERE type = 'rig.stopped'").all() as Array<{ type: string }>;
     expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(atStopped).toEqual([{ leases: [true, true], stored: 1 }]);
   });
 
   // T11: Multi-session node — only newest killed
