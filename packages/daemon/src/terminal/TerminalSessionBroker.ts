@@ -44,6 +44,9 @@ export const CANONICAL_ROWS = 27;
 export interface TerminalSubscriber {
   send(data: string): void;
   close(code: number, reason: string): void;
+  /** Present only for a viewer that asked for the pane's size: told the columns and rows when it joins and whenever
+   *  they change. It is told, never asked (FR-7). */
+  geometry?(cols: number, rows: number): void;
 }
 
 /**
@@ -169,6 +172,9 @@ export class TerminalSessionBroker {
   // the pane (capture-pane), so every viewer scrolls independently and nobody else's
   // live view is disturbed (multi-subscriber-safe scrollback - vs pane-global copy-mode).
   private readonly scrollOffsets = new Map<TerminalSubscriber, number>();
+  // The pane size each opted-in subscriber was last told ("<cols>x<rows>"), so a size is sent only when it changes.
+  private readonly sentGeometry = new Map<TerminalSubscriber, string>();
+  private geometryReadInFlight = false;
   // Broker-owned recent-output ring (AC-5): raw fanned-out bytes, bounded,
   // replayed to late subscribers so their scrollback matches the earlier ones.
   private history: string[] = [];
@@ -294,6 +300,7 @@ export class TerminalSessionBroker {
 
   /** Close a subscriber that resumed after teardown, with the remembered reason. */
   private closeTorndown(sub: TerminalSubscriber): void {
+    this.sentGeometry.delete(sub);
     const c = this.lastClose ?? { code: 1011, reason: "terminal broker unavailable" };
     try {
       sub.close(c.code, c.reason);
@@ -374,6 +381,7 @@ export class TerminalSessionBroker {
     let cursor: TmuxCursorPosition | null = null;
     try { snapshot = await this.tmux.capturePaneScreen(this.sessionName, { escapeSequences: true }); } catch { snapshot = null; }
     try { cursor = await this.tmux.getPaneCursorPosition(this.sessionName); } catch { cursor = null; }
+    this.sendGeometry(sub, cursor);
     if (snapshot !== null) {
       try { sub.send(screenSnapshotEscape(snapshot, cursor)); } catch { /* dead */ }
     }
@@ -386,6 +394,7 @@ export class TerminalSessionBroker {
   detach(sub: TerminalSubscriber): void {
     if (!this.subscribers.delete(sub)) return;
     this.scrollOffsets.delete(sub);
+    this.sentGeometry.delete(sub);
     if (this.subscribers.size === 0) {
       void this.teardown();
     }
@@ -468,6 +477,12 @@ export class TerminalSessionBroker {
   }
 
   private async seed(sub: TerminalSubscriber): Promise<void> {
+    // A viewer that asked for the pane's size is told it before any output, so it sizes its grid before it paints.
+    if (sub.geometry) {
+      let size: TmuxCursorPosition | null = null;
+      try { size = await this.tmux.getPaneCursorPosition(this.sessionName); } catch { size = null; }
+      this.sendGeometry(sub, size);
+    }
     // AC-5: replay the broker-owned recent-output ring FIRST so the late
     // subscriber's xterm builds the same scrollback the earlier subscribers
     // have for plain terminal streams. Cursor-addressed TUI repaint history is
@@ -493,6 +508,7 @@ export class TerminalSessionBroker {
     } catch {
       cursor = null;
     }
+    this.sendGeometry(sub, cursor);
     if (snapshot != null) {
       try {
         sub.send(screenSnapshotEscape(snapshot, cursor));
@@ -570,11 +586,32 @@ export class TerminalSessionBroker {
         .hasSession(this.sessionName)
         .then((alive) => {
           if (!alive) void this.handleSessionDeath();
+          else void this.refreshGeometry();
         })
         .catch(() => {
           void this.handleSessionDeath();
         });
     }, this.livenessMs);
+  }
+
+  /** On the liveness tick: read the pane's size once and tell each opted-in subscriber whose size changed. */
+  private async refreshGeometry(): Promise<void> {
+    if (this.geometryReadInFlight || ![...this.subscribers].some((sub) => sub.geometry)) return;
+    this.geometryReadInFlight = true;
+    let size: TmuxCursorPosition | null = null;
+    try { size = await this.tmux.getPaneCursorPosition(this.sessionName); } catch { size = null; } finally { this.geometryReadInFlight = false; }
+    if (this.torndown) return;
+    for (const sub of this.subscribers) this.sendGeometry(sub, size);
+  }
+
+  /** Tell one opted-in subscriber the pane's size when it differs from what it was last told. An unreadable size sends
+   *  nothing, and the viewer keeps working without it. */
+  private sendGeometry(sub: TerminalSubscriber, size: TmuxCursorPosition | null): void {
+    if (!sub.geometry || !size) return;
+    const key = `${size.width}x${size.height}`;
+    if (this.sentGeometry.get(sub) === key) return;
+    this.sentGeometry.set(sub, key);
+    try { sub.geometry(size.width, size.height); } catch { /* dead subscriber */ }
   }
 
   /** FR-5: a dead session closes ALL subscribers honestly - never silent stale-live. */
@@ -649,6 +686,7 @@ export class TerminalSessionBroker {
     }
     this.lastSize = 0;
     this.outputDecoder = new StringDecoder("utf8");
+    this.sentGeometry.clear();
     // Clear the history ring so a torn-down broker leaks no retained output.
     this.history = [];
     this.historyBytes = 0;
