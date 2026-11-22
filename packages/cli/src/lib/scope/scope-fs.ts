@@ -38,7 +38,7 @@ export function splitFrontmatter(content: string): {
   const opening = /^---[ \t]*\r?\n/.exec(content);
   if (!opening) return { frontmatter: {}, body: content };
   const rest = content.slice(opening[0].length);
-  const closing = /^---[ \t]*(?:\r?\n|(?![\s\S]))/m.exec(rest);
+  const closing = /(?<=^|\n)---[ \t]*(?:\r?\n|(?![\s\S]))/.exec(rest);
   if (!closing) return { frontmatter: {}, body: content };
   return {
     frontmatter: parseYamlSafely(rest.slice(0, closing.index)),
@@ -152,19 +152,22 @@ export function updateFrontmatter(
 }
 
 export function editFrontmatter(original: string, updates: Record<string, unknown>, absPath: string, strict = false): string {
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
-  if (!match) {
-    if (strict && /^---[ \t]*\r?\n/.test(original)) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
+  const opening = /^---[ \t]*\r?\n/.exec(original);
+  const rest = original.slice(opening?.[0].length ?? 0);
+  const closing = opening && /(?<=^|\n)---[ \t]*(?=\r?\n|(?![\s\S]))/.exec(rest);
+  if (!opening || !closing) {
+    if (strict && opening) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
     const newline = original.includes("\r\n") ? "\r\n" : "\n";
     const separator = original.startsWith(newline) ? "" : newline;
     return `---${newline}${yaml}${newline}---${newline}${separator}${original}`;
   }
 
-  const originalBlock = match[1]!;
-  const blockStart = original.indexOf("\n") + 1;
+  const capturedBlock = rest.slice(0, closing.index);
+  const originalBlock = capturedBlock.replace(/\r?\n$/, "");
+  const blockStart = opening[0].length;
   const blockEnd = blockStart + originalBlock.length;
-  const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
+  const newline = (capturedBlock || opening[0]).endsWith("\r\n") ? "\r\n" : "\n";
   let block: string;
   try {
     block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
@@ -174,10 +177,10 @@ export function editFrontmatter(original: string, updates: Record<string, unknow
     console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
     // Start again from the original block, including when a splice removed a used anchor.
     block = updateFrontmatterLines(originalBlock, updates);
-    const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
-    return updated;
+    return `---\n${block}\n---` + rest.slice(closing.index + closing[0].length);
   }
-  return original.slice(0, blockStart) + block + original.slice(blockEnd);
+  const separator = capturedBlock === "" && block !== "" ? newline : "";
+  return original.slice(0, blockStart) + block + separator + original.slice(blockEnd);
 }
 
 /** Keep main's line-based update for YAML that cannot use source-range splicing. */

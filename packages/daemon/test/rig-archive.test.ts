@@ -16,6 +16,8 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
+import { Hono } from "hono";
+import { psRoutes } from "../src/routes/ps.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
@@ -161,6 +163,24 @@ describe("rig archive affordance (OPR.0.3.3.19)", () => {
       expect(only.map((e) => e.rigId)).toEqual([archived]);
       expect(only[0]!.isArchived).toBe(true);
       expect(only[0]!.archivedAt).not.toBeNull();
+    });
+
+    it("counts archived rigs from the archived_at index, and /api/ps sends that count beside its unchanged list (#3636)", async () => {
+      const active = rigRepo.createRig("active").id;
+      for (const name of ["old-1", "old-2"]) rigRepo.archiveRig(rigRepo.createRig(name).id);
+      const ps = new PsProjectionService({ db });
+      expect(ps.countArchivedRigs()).toBe(2);
+      // The daemon's own engine plans it on the index, not a scan of rigs.
+      const plan = (db.prepare("EXPLAIN QUERY PLAN SELECT COUNT(*) AS n FROM rigs WHERE archived_at IS NOT NULL").all() as Array<{ detail: string }>)
+        .map((row) => row.detail).join(" ");
+      expect(plan).toContain("idx_rigs_archived");
+
+      const app = new Hono();
+      app.use("*", async (c, next) => { c.set("psProjectionService" as never, ps as never); await next(); });
+      app.route("/api/ps", psRoutes);
+      const res = await app.request("/api/ps");
+      expect(res.headers.get("x-openrig-archived-count")).toBe("2");
+      expect((await res.json() as Array<{ rigId: string }>).map((entry) => entry.rigId)).toEqual([active]);
     });
   });
 

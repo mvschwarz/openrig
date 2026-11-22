@@ -125,6 +125,31 @@ describe("cooperative candidate reads", () => {
     expect(after.rows.slice(-2)).toEqual([{ id: 500, v: "changed" }, { id: 501, v: "new" }]);
   });
 
+  it("hands each window's rows to onWindow in rowid order and keeps none; a throw from it ends the read and closes the reader", async () => {
+    const { file } = walTable(500);
+    const loop = turns(), reader = recordingOpen(), windows: number[][] = [];
+    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], reader.open, 64, {
+      targetMs: Infinity,
+      onWindow: (rows) => { windows.push(rows.map((r) => r.id)); },
+    });
+    loop.stop();
+    expect(read.rows).toEqual([]);
+    expect(read.windows).toBe(8);
+    expect(windows).toHaveLength(8);
+    expect(windows.flat()).toEqual(Array.from({ length: 500 }, (_, i) => i + 1));
+    expect(loop.count()).toBeGreaterThan(1);
+
+    const failing = recordingOpen();
+    let seen = 0;
+    const thrown = readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], failing.open, 64, {
+      targetMs: Infinity,
+      onWindow: (rows) => { seen += rows.length; if (seen > 128) throw new Error("consumer fault"); },
+    });
+    await expect(thrown).rejects.toThrow("consumer fault");
+    expect(seen).toBe(192);
+    expect(failing.readers.map((db) => [db.open, db.inTransaction])).toEqual([[false, false]]);
+  });
+
   it("rethrows a native error raised in a later window, returns nothing, and leaves no reader pinning the WAL", async () => {
     const { file, db } = walTable(500, 300);
     const reader = recordingOpen();

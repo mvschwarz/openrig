@@ -225,7 +225,8 @@ export function startWakeLadderScheduler(deps: {
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">
     & Partial<Pick<import("./domain/seat-activity-service.js").SeatActivityService, "codexPermissionState">>;
-  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">
+    & Partial<Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "findPermissionPromptStart">>;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   gatewaySubsystem?: { status?: () => { state?: unknown }; dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
@@ -256,7 +257,9 @@ export function startWakeLadderScheduler(deps: {
       readPermissionPrompts: makePermissionPromptReader({ db,
         getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
           order: runtime === "claude-code" ? "source" : "arrival" }),
+        getPromptStart: (sessionName, generation) => deps.agentActivityStore?.findPermissionPromptStart?.({ sessionName, generation }),
         getCodexPermissionState: (nodeId, raisedAt) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt),
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
       }),
       readPromptState: makePromptStateReader({
         db,
@@ -426,6 +429,8 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        // #2940: keep_alive seats are watched from here on; boot-time recovery stays with the kernel boot in createDaemon.
+        deps.keepAliveSupervisor?.start();
         deps.networkConnector?.start();
         deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
@@ -485,7 +490,10 @@ export async function startServer(port?: number) {
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
-      // First, while transport still works: let the delivery in flight finish; the rest wait for the next start.
+      // First, so no keep_alive relaunch starts while the daemon goes down; a tick in flight gets a short bounded wait.
+      // Nothing is written to sessions: seats that survive stay as they are.
+      ["keep-alive", () => deps.keepAliveSupervisor?.stop()],
+      // While transport still works: let the delivery in flight finish; the rest wait for the next start.
       ["wake-recovery", () => wakeRecovery.stop()],
       ["terminal-following", () => deps.terminalService?.stop()],
       ["rex-status", () => deps.rexStatusRelay?.stop()],

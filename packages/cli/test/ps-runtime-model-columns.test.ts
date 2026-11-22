@@ -115,3 +115,16 @@ it("r2: keeps explicit UNKNOWN reasons compact without fabricating an observed m
   const [row] = compactNodeProjection([{ sessionStatus: "running", modelObservation: { status: "unknown", model: null, source: null, observedAt: null, generation: "current", reason: "model-record-unavailable" } }] as never);
   expect(row?.modelObservation).toEqual({ status: "unknown", reason: "model-record-unavailable" });
 });
+
+it("#3513: keeps a served Remote Control observation in the compact read and leaves it out when none applies", () => {
+  const observation = { sessionId: "session_01AbCdEf", observedAt: "2026-11-19T01:00:00.000Z" };
+  const absent = { sessionId: null, observedAt: "2026-11-19T01:10:00.000Z" };
+  const [seen, gone, none, missing] = compactNodeProjection([
+    { sessionStatus: "running", remoteControl: observation }, { sessionStatus: "running", remoteControl: absent },
+    { sessionStatus: "running", remoteControl: null }, { sessionStatus: "running" },
+  ] as never);
+  expect(seen?.remoteControl).toEqual(observation);
+  expect(gone?.remoteControl).toEqual(absent);
+  expect(none).not.toHaveProperty("remoteControl");
+  expect(missing).not.toHaveProperty("remoteControl");
+});

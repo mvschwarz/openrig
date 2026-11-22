@@ -2230,7 +2230,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.nodes[0]?.status).toBe("attention_required");
-    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch" });
+    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId))
+      .toEqual({ verdict: failure === "process-error" ? "tmux_unavailable" : "mismatch" });
     expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
@@ -2420,7 +2421,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it.each([null, "node"])(
-    "keeps a native resume partial when the joined pane command is ambiguous (%s)",
+    "keeps a native resume partial when the joined pane does not prove identity (%s)",
     async (command) => {
       const snap = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -2436,10 +2437,18 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       expect(result.result.rigResult).toBe("partially_restored");
       expect(result.result.nodes[0]!.status).toBe("attention_required");
-      expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
-      expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
-      expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
-        .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+      expect(result.result.nodes[0]!.error).toContain("no replacement was started");
+      const verdict = db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
+        .get(result.result.nodes[0]!.nodeId);
+      if (command === null) {
+        expect(result.result.nodes[0]!.error).toContain("foreground command of tmux pane");
+        expect(result.result.nodes[0]!.error).toContain("could not be read");
+        expect(verdict).toEqual({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+      } else {
+        expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
+        expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
+        expect(verdict).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+      }
     },
   );
 
