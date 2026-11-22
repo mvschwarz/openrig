@@ -20,6 +20,7 @@ import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
 import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { runSyncSite } from "../sync-site-wrap.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
 
@@ -785,46 +786,48 @@ export class SliceIndexer {
     }
 
     const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
-    for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
-      if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
-      const scope = parseTypedQueueScope(row.tags);
-      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
-      const taggedProject = scope.projects.values().next().value;
-      // A former id a catalogued project declares counts as that project (#3261).
-      const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
-      const firstSlice = scope.slices.values().next().value!;
-      const candidates = targetsBySliceToken.get(firstSlice);
-      if (!candidates) continue;
+    runSyncSite("slices.queue_counts_scan", () => {
+      for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+        if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
+        const scope = parseTypedQueueScope(row.tags);
+        if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
+        const taggedProject = scope.projects.values().next().value;
+        // A former id a catalogued project declares counts as that project (#3261).
+        const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
+        const firstSlice = scope.slices.values().next().value!;
+        const candidates = targetsBySliceToken.get(firstSlice);
+        if (!candidates) continue;
 
-      let uniqueMatch: TargetScope | null = null;
-      for (const target of candidates) {
-        if (rowProject !== undefined && target.projectId !== rowProject) continue;
-        let allSlicesMatch = true;
-        for (const slice of scope.slices) {
-          if (!target.sliceKeys.has(slice)) {
-            allSlicesMatch = false;
+        let uniqueMatch: TargetScope | null = null;
+        for (const target of candidates) {
+          if (rowProject !== undefined && target.projectId !== rowProject) continue;
+          let allSlicesMatch = true;
+          for (const slice of scope.slices) {
+            if (!target.sliceKeys.has(slice)) {
+              allSlicesMatch = false;
+              break;
+            }
+          }
+          if (!allSlicesMatch) continue;
+          let allMissionsMatch = true;
+          for (const mission of scope.missions) {
+            if (!target.missionKeys.has(mission)) {
+              allMissionsMatch = false;
+              break;
+            }
+          }
+          if (!allMissionsMatch) continue;
+          if (uniqueMatch) {
+            uniqueMatch = null;
             break;
           }
+          uniqueMatch = target;
         }
-        if (!allSlicesMatch) continue;
-        let allMissionsMatch = true;
-        for (const mission of scope.missions) {
-          if (!target.missionKeys.has(mission)) {
-            allMissionsMatch = false;
-            break;
-          }
-        }
-        if (!allMissionsMatch) continue;
-        if (uniqueMatch) {
-          uniqueMatch = null;
-          break;
-        }
-        uniqueMatch = target;
+
+        if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
+        uniqueMatch.counts[row.state as ObservedQueueState]++;
       }
-
-      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
-      uniqueMatch.counts[row.state as ObservedQueueState]++;
-    }
+    });
 
     return result;
   }
@@ -1421,15 +1424,17 @@ export class SliceIndexer {
         `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`,
       );
       const scanOrder = new Map<string, number>();
-      for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
-        scanOrder.set(r.qitem_id, scanOrder.size);
-        for (const tagged of parseScopeTags(r.tags).slices) {
-          const bucket = typedBySlice.get(tagged);
-          if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
-          else if (bucket.length < 500) bucket.push(r.qitem_id);
+      runSyncSite("slices.membership_typed_scan", () => {
+        for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
+          if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
+          scanOrder.set(r.qitem_id, scanOrder.size);
+          for (const tagged of parseScopeTags(r.tags).slices) {
+            const bucket = typedBySlice.get(tagged);
+            if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
+            else if (bucket.length < 500) bucket.push(r.qitem_id);
+          }
         }
-      }
+      });
 
       // A tag may name a slice by its frontmatter id instead of its directory
       // name. Fold such rows into that slice's bucket. The id map is read only
@@ -1525,45 +1530,47 @@ export class SliceIndexer {
         ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
         : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
       let stamp = 0;
-      for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
-        if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
-        // A non-TEXT value (a BLOB) failed the build here before this matcher:
-        // asciiFold/sqliteVisiblePrefix threw on it. The literal pass reads
-        // code units and would skip it silently, so fail it the same way.
-        if (typeof r.body !== "string" || (r.tags != null && typeof r.tags !== "string")) {
-          throw new TypeError(`queue_items row ${r.qitem_id}: body and tags must be TEXT`);
-        }
-        // Stamps tell this row's marks from earlier rows' without clearing;
-        // restart them before the Uint32 wraps.
-        if (stamp === 0xffffffff) {
-          literalMarks.fill(0);
-          stamp = 0;
-        }
-        stamp++;
-        // Both haystacks are scanned (no short-circuit) so every literal hit is marked.
-        const bodyHit = literal !== null && literal.scan(r.body, literalMarks, stamp);
-        const tagsHit = literal !== null && r.tags != null && literal.scan(r.tags, literalMarks, stamp);
-        let hayBody: string | null = null;
-        let hayTags: string | null = null;
-        let patternHit = false;
-        if (patternPrefilter) {
-          hayBody = asciiFold(sqliteVisiblePrefix(r.body));
-          hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
-          patternHit = patternPrefilter.test(hayBody) || (hayTags !== null && patternPrefilter.test(hayTags));
-        }
-        if (!bodyHit && !tagsHit && !patternHit) continue;
-        for (let index = 0; index < termList.length; index++) {
-          const literalId = literalIdOfTerm[index]!;
-          const re = patternRegexes[index];
-          const hit = literalId !== -1
-            ? literalMarks[literalId] === stamp
-            : patternHit && (re!.test(hayBody!) || (hayTags !== null && re!.test(hayTags)));
-          if (hit) {
-            const bucket = localBuckets.get(termList[index]!)!;
-            if (bucket.length < 500) bucket.push(r.qitem_id);
+      runSyncSite("slices.membership_term_scan", () => {
+        for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
+          if (this.projectId && !belongsToProject(r.tags, this.projectIds)) continue;
+          // A non-TEXT value (a BLOB) failed the build here before this matcher:
+          // asciiFold/sqliteVisiblePrefix threw on it. The literal pass reads
+          // code units and would skip it silently, so fail it the same way.
+          if (typeof r.body !== "string" || (r.tags != null && typeof r.tags !== "string")) {
+            throw new TypeError(`queue_items row ${r.qitem_id}: body and tags must be TEXT`);
+          }
+          // Stamps tell this row's marks from earlier rows' without clearing;
+          // restart them before the Uint32 wraps.
+          if (stamp === 0xffffffff) {
+            literalMarks.fill(0);
+            stamp = 0;
+          }
+          stamp++;
+          // Both haystacks are scanned (no short-circuit) so every literal hit is marked.
+          const bodyHit = literal !== null && literal.scan(r.body, literalMarks, stamp);
+          const tagsHit = literal !== null && r.tags != null && literal.scan(r.tags, literalMarks, stamp);
+          let hayBody: string | null = null;
+          let hayTags: string | null = null;
+          let patternHit = false;
+          if (patternPrefilter) {
+            hayBody = asciiFold(sqliteVisiblePrefix(r.body));
+            hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
+            patternHit = patternPrefilter.test(hayBody) || (hayTags !== null && patternPrefilter.test(hayTags));
+          }
+          if (!bodyHit && !tagsHit && !patternHit) continue;
+          for (let index = 0; index < termList.length; index++) {
+            const literalId = literalIdOfTerm[index]!;
+            const re = patternRegexes[index];
+            const hit = literalId !== -1
+              ? literalMarks[literalId] === stamp
+              : patternHit && (re!.test(hayBody!) || (hayTags !== null && re!.test(hayTags)));
+            if (hit) {
+              const bucket = localBuckets.get(termList[index]!)!;
+              if (bucket.length < 500) bucket.push(r.qitem_id);
+            }
           }
         }
-      }
+      });
       for (const [term, ids] of localBuckets) fallbackByTerm.set(term, ids);
     }
 

@@ -1576,6 +1576,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's ` +
                 `host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path` +
                 (created.returnRouteBasis === "issued-actor" ? `. Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+            } else if (created.returnRouteBasis === "inherited") {
+              console.error(`Return route: ${route}, carried from the routed work you hold. This work's questions and its seats' prompts ` +
+                `(not choice dialogs) go to that conversation as tasks.`);
             } else {
               console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
                 `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +

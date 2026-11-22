@@ -431,6 +431,16 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(f.unknown).not.toHaveBeenCalled();
     });
 
+    it("gives no notice when a cancel runs after the poll queued it, before its turn", async () => {
+      const f = await toDone();
+      f.advance(31 * 60_000);
+      // The poll's synchronous part queues the notice; a cancel resuming ahead of it in the same turn of the queue replaces the check.
+      const poll = f.poll();
+      f.enforcer.cancelPreparation(seat);
+      await poll; await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
     // Seven hours is past the six-hour restart window that bounds resuming restore input; this check sends none.
     it.each([31, 7 * 60])("keeps the check across a daemon restart, from the done record (%i minutes later)", async (minutes) => {
       const home = mkdtempSync(join(tmpdir(), "compaction-uptake-restart-")); fixtureHomes.push(home);
