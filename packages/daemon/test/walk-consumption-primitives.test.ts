@@ -448,7 +448,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     const metadata = await response.json();
     expect(metadata).toMatchObject({ runtime: "codex", sessionId: threadId, totalBytes: Buffer.byteLength(readFileSync(record)) });
     expect(metadata.suffix).toBeUndefined();
-    expect(CodexThreadIdResolver.prototype.resolveWithHome).toHaveBeenCalledWith(20, "start");
+    expect(CodexThreadIdResolver.prototype.resolveWithHome).toHaveBeenCalledWith(20, "start", true);
 
     const suffix = JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "fixture-turn" } }) + "\n";
     appendFileSync(record, suffix);

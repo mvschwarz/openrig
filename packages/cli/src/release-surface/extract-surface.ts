@@ -68,6 +68,18 @@ function unwrap(e: ts.Expression): ts.Expression {
   return cur;
 }
 
+/** Follow fluent calls such as new Option("--status").choices(...) back to the flags. */
+function optionFlags(input: ts.Expression | undefined): string | null {
+  if (!input) return null;
+  let expr = unwrap(input);
+  while (ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression)) {
+    expr = unwrap(expr.expression.expression);
+  }
+  return ts.isNewExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === "Option"
+    ? stringLiteralText(expr.arguments?.[0])
+    : null;
+}
+
 function freshNode(rawName: string): CmdNode {
   return { name: firstToken(rawName), flags: new Set(), children: [] };
 }
@@ -158,8 +170,8 @@ function extractFile(fileName: string, text: string): CmdNode[] {
           if (recv) recv.children.push(child);
           return child; // chained calls attach to the child
         }
-        if (method === "option" || method === "requiredOption") {
-          const flagLit = stringLiteralText(expr.arguments[0]);
+        if (method === "option" || method === "requiredOption" || method === "addOption") {
+          const flagLit = method === "addOption" ? optionFlags(expr.arguments[0]) : stringLiteralText(expr.arguments[0]);
           if (recv && flagLit != null) {
             const f = normalizeFlag(flagLit);
             if (f) recv.flags.add(f);
