@@ -10,7 +10,7 @@ import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
-import { CLAUDE_NOT_STATUS_LINE_ROW, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -305,30 +305,6 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   return null;
 }
 
-// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
-// Recognize the complete input block, never a warning or historical prompt alone.
-const CLAUDE_STATUS_WARNINGS = [
-  /^✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor$/,
-  /^✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)$/,
-  /^✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai\/claude-c…$/,
-  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
-  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
-  // #1641: Claude 2.1.293's update banner, whatever installer it names.
-  /^Update available! Run: \S.*$/,
-  // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
-  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
-  /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
-  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
-  // "Restart to update" on its own row (Claude 2.1.319, #2605).
-  /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
-];
-// Claude can draw noninteractive UI rows after its mode footer. They do not
-// replace the composer and should only be skipped when they match a known row.
-const CLAUDE_STATUS_DECORATIONS = [
-  /^\d[\d,]* tokens$/,
-  /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
-  /^\/rc$/,
-];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -2243,6 +2219,10 @@ export interface SendResult {
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
+  /** Context, not a status: when this send started, the seat's main session had a permission or elicitation request,
+   *  made after its latest activity report, that OpenRig hadn't seen settled. It never says a dialog is open (a hook or
+   *  host can decide one with nothing shown), and the send's own result is unchanged by it. */
+  inputRequest?: { observedAt: string; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
@@ -2765,9 +2745,24 @@ export class SessionTransport {
     this.compactionObserver = observer;
   }
 
+  /** The time of a permission or elicitation request the seat's main session made after its latest activity report and
+   *  that nothing has settled, else null. An unreadable record reads as none: it never changes a send. */
+  private unsettledInputRequestAt(sessionName: string): string | null {
+    try {
+      const nodeId = this.getSessionMeta(sessionName).nodeId;
+      const at = nodeId ? this.agentActivityStore?.getUnsettledInputRequestForNode?.(nodeId, sessionName) ?? null : null;
+      if (!at) return null;
+      const latest = this.agentActivityStore?.getLatestForNode({ sessionName, now: this.now(), order: "source" });
+      return latest?.eventAt && Date.parse(at) <= Date.parse(latest.eventAt) ? null : at;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
-   * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
+   * send, or had an unsettled permission or elicitation request newer than its latest activity report, add a notice
+   * saying so. Each notice is context beside the send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
@@ -2781,7 +2776,11 @@ export class SessionTransport {
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
-    const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    // A prompt answer or a bare Enter is aimed at the prompt itself.
+    const requestAt = opts?.dangerouslyInteract || opts?.submitOnly ? null : this.unsettledInputRequestAt(sessionName);
+    const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    const result = requestAt ? { ...sent, inputRequest: { observedAt: requestAt,
+      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : sent;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";

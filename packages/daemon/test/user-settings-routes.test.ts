@@ -144,7 +144,9 @@ describe("config routes (User Settings v0)", () => {
     // + 1 retention.erasure_ledger (queue erasure's replay ledger; default empty = none).
     // + 1 ui.topology_remote_seats (read a remote rig's seats in the TUI topology; default off).
     // + 1 output.rebuild_recaps (optional rebuild briefing preview; default 3).
-    expect(Object.keys(body.settings).length).toBe(106);
+    // + 1 daemon.identity_poll_interval_ms (#3146 the identity reconciler's cadence; startup-only, default 5000).
+    expect(Object.keys(body.settings).length).toBe(107);
+    expect(body.settings["daemon.identity_poll_interval_ms"]).toMatchObject({ value: 5000, source: "default", defaultValue: 5000 });
     expect(body.settings["output.rebuild_recaps"]).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["ui.topology_remote_seats"]).toMatchObject({ value: false, source: "default", defaultValue: false });

@@ -64,6 +64,17 @@ function conversationFields(providerPayload, env) {
   };
 }
 
+// #3513: the Remote Control session Claude Code is connected to, which it sets in its hook subprocesses as
+// CLAUDE_CODE_BRIDGE_SESSION_ID while Remote Control is connected (documented from v2.1.199). A well-formed id is
+// reported as is; an unset or empty variable as null (the daemon counts that as a disconnect only for a conversation
+// that earlier reported a session); a malformed value is left out, as no claim. Claude seats only.
+function remoteControlFields(runtime, env) {
+  if (runtime !== "claude-code") return {};
+  const value = firstString(env.CLAUDE_CODE_BRIDGE_SESSION_ID);
+  if (value === null) return { remoteControlSessionId: null };
+  return /^session_[A-Za-z0-9]{1,128}$/.test(value) ? { remoteControlSessionId: value } : {};
+}
+
 // The prompt the harness received at UserPromptSubmit, as a fingerprint and byte length, with Claude's own prompt id
 // when it sends one: enough for the daemon to match it to a message OpenRig wrote, without the prompt leaving this
 // process. Any other event, or a prompt that isn't a string, adds nothing.
@@ -114,6 +125,16 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
       relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed" };
   }
 
+  if (runtime === "claude-code" && (hookEvent === "Elicitation" || hookEvent === "ElicitationResult")) {
+    // Observation and settlement only: the server's message, schema, form fields and the person's response never leave
+    // the relay, and nothing is returned to answer, cancel or change the request.
+    const actor = providerPayload.agent_id;
+    return { sessionName, nodeId, runtime, generation, hookEvent,
+      ...(actor == null ? { hookAgentId: null }
+        : typeof actor === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(actor) ? { hookAgentId: actor } : {}),
+      occurredAt: now().toISOString(), relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed" };
+  }
+
   // StopFailure has a typed error field. Never infer it from rendered error text,
   // a tool name, or another event's subtype; those are not provider failures.
   const subtype = runtime === "claude-code" && hookEvent === "StopFailure"
@@ -146,6 +167,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
     ...limitResetField(runtime, hookEvent, subtype, providerPayload, now),
     ...conversationFields(providerPayload, env),
+    ...remoteControlFields(runtime, env),
   };
 }
 
@@ -399,6 +421,7 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
     claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
     occurredAt: now().toISOString(),
+    ...remoteControlFields(runtime, env),
   };
 }
 

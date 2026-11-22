@@ -55,6 +55,10 @@ hook. A permission prompt can independently supply human-input evidence. See
 [Claude usage-limit detection](claude-status-line.md#claude-usage-limit-detection)
 for the separate provider signal and queue timer.
 
+The arbitrated state holds Claude's typed limit too. After `StopFailure/rate_limit`, `activity` reads `unknown`, never
+working or idle, and `usageLimit` carries when the limit was seen and the reset it stated. Both hold until a strictly
+newer turn starts, from a hook or Claude's own status. An idle prompt, a redraw or the limit's menu doesn't clear them.
+
 ### Per-seat attention in the node inventory
 
 `rig ps --nodes` carries the daemon's `needsAttention` result, using the same predicate

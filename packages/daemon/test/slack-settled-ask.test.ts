@@ -232,6 +232,20 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(statusOf(updates[1]!)).toEqual({ text: "Answered: Hold", block: "Answered: Hold" });
   });
 
+  it("shows a chosen label's *, _ and ~ literally on the settled status line", async () => {
+    const label = "Blue *B20* _fast_ ~old~";
+    const item = await postAsk(undefined, label);
+    expect(repo.recordHumanAnswer({ qitemId: item.qitemId, actorSession: human, questionId: "ship", optionId: "yes" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: `Ship now?: ${label}` })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const [status] = updates[0]!.blocks as Array<{ block_id?: string; elements?: Array<{ type?: string; text?: string }> }>;
+    expect(status?.block_id).toBe("or-settled");
+    expect(status?.elements).toHaveLength(1);
+    expect(status?.elements?.[0]?.type).toBe("plain_text");
+    expect(String(status?.elements?.[0]?.text).split(" · ")[0]).toBe(`Answered: ${label}`);
+  });
+
   // C8 on a re-park: each park is its own question, and the item keeps one set of answers, so a card names only what its
   // own park recorded. The decision is asked of the person and parked on them by its asker; Slack resumes it.
   describe("a decision parked on the person again", () => {

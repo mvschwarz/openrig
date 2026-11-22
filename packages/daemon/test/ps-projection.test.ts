@@ -1,10 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// #3636 — hoisted importOriginal passthrough: every export stays the real
+// implementation; only the two inventory builders are wrapped, so the scoping
+// tests can see which rigs a projection folds. Behavior is unchanged.
+vi.mock("../src/domain/node-inventory.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/domain/node-inventory.js")>();
+  return {
+    ...actual,
+    getNodeInventoryForAllRigs: vi.fn(actual.getNodeInventoryForAllRigs),
+    getNodeInventoryForRigs: vi.fn(actual.getNodeInventoryForRigs),
+  };
+});
 import type Database from "better-sqlite3";
 import { monotonicFactory } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention, arbitratedNeedsInputSignal } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
-import { attachTerminalActivityAndWork, getNodeInventory } from "../src/domain/node-inventory.js";
+import { attachTerminalActivityAndWork, getNodeInventory, getNodeInventoryForAllRigs, getNodeInventoryForRigs } from "../src/domain/node-inventory.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -860,5 +872,92 @@ describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () =
     } finally {
       db.close();
     }
+  });
+});
+
+describe("#3636 — the ps projection folds only the rigs it returns", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    vi.mocked(getNodeInventoryForAllRigs).mockClear();
+    vi.mocked(getNodeInventoryForRigs).mockClear();
+  });
+
+  afterEach(() => { vi.useRealTimers(); db.close(); });
+
+  function seedRunningRig(
+    name: string,
+    opts: { id?: string; archived?: boolean; latest?: "running" | "stopped" } = {},
+  ): { rigId: string; nodeId: string } {
+    const rigId = opts.id ?? `rig-${name}`;
+    const nodeId = `node-${rigId}`;
+    db.prepare("INSERT INTO rigs (id, name, archived_at) VALUES (?, ?, ?)")
+      .run(rigId, name, opts.archived ? "2026-11-20 00:00:00" : null);
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES (?, ?, 'dev', 'claude-code', '/tmp')").run(nodeId, rigId);
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, 'running', '2026-11-20 12:00:00')")
+      .run(sessionId(), nodeId, `tmux-${rigId}`);
+    if (opts.latest === "stopped") {
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, 'stopped', '2026-11-20 13:00:00')")
+        .run(sessionId(), nodeId, `tmux-${rigId}`);
+    }
+    return { rigId, nodeId };
+  }
+
+  it("the default projection builds the inventory only for the active rigs, with the same entries as before", () => {
+    const active = seedRunningRig("active");
+    const archived = seedRunningRig("archived", { archived: true });
+    // One name, three rigs: two active generations and one archived.
+    const twinA = seedRunningRig("twin", { id: "rig-twin-a" });
+    const twinB = seedRunningRig("twin", { id: "rig-twin-b" });
+    const twinOld = seedRunningRig("twin", { id: "rig-twin-old", archived: true });
+    const ps = new PsProjectionService({ db });
+    // One clock for both projections, so uptime can't roll over between them.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+
+    const entries = ps.getEntries();
+
+    expect(vi.mocked(getNodeInventoryForAllRigs)).not.toHaveBeenCalled();
+    expect(vi.mocked(getNodeInventoryForRigs)).toHaveBeenCalledTimes(1);
+    expect([...vi.mocked(getNodeInventoryForRigs).mock.calls[0]![1]].sort()).toEqual([active.rigId, twinA.rigId, twinB.rigId].sort());
+    expect(entries.map((e) => [e.rigId, e.runningCount]).sort()).toEqual(
+      [[active.rigId, 1], [twinA.rigId, 1], [twinB.rigId, 1]].sort(),
+    );
+    // Same per-rig entries the unscoped (all-rigs) pass gives.
+    expect(entries).toEqual(ps.getEntries({ includeArchived: true }).filter((e) => !e.isArchived));
+
+    vi.mocked(getNodeInventoryForRigs).mockClear();
+    const archivedEntries = ps.getEntries({ archivedOnly: true });
+    expect(archivedEntries.map((e) => [e.rigId, e.runningCount]).sort()).toEqual([[archived.rigId, 1], [twinOld.rigId, 1]].sort());
+    expect([...vi.mocked(getNodeInventoryForRigs).mock.calls[0]![1]].sort()).toEqual([archived.rigId, twinOld.rigId].sort());
+    expect(archivedEntries).toEqual(ps.getEntries({ includeArchived: true }).filter((e) => e.isArchived));
+  });
+
+  it("countRunningSeats equals the includeArchived runningCount sum and folds only rigs with a running latest registration", () => {
+    const active = seedRunningRig("active");
+    const archived = seedRunningRig("archived", { archived: true }); // forced archival: still running, still counted
+    seedRunningRig("stopped-now", { latest: "stopped" });            // an older running row doesn't count
+    const gone = seedRunningRig("gone");                             // running row, but the session is confirmed missing
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-gone', ?, 'tmux', 'tmux-rig-gone', '%1')")
+      .run(gone.nodeId);
+    new SeatIdentityStore(db).upsert({
+      nodeId: gone.nodeId,
+      verdict: "pane_missing",
+      evidenceSource: "tmux_session",
+      reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: "tmux-rig-gone",
+      // After the ULID registration time, so the verdict applies to this session.
+      observedAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const ps = new PsProjectionService({ db });
+
+    const count = ps.countRunningSeats();
+
+    expect(count).toBe(2);
+    expect(vi.mocked(getNodeInventoryForAllRigs)).not.toHaveBeenCalled();
+    expect([...vi.mocked(getNodeInventoryForRigs).mock.calls[0]![1]].sort()).toEqual([active.rigId, archived.rigId, gone.rigId].sort());
+    expect(count).toBe(ps.getEntries({ includeArchived: true }).reduce((n, entry) => n + entry.runningCount, 0));
   });
 });

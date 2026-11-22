@@ -7,14 +7,23 @@ import { findFreePort, runRig } from "./helpers/scenario-daemon.js";
 
 const rigBin = resolve(dirname(fileURLToPath(import.meta.url)), "../../cli/dist/bin-wrapper.js");
 const fixture = () => prepareHermeticEnv({ baseEnv: { PATH: process.env.PATH, TERM: "xterm-256color" } });
+/** Each home's daemon URL, kept from before its start so its stop addresses only that daemon: with no daemon.json (a
+ * start that failed), a stop without it would check the default 127.0.0.1:7433, the machine's own daemon (#3631). */
+const urls = new WeakMap<HermeticScaffold, string>();
+async function portFor(home: HermeticScaffold) {
+  const port = await findFreePort();
+  urls.set(home, `http://127.0.0.1:${port}`);
+  return port;
+}
 async function start(home: HermeticScaffold, db: string) {
   home.env.OPENRIG_DB = db;
-  const result = await runRig(["daemon", "start", "--port", String(await findFreePort()), "--no-kernel"], home.env, rigBin, 60_000);
+  const result = await runRig(["daemon", "start", "--port", String(await portFor(home)), "--no-kernel"], home.env, rigBin, 60_000);
   expect(result.code, result.stdout + result.stderr).toBe(0);
   return result.stdout + result.stderr;
 }
 async function stop(home: HermeticScaffold) {
-  await runRig(["daemon", "stop"], home.env, rigBin);
+  const url = urls.get(home);
+  if (url) await runRig(["daemon", "stop"], { ...home.env, OPENRIG_URL: url }, rigBin);
   home.cleanup();
 }
 /** Put a stand-in lsof first on this home's PATH, which its daemon inherits, so the OS holder query answers on cue
@@ -99,7 +108,7 @@ it("explains a --db override without promising that unsetting OPENRIG_DB resets 
   delete home.env.RIGGED_DB;
   const db = join(home.stateDir, "explicit.sqlite");
   try {
-    const result = await runRig(["daemon", "start", "--port", String(await findFreePort()), "--no-kernel", "--db", db], home.env, rigBin, 60_000);
+    const result = await runRig(["daemon", "start", "--port", String(await portFor(home)), "--no-kernel", "--db", db], home.env, rigBin, 60_000);
     expect(result.code, result.stdout + result.stderr).toBe(0);
     expect(result.stderr).toContain("--db, db.path, OPENRIG_DB or RIGGED_DB");
     expect(result.stderr).toContain("Remove or correct the selecting override");

@@ -43,7 +43,8 @@ export type InPlaceRestartTmux = Pick<TmuxAdapter,
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
-  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string }):
+  /** `preview` builds the same command without bringing the Codex config to OpenRig's managed state. */
+  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string; preview?: boolean }):
     Promise<{ ok: true; command: string; core: string } | { ok: false; error: string }>;
   /** `nodeId` lets the resume proof read the seat's own CODEX_HOME when it declares one; `home`, the one the running
    *  Codex was read using, wins over both that and the daemon's. */
@@ -238,7 +239,7 @@ export class CodexInPlaceRestart {
 
   /** Every gate, read-only. Returns the report a restart would start from, or the refusal it would give. */
   async plan(target: InPlaceRestartTarget): Promise<InPlaceRestartReport | InPlaceRestartRefusal> {
-    const observed = await this.observe(target, null);
+    const observed = await this.observe(target, null, true);
     if (!observed.ok) return observed;
     return { ...observed.report, message: "Preview only: nothing was stopped or restarted." };
   }
@@ -419,7 +420,7 @@ export class CodexInPlaceRestart {
 
   // -- observation (shared by plan and execute) --
 
-  private async observe(target: InPlaceRestartTarget, seenStartedSeq: number | null): Promise<Observed | InPlaceRestartRefusal> {
+  private async observe(target: InPlaceRestartTarget, seenStartedSeq: number | null, preview = false): Promise<Observed | InPlaceRestartRefusal> {
     const { binding, sessionName, seat } = target;
     const history = this.restartHistory(seat.nodeId, seenStartedSeq);
     if ("code" in history) return history;
@@ -548,6 +549,7 @@ export class CodexInPlaceRestart {
       resumeToken: token,
       running,
       ...(launchShell ? { launchShell } : {}),
+      ...(preview ? { preview: true } : {}),
     });
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")
