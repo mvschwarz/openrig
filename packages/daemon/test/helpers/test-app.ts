@@ -3,8 +3,8 @@ import { sessionLaunchedCwdSchema } from "../../src/db/migrations/174_session_la
 import { nodeStatuslineThrottleSchema } from "../../src/db/migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "../../src/db/migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "../../src/db/migrations/179_remote_control_observations.js";
-import { providerAccountRefsSchema } from "../../src/db/migrations/180_provider_account_refs.js";
-import { providerAccountAssignmentsSchema } from "../../src/db/migrations/181_provider_account_assignments.js";
+import { providerAccountRefsSchema } from "../../src/db/migrations/182_provider_account_refs.js";
+import { providerAccountAssignmentsSchema } from "../../src/db/migrations/183_provider_account_assignments.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "../../src/db/migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";

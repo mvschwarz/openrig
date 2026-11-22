@@ -12,7 +12,7 @@ import type { Migration } from "../migrate.js";
  * account, and a label later pointed at another reference isn't mistaken for it.
  */
 export const providerAccountAssignmentsSchema: Migration = {
-  name: "181_provider_account_assignments.sql",
+  name: "183_provider_account_assignments.sql",
   sql: `
     CREATE TABLE provider_account_assignments (
       rig_id TEXT NOT NULL REFERENCES rigs(id) ON DELETE CASCADE,

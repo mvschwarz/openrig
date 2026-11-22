@@ -2,8 +2,8 @@ import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js
 import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
-import { providerAccountRefsSchema } from "./migrations/180_provider_account_refs.js";
-import { providerAccountAssignmentsSchema } from "./migrations/181_provider_account_assignments.js";
+import { providerAccountRefsSchema } from "./migrations/182_provider_account_refs.js";
+import { providerAccountAssignmentsSchema } from "./migrations/183_provider_account_assignments.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
