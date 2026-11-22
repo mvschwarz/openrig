@@ -12,15 +12,15 @@ In your project folder, add OpenRig's `rigs` skill to the agent you use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent codex
 # OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.20/skills/rigs --skill rigs --agent pi
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent pi
 ```
 
-**OMP:** this pin installs the shared skill only. The `v0.7.20` skill does not yet include OMP attachment guidance,
-and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+**OMP:** this pin installs the shared skill only. The `v0.7.21` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
+but complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
 signed in.
 
 These use this release's tag, for a new install. If OpenRig is already installed, replace the tag after `tree/` with

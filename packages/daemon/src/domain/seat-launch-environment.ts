@@ -88,6 +88,10 @@ export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath:
  * Credentials stay in the inherited channel. An explicitly selected Codex home
  * is reasserted for Codex only; an unset selection retains the pane's defaults.
  */
+/** #3746: what a wrapped classic Claude launch prints when `claude` in the pane's shell is a function or alias, not a file. */
+export const WRAPPED_CLAUDE_LOOKUP_REFUSAL = (kind: "function" | "alias"): string =>
+  `OpenRig: claude is a shell ${kind} here, and a launch_wrapper needs claude to be an executable file; no agent started.`;
+
 export class SeatLaunchEnvironment {
   constructor(private readonly tmux: TmuxAdapter,
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
@@ -228,7 +232,13 @@ export class SeatLaunchEnvironment {
           ...(wrapped ? [`    */*) eval ${shellQuote(`claude() { exec ${prefix}"$_openrig_claude_executable" "$@"; }`)} ;;`]
             : ['    */*) eval \'claude() { exec "$_openrig_claude_executable" "$@"; }\' ;;']),
           '  esac',
-          ...(wrapped ? [...token, launch, 'else', "  printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false", 'fi']
+          // A launch_wrapper needs claude's executable file. A function or alias named claude may carry the person's settings,
+          // so it isn't looked past; the refusal names which it is, by the shape of `command -v`'s answer, never its text.
+          ...(wrapped ? [...token, launch, 'else', '  case "$_openrig_claude_executable" in',
+            `    'alias '*) printf '%s\\n' '${WRAPPED_CLAUDE_LOOKUP_REFUSAL("alias")}' >&2 ;;`,
+            "    */*|'') printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2 ;;",
+            `    *) printf '%s\\n' '${WRAPPED_CLAUDE_LOOKUP_REFUSAL("function")}' >&2 ;;`,
+            '  esac', '  false', 'fi']
             : ['fi', ...token, launch]),
         ].join("\n");
       }

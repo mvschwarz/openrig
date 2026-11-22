@@ -139,6 +139,19 @@ parked `blocked_on` that human seat in the same transaction (summary and
 for a declared role, an ordinary packet goes to that handler role's seat
 (`workflow-projector.ts:1659`–`1778`).
 
+On the serial path, a `handoff` into a step of the same `actor_role` that
+resolves through `preferred_targets`, while the closing session was the
+destination of the packet it closed, returns an advisory naming
+`--next-owner`. `next_owner: same_as_previous`, on a step or at the spec's top
+level (the step's value wins), keeps such a handoff with that closing
+session instead. It applies only to the `handoff` exit (another exit that
+`next_hop.on` routes into the step, such as `failed`, doesn't count) into a
+step of the same `actor_role` that has no gate, with no explicit next owner,
+when the closing session was the closed packet's
+destination; the closure evidence then records
+`owner_resolution.mode: "continuation"`. Without it, resolution is unchanged.
+Dependency-graph successors (`depends_on`) don't read it.
+
 `rig workflow instantiate` and `rig workflow run` accept `--pod <namespace>`
 when the instance is bound to a registered rig. The pod must exist on that rig.
 The instance stores the selection, and role-only resolution considers seats in
