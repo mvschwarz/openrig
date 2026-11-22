@@ -233,7 +233,7 @@ function ProofSliceCard({
                 <a
                   href={fileAssetUrl(resolved!.rootName, `${proofRel}/${f.name}`)}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="text-on-surface-variant underline decoration-outline-variant underline-offset-2 hover:text-on-surface"
                 >
                   proof/{f.name}

@@ -105,4 +105,21 @@ describe("EvidenceOpener — slice-boundary containment", () => {
     render(<EvidenceOpener evidenceRef="proof/qa.md" ctx={ctx} testId="pq" />);
     expect(screen.getByTestId("pq-md").getAttribute("data-readpath")).toBe("missions/m/slices/s/proof/qa.md");
   });
+
+  // OPR.0.6.0 — every external-target anchor in the opener carries BOTH
+  // `noopener` and `noreferrer`. The two non-markdown kinds (.html and `other`)
+  // open the daemon's asset URL in a new tab; without `noopener` the opened page
+  // gets a `window.opener` handle back into the OpenRig UI origin.
+  it("FM-1: new-tab evidence anchors carry rel=\"noopener noreferrer\"", () => {
+    render(<EvidenceOpener evidenceRef="proof/mockup.html" ctx={ctx} testId="h" />);
+    const htmlLink = screen.getByTestId("h-html");
+    expect(htmlLink.getAttribute("target")).toBe("_blank");
+    expect(htmlLink.getAttribute("rel")).toBe("noopener noreferrer");
+
+    cleanup();
+    render(<EvidenceOpener evidenceRef="proof/notes.txt" ctx={ctx} testId="o" />);
+    const otherLink = screen.getByTestId("o-other");
+    expect(otherLink.getAttribute("target")).toBe("_blank");
+    expect(otherLink.getAttribute("rel")).toBe("noopener noreferrer");
+  });
 });

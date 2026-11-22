@@ -133,7 +133,7 @@ export function EvidenceOpener({ evidenceRef, ctx, testId }: { evidenceRef: stri
   if (kind === "html") {
     if (!url) return <span className="font-mono text-[11px] text-red-700">unresolvable mockup ref: {evidenceRef}</span>;
     return (
-      <a data-testid={`${tid}-html`} className={linkClass} href={`${url}&render=1`} target="_blank" rel="noreferrer">
+      <a data-testid={`${tid}-html`} className={linkClass} href={`${url}&render=1`} target="_blank" rel="noopener noreferrer">
         {evidenceRef} ↗
       </a>
     );
@@ -163,7 +163,7 @@ export function EvidenceOpener({ evidenceRef, ctx, testId }: { evidenceRef: stri
   }
 
   return url ? (
-    <a className={linkClass} href={url} target="_blank" rel="noreferrer" data-testid={`${tid}-other`}>
+    <a className={linkClass} href={url} target="_blank" rel="noopener noreferrer" data-testid={`${tid}-other`}>
       {evidenceRef}
     </a>
   ) : (
