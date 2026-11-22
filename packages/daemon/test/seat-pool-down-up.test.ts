@@ -195,7 +195,8 @@ describe("seat pool agents across rig down and rig up (#3395 Piece 1)", () => {
       expect(stopped.errors).toHaveLength(1);
       expect(stopped.errors[0]).toContain(`'${agent.sessionName}'`);
       expect(stopped.sessionsKilled).toBe(1);
-      expect(sessionsOf(agent.node.id)).toEqual([{ id: agent.session.id, status: "running", stopped: 0, token: "conv-dev.impl-s1" }]);
+      // The stop request is recorded before the probe (#2940), so keep_alive doesn't bring the agent back; the row stays.
+      expect(sessionsOf(agent.node.id)).toEqual([{ id: agent.session.id, status: "running", stopped: 1, token: "conv-dev.impl-s1" }]);
       expect(slots.get(slot.slotId)).toEqual(slot);
       expect(slots.forModel(model.node.id)).toEqual([slot]);
     }
