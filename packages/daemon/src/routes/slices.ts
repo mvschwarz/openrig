@@ -22,7 +22,7 @@ import { readParentScope, type ParentScopeNode } from "../domain/scope/mission-p
 import { createProofPolicyRead, readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
+import { SliceIndexer, SliceListEntry, SliceStatus, type QueueCountRow } from "../domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../domain/slices/slice-detail-projector.js";
 import { findSliceWorkflowBinding } from "../domain/workflow/slice-workflow-binding.js";
 
@@ -65,8 +65,10 @@ export function slicesRoutes(): Hono {
     // One request-local policy reader for every readiness in this response
     // (the listing and the project readiness below); never across requests.
     const readPolicy = createProofPolicyRead();
-    // The queue-count rows are read first, without holding the event loop; the count in the batch uses them.
+    // The queue-count rows are read first, without holding the event loop. The batch prepares the count, and it runs
+    // over them after the batch, in chunks, filling the listing's count objects in place before the response is built.
     const queueCountRows = await deps.indexer.readQueueCountRowsCooperatively();
+    const deferredCount: { countRow?: (row: QueueCountRow) => void } = {};
     const listing = deps.indexer.withMembershipBatch(() => {
       const all = deps.indexer.list();
       let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
@@ -107,7 +109,7 @@ export function slicesRoutes(): Hono {
         additionalSliceRoots: projectLookup.additionalSliceRoots,
         complete: projectLookup.complete,
         canonicalProjectId: projectLookup.canonicalProjectId,
-        ...(queueCountRows ? { rows: queueCountRows } : {}),
+        ...(queueCountRows ? { deferRows: (countRow: (row: QueueCountRow) => void) => { deferredCount.countRow = countRow; } } : {}),
       });
       const authored = deps.indexer.missionAuthoredStatuses();
       const parentRoots = new Map<string, ParentScopeNode[]>();
@@ -141,6 +143,7 @@ export function slicesRoutes(): Hono {
       };
     });
     if (listing instanceof Response) return listing;
+    if (queueCountRows && deferredCount.countRow) await deps.indexer.countQueueRowsCooperatively(queueCountRows, deferredCount.countRow);
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
     const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {

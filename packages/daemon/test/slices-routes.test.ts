@@ -129,7 +129,7 @@ import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
-import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
+import { SliceIndexer, type QueueCountRow } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
 import * as slicesRoutesModule from "../src/routes/slices.js";
@@ -1787,6 +1787,30 @@ describe("GET /api/slices observed queue counts", () => {
     try { entries = await list(route("alpha").app); } finally { (db as unknown as { prepare: typeof original }).prepare = original; }
     expect(entries[0]!.queueCounts).toEqual({ pending: 1, "in-progress": 1, done: 1, blocked: 1, failed: 1, denied: 1, canceled: 1, "handed-off": 1 });
     expect(sql.filter((statement) => statement.startsWith("SELECT state, tags FROM queue_items"))).toEqual([]);
+  });
+
+  it("counts the prefetched rows in chunks the event loop runs between, with the statement's counts", async () => {
+    db.close();
+    db = createDb(path.join(root, "openrig.sqlite"));
+    migrate(db, ALL_MIGRATIONS);
+    addSlice("alpha", "shipping", "shared");
+    addSlice("alpha", "shipping", "other");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (let i = 0; i < 400; i++) row(`tagged-${i}`, states[i % 8]!, ["project:alpha", "mission:shipping", `slice:${i % 3 ? "shared" : "other"}`]);
+    const { indexer } = route("alpha", true);
+    const entries = indexer.list();
+    const statement = indexer.observedQueueCounts(entries);
+    let countRow: ((row: QueueCountRow) => void) | undefined;
+    const deferred = indexer.observedQueueCounts(entries, undefined, { deferRows: (count) => { countRow = count; } });
+    const rows = await indexer.readQueueCountRowsCooperatively();
+    let turns = 0, stopped = false;
+    const spin = () => { if (stopped) return; turns++; setImmediate(spin); };
+    setImmediate(spin);
+    await indexer.countQueueRowsCooperatively(rows!, countRow!, 0);
+    stopped = true;
+    expect(turns).toBeGreaterThan(1);
+    expect([...deferred]).toEqual([...statement]);
+    expect([...statement.values()].some((counts) => (counts?.done ?? 0) > 0)).toBe(true);
   });
 
   it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {
