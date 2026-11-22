@@ -2208,6 +2208,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
     let resolvedSlicesRoot = "";
     let resolvedWorkspaceRoot = "";
+    let resolvedCatalogPath = "";
     try {
       const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
       const resolvedConfig = new SettingsStoreCtor().resolveConfig();
@@ -2215,6 +2216,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         resolvedSlicesRoot = resolvedConfig.workspaceSlicesRoot;
       }
       resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
+      resolvedCatalogPath = resolvedConfig.workspaceCatalogPath;
     } catch {
       // SettingsStore unavailable — keep roots empty; routes return 503.
     }
@@ -2231,6 +2233,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           nodePath.join(resolvedWorkspaceRoot, "slices"),
         ].filter((root) => root !== slicesRoot)
       : [];
+    // #3553 — terminal mission/slice views resolve through the same project catalog as the Projects view, which re-reads the catalog on every call. The roots are re-read through the getter whenever a scope index is built. A missing or unreadable catalog degrades to today's configured roots.
+    let catalogMissionsRoots: readonly string[] | (() => readonly string[]) = [];
+    if (resolvedCatalogPath) {
+      try {
+        const { catalogMissionsRoots: catalogRoots } = await import("./domain/workspace/project-read.js");
+        const catalogPath = resolvedCatalogPath;
+        catalogMissionsRoots = () => catalogRoots(catalogPath);
+      } catch {
+        catalogMissionsRoots = [];
+      }
+    }
     // S27 (OPR.0.5.6.27) — wire the execution view once the slices root is
     // resolved; the thunk re-reads nothing (path resolution stays startup's).
     viewProjectorInstance.setExecutionDeps({
@@ -2251,6 +2264,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const sliceIndexer = new SliceIndexer({
       slicesRoot,
       additionalSliceRoots,
+      catalogMissionsRoots,
       dogfoodEvidenceRoot: resolvedDogfoodRoot || null,
       db,
     });
