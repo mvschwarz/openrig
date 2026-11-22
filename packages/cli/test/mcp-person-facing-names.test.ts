@@ -140,6 +140,20 @@ describe("rig_team for a person's assistant", () => {
     member("grok@team", { hosted: true, label: "grok (Sam's researcher)" }),
   ]);
 
+  it.each(["absent", "empty"])("unnamed roster: rig_team omits the display name for an %s name", async (kind) => {
+    const folder = rosters(null);
+    const value: Record<string, unknown> = roster("", [member("grok@team", { hosted: true })]);
+    if (kind === "absent") delete value.name;
+    fs.writeFileSync(path.join(folder, "network-team.json"), JSON.stringify(value));
+    expect(rosterTeamName(folder, "team")).toEqual({ name: null });
+    const s = await connect(folder, { external: true });
+    try {
+      const team = await s.team();
+      expect(team.rig).toEqual({ id: "rig-1", name: "team" });
+      expect(team.hostedMembers).toMatchObject([{ session: "grok@team" }]);
+    } finally { await s.close(); }
+  });
+
   it("names the team and its members, and puts a network seat's roster entry and presence on its own entry", async () => {
     const s = await connect(named(), { external: true });
     try {

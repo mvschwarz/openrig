@@ -362,6 +362,9 @@ reboot. It does not detect a reboot as such. It uses the same restore as
 until the seats are ready. A kernel stopped with `rig down kernel`, including
 one whose seats were already detached, stays down on later starts; start it again
 with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down.
+Other rigs aren't restored at daemon start; only their seats that declare
+`keep_alive` and are gone come back, one seat at a time, once the daemon runs
+([Keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive)).
 While the kernel's other seats are running, `rig up kernel --existing` refuses
 (it restores only a kernel with no live session), so start one stopped seat with
 `rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
@@ -376,10 +379,12 @@ waiting for a decision, not as started.
 with no continuity source: use it only when you want a fresh occupant, since the
 seat's earlier conversation isn't carried.
 When the tmux server is gone, an explicit `rig down` of any rig can start an
-empty server and probe again. It records the stop and clears eligible bindings
+empty server and probe again. It records the stop request on each selected seat
+before it stops anything, and confirms the stop and clears eligible bindings
 only after confirming the sessions are absent. This can leave an empty tmux
 server running; it never launches an agent or provider session. Unreadable or
-permission results and changed occupants leave the stop bookkeeping unchanged.
+permission results and changed occupants leave the stop unconfirmed; the
+request recorded on the session `rig down` selected stays.
 
 While that automatic restore runs, `rig start` continues to your other rigs and
 says the kernel is still restoring (`kernelRestore.state: "restoring"` with
@@ -929,6 +934,12 @@ after its own session ends. Check each result before calling the shutdown done.
 
 `rig daemon stop` stops only the background service and preserves agent tmux
 sessions. If you also want that service stopped, run it after stopping the rigs.
+A daemon stop isn't a stop of the seats: it changes no seat's desired state, so a
+seat that declares `keep_alive` and is gone when the daemon starts again is
+relaunched. To keep a seat or rig down, stop it with `rig seat stop` or
+`rig down`; each records the stop before it stops anything, so the seat stays
+down even if the daemon dies midway
+([Keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive)).
 If the operator is handling this full shutdown and kernel is included, it gives you this
 last step before running `rig down kernel`: once kernel is down, run
 `rig daemon stop` in your own shell and check the result. The operator's session
@@ -952,7 +963,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | Shared terminal is absent | Check the kernel's `operator.human` terminal separately from its agents; recover only that seat as described below. Standalone `rig tui` remains available while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
-| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when that start finds all of its seats lost; a kernel that was already down before the reboot stays down, and `rig start` names `rig up kernel --existing`. Check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when that start finds all of its seats lost; a kernel that was already down before the reboot stays down, and `rig start` names `rig up kernel --existing`. Check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. Seats that declare `keep_alive` and weren't stopped on purpose come back by themselves once the daemon runs; one whose attempts ran out reads `attention_required`. |
 | OpenRig's home moved (a new `HOME`, account or machine), and restoring an existing rig reports that no rig was found | A shell that exports `OPENRIG_HOME` (legacy `RIGGED_HOME`) or `OPENRIG_DB` still points `rig` and any daemon it starts at the old home, and a daemon started there makes an empty home at that path. Run `rig daemon stop` from that shell first. Then point `OPENRIG_HOME` at the new home folder and `OPENRIG_DB` at the database file in it, or unset them (an unset `OPENRIG_HOME` follows `HOME`), and start the daemon again. A seat whose saved folder isn't on this machine starts in another folder, which the restore names when it can read the seat's terminal; to choose the folder, run `rig up <rig> --existing --cwd <dir>`. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |

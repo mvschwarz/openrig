@@ -24,6 +24,8 @@ import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { reconcileSeatPoolNode } from "../src/domain/seat-pool-registration.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { stringify as stringifyYaml } from "yaml";
@@ -2485,6 +2487,168 @@ profiles:
     });
   });
 
+  describe("keep_alive resolution and retention (#2940)", () => {
+    const keptAgentYaml = (name: string) =>
+      `name: ${name}\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    keep_alive: true\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`;
+    const keepOf = (db: ReturnType<typeof createFullTestDb>, nodeId: string) =>
+      (db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(nodeId) as { keep_alive: number }).keep_alive;
+
+    it("stores the resolved value at every creation site: agent defaults, a member override and a terminal's own", async () => {
+      const { db, rigRepo, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: keptAgentYaml("impl"),
+        [`${RIG_ROOT}/agents/qa/agent.yaml`]: keptAgentYaml("qa"),
+        [`${RIG_ROOT}/agents/plain/agent.yaml`]: agentYaml("plain"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const members = [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." },
+          { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "codex" as const, cwd: ".", keepAlive: false },
+          { id: "plain", agentRef: "local:agents/plain", profile: "default", runtime: "codex" as const, cwd: "." },
+          { id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: ".", keepAlive: true },
+        ];
+        const yaml = RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev", members, edges: [] }] }));
+        const expected = { "dev.impl": 1, "dev.qa": 0, "dev.plain": 0, "dev.server": 1 };
+
+        const made = await inst.instantiate(yaml, RIG_ROOT);
+        expect(made.ok, JSON.stringify(made)).toBe(true);
+        if (!made.ok) return;
+        const upNodes = rigRepo.getRig(made.result.rigId)!.nodes;
+        expect(Object.fromEntries(upNodes.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual(expected);
+
+        // materialize creates the nodes through createMemberNode, before any launch
+        const mat = await inst.materialize(RigSpecCodec.serialize(makeRigSpec({ name: "kept-mat", pods: [{ id: "dev", label: "Dev", members, edges: [] }] })), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matNodes = rigRepo.getRig(mat.result.rigId)!.nodes;
+        expect(Object.fromEntries(matNodes.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual(expected);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a re-applied spec writes the newly resolved value; a fresh launch from the recipe keeps the stored one", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." };
+        const spec = (keepAlive?: boolean) => RigSpecCodec.serialize(makeRigSpec({
+          pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(keepAlive === undefined ? {} : { keepAlive }) }], edges: [] }],
+        }));
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+
+        const mat = await inst.materialize(spec(true), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(keepOf(db, nodeId)).toBe(1);
+
+        const launched = await inst.launchMaterialized(spec(true), RIG_ROOT, rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        expect(keepOf(db, nodeId)).toBe(1);
+
+        clearOccupancy(rigId);
+        const turnedOff = await inst.launchMaterialized(spec(), RIG_ROOT, rigId);
+        expect(turnedOff.ok, JSON.stringify(turnedOff)).toBe(true);
+        expect(keepOf(db, nodeId)).toBe(0);
+
+        rigRepo.setNodeKeepAlive(nodeId, true);
+        clearOccupancy(rigId);
+        await inst.launchPersistedFresh(rigId, nodeId);
+        expect(keepOf(db, nodeId)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a first-start retry whose member resolves keep_alive differently isn't refused: it carries the seat's saved value", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: ".", keep_alive: true };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        expect(keepOf(db, worker.id)).toBe(1);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        // Without the member's keep_alive, its agent spec resolves it off; the recovery keeps the saved value instead.
+        const { keep_alive: _dropped, ...withoutKeepAlive } = memberRaw;
+        const retried = await inst.retryFirstStart(rigId, worker.id, withoutKeepAlive, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        expect(keepOf(db, worker.id)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a re-applied keep_alive: false stays off across export and import; a member that never declares it exports no key", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: keptAgentYaml("impl"),
+        [`${RIG_ROOT}/agents/plain/agent.yaml`]: agentYaml("plain"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const spec = (name: string, keepAlive?: boolean) => RigSpecCodec.serialize(makeRigSpec({ name, pods: [{ id: "dev", label: "Dev", members: [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: ".", ...(keepAlive === undefined ? {} : { keepAlive }) },
+          { id: "plain", agentRef: "local:agents/plain", profile: "default", runtime: "codex" as const, cwd: "." },
+        ], edges: [] }] }));
+        const mat = await inst.materialize(spec("kept-rt"), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const impl = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.impl")!;
+        expect(keepOf(db, impl.id)).toBe(1);
+        // The member turns off what its agent spec turns on, in a spec re-applied after the seat was created.
+        const reapplied = await inst.launchMaterialized(spec("kept-rt", false), RIG_ROOT, rigId);
+        expect(reapplied.ok, JSON.stringify(reapplied)).toBe(true);
+        expect(keepOf(db, impl.id)).toBe(0);
+
+        const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+        const exported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(rigId) as RigSpec;
+        const members = exported.pods.find((p) => p.id === "dev")!.members;
+        expect(members.find((m) => m.id === "impl")?.keepAlive).toBe(false);
+        expect("keepAlive" in members.find((m) => m.id === "plain")!).toBe(false);
+
+        const imported = await inst.materialize(RigSpecCodec.serialize({ ...exported, name: "kept-rt-imported" }), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        if (!imported.ok) return;
+        const back = rigRepo.getRig(imported.result.rigId)!.nodes;
+        expect(Object.fromEntries(back.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual({ "dev.impl": 0, "dev.plain": 0 });
+
+        // The first start of a materialized seat launches its saved, resolved settings, not a declaration of the member's:
+        // the member that never declared keep_alive still exports without it.
+        const first = await inst.launchFirstMaterializedNode(imported.result.rigId, back.find((n) => n.logicalId === "dev.plain")!.id);
+        expect(first, JSON.stringify(first)).toMatchObject({ ok: true });
+        const reexported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(imported.result.rigId) as RigSpec;
+        expect("keepAlive" in reexported.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "plain")!).toBe(false);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   describe("pool block stored on the model node (#3395 Piece 1)", () => {
     const memberBase = { id: "impl", agent_ref: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." };
     const yamlSpec = (pool?: unknown, name = "test-rig") => stringifyYaml({
@@ -2686,6 +2850,38 @@ profiles:
         const relaunched = await inst.launchPersistedFresh(rigId, nodeId);
         expect(relaunched.status, JSON.stringify(relaunched)).toBe("launched");
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 7 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A rig launched and then re-applied with a valid `pool` block registers no seat-pool job while the job is unarmed.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        const seatPoolJobs = () => (db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs WHERE policy = 'seat-pool'").get() as { n: number }).n;
+        const mat = await inst.materialize(yamlSpec({ max: 3, min: 1 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ min: 1 }));
+        expect(seatPoolJobs()).toBe(0);
+
+        clearOccupancy(rigId);
+        const again = await inst.launchMaterialized(yamlSpec({ max: 5, min: 2 }), RIG_ROOT, rigId);
+        expect(again, JSON.stringify(again)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 5, min: 2 }));
+        expect(seatPoolJobs()).toBe(0);
+
+        // `rig up` (import) goes through instantiate: no job there either
+        const up = await inst.instantiate(yamlSpec({ max: 2 }, "up-rig"), RIG_ROOT);
+        expect(up.ok, JSON.stringify(up)).toBe(true);
+        expect(seatPoolJobs()).toBe(0);
+
+        // the node is one the registration would arm: the 0 above comes from the unarmed job, not from the node
+        const jobsRepo = new WatchdogJobsRepository(db);
+        expect(reconcileSeatPoolNode({ db, rigRepo, jobsRepo }, nodeId)).toMatchObject({ outcome: "registered", job: { targetSession: "dev-impl@test-rig" } });
+        expect(seatPoolJobs()).toBe(1);
       } finally {
         db.close();
       }
