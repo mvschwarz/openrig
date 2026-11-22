@@ -560,6 +560,9 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
     const candidates = e.details?.["candidates"] as Array<{ coordinate: string; disqualifier: string }>;
     const driver1 = candidates.find((c) => c.coordinate === "dev-driver1@factory-a");
     expect(driver1?.disqualifier).toMatch(/^not_live\(lifecycleState=/);
+    // #3757: on a plain handoff the message keeps the candidate diagnostics and also names an explicit owner.
+    expect(e.message).toContain("dev-driver1@factory-a → not_live(");
+    expect(e.message).toContain("rig workflow project --next-owner <session>");
 
     // Zero-candidate: a fresh rig where NO seat declares the entry role.
     const rigB = rigRepo.createRig("factory-b");

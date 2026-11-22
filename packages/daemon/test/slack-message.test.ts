@@ -112,7 +112,14 @@ describe("#47 evidence link boundaries", () => {
     const message = buildOutboundMessage(qitem, { ...opts, evidenceLink: url });
     expect(context.length).toBe(SLACK_SECTION_CAP);
     expect(message.blocks).toContainEqual({ type: "context", elements: [{ type: "mrkdwn", text: context }] });
-    expect(() => buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character })).toThrow(/evidence context.*maximum 3000/);
+    const longer = base + escaped.repeat(count) + padding + escaped;
+    const compact = buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character });
+    expect(compact.blocks).toContainEqual({
+      type: "context", elements: [{ type: "mrkdwn", text: suffix ? `<${longer}|evidence>` : longer }],
+    });
+    const extra = 1 + Math.floor((prefix.length + suffix.length) / escaped.length);
+    expect(() => buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character.repeat(extra) }))
+      .toThrow(/evidence context.*maximum 3000/);
   });
 
   it("includes evidence, images, attribution, mentions and the reconcile marker in the complete fallback budget", () => {
@@ -135,7 +142,13 @@ describe("#47 evidence link boundaries", () => {
     expect(message.text).toContain("From dev@rig@host");
     expect(message.text).toContain("<@U-EVIDENCE>");
     expect(message.text.endsWith(fullOpts.reconcileMarker)).toBe(true);
-    expect(() => buildOutboundMessage({ ...brief, body: body + "b" }, fullOpts)).toThrow(/complete fallback.*maximum 3900/);
+    const compactBody = body + "b".repeat("Evidence: ".length);
+    const compact = buildOutboundMessage({ ...brief, body: compactBody }, fullOpts);
+    expect(compact.text.length).toBe(SLACK_TEXT_CAP);
+    expect(compact.text.split("\n")).toContain(evidenceLink.replaceAll("&", "&amp;"));
+    expect(compact.text).toContain(compactBody);
+    expect(() => buildOutboundMessage({ ...brief, body: compactBody + "b" }, fullOpts))
+      .toThrow(/complete fallback.*maximum 3900/);
   });
 });
 
