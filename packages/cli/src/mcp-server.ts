@@ -60,6 +60,15 @@ function rigNotFound(handle: string): TextResult {
   return errorResult(JSON.stringify({ error: message }), "rig_not_found", message);
 }
 
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
+}
+
 /** structuredContent is an object, so a list comes back as { items }. */
 function structured(data: unknown): Record<string, unknown> {
   if (data && typeof data === "object" && !Array.isArray(data)) return data as Record<string, unknown>;
@@ -687,9 +696,9 @@ export const PLAIN_WORDING: Readonly<Record<string, { title: string; replaces: s
  *  communication with seats) reach a team within the caller's scope; workspace tools read the work tree and context when
  *  the caller's grant includes them; owner tools administer the instance (launch, stop, snapshot and restore, discover and
  *  bind, add seats, validate or inspect local files by path, the event log) and are offered only to an owner grant for now.
- *  A local caller (stdio, or HTTP with no auth configured) is the owner. Person tools act for the person an external grant
- *  names (the team's questions to them) and are offered only to such a grant: no other caller, the owner included, has a
- *  person to act for. */
+ *  A local caller (stdio, or HTTP with no auth configured) is the owner. Person tools act for the person a grant explicitly
+ *  names (the team's questions to them): an external grant's person, or a token-file grant bound to one with
+ *  `rig mcp token add --person`. No other caller, the owner included, has a person to act for. */
 export type McpAccessClass = "work" | "workspace" | "owner" | "person";
 
 /** An authenticated HTTP caller: the seat it acts as comes with it (the DaemonClient built for it); this is what it may
@@ -697,6 +706,9 @@ export type McpAccessClass = "work" | "workspace" | "owner" | "person";
  *  destination is. An external grant (`external`) is narrower: see externalScope. */
 export type McpAccess = {
   principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
+  /** A token-file grant's person (`rig mcp token add --person`): the gateway entity id of the registered person this
+   *  connection may answer the team's questions for. Never inferred from the seat or the owner flag. */
+  person?: string;
   /** An external caller's grant: the object/action pairs it names (openrig.grant/v1 `objects`), the grant it answered
    *  with, `person`, the gateway entity id of the person the grant service vouches owns this connection, and `throttle`,
    *  the service's fair-use limit on new work for this request: the seconds before a new create is accepted again. */
@@ -711,6 +723,10 @@ const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>>
   artifact: { read: "rig_artifact_read" },
   question: { read: "rig_question_list", answer: "rig_question_answer" },
 };
+
+/** The person a caller's grant names: an external grant's, or a token-file grant's own binding. */
+const personOf = (access: McpAccess | undefined): string | undefined =>
+  access?.external ? access.external.person : access?.person;
 
 /** A person tool (access class `person`) acts for the person an external grant names, so a grant without a person isn't
  *  offered it, whatever its objects say. The caller's seat is never taken for a person. */
@@ -876,8 +892,14 @@ function externalInboxInstructions(tools: ReadonlySet<string>): string {
   ].join("\n");
 }
 
+/** For a token-file grant bound to a person: the same rule as an external grant's person, beside the member's instructions. */
+const FILE_PERSON_INSTRUCTION = "This connection is bound to a person: the team's questions to them are in rig_question_list. Submit only the answer they explicitly give you, with rig_question_answer (the qitemId, the revision you showed them, and the options they chose or exactly what they typed), and never choose for them.";
+
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
-  if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
+  if (!access?.external) {
+    const base = frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
+    return access?.person ? `${base}\n${FILE_PERSON_INSTRUCTION}` : base;
+  }
   const tools = externalTools(access.external);
   const workflow = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
@@ -1041,7 +1063,7 @@ export function mintUnknownSender(): string {
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; principalSource?: "file" | "grant-service"; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
   /** HTTP disconnect/legacy cancellation, combined with the SDK's per-call cancellation for bounded reads. */
   requestSignal?: AbortSignal;
   /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
@@ -1160,7 +1182,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const offered = (tool: string): boolean => {
     if (external) return external.has(tool);
     const kind = accessClass.get(tool);
-    if (kind === "person") return false;
+    // Only a token-file grant explicitly bound to a person is offered the person tools; a local caller and the owner aren't.
+    if (kind === "person") return Boolean(access?.person);
     if (!access || access.owner) return true;
     return kind === "work" || (kind === "workspace" && access.workspace);
   };
@@ -1172,7 +1195,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const worded = (tool: string, description: string, annotations: ToolAnnotations): { title?: string; description: string; annotations: ToolAnnotations } => {
     const plain = PLAIN_WORDING[tool];
     if (!plain || !(access?.external || tool === "rig_whoami") || !description.startsWith(plain.replaces)) return { description, annotations };
-    return { title: plain.title, description: plain.with + description.slice(plain.replaces.length), annotations: { ...annotations, title: plain.title } };
+    const network = tool === "rig_team" && options.principalSource === "grant-service";
+    const title = network ? "Show my network" : plain.title;
+    const opening = network ? plain.with.replace("on your team", "on your network") : plain.with;
+    return { title, description: opening + description.slice(plain.replaces.length), annotations: { ...annotations, title } };
   };
   const caller = access ? { authenticated: true, principal: access.principal } : { authenticated: false, identity: "declared" };
   /** For an authenticated non-owner: the error for an item it can't reach (or can't read), else null. `owner` asks
@@ -1993,6 +2019,16 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (handedOffFrom) params.set("handedOffFrom", handedOffFrom);
         params.set("limit", String(limit ?? 100));
         const res = await hostGet(target, `/api/queue/list?${params.toString()}`);
+        // The daemon's page marker rides beside the items, as limit and truncated, with a line when the page was cut,
+        // as the CLI prints one. A daemon that doesn't send it leaves the result as it was.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        const paged = (result: TextResult): TextResult => !page || result.isError ? result : {
+          ...result,
+          content: page.truncated
+            ? [...result.content, { type: "text", text: `This page stops at the limit of ${page.limit} and more items match; pass a larger limit to see the rest.` }]
+            : result.content,
+          structuredContent: { ...result.structuredContent, limit: page.limit, truncated: page.truncated },
+        };
         const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom, tags }) : null;
         if (ignored) {
           const message = `The daemon didn't apply ${ignored}, so this list isn't filtered by it; it needs a newer daemon.`;
@@ -2002,17 +2038,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (scope && res.status < 400 && Array.isArray(res.data)) {
           const view = externalView(scope);
           const rows = res.data.filter((row) => scope.item(row)).map(withoutDaemonLinkedRows);
-          const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
+          const result = paged(mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true }));
           // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
           // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list. The
           // default list holds open items only, so its empty answer says no open requests, never none at all.
           const inbox = access?.external && (owned || mine) && !destination && !source && !state && tags.length === 0 && !since && !handedOffFrom;
-          if (!inbox || rows.length > 0) return result;
+          // A cut page can't say that nothing is addressed to the caller.
+          if (!inbox || rows.length > 0 || page?.truncated) return result;
           const team = teamPhrase(rosterTeamName(rostersFolder(), sessionName!.split("@")[1] ?? "").name);
           const message = `No ${all ? "" : "open "}requests are addressed to you on ${team}.`;
           return { ...result, content: [...result.content, { type: "text", text: message }], structuredContent: { ...result.structuredContent, message } };
         }
-        return mapResult(res, undefined, { structured: true });
+        return paged(mapResult(res, undefined, { structured: true }));
       } catch (err) {
         return caught(err);
       }
@@ -2472,7 +2509,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   // them are what Steering shows them as answerable, read from Steering's own view of them, and answered through
   // Steering's write path (answer for an ask, resolve for a park), as them, through their own client. The caller's seat
   // is only the route the answer came by.
-  const person = access?.external?.person;
+  const person = personOf(access);
   const personAddress = person ? `${person}@external` : undefined;
   type Answerable = { qitemId: string; verb: "answer" | "approve" | "resolve"; item: Record<string, any> };
   const answerable = async (): Promise<Answerable[] | TextResult> => {
@@ -2599,7 +2636,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // The route the answer came by, recorded beside it: never the person, and never the caller's own judgment.
         const grant = access?.external?.grant;
-        const route = { route: "external-assistant", assistantSeat: seatOf(), principal: access?.principal, ...(grant ? { grant: grant.id, grantVersion: grant.version } : {}), person: personAddress };
+        const route = { route: access?.external ? "external-assistant" : "file-grant", assistantSeat: seatOf(), principal: access?.principal, ...(grant ? { grant: grant.id, grantVersion: grant.version } : {}), person: personAddress };
         // One operation per submission, one id per step: a retry of the same answer to the same revision is recognised by
         // these ids, never by equal answers.
         const operation = `assistant:${createHash("sha256").update(JSON.stringify([grant?.id ?? access?.principal, qitemId, revision, choices ?? null, words ?? null])).digest("hex").slice(0, 24)}`;

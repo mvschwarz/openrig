@@ -19,9 +19,37 @@ const PERCENT = String.raw`(?:100|[1-9]?\d)%`;
 const CONTEXT_NOTICE = String.raw`(?:(?:${PERCENT} until auto-compact|auto-compact is next|${PERCENT} context used)`
   + String.raw`(?: · \/model [A-Za-z0-9._\[\]-]+)?`
   + String.raw`|Context low \(${PERCENT} remaining\)(?: · (?:\/compact to free up space|\/model [A-Za-z0-9._\[\]-]+))?)`;
-// Only a known effort hint, installed-update notice, auto-update failure or context warning may share the paste-hint
-// row. A wide pane draws the failure there in full; a narrow one gives it its own row, skipped as a status warning.
-const PASTE_HINT = new RegExp(String.raw`^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))|✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor|✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)|${CONTEXT_NOTICE}))?$`);
+// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
+// Recognize the complete input block, never a warning or historical prompt alone.
+export const CLAUDE_STATUS_WARNINGS = [
+  /^✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor$/,
+  /^✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)$/,
+  /^✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai\/claude-c…$/,
+  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
+  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
+  // #1641: Claude 2.1.293's update banner, whatever installer it names.
+  /^Update available! Run: \S.*$/,
+  // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
+  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
+  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
+  // "Restart to update" on its own row (Claude 2.1.319, #2605).
+  /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
+];
+// Claude can draw noninteractive UI rows after its mode footer. They do not
+// replace the composer and should only be skipped when they match a known row.
+export const CLAUDE_STATUS_DECORATIONS = [
+  /^\d[\d,]* tokens$/,
+  /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
+  /^\/rc$/,
+];
+// Only a known effort hint, context warning, or a notice the reader knows on its own row (the lists above, each
+// `^…$`) may share the paste-hint row. A wide pane draws a notice there in full; a narrow one gives it its own row,
+// skipped as a status row, so a row clipped to that width (ending in `…`) never shares the hint's (#3231). Any other
+// right side, such as a draft's text, is not the hint (#2429).
+const STATUS_NOTICE = [...CLAUDE_STATUS_WARNINGS, ...CLAUDE_STATUS_DECORATIONS].filter(row => !row.source.endsWith("…$"))
+  .map(row => `(?:${row.source.slice(1, -1)})`).join("|");
+const PASTE_HINT = new RegExp(String.raw`^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|${STATUS_NOTICE}|${CONTEXT_NOTICE}))?$`);
 export const isClaudePasteHint = (line: string): boolean => PASTE_HINT.test(line.replace(VIM_MODE_PREFIX, ""));
 export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");

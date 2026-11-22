@@ -234,11 +234,16 @@ describe("terminal WebSocket input ordering", () => {
     const app3 = new Hono();
     app3.use("*", async (c, next) => {
       c.set("tmuxAdapter" as never, {
+        humanInput: async (name: string, write: () => Promise<void>) => {
+          if (name === "unknown-target") throw Object.assign(new Error("no managed target"), { code: "guard_target_unknown" });
+          await write();
+        },
         hasSession: async () => true,
         setWindowOption: async () => ({ ok: true }),
         startPipePane: async () => ({ ok: true }),
         stopPipePane: async () => ({ ok: true }),
-        sendKeys: async () => ({ ok: true }),
+        sendKeys: async (name: string) => name === "failed-target"
+          ? { ok: false, code: "guard_target_changed", message: "target changed" } : { ok: true },
         sendText: async (_name: string, text: string) => {
           await new Promise((resolve) => setTimeout(resolve, text === "e" ? 30 : 0));
           textCompletions.push(text);
@@ -257,6 +262,24 @@ describe("terminal WebSocket input ordering", () => {
 
   afterAll(() => {
     orderServer?.close();
+  });
+
+  it.each([
+    ["unknown-target", { type: "text", text: "typed private text" }, "guard_target_unknown"],
+    ["failed-target", { type: "keys", keys: ["Enter"] }, "guard_target_changed"],
+  ])("reports undelivered input to the viewer of %s", async (name, frame, reason) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${ORDER_PORT}/api/terminal/${name}?token=${ORDER_TOKEN}`);
+    try {
+      const response = new Promise<string>((resolve, reject) => {
+        ws.onmessage = event => { if (String(event.data).includes("terminal input was not sent")) resolve(String(event.data)); };
+        ws.onerror = () => reject(new Error("websocket failed"));
+      });
+      await new Promise<void>(resolve => { ws.onopen = () => resolve(); });
+      ws.send(JSON.stringify(frame));
+      const message = await Promise.race([response, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("input failure was silent")), 1000))]);
+      expect(message).toContain(`terminal input was not sent (${reason})`);
+      expect(message).not.toContain("typed private text");
+    } finally { ws.close(); }
   });
 
   it("serializes rapid text messages before calling tmux", async () => {

@@ -31,14 +31,22 @@ function parseArgs(argv) {
     out: DEFAULT_OUT,
     cwd: process.cwd(),
     json: false,
+    tailBytes: 0,
+    untilByte: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--jsonl") args.jsonl = argv[++i];
     else if (arg === "--out") args.out = argv[++i];
+    else if (arg === "--tail-bytes") {
+      args.tailBytes = Number(argv[++i]);
+      if (!Number.isInteger(args.tailBytes) || args.tailBytes <= 0) throw new Error("--tail-bytes needs a whole number of bytes");
+    }
     else if (arg === "--cwd") args.cwd = argv[++i];
     else if (arg === "--json") args.json = true;
+    // Read only the first N bytes: the transcript as it was when the PreCompact hook ran, before compaction appends to it.
+    else if (arg === "--until-byte") args.untilByte = Number(argv[++i]);
     else if (!arg.startsWith("-") && !args.jsonl) args.jsonl = arg;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -48,10 +56,21 @@ function parseArgs(argv) {
 
 // The transcript is read a line at a time: a long-lived seat's JSONL runs to gigabytes, past the longest string Node can
 // make (about 512 MB), so the whole file is never read into one string.
-async function* readJsonLines(file) {
-  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+// From a byte offset (a tail packet), the stream starts one byte early and drops its first line: that's the rest of the
+// line the cut fell in, or empty when the cut falls at a line start. It ends at the size recorded when the tail was
+// chosen, so lines appended while it reads stay out of the packet and out of the range its coverage line names.
+async function* readJsonLines(file, start = 0, untilByte = null) {
+  if (untilByte === 0) return; // an explicit bound of 0 is an empty prefix; an absent one reads the whole file
+  const bounded = Number.isInteger(untilByte) && untilByte > 0 ? { end: untilByte - 1 } : {};
+  const range = start ? { start: start - 1, ...bounded } : bounded;
+  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", ...range }), crlfDelay: Infinity });
   let index = 0;
+  let skip = start > 0;
   for await (const line of lines) {
+    if (skip) {
+      skip = false;
+      continue;
+    }
     if (!line) continue;
     index += 1;
     let record;
@@ -276,7 +295,7 @@ function discoverDocs(cwd) {
   return [...docs].sort();
 }
 
-async function analyze(jsonlPath, cwd, staging) {
+async function analyze(jsonlPath, cwd, staging, start = 0, untilByte = null) {
   const registry = createRegistry();
   const transcript = createTextSink(path.join(staging, "transcript.txt"));
   const narrative = createTextSink(path.join(staging, "transcript-narrative.txt")); // R4: message-turns only (assistant/user text), no tool bodies
@@ -284,9 +303,11 @@ async function analyze(jsonlPath, cwd, staging) {
   const cwdCounts = new Map();
   let sessionId = null;
   let records = 0;
+  let firstTimestamp = null;
 
-  for await (const record of readJsonLines(jsonlPath)) {
+  for await (const record of readJsonLines(jsonlPath, start, untilByte)) {
     records += 1;
+    if (!firstTimestamp && typeof record.timestamp === "string") firstTimestamp = record.timestamp;
     registry.tick();
     if (record.sessionId || record.session_id) sessionId = record.sessionId ?? record.session_id;
     if (record.cwd) {
@@ -370,6 +391,8 @@ async function analyze(jsonlPath, cwd, staging) {
     narrativeTokens: Math.round(narrativeLength / 4),
     files: rankedFiles,
     docs: discoverDocs(effectiveCwd),
+    // Only a tail packet says what it covers, so a whole-session packet's summary is unchanged.
+    ...(start ? { coverage: { fromByte: start, bytes: untilByte - start, firstTimestamp } } : {}),
   };
 }
 
@@ -412,6 +435,10 @@ function restoreInstructions(summary, outputPaths) {
   lines.push(`- Narrative companion (READ THIS FIRST): \`${outputPaths.narrative}\` (~${summary.narrativeTokens ?? "?"} tokens — message turns only, no tool bodies)`);
   lines.push(`- Touched-file triage: \`${outputPaths.touchedFiles}\``);
   lines.push(`- Working directory inferred: \`${summary.cwd}\``);
+  if (summary.coverage) {
+    const { fromByte, bytes, firstTimestamp } = summary.coverage;
+    lines.push(`- **Coverage: this packet is built from the JSONL's last ${bytes} bytes only** (from byte ${fromByte}${firstTimestamp ? `, first timed record at ${firstTimestamp}` : ""}). Earlier history is in the JSONL itself. Touched files and their counts come from this tail, and a Read whose call is before the cut has no file path. For a whole-session packet, run restore-from-jsonl.mjs without --tail-bytes.`);
+  }
   lines.push("");
   lines.push("## Read budget (the restore must leave room for the work)");
   lines.push("");
@@ -503,8 +530,12 @@ async function main() {
   staging = fs.mkdtempSync(path.join(outRoot, ".partial-"));
   let summary;
   let outputPaths;
+  // --tail-bytes N reads only the transcript's last N bytes (the PreCompact hook asks for it on a large transcript),
+  // counted back from --until-byte when one is given.
+  const size = Number.isInteger(args.untilByte) && args.untilByte >= 0 ? args.untilByte : fs.statSync(jsonlPath).size;
+  const start = args.tailBytes && args.tailBytes < size ? size - args.tailBytes : 0;
   try {
-    summary = await analyze(jsonlPath, cwd, staging);
+    summary = await analyze(jsonlPath, cwd, staging, start, start ? size : args.untilByte);
     outputPaths = writeOutputs(summary, outRoot, staging);
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });

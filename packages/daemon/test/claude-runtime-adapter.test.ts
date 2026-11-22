@@ -5,6 +5,7 @@ import os from "node:os";
 import nodePath from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
+import { WRAPPED_CLAUDE_LOOKUP_REFUSAL } from "../src/domain/seat-launch-environment.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -579,6 +580,43 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  // #3746: a wrapped classic launch refuses a claude that is a shell function or alias, since a launch_wrapper needs claude's
+  // executable file and the function may carry the person's settings. The ready check names that refusal and its remedy.
+  const lookupReason = (line: string, kind: string) => `the pane shows OpenRig's launch refusal (${line}) A launch_wrapper starts Claude's executable file, and OpenRig doesn't look past a shell ${kind} named claude, which may set this seat's account, endpoint or hooks. Make claude an executable file on PATH (for example a script that applies the same settings and then execs Claude), or remove the ${kind} from the shell OpenRig's panes start, then relaunch this seat.`;
+
+  it.each(["function", "alias"] as const)("checkReady names the wrapped launch's refusal of a claude %s and its remedy (#3746)", async (kind) => {
+    const line = WRAPPED_CLAUDE_LOOKUP_REFUSAL(kind);
+    expect(await idleShellAfter(line)).toEqual({ ready: false, reason: lookupReason(line, kind), code: "returned_to_shell" });
+  });
+
+  it("checkReady keeps a wrapped launch refusal whole by reading the joined capture (#3746)", async () => {
+    const line = WRAPPED_CLAUDE_LOOKUP_REFUSAL("function");
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, _n?: number, opts?: { joinWrappedLines?: boolean }) =>
+      `${opts?.joinWrappedLines ? line : `${line.slice(0, 70)}\n${line.slice(70)}`}\n% `);
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh", pgid: 900, tpgid: 900, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: false, reason: lookupReason(line, "function"), code: "returned_to_shell" });
+  });
+
+  it.each([
+    ["the generic wrapper refusal", "OpenRig: launch_wrapper unavailable; no agent started."],
+    ["a line that only quotes the refusal", `# why: ${WRAPPED_CLAUDE_LOOKUP_REFUSAL("function")}`],
+  ])("checkReady keeps the plain returned-to-shell reason for %s (#3746)", async (_label, line) => {
+    expect(await idleShellAfter(line)).toEqual({
+      ready: false,
+      reason: "The probe pane returned to a shell instead of staying inside the runtime.",
+      code: "returned_to_shell",
+    });
+  });
+
   it("checkReady stays ready when a working Claude conversation quotes the sideload refusal (#3245)", async () => {
     const tmux = mockTmux();
     (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -1025,6 +1063,43 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  it("launchHarness keeps polling past a foreground Claude, so the missing conversation it then reports is marked", async () => {
+    const tmux = mockTmux();
+    const command = tmux.getPaneCommand as ReturnType<typeof vi.fn>;
+    const capture = tmux.capturePaneContent as ReturnType<typeof vi.fn>;
+    // A resume of a conversation that doesn't exist: Claude is the foreground process with nothing drawn, then prints
+    // "No conversation found" and the pane is back at its shell. The foreground reads alone aren't a resumed seat.
+    for (let read = 0; read < 3; read++) { command.mockResolvedValueOnce("claude"); capture.mockResolvedValueOnce(""); }
+    command.mockResolvedValue("zsh");
+    capture.mockResolvedValue("No conversation found with session ID: abc-123\nuser@example.test %");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(capture).toHaveBeenCalledTimes(4);
+    expect(result).toEqual({
+      ok: false,
+      probe: probeEvidence,
+      error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh",
+      missingConversation: true,
+    });
+  });
+
+  it("launchHarness still accepts a foreground Claude with nothing drawn when the wait ends (control)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+    const capture = tmux.capturePaneContent as ReturnType<typeof vi.fn>;
+    capture.mockResolvedValue("");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    // The 16 reads of the wait, then the final read accepts it as before.
+    expect(capture).toHaveBeenCalledTimes(17);
+    expect(result).toMatchObject({ ok: true });
+  });
+
   it("launchHarness marks a missing conversation that first shows on the read after the wait", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
@@ -1088,6 +1163,18 @@ describe("Claude Code runtime adapter", () => {
     expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${sideloadReason(sideloadRefusalCore)}`, recovery: "retry_fresh" });
   });
 
+  it("launchHarness names the wrapped launch's refusal of a claude function when a resume's pane is back at its shell (#3746)", async () => {
+    const line = WRAPPED_CLAUDE_LOOKUP_REFUSAL("function");
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`${line}\n% `);
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: ["dev-impl", "test-rig"].join("@"), resumeToken: "abc-123" });
+
+    expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${lookupReason(line, "function")}`, recovery: "retry_fresh" });
+  });
+
   describe("a resume still starting is watched, not failed (pane command is sh for every OpenRig launch)", () => {
     const startedAt = "Fri Oct 16 15:00:00 2026";
     const pane = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "-zsh", executableName: "zsh", startedAt };
@@ -1100,10 +1187,11 @@ describe("Claude Code runtime adapter", () => {
     const WAIT_MS = 6_000;
 
     // `screen(read)` is the pane text on the nth capture; `rows(read)` the process list at that point.
-    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
+    // `command(read)`, when given, is the pane's foreground command before the nth capture.
+    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
       let reads = 0;
       const tmux = mockTmux();
-      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue(opts.paneCommand ?? "sh");
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => opts.command?.(reads) ?? opts.paneCommand ?? "sh");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => (opts.screen ?? (() => ""))(reads++));
       (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
       const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: opts.autoDrive, readinessTimeoutMs: "readinessTimeoutMs" in opts ? opts.readinessTimeoutMs : WAIT_MS,
@@ -1168,6 +1256,30 @@ describe("Claude Code runtime adapter", () => {
         recovery: "retry_fresh",
         missingConversation: true,
       });
+    });
+
+    // The launch script holds the pane through the quick window, so the wait is extended; then Claude is the foreground
+    // process with nothing drawn. That alone isn't a resumed conversation in the longer wait either.
+    const foregroundAfterWindow = (read: number) => (read < 16 ? "sh" : "claude");
+
+    it("keeps the longer wait going past a foreground Claude, so the missing conversation it then reports is marked", async () => {
+      const { result, reads } = await run({ command: foregroundAfterWindow,
+        screen: (read) => (read < 19 ? "" : "No conversation found with session ID: abc-123") });
+      expect(result).toEqual({
+        ok: false,
+        probe: probeEvidence,
+        error: "Claude resume failed: no conversation found for the requested session",
+        recovery: "retry_fresh",
+        missingConversation: true,
+      });
+      expect(reads).toBe(20);
+    });
+
+    it("still accepts a foreground Claude with nothing drawn at the longer wait's end (control)", async () => {
+      const { result, reads } = await run({ command: foregroundAfterWindow });
+      expect(result).toMatchObject({ ok: true });
+      // The 30 polls of the bound, then the final read accepts it as before.
+      expect(reads).toBe(31);
     });
 
     it("still stops at a resume-selection prompt that shows up during the extra wait", async () => {

@@ -206,6 +206,9 @@ export class SessionAddressConflict extends Error {
 
 export class SessionRegistry {
   readonly db: Database.Database;
+  /** #3634: fired after a session of a node is recorded as running, so a daemon-owned per-rig job that archive
+   *  retired comes back when a seat of that rig runs again (restore or launch without unarchive). */
+  onSessionRunning?: (nodeId: string) => void;
   private watchdogRegistrationObserver?: WatchdogRegistrationObserver;
   constructor(db: Database.Database, watchdogRegistrationObserver?: WatchdogRegistrationObserver) {
     this.db = db;
@@ -342,6 +345,7 @@ export class SessionRegistry {
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
     try { new ActivityGrantStore(this.db).reconcileBinding(nodeId); }
     catch { /* Optional run attribution must not fail an already registered claimed session. */ }
+    this.onSessionRunning?.(nodeId);
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -528,26 +532,55 @@ export class SessionRegistry {
     };
   }
 
+  /** An observed or recorded status. It leaves a requested stop in place (#2940): an observation, the startup
+   *  reconcile or a compensation must not undo a person's stop. A later start or resume writes a new session row,
+   *  which starts without a request. */
   updateStatus(sessionId: string, status: string): void {
     if (["exited", "detached", "superseded"].includes(status)) new ActivityGrantStore(this.db).revokeForSession(sessionId, status);
     this.db
-      .prepare("UPDATE sessions SET status = ?, intentionally_stopped = 0, last_seen_at = datetime('now') WHERE id = ?")
+      .prepare("UPDATE sessions SET status = ?, last_seen_at = datetime('now') WHERE id = ?")
       .run(status, sessionId);
+    if (status === "running" && this.onSessionRunning) {
+      const row = this.db.prepare("SELECT node_id FROM sessions WHERE id = ?").get(sessionId) as { node_id: string } | undefined;
+      if (row) this.onSessionRunning(row.node_id);
+    }
   }
 
-  /** A supported stop is distinct from an observed exit. Any later status write
-   * clears the intent, including a resume of this same session row. */
+  /** #2940: record a stop request durably before the first step that stops anything, without changing the status.
+   *  Returns this row's earlier request, which only a stop proven to have had no effect puts back. */
+  requestStop(sessionId: string, attemptId: string): { flag: number; attempt: string | null } | null {
+    const prev = this.db.prepare("SELECT intentionally_stopped AS flag, stop_attempt AS attempt FROM sessions WHERE id = ?")
+      .get(sessionId) as { flag: number; attempt: string | null } | undefined;
+    if (!prev) return null;
+    this.db.prepare("UPDATE sessions SET intentionally_stopped = 1, stop_attempt = ? WHERE id = ?").run(attemptId, sessionId);
+    return prev;
+  }
+
+  /** #2940: put back the request this attempt replaced, only while the row still carries this attempt and is still
+   *  live or detached (running, idle, unknown or detached: a detached row tmux shows again can be stopped too). An older
+   *  or concurrent stop recorded its own attempt and is left alone, a confirmed stop (exited) is kept, and a replacement
+   *  session is another row. Returns whether the row changed. */
+  revertStopRequest(sessionId: string, attemptId: string, prev: { flag: number; attempt: string | null }): boolean {
+    return this.db.prepare(
+      "UPDATE sessions SET intentionally_stopped = ?, stop_attempt = ? WHERE id = ? AND stop_attempt = ? AND status IN ('running', 'idle', 'unknown', 'detached')",
+    ).run(prev.flag, prev.attempt, sessionId, attemptId).changes > 0;
+  }
+
+  /** A supported stop is distinct from an observed exit: this confirms one (status exited, request kept). Only a new
+   *  session row (a later start or resume) is without it. #2940: confirming clears the attempt that recorded the
+   *  request; a request whose attempt is still set is pending, whatever the row's status. */
   markIntentionallyStopped(sessionId: string): void {
     new ActivityGrantStore(this.db).revokeForSession(sessionId, "stopped");
     this.db.prepare(
-      "UPDATE sessions SET status = 'exited', intentionally_stopped = 1, last_seen_at = datetime('now') WHERE id = ?",
+      `UPDATE sessions SET status = 'exited', intentionally_stopped = 1${stopAttemptCleared(this.db)}, last_seen_at = datetime('now') WHERE id = ?`,
     ).run(sessionId);
   }
 
   /** Record a supported stop on a row that keeps its status: a rolled-back launch's superseded session is
-   * occupant history, and turning it into an exit would make it a restore candidate. */
+   * occupant history, and turning it into an exit would make it a restore candidate. Confirmed, like
+   * markIntentionallyStopped: the attempt is cleared. */
   recordStopIntent(sessionId: string): void {
-    this.db.prepare("UPDATE sessions SET intentionally_stopped = 1 WHERE id = ?").run(sessionId);
+    this.db.prepare(`UPDATE sessions SET intentionally_stopped = 1${stopAttemptCleared(this.db)} WHERE id = ?`).run(sessionId);
   }
 
   updateStartupStatus(sessionId: string, status: "pending" | "ready" | "attention_required" | "failed", completedAt?: string): void {
@@ -1003,6 +1036,17 @@ interface BindingRow {
 }
 
 const sessionsHaveCommunityHarness = new WeakMap<Database.Database, boolean>();
+const sessionsHaveStopAttempt = new WeakMap<Database.Database, boolean>();
+
+/** #2940: the assignment that clears a confirmed stop's attempt, on a database that has the column (none before it). */
+function stopAttemptCleared(db: Database.Database): string {
+  let has = sessionsHaveStopAttempt.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "stop_attempt");
+    sessionsHaveStopAttempt.set(db, has);
+  }
+  return has ? ", stop_attempt = NULL" : "";
+}
 
 /** The SQL that reads a session's recorded community harness: the retained storage column, or NULL on a schema without that column
  *  (as other optional columns are read), so a partial schema reads every seat as before. The schema check is made
