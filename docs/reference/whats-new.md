@@ -1,4 +1,84 @@
-# What changed in OpenRig 0.7.20
+# What changed in OpenRig 0.7.21
+
+This note is for an agent on an install that was just upgraded to 0.7.21.
+OpenRig 0.7.21 is a patch of ordinary team fixes. An agent can find a team's declared entry point when the team has no single lead. The daemon narrows one source of stalls when reading a mission's execution view. A seat pool's agents stay out of exports, and a bad pool block is named where you will see it. A Pi seat's posted usage feeds the context lane. It also fixes a run of smaller daemon, CLI, terminal, scope and skill problems.
+
+## Before you upgrade
+
+Run the upgrade in the environment that owns your daemon, keeping the same `OPENRIG_HOME` (legacy `RIGGED_HOME`) if you set it. Stop the daemon, back up its database, install the patch, then restart it. Your agents keep running; do not use `rig down` for this upgrade.
+
+If the daemon was started with `--db`, or with `OPENRIG_DB` (legacy `RIGGED_DB`) set differently from this shell, replace the `DB=` line below with that actual database path. Pass the same `--db "$DB"` to every `rig daemon start`, including recovery; `rig config get db.path` reads this shell's configuration, not the running daemon's launch arguments or environment.
+
+```sh
+DB="$(rig config get db.path)" &&
+STOP="$(rig daemon stop)" && printf '%s\n' "$STOP" &&
+{ printf '%s\n' "$STOP" | grep -qx 'Daemon stopped' || { echo "The stop wasn't confirmed clean; see below before continuing." >&2; false; }; } &&
+BACKUP="$DB.before-0.7.21-$(date -u +%Y%m%dT%H%M%SZ)" &&
+{ [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists; keep it and run again." >&2; false; }; } &&
+cp "$DB" "$BACKUP" &&
+{ [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+npm install -g @openrig/cli@0.7.21 &&
+rig daemon start --db "$DB"
+```
+
+A failure stops the following commands; fix it before continuing. Back up and install only after `rig daemon stop` prints the line `Daemon stopped`: that is the stop outcome that confirms a clean shutdown. Its other success line, “No daemon target recorded; listener refused. Nothing to stop; prior drain not certified.”, means this stop has no recorded target. It does not prove that no daemon exists or that the last one shut down cleanly. A `Daemon stopped` from `rig daemon status` does not confirm a clean shutdown either.
+
+If the stop failed or had no recorded target, make sure the daemon is running on its original home and database (start it with `rig daemon start --db "$DB"` if `rig daemon status` does not say it is running), then run the whole block again. If the stop is still unconfirmed, use `daemon-shutdown.json` and `daemon.log` in your OpenRig home, together with `rig context get help`, to resolve the reported problem before retrying. Do not continue to the backup or install on an unconfirmed stop.
+
+A clean stop after restarting confirms only the new daemon’s shutdown, not whether earlier unfinished actions completed. Each stop replaces `daemon-shutdown.json`; look in `daemon.log` for earlier shutdown failures.
+
+This release adds no database migration. Coming from 0.7.19 or earlier, 0.7.20's three additive migrations (`176_node_statusline_throttle`, `177_workflow_bound_pod` and `178_seat_pool`) apply at the first start; keep the backup, because downgrading a migrated database is not established. Bundled `openrig` is 0.7.21; `openrig-core` is 0.1.35.
+
+## Teams and a person's agent
+
+A roster entry can declare `lead_of`, a team name. When the daemon names no single lead for a rig (no `delegates_to` root, several, or one without a session) and exactly one entry in the rig declares a team, `rig_team` reports that entry as the rig's lead, marked declared, with its team and a note that it is that team's entry point and doesn't manage the network or its other participants. Two or more declarations give no lead, and the note names them; the same seat and team declared in two rosters counts once, and one seat declaring two teams counts as two. This tells an agent where to hand a team's work; nothing routes work automatically. ([#3593](https://github.com/mvschwarz/openrig/pull/3593), [#3606](https://github.com/mvschwarz/openrig/pull/3606))
+
+When `rig attach --self` receives an HTTP error from the daemon, the CLI's text output keeps the error and adds one line naming the unjoined route: `rig queue create --destination <seat> --return-route auto --summary "<the goal>" --body-file <file>`. With `--json`, it prints the daemon's result instead, without that added line. The `rigs` skill says to take that route when the attach fails, names the fewer-prompts route in its top rules, and says what to do when the person's own app refuses a relay: tell them what was refused and why, let them choose, and don't retry another way. This release ships that guidance; it doesn't claim a measured change in how agents behave. ([#3569](https://github.com/mvschwarz/openrig/pull/3569), [#3574](https://github.com/mvschwarz/openrig/pull/3574))
+
+`rig gateway human add` for a person with no connector binding says that they are reached only in the TUI's Feed and Steering until a binding is added, and names the command that adds one. ([#3590](https://github.com/mvschwarz/openrig/pull/3590))
+
+## Queue work
+
+A stuck-sweep finding says it is a diagnostic about its row, not a second assignment: act on the row, and the sweep closes the finding once the row is no longer stuck. The `queue-handoff` skill says tags can be added to a row later with `rig queue tag`, and that a receiver adds its own team's scope tags to a row it owns. ([#3591](https://github.com/mvschwarz/openrig/pull/3591), [#3581](https://github.com/mvschwarz/openrig/pull/3581), [#3599](https://github.com/mvschwarz/openrig/pull/3599))
+
+An explicitly held seat that has never launched, with no assigned work, session, error or recorded launch or restore, reads as planned capacity: it stays visibly held, but no longer marks an otherwise running rig degraded or adds an attention item. A problem written only into such a seat's hold reason no longer adds attention. ([#3538](https://github.com/mvschwarz/openrig/pull/3538))
+
+## Daemon
+
+On a file-backed WAL database, when the main connection is not already in a transaction, a mission's execution view reads its candidates in size-adjusted windows, yielding between them and checking whether the caller has disconnected. The queue is scanned once instead of twice; the stuck sweep's candidate read uses the same conditional pacing. The time target is a soft bound: opening the database, native I/O or processing a large row can still block. Other database modes and calls inside a transaction retain the synchronous read. This narrows one source of daemon stalls; it isn't a cure for every stall or a release-wide speed-up. ([#3558](https://github.com/mvschwarz/openrig/pull/3558))
+
+The daemon's writable SQLite connection keeps temporary storage in memory, so a sandbox whose temp directory refuses writes no longer fails nested writes inside a transaction. Large temporary structures may use more memory. ([#3486](https://github.com/mvschwarz/openrig/pull/3486))
+
+A Pi seat that posts usage facts feeds the context lane: `rig usage top`, `rig ps` and a token `context-usage-threshold` watchdog see it as they see Claude and Codex seats. A relaunched Pi seat reads unknown until its new session's first post. ([#3244](https://github.com/mvschwarz/openrig/pull/3244))
+
+## Seat pools
+
+`rig spec export` leaves a seat pool's agents out and writes the model member with its pool block; an edge that touches a pool agent is left out and named in a "Not carried" line. `rig bundle create` no longer refuses a pooled rig for drift without `--allow-drift`; real drift still refuses. A bad `pool:` block shows its advisory in the warnings you see on preflight, import, launch, `rig expand` and the other paths, and a pod bundle drops a malformed block with a warning instead of failing. The seat pool stays off: nothing arms or dispatches a pool. ([#3546](https://github.com/mvschwarz/openrig/pull/3546), [#3547](https://github.com/mvschwarz/openrig/pull/3547))
+
+## Terminal, scope and reference
+
+Herdr tiles opened by OpenRig 0.7.5 through 0.7.9 keep a fixed size. Opening a Herdr view no longer reuses such a workspace as current, and names the command that closes one. ([#3560](https://github.com/mvschwarz/openrig/pull/3560))
+
+A project nested in another project's workspace can set `scope.idPrefix` in its `project.yaml` (two or three uppercase letters) so its mission and slice ids stop repeating the enclosing project's; unset keeps `OPR`. Creating a mission with an id the enclosing project already uses names the mission that holds it. ([#3583](https://github.com/mvschwarz/openrig/pull/3583))
+
+The reference lists 0.7.20's new flags and shows `rig seat set-statusline-throttle` with its required `--reason`. Project-selection hints name only options their command accepts. "Writing a daemon client" gains a companion-app recipe over the existing Core app job. ([#3550](https://github.com/mvschwarz/openrig/pull/3550), [#3552](https://github.com/mvschwarz/openrig/pull/3552), [#3592](https://github.com/mvschwarz/openrig/pull/3592))
+
+## Known limits
+
+- Successive permission prompts at one seat can stay on one open alert without a fresh wake for each new prompt. A fix is in review. Check a seat that has stopped at a permission prompt before assuming its alert is current.
+- While a tmux server is gone, a stale probe observation can still release or reapply the delivery hold. Later observations correct it, with no guaranteed recovery time. The outage record is in memory, so a daemon restarted during a loss records it again.
+- A restore or `rig start` can label a Claude seat `resumed` before its conversation is confirmed, including when Claude reports that no conversation was found. A send can still land on Claude's workspace trust dialog. Check the seat's screen after a restore or start before relying on it.
+- A `rig send` message sent while Claude's `AskUserQuestion` dialog is open can become the answer to that question. This was observed on Claude Code 2.1.322 and 2.1.323 with OpenRig 0.7.19 and 0.7.20; nothing in this release changes it.
+- When a Codex seat's `config.toml` or `hooks.json` is a symbolic link, OpenRig records its hook trust under the link's target, as in 0.7.20, so such a seat may be asked to review hooks again. With a linked `config.toml`, OpenRig can also miss a setting stored for it that turns OpenRig's hooks off, and set those hooks up anyway. Review any hook prompt yourself; don't treat this upgrade as prior consent.
+- A percent `context-usage-threshold` doesn't fire for a Pi seat; use a token threshold.
+- The seat pool's storage applies on upgrade even though nothing arms a pool.
+- A return route records where questions should go; it doesn't guarantee arrival. Choice prompts and other hosts keep their own paths.
+
+## Credits
+
+Thanks to Evgeny Zotov, Mike Schwarz, Roberto Campos, Wu Shuwen, and billbenetti. Their contributions also improve the tmux-server tests' fixture root and the grouped native-input waits in tests.
+
+## What changed in OpenRig 0.7.20
 
 This note is for an agent on an install that was just upgraded to 0.7.20.
 OpenRig 0.7.20 tells a person's own agent the consent rules first and where a handed-over task's result is, holds automatic delivery while a seat's tmux server is gone, and, when a parked row's wake is refused at a Claude seat's usage limit, retries it at the stated reset. It also lets a workflow instance stay on one pod, adds an opt-in Claude status-line throttle, and fixes a run of smaller CLI, TUI, scope and workflow problems.
