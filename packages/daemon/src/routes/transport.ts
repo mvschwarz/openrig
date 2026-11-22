@@ -7,6 +7,8 @@ import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runti
 import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type Database from "better-sqlite3";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
+import type { EventBus } from "../domain/event-bus.js";
+import { recordRefusal } from "../domain/refusal-trace.js";
 import type { QueueRepository, QueueDestinationAdvisory } from "../domain/queue-repository.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
@@ -156,6 +158,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         }
       }
       const status = resolved.code === "ambiguous" ? 409 : 404;
+      // #3728: nothing was saved for this send (no outbox record), so the refusal itself is what the log keeps.
+      recordRefusal(c.get("eventBus" as never) as EventBus | undefined, { type: "transport.send_refused", senderSession: derivedActor,
+        session: body.session, reason: resolved.code === "ambiguous" ? "ambiguous_destination" : "destination_not_found", status });
       return c.json({ ok: false, error: resolved.error, ...(destinationStatus ? { destinationStatus } : {}) }, status);
     }
 

@@ -21,6 +21,7 @@ import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
 import { type OutboxHandler } from "../domain/outbox-handler.js";
+import { recordRefusal, refusalReason } from "../domain/refusal-trace.js";
 import { aggregateAttention } from "../domain/feed/attention-aggregator.js";
 import type { AttentionItem } from "../domain/feed/attention-aggregator.js";
 import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-reader.js";
@@ -788,8 +789,29 @@ export function queueRoutes(): Hono {
     };
   }
 
+  /** #3728: leaves a trace in the event log when /create refuses (a 4xx), or a forwarded write's result is unknown. It only
+   *  reads the response the handler already decided, so nothing the caller receives changes. */
+  async function traceCreateOutcome(c: Context, next: () => Promise<void>): Promise<void> {
+    await next();
+    const status = c.res.status;
+    if (status < 400) return;
+    const payload = await c.res.clone().json().catch(() => null) as Record<string, unknown> | null;
+    const sent = await c.req.json<{ destinationSession?: unknown; hostId?: unknown; qitemId?: unknown }>().catch(() => ({} as never));
+    const text = (value: unknown): string | null => typeof value === "string" && value ? value : null;
+    const sourceSession = transportSenderSession(c) ?? null;
+    const destinationSession = text(sent.destinationSession);
+    if (status === 502 && payload?.error === "remote_queue_write_failed" && payload.outcome === "indeterminate") {
+      recordRefusal(getEventBus(c), { type: "queue.create_remote_unknown", qitemId: text(sent.qitemId), sourceSession, destinationSession,
+        hostId: text(payload.hostId) ?? text(sent.hostId) ?? "unknown", failureClass: text(payload.failureClass) ?? "unknown" });
+      return;
+    }
+    if (status >= 500 && payload?.error !== "remote_queue_write_failed") return; // a daemon fault, not a refusal
+    recordRefusal(getEventBus(c), { type: "queue.create_refused", sourceSession, destinationSession, reason: refusalReason(payload), status,
+      hostId: text(sent.hostId) });
+  }
+
   // POST /create
-  app.post("/create", async (c) => {
+  app.post("/create", traceCreateOutcome, async (c) => {
     const body = await c.req.json<{
       qitemId?: string;
       sourceSession?: string;
