@@ -208,7 +208,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private activityRelayPath?: string;
   // The vendored openrig-core plugin directory, resolved when the install step runs (vendoring happens at startup).
   private resolveCorePluginDir?: () => string | undefined;
-  // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_SEAT_PROJECT_DIR).
+  // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_NODE; every seat gets OPENRIG_SEAT_PROJECT_DIR).
   private resolveCorePluginSelected?: (nodeId: string) => boolean;
   private runCodexCli: CodexCliRunner;
   // One Codex config.toml per adapter: launches, the boot step and resume all write it (and Codex's install writes it too),

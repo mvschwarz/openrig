@@ -370,11 +370,12 @@ export class ClaudeManagedLaunch {
     // the session never reaches a successor pane that was not given it. Set-but-empty stays empty.
     const seatForwarded = seatKeys.filter(key => !inherited.includes(key) && !(key in identity) && !(key in publicEnv))
       .map(key => `if [ "\${${key}+set}" ]; then export ${key}; fi`);
-    // A seat that loads the openrig-core plugin has its launch project in its pane (OPENRIG_SEAT_PROJECT_DIR): the plugin's
-    // hooks use it to tell the seat from a Claude started elsewhere inside it. Forwarded by name; the pane supplies the value.
+    // #3328: every seat's launch project (OPENRIG_SEAT_PROJECT_DIR) is forwarded by name from its pane, whatever it
+    // selected, so a reset pane keeps the directory a seat-scoped tool inherits. OPENRIG_NODE stays plugin-only: the
+    // plugin's hooks require both variables, so a seat without the plugin must not gain its interpreter here.
     const loadsCorePlugin = seatCorePluginDir({ id: target.nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir) !== undefined;
-    const projectForwarded = loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV]
-      .map(key => `if [ "\${${key}+set}" ]; then export ${key}; fi`) : [];
+    const projectForwarded = [SEAT_PROJECT_DIR_ENV, ...(loadsCorePlugin ? [SEAT_NODE_ENV] : [])]
+      .map(key => `if [ "\${${key}+set}" ]; then export ${key}; fi`);
     // Expand in the target pane shell, whose terminal can differ from the daemon.
     // Empty and absent values remain absent after the reset. TERM_PROGRAM is how Claude tells it runs
     // inside tmux; without it Claude never asks tmux for extended keys, and Shift+Enter reaches it
@@ -382,7 +383,7 @@ export class ClaudeManagedLaunch {
     // TMUX_TMPDIR, so tools the seat runs (and any daemon it starts) would follow the seat's own tmux server.
     const terminalKeys = [...PANE_TERMINAL_KEYS, ...PANE_SESSION_KEYS];
     const selectedKeys = [...Object.keys(context.env), ...Object.keys(publicEnv), ...Object.keys(identity), ...inherited,
-      ...seatKeys, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])];
+      ...seatKeys, SEAT_PROJECT_DIR_ENV, ...(loadsCorePlugin ? [SEAT_NODE_ENV] : [])];
     const otherwise = (key: string) => selectedKeys.includes(key) ? "" : ` else unset ${key};`;
     const terminal = terminalKeys.map(key => `if [ -n "\${${key}-}" ]; then export ${key};${otherwise(key)} fi`);
     terminal.push(`if [ -n "$${WAYLAND_DISPLAY_VAR}" ]; then export WAYLAND_DISPLAY="$${WAYLAND_DISPLAY_VAR}";${otherwise("WAYLAND_DISPLAY")} fi`);

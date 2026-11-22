@@ -24,7 +24,7 @@ import { homePluginPath } from "./builtin-startup-files.js";
 // plugin's relay run decides for itself, from that file, whether to stay quiet (see hooks/scripts/activity-relay.cjs).
 
 export const CLAUDE_PLUGIN_DIRS_ENV = "CLAUDE_CODE_PLUGIN_DIRS";
-/** The seat's launch project, set for a seat that loads the plugin, so a Claude started elsewhere inside the seat can be told from the seat. */
+/** The seat's launch project. #3328: set for every managed seat, so a seat-scoped tool inherited by an agent can find its directory and a Claude started elsewhere inside the seat can be told from the seat. The plugin's hooks additionally require OPENRIG_NODE, which stays selection-gated. */
 export const SEAT_PROJECT_DIR_ENV = "OPENRIG_SEAT_PROJECT_DIR";
 
 /** The vendored openrig-core plugin directory under `pluginsDir`, or undefined when it is not vendored. */
