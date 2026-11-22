@@ -232,9 +232,12 @@ async function runCrossHostBroadcast(
     timeoutMs: timeoutMs ?? BROADCAST_REMOTE_TIMEOUT_MS,
   });
 
-  const hint = result.ok || !result.outcomeUnknown ? undefined : seatSender
-    ? `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. A missing receipt is not proof of non-delivery: check each recipient's outcome on that host (its outbox) before resending only to the ones recorded as failed.`
-    : `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. It had no sender identity, so that host keeps no per-recipient record of it: check the recipients there with rig capture before resending to any.`;
+  // The remote records the per-recipient rows under the sender the request carried: for --host, the origin triple
+  // member@rig@<origin host> when this host's id is known, and outbox-list there doesn't widen a name that isn't its seat.
+  const recordedSender = result.sender ?? seatSender;
+  const hint = result.ok || !result.outcomeUnknown ? undefined : recordedSender
+    ? `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. A missing receipt is not proof of non-delivery: check each recipient's outcome in ${recordedSender}'s outbox on ${host.id} (on that host: rig queue outbox-list ${recordedSender} --limit 1000) before resending only to the ones recorded as failed.`
+    : `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. It had no sender identity, so that host keeps no per-recipient record of it: check the recipients there with rig capture <seat> --host ${host.id} before resending to any.`;
 
   if (opts.json) {
     console.log(JSON.stringify({

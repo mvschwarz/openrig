@@ -761,7 +761,29 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     expect(err).toContain("may still be running on vps-b");
     expect(err).toContain("Don't retry the whole broadcast");
     expect(err).toContain("A missing receipt is not proof of non-delivery");
+    expect(err).toContain("relay@my-rig's outbox on vps-b (on that host: rig queue outbox-list relay@my-rig --limit 1000)");
     expect(process.exitCode).toBe(1);
+  });
+
+  it("a --host broadcast whose outcome is unknown names the outbox under the origin triple the request carried", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev50@v-rig");
+    const home = mkdtempSync(join(tmpdir(), "origin-broadcast-hint-"));
+    vi.stubEnv("OPENRIG_DB", join(home, "origin.sqlite"));
+    const db = new Database(process.env.OPENRIG_DB!);
+    db.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT); INSERT INTO self_host_identity VALUES (1, 'origin-host')");
+    db.close();
+    try {
+      // the connection drops after the request went out: the remote may have recorded rows under the carried sender
+      const realClientFactory = (url: string) => new DaemonClient(url, {
+        fetchImpl: (async () => { throw new Error("other side closed"); }) as unknown as typeof fetch,
+      });
+      const lifecycleDeps = { exists: () => false, fetch: async () => ({ ok: false }) } as never;
+      await broadcastCommand(httpDeps(mockClient(() => ({ status: 200, data: {} })), { clientFactory: realClientFactory, lifecycleDeps }))
+        .parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
+      expect(captured.stderrLines.join("\n")).toContain(
+        "dev50@v-rig@origin-host's outbox on vps-b (on that host: rig queue outbox-list dev50@v-rig@origin-host --limit 1000)");
+      expect(process.exitCode).toBe(1);
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   it("a --host --json broadcast that timed out carries the same recovery hint", async () => {
@@ -780,7 +802,7 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
     const err = captured.stderrLines.join("\n");
     expect(err).toContain("may still be running on vps-b");
-    expect(err).toContain("rig capture");
+    expect(err).toContain("rig capture <seat> --host vps-b");
     expect(err).not.toContain("outbox");
     expect(process.exitCode).toBe(1);
   });
