@@ -114,7 +114,7 @@ import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { restoredRunnerHookEvidence, restoredUsageLimitEvidence } from "./routes/activity.js";
-import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
+import { readClaudeSelfReportEvidence, verifiedSelfReportPid } from "./adapters/claude-code-adapter.js";
 import { replaceFile } from "./adapters/replace-file.js";
 import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
@@ -692,6 +692,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // AgentSpec.profile.activity is currently inert (the poller uses the
   // global default; per-seat windows are not wired to the live poll).
   const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
+  const selfReportIdentities = new SeatIdentityStore(db);
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
     structuralActivity: seatStructuralActivityService,
@@ -720,7 +721,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     selfReportReader: (sessionName, seatNodeId) => {
       // The seat's own Claude config dir when it declares one, where its Claude writes pid.json.
       const sessionsDir = nodePath.join(claudeConfigRootFor(db, seatNodeId), "sessions");
-      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId });
+      // The verified native process's own pid.json is the seat's after a /rename; the name match stays the fallback.
+      const pid = verifiedSelfReportPid(selfReportIdentities.getForNode(seatNodeId), sessionName);
+      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId, pid });
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
     restoreHookEvidence: (seat, runtime) => restoredRunnerHookEvidence(agentActivityStore, seat, runtime),
@@ -2564,6 +2567,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
       return since == null ? null : new Date(since).toISOString();
     });
+    // #3508's one usage-limit reader: the watchdog's parked-row wakes and every send's record use it alike.
+    const readUsageLimitState = (session: string) => readWatchdogUsageLimitState({ db, activity: agentActivityStore,
+      structuralActivity: name => seatStructuralActivityService.getStructuralActivity(name) }, session);
+    sessionTransport.setUsageLimitObserver(readUsageLimitState);
     // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
@@ -2581,8 +2588,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       deliver: makeWatchdogDeliver({
         sessionTransport,
         outbox: outboxHandlerInstance,
-        readUsageLimitState: session => readWatchdogUsageLimitState({ db, activity: agentActivityStore,
-          structuralActivity: name => seatStructuralActivityService.getStructuralActivity(name) }, session),
+        readUsageLimitState,
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
