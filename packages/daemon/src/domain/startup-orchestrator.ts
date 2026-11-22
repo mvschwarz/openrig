@@ -14,7 +14,7 @@ import type {
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
-import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
+import { hasVerifiedStartupProof, issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -900,7 +900,7 @@ export class StartupOrchestrator {
       postLaunchFiles = []; // All resolved files were projected before the guest's initial input.
       for (const action of input.startupActions) if (action.type === "send_text") consumedActions.add(action);
     }
-    let challengeOnlyPrompt: string | null = null;
+    let standaloneChallenge: typeof challenge = null;
     if (continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = input.firstInputPassed && launchPrompt
         ? { ok: true as const, remainingFiles: launchPrompt.remainingFiles }
@@ -910,9 +910,9 @@ export class StartupOrchestrator {
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
-      if (challenge) await this.sendProofInstruction(deliveryInput);
+      if (challenge) await this.sendProofInstruction(deliveryInput, challenge.challengeId);
     } else if (challenge && !guestInputPassed) {
-      challengeOnlyPrompt = challenge.promptBlock;
+      standaloneChallenge = challenge;
     }
 
     // OPR.0.4.7.17 restore-order-correction. On a resumed
@@ -972,9 +972,9 @@ export class StartupOrchestrator {
 
     // Challenge-only delivery remains best-effort. Staging is reported without
     // turning a recoverable composer into a startup failure/occupant rollback.
-    if (challengeOnlyPrompt && input.binding.tmuxSession) {
-      const challengeFailure = await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt, "challenge");
-      if (!challengeFailure) await this.sendProofInstruction(deliveryInput);
+    if (standaloneChallenge && input.binding.tmuxSession) {
+      const challengeFailure = await this.sendInteractiveText(deliveryInput, standaloneChallenge.promptBlock, "challenge");
+      if (!challengeFailure) await this.sendProofInstruction(deliveryInput, standaloneChallenge.challengeId);
     }
 
     // 8. Execute after_files actions
@@ -1197,7 +1197,7 @@ export class StartupOrchestrator {
           continue;
         }
 
-        const sendError = await this.sendInteractiveText(input, action.value, phase, actionIndex);
+        const sendError = await this.sendInteractiveText(input, action.value, phase, { actionIndex });
         if (sendError) {
           errors.push(`Action failed (${action.type}): ${sendError.error}`);
         }
@@ -1328,18 +1328,29 @@ export class StartupOrchestrator {
 
   /**
    * Claude only: the challenge reached the seat inside a paste, which Claude won't act on alone.
-   * One short line in the person's turn asks it to run the challenge's own command. Best-effort: a
+   * If this launch still needs proof, one short line asks it to run the challenge's own command. Best-effort: a
    * failed send is a submission warning, never a startup failure. It is sent only after the startup
    * prompt was observed submitted: staged, unverified or unobservable input stays in the composer
    * for the operator, and nothing is typed on top of it.
    */
-  private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
+  private async sendProofInstruction(input: StartupDeliveryInput, challengeId: string): Promise<void> {
     if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
+    const proofVerified = () => {
+      try {
+        return hasVerifiedStartupProof(this.db, { nodeId: input.nodeId, sessionId: input.sessionId, challengeId });
+      } catch {
+        // Treat unreadable proof as unknown and keep the reminder best-effort.
+        return false;
+      }
+    };
+    if (proofVerified()) return;
     if (!input.lastSubmissionConfirmed) {
       this.recordSubmissionWarning(input, startupProofHeldBackWarning(input.lastSubmissionUnconfirmedReason));
       return;
     }
-    const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction");
+    const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction", {
+      skipPaste: proofVerified,
+    });
     if (failure) this.recordSubmissionWarning(input, `Startup proof instruction was not delivered: ${failure.error}`);
   }
 
@@ -1385,7 +1396,12 @@ export class StartupOrchestrator {
     }
   }
 
-  private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
+  private async sendInteractiveText(
+    input: StartupDeliveryInput,
+    text: string,
+    source: StartupSubmissionDiagnostic["source"],
+    { actionIndex, skipPaste }: { actionIndex?: number; skipPaste?: () => boolean } = {},
+  ): Promise<StartupSendFailure | null> {
     // Contained startup is passed at launch through the verified guest input file. A viewer can exit
     // between any observation and input; never use its host terminal as a fallback destination.
     if (input.adapter.environment) return { error: "Environment startup input was not passed through the guest launch; no host input was sent" };
@@ -1395,14 +1411,16 @@ export class StartupOrchestrator {
       input.heldInputs = (input.heldInputs ?? 0) + 1;
       return null;
     }
-    const sendOrder = ++input.sendOrder;
+    const sendOrder = input.sendOrder + 1;
     const tmuxSession = input.binding.tmuxSession!;
-    input.lastSubmissionConfirmed = false;
-    input.lastSubmissionUnconfirmedReason = undefined;
     const firstPane = input.binding.tmuxPane;
     if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore && firstPane) {
       await waitForClaudeInputBox(() => this.tmuxAdapter.capturePaneScreen(firstPane), this.sleep);
     }
+    if (skipPaste?.()) return null;
+    input.sendOrder = sendOrder;
+    input.lastSubmissionConfirmed = false;
+    input.lastSubmissionUnconfirmedReason = undefined;
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
