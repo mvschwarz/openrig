@@ -10,7 +10,7 @@ import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveRigRepresentativeById } from "../queue-owner.js";
+import { resolveRigRepresentativeNodeId } from "../queue-owner.js";
 import { NetworkBindingError, readPrivateToken, writePrivateToken, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 
 export interface NetworkInstallation {
@@ -321,7 +321,7 @@ export class NetworkInstallationStore {
     return Date.now() + (this.opts.timeoutMs ?? ACCOUNT_DEADLINE_MS);
   }
 
-  private async setParticipants(bindings: NetworkBindingStore, installation: NetworkInstallation, names: () => string[], until: number, connecting?: { session: string; nodeId: string; name: string }): Promise<Identities> {
+  private async setParticipants(bindings: NetworkBindingStore, installation: NetworkInstallation, names: () => string[], until: number, connecting?: { nodeId: string; name: string }): Promise<Identities> {
     const instance = this.instance();
     const repair = `Get a new code from the account page and run rig network enroll <code> --site ${installation.site} --replace.`;
     const key = readPrivateToken(networkInstallationKeyFile(this.home, installation.id),
@@ -329,12 +329,12 @@ export class NetworkInstallationStore {
     const put = () => {
       const participants = names();
       const candidates = bindings.active().filter((binding) => binding.installationId === installation.id && binding.participantName)
-        .map((binding) => ({ name: binding.participantName!, session: binding.localSession, nodeId: binding.nodeId }));
+        .map((binding) => ({ name: binding.participantName!, nodeId: binding.nodeId }));
       if (connecting) candidates.push(connecting);
       const leads = [...new Set(candidates.filter((candidate) => {
         if (!participants.includes(candidate.name)) return false;
         const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(candidate.nodeId) as { rig_id: string } | undefined;
-        return node && resolveRigRepresentativeById(this.db, node.rig_id) === candidate.session;
+        return node && resolveRigRepresentativeNodeId(this.db, node.rig_id) === candidate.nodeId;
       }).map((candidate) => candidate.name))];
       // Keep the existing string list: older services ignore the additive top-level lead declarations.
       return this.call(installation.site, "PUT", "/api/connector/identities", key, { instance, participants, ...(leads.length ? { leads } : {}) }, until);

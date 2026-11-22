@@ -582,3 +582,19 @@ it("exports only topology-declared lead names, keeps string participants, and dr
   expect(account.leadLists.at(-1)).toBeUndefined();
   expect(account.puts.at(-1)).not.toContain("beta");
 });
+
+it("exports a declared lead connected by its derived address rather than its physical session name", async () => {
+  const lead = seat("staged-lead@lab"), worker = seat("worker@lab");
+  const lab = rigs.listRigs().find(rig => rig.name === "lab")!;
+  rigs.addEdge(lab.id, lead, worker, "delegates_to");
+  db.prepare("INSERT INTO bindings (id, node_id, tmux_session, attachment_type) VALUES (?, ?, ?, 'tmux')")
+    .run("lead-binding", lead, "staged-lead@lab");
+  const node = db.prepare("SELECT logical_id FROM nodes WHERE id = ?").get(lead) as { logical_id: string };
+  const address = `${node.logical_id.replaceAll(".", "-")}@lab`;
+  await enroll();
+  expect((await connect(address, "alpha")).status).toBe(201);
+  expect(account.leadLists.at(-1)).toEqual(["alpha"]);
+  // Later syncs read the existing binding, whose localSession still holds the typed derived address.
+  expect((await connect("worker@lab", "worker")).status).toBe(201);
+  expect(account.leadLists.at(-1)).toEqual(["alpha"]);
+});
