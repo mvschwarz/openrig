@@ -12,7 +12,8 @@ listed here can change.
 `OPENRIG_URL` has no `pid`. `reachable` is `true` when the daemon answered its health probe, `false` when it is
 positively down, and `null` when that isn't confirmed (see `rig status` in
 [the command reference](../as-built/cli-reference.md#status)). It reads the recorded state and probes; it never
-starts a daemon.
+starts a daemon. A supervisor that keeps the daemon running reads it as described in
+[Run the daemon under a supervisor](getting-started.md#run-the-daemon-under-a-supervisor).
 
 The CLI itself finds the daemon in these orders:
 
@@ -67,6 +68,11 @@ or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; t
 approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
 `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
 refused for want of it, `rig host` and the TUI say what to set.
+
+The web UI takes its tokens from its address. To use its token-protected actions (terminals, Mission Control writes),
+open it once at `http://<daemon>/#termToken=<terminal token>&mcToken=<auth token>`. The tokens go after `#`, a part of
+the address the browser keeps to itself and never sends. The page keeps them in that browser and takes them out of the
+address. With neither token set, the UI needs nothing.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
@@ -156,7 +162,8 @@ console.log(JSON.stringify({ participants: registry.participants, default: regis
   asks: rows.filter(row => row.humanIntent !== "update"), updates, receipts, rigHistory, messages }, null, 2));
 ```
 
-The queue and outbox lists are bounded snapshots, not subscriptions. A full queue list may need a larger `limit`.
+The queue and outbox lists are bounded snapshots, not subscriptions. A queue list cut at its `limit` says so in its
+`X-OpenRig-Truncated: 1` response header; read it again with a larger `limit`.
 An outbox entry's `deliveryState` reports the send attempt; only `delivered` confirms delivery. A queue transition,
 an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
 `outbox/list?senderSession=<session>` read remains available.
@@ -315,9 +322,18 @@ What reads these declarations:
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
   rig's queue items (any whose source or destination seat is in the rig) updated at or after that time: open items
   (`pending`, `in-progress`, `blocked`) first, then the rest by latest update. `limit` defaults to 100 and has no
-  upper cap. The list is cut after `limit` rows in that order, so when it comes back full, raise `limit` to read
-  them all. Each item's own history is `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so
-  read it occasionally rather than polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
+  upper cap. The list is cut after `limit` rows in that order. The body stays a bare array; the response headers
+  carry `X-OpenRig-Limit` (the limit applied) and `X-OpenRig-Truncated`, `1` when more rows matched than were
+  returned and `0` when they all fit, so a full page that holds every match isn't mistaken for a cut one. When it
+  says `1`, raise `limit` to read them all. A negative `limit` doesn't bound the read, and the response has neither
+  header. With `attention=1`, when the read reaches its limit but the attention check leaves `limit` rows or fewer,
+  the response has neither header either; read again with a larger `limit` to know. `rig queue list` prints a line on
+  stderr when the page was cut, and the `rig_queue_list` MCP tool adds `limit` and `truncated` beside `items`. Both
+  rely on these headers: from an older daemon that doesn't send them, or when `X-OpenRig-Truncated` isn't an
+  explicit `0` or `1`, the CLI prints no line and the MCP result has no `limit` or `truncated`. Each item's own
+  history is
+  `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so read it occasionally rather than
+  polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
   `queue/list?rig=` again. Not every event names both seats (`queue.claimed` and `queue.unclaimed` carry only the
   destination), and not every state change is on that stream, so the events alone don't track a rig's items.
 - **A rig's messages:** `GET /api/queue/outbox/list?rig=<rig>` returns the messages sent from or to the rig's

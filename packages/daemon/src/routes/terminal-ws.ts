@@ -23,7 +23,7 @@ export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
     }
     const queryToken = c.req.query("token");
     if (queryToken && constantTimeEqual(queryToken.trim(), token)) { await next(); return; }
-    return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query" }, 401);
+    return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query. In the web UI, open it once with #termToken=<token> after its address." }, 401);
   };
 }
 
@@ -82,8 +82,10 @@ export function registerTerminalWs(
 
       const handleFrame = async (data: string): Promise<void> => {
         if (!broker) return;
+        let msg: Record<string, unknown>;
+        try { msg = JSON.parse(data) as Record<string, unknown>; }
+        catch { return; } // Malformed frames are not input attempts.
         try {
-          const msg = JSON.parse(data) as Record<string, unknown>;
           if (msg.type === "keys" && Array.isArray(msg.keys)) {
             await broker.input({ type: "keys", keys: msg.keys as string[] });
           } else if (msg.type === "text" && typeof msg.text === "string") {
@@ -97,7 +99,12 @@ export function registerTerminalWs(
           // FR-7: there is intentionally NO resize branch. The broker owns the
           // fixed canonical geometry; a client-driven resize is ignored so
           // multiple viewers cannot shrink the shared pane.
-        } catch { /* ignore malformed frames */ }
+        } catch (error) {
+          const reason = (error as { code?: unknown })?.code;
+          const code = typeof reason === "string" && /^[a-z0-9_]+$/.test(reason) ? reason : "terminal_input_failed";
+          // Terminal frames are text, written directly by every viewer. Report to this sender only, without echoing input.
+          try { subscriber?.send(`\r\n[OpenRig: terminal input was not sent (${code}).]\r\n`); } catch { /* disconnected */ }
+        }
       };
 
       return {

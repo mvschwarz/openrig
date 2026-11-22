@@ -7,7 +7,7 @@ import { resolveRegisteredHumanAddress } from "../human-registry.js";
 import { callWebApi, type FetchImpl, type WebApiResult } from "./slack-api.js";
 import { budgetLeft, HISTORY, REPLIES, MethodBackoff, newRecoveryBudget } from "./recovery-budget.js";
 import { parsePostedStamp } from "./thread-seat-map.js";
-import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, recommendationLabel, escapeSlackText, redactSecrets } from "./message.js";
+import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, SLACK_SECTION_CAP, recommendationLabel, escapeSlackText, redactSecrets } from "./message.js";
 import { chosenAnswers, type HumanAnswers, type HumanQuestion } from "../../human-questions.js";
 
 const UPDATE = "chat.update";
@@ -77,7 +77,18 @@ function statusLine(t: QueueTransition, label?: string, chosen: ReadonlyArray<st
     : t.ownerNotificationKind === "human-decision-resolved" ? answeredLine(chosen) : t.state === "done" ? "Done"
     : t.state === "canceled" ? "Canceled" : terminal.has(t.state) ? t.state : "Handled");
   const note = redactSecrets((t.transitionNote ?? "").replace(/\s+/g, " ")).slice(0, 1000);
-  return escapeSlackText([what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · "));
+  const text = [what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · ");
+  const escaped = escapeSlackText(text);
+  if (escaped.length <= SLACK_SECTION_CAP) return escaped;
+  // The context text object has the same limit. Keep escaped entities and
+  // Unicode code points intact when budgeting the final wire string.
+  let prefix = "";
+  for (const character of text) {
+    const piece = escapeSlackText(character);
+    if (prefix.length + piece.length >= SLACK_SECTION_CAP) break;
+    prefix += piece;
+  }
+  return prefix + "…";
 }
 
 export class SlackAskSettlement {

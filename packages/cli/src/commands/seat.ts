@@ -731,6 +731,13 @@ Examples:
     });
   cmd.command("retire-held-message").argument("<seat>").argument("<id>").requiredOption("--reason <text>").option("--json")
     .description("Release one held message's active quota, preserving evidence; does not deliver or close work")
+    .addHelpText("after", `
+This works from an ordinary terminal as well as from a seat's shell. From a
+managed seat's shell (OPENRIG_SESSION_NAME set), retirement is recorded under
+that seat. Without a seat identity, it is recorded as "unattributed (no seat identity)".
+The actor comes only from transport identity, never the request body or target.
+Retirement requires a reason; it does not deliver, claim native consumption or close work.
+`)
     .action(async (seat: string, id: string, opts: {reason: string; json?: boolean}) => {
       await guardRequest("POST", `/api/seat/retire-held-message/${encodeURIComponent(seat)}/${encodeURIComponent(id)}`, { reason: opts.reason }, opts.json);
     });

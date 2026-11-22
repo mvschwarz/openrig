@@ -323,8 +323,17 @@ rig workflow instantiate ./spec.workflow.md \
   `exception:`, `occurrence:` and `recovery-for:` prefixes, a `project:`,
   `mission:` or `slice:` tag that contradicts its flag, or a second value of
   the same key.
-- `rig workflow instantiate-lifecycle` needs no flags: it takes the project and
-  mission from the lifecycle identity it compiles. A compiled step's packets
+- `rig workflow instantiate-lifecycle` derives scope from the lifecycle identity
+  it compiles. Pass the mission path and the required operation key, root
+  objective and creator as shown below.
+
+  ```bash
+  rig workflow instantiate-lifecycle ./mission.yaml \
+    --operation-key capture-lifecycle-1 \
+    --root-objective "Build the capture flow" --created-by orch@my-rig
+  ```
+
+  A compiled step's packets
   carry the `slice:<directory>` of the slice that step was compiled from, even
   when another slice's directory has the same name as its `metadata.id`. A step
   an authored graph names carries `slice:<directory>` when it names an active
