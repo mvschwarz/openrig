@@ -7,6 +7,8 @@ import {
   seatNeedsAttention,
   arbitratedNeedsInputSignal,
   hookOrPaneActivity,
+  providerFailureActivity,
+  retainedProviderFailure,
   getNodeInventoryForAllRigs,
   getNodeInventoryForRigs,
   readAssignedWorkBySession,
@@ -312,7 +314,9 @@ export class PsProjectionService {
         // neither, as on the row.
         const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
         const activity = identityVerdictConfirmsExecutorStopped(node.identityVerdict) ? null
-          : hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
+          : providerFailureActivity(retainedProviderFailure(this.agentActivity, { nodeId: node.nodeId, sessionName: session,
+            runtime: node.runtime, now: nowDate }, hook), structural, node.runtime)
+            ?? hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
         if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated), countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount)) attentionCount++;
       }
 
@@ -346,6 +350,12 @@ export class PsProjectionService {
    * with a node whose latest registration is `running`. The fold never turns any
    * other node into a running one, so the other rigs can't add to the sum (#3636).
    */
+  /** How many rigs are archived, read from the archived_at index (`idx_rigs_archived`) without folding them, so the count
+   *  line `rig ps` prints doesn't cost an archived listing (#3636). */
+  countArchivedRigs(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM rigs WHERE archived_at IS NOT NULL").get() as { n: number }).n;
+  }
+
   countRunningSeats(): number {
     const rigIds = this.db.prepare(`
       SELECT DISTINCT n.rig_id FROM nodes n
