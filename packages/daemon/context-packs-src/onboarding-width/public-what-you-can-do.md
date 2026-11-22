@@ -425,7 +425,10 @@ your context, your compaction and your replacement — and it is the only thing 
   and a close with `--resolution "<outcome>"` stores the outcome on the row; `--state done
   --evidence-ref <path>` also keeps the artifact's pointer on it. To accept a re-estimate,
   `--closure-required-at <iso>` on an in-progress row moves its deadline and keeps the claim,
-  recording the old and new time and who accepted it.
+  recording the old and new time and who accepted it. A caller that acts on a state it read earlier
+  (a closer that isn't the claimant) adds `--expect-state <state>`: the update applies only if the
+  row is still in that state, checked in the same transaction, and otherwise writes nothing and
+  fails with `qitem_state_changed` and the current state, so a claim that landed in between stays.
   Since 0.7.16 an otherwise-admitted state-changing park or close stores its supplied non-blank
   `--summary` or `--evidence-ref`, instead of refusing the whole update; note-append and
   re-estimate rules are unchanged, and the receipt names a requested field the stored row doesn't
@@ -879,7 +882,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
   Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
   line about every 20 s: let it finish rather than starting again. Synchronous work can run past
-  the budget, and it isn't a cure for a slow start.
+  the budget, and it isn't a cure for a slow start. `rig config set daemon.start_readiness_wait_seconds <seconds>`
+  (whole seconds, or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS`) sets that budget for later starts.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
   slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
   of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
@@ -903,6 +907,14 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
   activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
   so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.
+- **`rig config set daemon.identity_poll_interval_ms <5000-30000>`** slows the seat identity sweep (default 5000),
+  which checks that each seat's pane still runs its agent. It's read at daemon start, so restart the daemon to apply
+  it. A longer interval can delay noticing a stopped seat or a changed pane process, updating its identity verdict and
+  revoking its activity grants, and a seat `rig up` just launched answers expected-identity sends with
+  `expected_identity_unavailable` until a sweep verifies it. The value caps the cadence of sweep attempts (the first
+  scheduled one comes one interval after daemon start), not how stale a verdict can get: a sweep still reading skips
+  the ticks that come due, and a change seen after a sweep began waits for a later one, so verification or revocation
+  can take longer than one interval.
 - **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
   (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
   gets the real request. A write that then times out says its outcome is **unknown**: check its

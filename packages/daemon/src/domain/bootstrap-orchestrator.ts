@@ -653,6 +653,7 @@ export class BootstrapOrchestrator {
         } else {
           // A file the install left as it is, and why: the rest installed, and the rig still imports.
           for (const note of outcome.notes ?? []) warnings.push(`Package '${ref}' (${runtime}): ${note}`);
+          for (const warning of outcome.warnings ?? []) warnings.push(`Package '${ref}' (${runtime}): ${warning}`);
         }
       }
     }

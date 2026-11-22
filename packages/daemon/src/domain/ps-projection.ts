@@ -7,7 +7,10 @@ import {
   seatNeedsAttention,
   arbitratedNeedsInputSignal,
   hookOrPaneActivity,
+  providerFailureActivity,
+  retainedProviderFailure,
   getNodeInventoryForAllRigs,
+  getNodeInventoryForRigs,
   readAssignedWorkBySession,
   type AssignedWorkCounts,
 } from "./node-inventory.js";
@@ -212,9 +215,15 @@ export class PsProjectionService {
     // instead of one countNodesWithPendingWork query per rig. Per-rig hasWorkCount
     // is then a pure JS derivation over the already-fetched inventory below.
     const assignedByDest = readAssignedWorkBySession(this.db);
-    // FS-1 W1.2: node inventory for ALL rigs built in ONE batched pass (was one
-    // getNodeInventory query-set PER RIG — the rig-level N+1); indexed per rig below.
-    const inventoryByRig = getNodeInventoryForAllRigs(this.db);
+    // FS-1 W1.2: node inventory built in ONE batched pass (was one getNodeInventory
+    // query-set PER RIG — the rig-level N+1); indexed per rig below. Scoped to the
+    // rigs this projection returns, as /api/rigs/summary does, so the default
+    // projection never folds the nodes of archived rigs it then discards (#3636).
+    // With no archive filter every rig is returned: the all-rigs pass avoids an
+    // IN list of every rig id.
+    const inventoryByRig = cond === null
+      ? getNodeInventoryForAllRigs(this.db)
+      : getNodeInventoryForRigs(this.db, new Set(rows.map((r) => r.rig_id)));
 
     // Read the current registration's timestamp once per node, in one batch.
     // Uptime membership comes from the same effective-running inventory below.
@@ -305,7 +314,9 @@ export class PsProjectionService {
         // neither, as on the row.
         const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
         const activity = identityVerdictConfirmsExecutorStopped(node.identityVerdict) ? null
-          : hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
+          : providerFailureActivity(retainedProviderFailure(this.agentActivity, { nodeId: node.nodeId, sessionName: session,
+            runtime: node.runtime, now: nowDate }, hook), structural, node.runtime)
+            ?? hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
         if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated), countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount)) attentionCount++;
       }
 
@@ -329,6 +340,34 @@ export class PsProjectionService {
         attentionCount,
       };
     });
+  }
+
+  /**
+   * Host-wide count of effectively running seats, archived rigs included: forced
+   * archival can hide a rig without stopping its seats. Equal to the sum of
+   * `runningCount` over `getEntries({ includeArchived: true })`, through the same
+   * `isEffectivelyRunning` predicate, but the inventory is built only for rigs
+   * with a node whose latest registration is `running`. The fold never turns any
+   * other node into a running one, so the other rigs can't add to the sum (#3636).
+   */
+  /** How many rigs are archived, read from the archived_at index (`idx_rigs_archived`) without folding them, so the count
+   *  line `rig ps` prints doesn't cost an archived listing (#3636). */
+  countArchivedRigs(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM rigs WHERE archived_at IS NOT NULL").get() as { n: number }).n;
+  }
+
+  countRunningSeats(): number {
+    const rigIds = this.db.prepare(`
+      SELECT DISTINCT n.rig_id FROM nodes n
+      JOIN sessions s ON s.node_id = n.id
+        AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+      WHERE s.status = 'running'
+    `).all() as Array<{ rig_id: string }>;
+    let running = 0;
+    for (const inventory of getNodeInventoryForRigs(this.db, new Set(rigIds.map((r) => r.rig_id))).values()) {
+      running += inventory.filter(isEffectivelyRunning).length;
+    }
+    return running;
   }
 }
 

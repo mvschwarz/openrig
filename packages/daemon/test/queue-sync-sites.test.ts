@@ -49,6 +49,15 @@ describe("queue reads named in the slow-operation log", () => {
     expect(sync).toEqual(["queue.linked_successors.build"]);
   });
 
+  it("names the related-rows, delegated-decision and delivered-update reads", async () => {
+    const row = await repo.create({ sourceSession: "planner@r", destinationSession: "relay@r", body: "work", nudge: false });
+    sync.length = 0;
+    expect(repo.relatedTo(row.qitemId)).toEqual([]);
+    expect(repo.delegatedDecisionsFor("application-1")).toEqual([]);
+    expect(repo.listDeliveredHumanUpdates()).toEqual([]);
+    expect(sync).toEqual(expect.arrayContaining(["queue.related_to", "queue.delegated_decisions", "queue.delivered_human_updates"]));
+  });
+
   it("keeps the wrapped call's result and error, and records each outcome", () => {
     expect(runSyncSiteWhenSlow("test.site", () => 7)).toBe(7);
     expect(() => runSyncSiteWhenSlow("test.site", () => { throw new Error("read failed"); })).toThrow("read failed");

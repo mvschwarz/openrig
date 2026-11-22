@@ -99,8 +99,7 @@ export interface SubsystemSlackDeliveryOpts {
 }
 
 const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-/** Local evidence files uploaded into the thread: images, video (Slack plays mp4/webm/mov inline)
- *  and PDF. Wider than LOCAL_IMAGE_EXT, which gates https Block Kit image blocks. */
+/** Local evidence types uploaded into the thread, including images, videos and PDFs. */
 const LOCAL_ATTACHMENT_EXT = new Set([...LOCAL_IMAGE_EXT, ".mp4", ".webm", ".mov", ".pdf"]);
 /** Well under Slack's 1 GB per-file limit, and bounded for a daemon that holds the bytes in memory. */
 export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
@@ -188,39 +187,16 @@ export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
   }
 }
 
-/** #47 — only an https evidenceRef with an image-like extension may ride as a Block Kit
- *  `image` block (extension set mirrors LOCAL_IMAGE_EXT). Slack rejects the ENTIRE
- *  message with `invalid_blocks` when an image block's URL is not a real image (e.g. a
- *  GitLab issue link or a PROOF.md URL — both explicitly documented evidenceRef uses),
- *  so a non-image https ref must never become an image block. Query strings and
- *  fragments are stripped before the extension check. */
-export function isHttpsImageRef(ref: unknown): boolean {
-  if (typeof ref !== "string") return false;
-  const url = ref.trim();
-  if (!/^https:\/\/\S+$/.test(url)) return false;
-  try {
-    return LOCAL_IMAGE_EXT.has(path.extname(new URL(url).pathname).toLowerCase());
-  } catch {
-    return false;
-  }
-}
-
-/** #47 — split an evidenceRef into an image attachment vs. a plain link. An explicit
- *  `media` array stays fully caller-controlled; otherwise an image-looking https
- *  evidenceRef becomes a Block Kit image and a non-image https evidenceRef becomes a
- *  plain link (rendered by buildEvidenceLink, never an image block). Local refs keep
- *  their existing handling (image upload flow / clean skip). */
-export function evidenceAttachment(
+/** Slack requires publicly hosted URLs for image blocks. An HTTPS evidence ref
+ * may need private network access, so render it as a link. Explicit media and
+ * local file uploads have their own rendering paths. */
+function evidenceAttachment(
   media: unknown,
   evidenceRef: unknown,
-  summary: string | null | undefined,
 ): { mediaRefs: SlackMediaRef[] | undefined; evidenceLink: string | undefined } {
   if (Array.isArray(media)) return { mediaRefs: media as SlackMediaRef[], evidenceLink: undefined };
   if (typeof evidenceRef !== "string") return { mediaRefs: undefined, evidenceLink: undefined };
   const ref = evidenceRef.trim();
-  if (isHttpsImageRef(ref)) {
-    return { mediaRefs: [{ imageUrl: ref, altText: summary ?? "attachment" }], evidenceLink: undefined };
-  }
   if (/^https:\/\/\S+$/.test(ref)) return { mediaRefs: undefined, evidenceLink: ref };
   return { mediaRefs: undefined, evidenceLink: undefined };
 }
@@ -296,7 +272,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     const render = (possibleRepeat = false, stateUnconfirmed = false, quietUnreadable = false) => {
       const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`);
       if (cached) return cached;
-      const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
+      const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef);
       const built = buildOutboundMessage(
         {
           qitemId: q.qitemId ?? decision.decisionId,
@@ -518,12 +494,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       opts.release?.(key);
     }
 
-    // G — a LOCAL image evidenceRef (the founder screenshot) rides the EXTERNAL-UPLOAD flow
-    // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE
-    // but does NOT fail the decision: the text delivered; failing here would replay the whole
-    // post and duplicate the human notification (the H red). https refs already rode as Block
-    // Kit image blocks above; refs that are not attachments (e.g. a PROOF.md path) are a clean
-    // skip, and an attachment that can't be sent is logged.
+    // Local attachments use Slack's external upload flow in the conversation thread.
+    // HTTPS evidence already appeared as a link in the posted message. Unsupported
+    // local files are skipped. A failed upload is logged without reposting the decision.
     const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
       ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
       : null;
@@ -611,9 +584,7 @@ function partIdFor(decisionId: string, count: number, index: number): string {
 
 /** Render one part exactly as deliverSinglePart will, throwing HumanMessageShapeError if it can't. */
 function renderPart(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, part: DeliveryPart, index: number, partId: string) {
-  // #47 — preflight must mirror deliverSinglePart exactly: the same evidenceRef
-  // split (image attachment vs. plain link) so the shape check sees the true payload.
-  const partEvidence = evidenceAttachment(part.media, part.evidenceRef, part.summary);
+  const partEvidence = evidenceAttachment(part.media, part.evidenceRef);
   return buildOutboundMessage(part, {
     sourceLabel: opts.sourceLabel,
     attribution: attributionFromSession(part.sourceSession),

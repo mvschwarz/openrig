@@ -105,6 +105,73 @@ describe("Daemon Lifecycle", () => {
     expect(deps.spawn).toHaveBeenCalledOnce();
   });
 
+  describe("start over a stale daemon.json checks the launch port before spawning", () => {
+    const staleState: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const stale = (state: DaemonState = staleState): Partial<LifecycleDeps> => ({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+    });
+
+    it("refuses when the recorded PID is dead and the port is held, and releases the reservation", async () => {
+      const recordChild = vi.fn();
+      const release = vi.fn();
+      const deps = startableDeps({ ...stale(), processLiveness: vi.fn(() => "dead"), isPortOccupied: vi.fn(async () => true), acquireStartLock: () => ({ recordChild, release }) });
+      const error = await startDaemon({ port: 7433, host: "127.0.0.2" }, deps).catch((e) => e as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toMatch(/EADDRINUSE.*port 7433/);
+      expect(error.message).toContain("--port <unused-port>");
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.2", 7433);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.openForAppend).not.toHaveBeenCalled();
+      expect(deps.writeFile).not.toHaveBeenCalled();
+      expect(recordChild).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(false);
+    });
+
+    it("refuses when the recorded PID is alive but not an OpenRig daemon (refused probe) and the launch port is held", async () => {
+      // The recorded daemon was on another port; something else now holds the one this start binds.
+      const deps = startableDeps({
+        ...stale({ ...staleState, port: 7999 }),
+        processLiveness: vi.fn(() => "alive"),
+        fetch: vi.fn(async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); }),
+        isPortOccupied: vi.fn(async () => true),
+      });
+      await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/EADDRINUSE.*port 7433/);
+      expect(deps.fetch).toHaveBeenCalledWith("http://127.0.0.1:7999/healthz");
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.1", 7433);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.openForAppend).not.toHaveBeenCalled();
+    });
+
+    it("refuses on a real held loopback port when the recorded PID is dead", async () => {
+      const listener = createServer();
+      await new Promise<void>((resolve, reject) => {
+        listener.once("error", reject);
+        listener.listen(0, "127.0.0.1", resolve);
+      });
+      try {
+        const port = (listener.address() as { port: number }).port;
+        const deps = startableDeps({ ...stale({ ...staleState, port }), processLiveness: vi.fn(() => "dead"), isPortOccupied: realDeps().isPortOccupied });
+        await expect(startDaemon({ port }, deps)).rejects.toThrow(/EADDRINUSE/);
+        expect(deps.spawn).not.toHaveBeenCalled();
+        expect(deps.mkdirp).not.toHaveBeenCalled();
+        expect(listener.listening).toBe(true);
+      } finally {
+        await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+      }
+    });
+
+    it("checks the launch address once and starts when the recorded PID is dead and the port is free", async () => {
+      const deps = startableDeps({ ...stale(), processLiveness: vi.fn(() => "dead") });
+      await startDaemon({ port: 7433 }, deps);
+      expect(deps.isPortOccupied).toHaveBeenCalledOnce();
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.1", 7433);
+      expect(deps.spawn).toHaveBeenCalledOnce();
+    });
+  });
+
   it("does not signal or remove state when recorded process liveness is unknown", async () => {
     const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
     const deps = mockDeps({
@@ -494,6 +561,32 @@ describe("Daemon Lifecycle", () => {
     expect(error.message).toContain("--port <unused-port>");
     expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
     expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start: a child that exits with the daemon's listen-failure line reports that line", async () => {
+    vi.useFakeTimers();
+    let log = "Earlier daemon log\n";
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFile: vi.fn((p: string) => p === LOG_FILE ? log : null),
+      spawn: vi.fn(() => {
+        setTimeout(() => {
+          log += "OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433\n";
+          child.exitCode = 69;
+          child.emit("exit", 69, null);
+        }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({ port: 7433 }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
+
+    expect(error.message).toMatch(/exited before startup completed \(code 69/);
+    expect(error.message).toContain("OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433");
+    expect(error.message).not.toContain("See ");
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
   });
 
   it("start reports the current child's database-conflict stop and one-start remedy", async () => {

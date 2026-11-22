@@ -263,6 +263,34 @@ roles:
     expect(fs.readFileSync(skillPath, "utf-8")).toBe(SKILL_CONTENT);
   });
 
+  it("POST /api/packages/plan and /install say when a skill lands outside its usual folder, and install it as before", async () => {
+    writePkg(pkgDir, VALID_MANIFEST_YAML.replace("name: helper", "name: ../../.git/hooks"), { "skills/helper/SKILL.md": SKILL_CONTENT });
+    const warning = "Skill '../../.git/hooks' installs to .git/hooks/, outside the usual .claude/skills/ folder";
+    const request = (route: string) => app.request(route, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: pkgDir, targetRoot: targetDir, runtime: "claude-code" }),
+    });
+
+    const planned = await request("/api/packages/plan");
+    expect(planned.status).toBe(200);
+    const plan = await planned.json();
+    expect(plan.warnings).toEqual([warning]);
+    expect(plan.entries[0]).toMatchObject({ outsideKindFolder: { destination: ".git/hooks/SKILL.md", kindFolder: ".claude/skills" }, policyStatus: "approved" });
+
+    const installed = await request("/api/packages/install");
+    expect(installed.status).toBe(201);
+    const install = await installed.json();
+    expect(install.warnings).toEqual([warning]);
+    expect(install.verification.passed).toBe(true);
+    expect(fs.readFileSync(path.join(targetDir, ".git", "hooks", "SKILL.md"), "utf-8")).toBe(SKILL_CONTENT);
+
+    // An existing different file there is still a conflict, as before.
+    fs.writeFileSync(path.join(targetDir, ".git", "hooks", "SKILL.md"), "changed");
+    const again = await request("/api/packages/install");
+    expect(again.status).toBe(409);
+    expect((await again.json()).code).toBe("conflict_blocked");
+  });
+
   // --- Test 6: POST /install with conflicts → 409 ---
   it("POST /api/packages/install with conflicts → 409 conflict_blocked", async () => {
     writePkg(pkgDir, VALID_MANIFEST_YAML, {

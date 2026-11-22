@@ -15,7 +15,7 @@ import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js"
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
-import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+import { inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
@@ -33,6 +33,7 @@ import {
   deriveCurrentWorkChoice,
   deriveRole,
   deriveWorkCandidates,
+  listProjectMissions,
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
@@ -53,6 +54,8 @@ import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 import { feedPerspective } from "../domain/feed-perspective.js";
+import { waitForQueueItem } from "../domain/queue-read-wait.js";
+import { exemptSlowOpRequest } from "../domain/slow-op-recorder.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -73,6 +76,12 @@ const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
+/** GET /list's page marker (#3572): the limit it applied, and "1" when more rows matched than it returned ("0" when not).
+ *  Headers, so the body stays a bare array for readers that don't look. */
+const LIST_LIMIT_HEADER = "X-OpenRig-Limit";
+const LIST_TRUNCATED_HEADER = "X-OpenRig-Truncated";
+/** QueueRepository's default for list and listAttention, applied here so the route can read one row past it. */
+const LIST_DEFAULT_LIMIT = 100;
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -160,30 +169,63 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+type HandoffSuccessorFace = { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string };
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): HandoffSuccessorFace {
+  return handoffSuccessorsMany(repo, [item]).get(item.qitemId)!;
+}
+
+/** #3645: handoffSuccessors for a page of rows, with the same face per row, from two statements for the whole page
+ *  (QueueRepository.handoffSuccessorReads) instead of a listing and a getById per row. A lookup that fails says so on
+ *  every row of the page; it never fails the read. */
+export function handoffSuccessorsMany(repo: QueueRepository, items: ReadonlyArray<Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">>): Map<string, HandoffSuccessorFace> {
+  const faces = new Map<string, HandoffSuccessorFace>();
+  if (items.length === 0) return faces;
+  let reads: ReturnType<QueueRepository["handoffSuccessorReads"]>;
   try {
     // Newest first, one past the bound so a cut list is known.
-    const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
+    reads = repo.handoffSuccessorReads(items.map((item) => item.qitemId),
+      items.flatMap((item) => item.closureTarget?.startsWith("qitem-") ? [item.closureTarget] : []), HANDOFF_SUCCESSOR_LIMIT + 1);
+  } catch {
+    for (const item of items) faces.set(item.qitemId, { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." });
+    return faces;
+  }
+  for (const item of items) {
+    const found = reads.bySource.get(item.qitemId) ?? [];
     const truncated = found.length > HANDOFF_SUCCESSOR_LIMIT;
     const successors: HandoffSuccessor[] = found.slice(0, HANDOFF_SUCCESSOR_LIMIT)
       .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated) || a.qitemId.localeCompare(b.qitemId))
       .map((row) => ({ qitemId: row.qitemId, destinationSession: row.destinationSession, state: row.state, via: "handedOffFrom" }));
     const target = item.closureTarget;
     if (target?.startsWith("qitem-") && !successors.some((s) => s.qitemId === target)) {
-      const named = repo.getById(target);
+      const named = reads.byId.get(target);
       if (named) successors.push({ qitemId: named.qitemId, destinationSession: named.destinationSession, state: named.state, via: "closureTarget" });
     }
-    if (successors.length > 0) return { successors, ...(truncated ? { successorsTruncated: true as const } : {}) };
-    return {
+    if (successors.length > 0) { faces.set(item.qitemId, { successors, ...(truncated ? { successorsTruncated: true as const } : {}) }); continue; }
+    faces.set(item.qitemId, {
       successors,
       successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
         ? `${item.closureReason === "superseded" ? "Its recorded successor on another host is" : "It was handed to another host; its successor there is"} ${target}. This daemon has no copy.`
         : item.closureReason === "superseded" ? "No successor row was found on this daemon for this supersession."
           : "No row on this daemon was made by this handoff.",
-    };
-  } catch {
-    return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
+    });
   }
+  return faces;
+}
+
+/** The read limit for GET /list: one row past the page, so a full page can tell a cut from an exact fit. A negative limit
+ *  doesn't bound the read in SQLite, so it's passed as is. */
+function listReadLimit(limit: number): number {
+  return limit >= 0 ? limit + 1 : limit;
+}
+
+/** Cut GET /list's read back to the page and mark it. A full page alone never says more rows exist: only the extra row
+ *  read past the limit does. */
+function cutListPage<T>(c: Context, limit: number, rows: T[]): T[] {
+  if (limit < 0) return rows;
+  const truncated = rows.length > limit;
+  c.header(LIST_LIMIT_HEADER, String(limit));
+  c.header(LIST_TRUNCATED_HEADER, truncated ? "1" : "0");
+  return truncated ? rows.slice(0, limit) : rows;
 }
 
 export function queueRoutes(): Hono {
@@ -373,6 +415,8 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        // An update's expected state (--expect-state) no longer matches the row; nothing was written.
+        : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
@@ -797,7 +841,7 @@ export function queueRoutes(): Hono {
     const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
-    let route = requestedRoute === undefined ? null
+    let route: { address: string; basis: ReturnRouteBasis } | null = requestedRoute === undefined ? null
       : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
@@ -874,6 +918,12 @@ export function queueRoutes(): Hono {
     try {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
+      // Work a seat gives out as a new row keeps the route of the one routed row it holds, so its prompts still reach the
+      // person's conversation (return-route.ts). A route named here, or none at all, is unchanged.
+      if (requestedRoute === undefined && !route) {
+        const inherited = inheritedReturnRoute(getRepo(c).db, sourceSession, body.destinationSession!);
+        if (inherited) route = { address: inherited, basis: "inherited" };
+      }
       const item = await getRepo(c).create({
         qitemId: createId,
         sourceSession,
@@ -1076,6 +1126,7 @@ export function queueRoutes(): Hono {
       actorSession?: string;
       classificationBinding?: unknown;
       state?: QueueState;
+      expectState?: QueueState | null;
       reopen?: boolean;
       closureRequiredAt?: string;
       transitionNote?: string;
@@ -1104,6 +1155,8 @@ export function queueRoutes(): Hono {
         qitemId,
         actorSession,
         state: body.state,
+        // Optional compare-and-set: the repository checks it inside the update's transaction.
+        expectState: body.expectState,
         reopen: body.reopen,
         closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
@@ -1532,9 +1585,15 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
+      // The selected project's own missions, by its catalog entry's missions root, which may sit outside workspace.root:
+      // the trace lists these when it orients from that project. An unhealthy entry adds none and keeps today's listing.
+      const selectedMissionsRoot = workProject && "root" in workProject ? projectMissionsRoots.get(workProject.id)?.root : null;
+      const projectMissions = workProject && "root" in workProject && selectedMissionsRoot
+        ? listProjectMissions(workProject.id, selectedMissionsRoot) : null;
       return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}),
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
-        workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
+        workCandidates: { ...workCandidates, ...(projectMissions ? { projectMissions } : {}),
+          heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
     return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
@@ -1610,7 +1669,7 @@ export function queueRoutes(): Hono {
     const targetRepo = c.req.query("targetRepo") || undefined;
     const parsedLimit = queryLimit(c);
     if (!parsedLimit.ok) return parsedLimit.response;
-    const userLimit = parsedLimit.limit;
+    const pageLimit = parsedLimit.limit ?? LIST_DEFAULT_LIMIT;
     const asSession = c.req.query("as") || undefined;
     const compact = c.req.query("compact") === "1";
     const rig = c.req.query("rig") || undefined;
@@ -1636,13 +1695,13 @@ export function queueRoutes(): Hono {
 
     if (!attention) {
       const repo = getRepo(c);
-      const items = repo.list({
+      const items = cutListPage(c, pageLimit, repo.list({
         tag: tags.length > 0 ? tags : undefined,
         destinationSession,
         sourceSession,
         state,
         targetRepo,
-        limit: userLimit,
+        limit: listReadLimit(pageLimit),
         asSession,
         compact,
         rig,
@@ -1650,7 +1709,7 @@ export function queueRoutes(): Hono {
         handedOffFrom,
         updatedSince,
         sortByUpdated: c.req.query("sort") === "updated",
-      });
+      }));
       // A seat that lists its own active inbox is checking in; the stuck sweep reads that for hosted members that pick up
       // work by polling. Another actor's read, a read with no sender, a read that can't return pending rows, a read of
       // only what the seat sent (`as` and `sourceSession` both the seat, no destination) and the attention view aren't.
@@ -1664,9 +1723,9 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
-        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))
-        ? { ...item, ...handoffSuccessors(repo, item) } : item));
+      const faces = handoffSuccessorsMany(repo, items.filter((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))));
+      return c.json(items.map((item) => faces.has(item.qitemId) ? { ...item, ...faces.get(item.qitemId) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through
@@ -1686,7 +1745,7 @@ export function queueRoutes(): Hono {
     // attention=1&destinationSession=...) return ONLY the matching
     // attention items.
     const items = getRepo(c).listAttention({
-      limit: userLimit,
+      limit: listReadLimit(pageLimit),
       state,
       tag: tags.length > 0 ? tags : undefined,
       destinationSession,
@@ -1697,10 +1756,14 @@ export function queueRoutes(): Hono {
     });
     // Defense-in-depth: refine with the JS predicate so the SQL
     // LIKE superset cannot leak a malformed destination through. An ask to a registered person addressed as a seat or
-    // an alias is a member by its classification, as listAttention selected it.
+    // an alias is a member by its classification, as listAttention selected it. The page is cut and marked after the
+    // refinement, so a row it drops never reads as more rows.
     const repo = getRepo(c);
     const filtered = items.filter((item) => isAttentionItem(item) || repo.isCurrentHumanAsk(item.qitemId));
-    return c.json(filtered);
+    // A full read that the refinement thinned to the limit or fewer can't tell whether accepted rows lie past it, so the
+    // page carries no marker rather than claim either way.
+    if (pageLimit >= 0 && items.length > pageLimit && filtered.length <= pageLimit) return c.json(filtered);
+    return c.json(cutListPage(c, pageLimit, filtered));
   });
 
   // GET /overdue — surfaces in-progress qitems past closure_required_at.
@@ -1817,11 +1880,16 @@ export function queueRoutes(): Hono {
   });
 
   // GET /:qitemId — show one
-  app.get("/:qitemId", (c) => {
+  app.get("/:qitemId", async (c) => {
     const qitemId = c.req.param("qitemId");
     const repo = getRepo(c);
-    const item = repo.getById(qitemId);
+    const seconds = Number(c.req.query("waitSeconds") ?? "0");
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 50) {
+      return c.json({ error: "invalid_wait_seconds", message: "waitSeconds must be an integer from 0 to 50" }, 400);
+    }
+    const { item, parked, waited } = await waitForQueueItem(repo, getEventBus(c), qitemId, seconds, c.req.raw.signal);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
+    if (parked) exemptSlowOpRequest(c);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
     // The owner notification level is what the Slack selector keys on: a registered person who
@@ -1829,6 +1897,7 @@ export function queueRoutes(): Hono {
     const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      ...(waited ? { waited } : {}),
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
       // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.

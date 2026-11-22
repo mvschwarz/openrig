@@ -54,6 +54,9 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
+>     Activity hooks use a daemon-owned relay copy under `OPENRIG_HOME/runtime/assets/`. Existing hooks migrate
+>     once to that stable path; moving the same OpenRig version to another Node installation then leaves hook
+>     commands and trust records unchanged. The daemon refreshes the copy from its own shipped relay at startup.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
 >     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
 >     and status line back out once no Claude seat uses that directory.
@@ -941,7 +944,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
 | A restored seat still counts as needing attention after its prompt was answered | After a full restore of a Claude or Codex seat, the daemon clears this by itself once the seat reads running or idle and passes its check. If it still counts, check its `restoreOutcome` in `rig ps --nodes --json` (the RESTORE column): when it is `attention_required`, run `rig seat clear-attention <seat>`, which says which check failed; answering the prompt again or running `rig seat continue` doesn't change it. For a partial restore, submit any startup text left in the input box without sending it again, and wait for the agent to respond before clearing attention. See [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
-| "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
+| "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. For a long restore, choose a caller budget for the whole operation, for example `rig up <rig> --existing --timeout 900` (positive whole seconds; default 120). This also works with `--host` and `--plan`, and changes neither per-seat readiness nor retry behavior. If the caller's wait expires, that is not a rollback: check `rig ps` before running it again. `rig launch` still uses a 120 s caller wait. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | `rig status`, `rig terminal open` or `rig daemon start --wait-for-kernel` says a seat "needs attention" or "is waiting on a person" | The daemon flags that seat, and the line gives its recorded reason: a startup that failed or stopped at a sign-in, trust or other gate, a held message, a missing required file, or a question. "Is waiting on a person" means the daemon sees a live question you can answer in that seat's terminal. Look at it with `rig capture <seat>` or in its tile, then follow the row above that matches its message. "Couldn't check" means the check itself failed; it says nothing either way. |
 | A Codex seat, including the kernel's operator, answers every turn with a model error such as "… not supported when using Codex with a ChatGPT account" | Its Codex sign-in works, but that account can't run the model; the kernel picks its runtimes from the providers chosen at setup and their sign-ins, not from which models an account can run. If Claude Code is signed in, move just that seat: `rig seat set-runtime <seat> --runtime claude-code --reason "<model> isn't available to this Codex account"` (`--dry-run` first). Otherwise give it a model the account can run with `rig seat set-model <seat> --model <id> --reason "…"`, then start it again with `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. |
@@ -1088,6 +1091,50 @@ to return (tmux defaults to Ctrl-b, then d). Decide native trust/auth prompts
 there. If a fresh start paused before context delivery, **c** finishes that
 delivery to the same occupant (from a shell, `rig seat continue <seat>` does the
 same). **r** reads actual state again; **d** expands details.
+
+## Run the daemon under a supervisor
+
+A supervisor such as launchd or systemd keeps the daemon running. These are the
+facts it needs.
+
+- **Start it through the CLI** (`rig daemon start`), not by running the daemon
+  entry directly: the start reservation, the port checks and the readiness check
+  of the child run only in the CLI's start. `rig daemon start` returns once the
+  daemon is ready and leaves it running detached, so watch the daemon's PID or
+  `rig status --json`, not the exit of that command.
+- **Give the start time.** `rig daemon start` waits up to
+  `daemon.start_readiness_wait_seconds` (default 180) for its child. Allow the
+  supervisor's own timeout for that command at least that wait plus 19 seconds.
+  When the wait runs out and the child is still alive, the start ends pending: the
+  child keeps running and the reservation is kept. Don't start again; check the
+  state first.
+- **Check liveness with `rig status --json`.** Its exit code doesn't say whether the
+  daemon is up (it is 1 only when the rig summary can't be read), so read its
+  `daemon` object. `state: "running"` is up, also with `healthy: false`, which means
+  busy. `reachable: null` isn't proof that it is down. `stopped` and `stale` mean
+  no daemon answers for `daemon.json`, but a start that is still pending can read
+  `stale` too, since it doesn't write `daemon.json` until it's ready: a new
+  `rig daemon start` then refuses with `Daemon startup is already reserved`, which
+  is that start, not a failure to retry. Don't use a short `/healthz` timeout of
+  your own as a death check: a busy daemon can take longer to answer.
+- **Restart after the process has exited.** After `rig daemon stop` or a SIGTERM,
+  wait until the PID is gone and the port refuses connections, not for a fixed
+  delay. The shutdown budget is 10 seconds, and `rig daemon stop` waits 12.
+- **Don't relaunch on a held port.** A start that finds the port in use stops with
+  the `EADDRINUSE` guidance before it spawns a child. A daemon whose listener can't
+  bind writes one `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>` line and
+  exits with status 69, and `rig daemon start` puts that line in its error. Either
+  way `rig daemon start` exits non-zero with the port named: have the wrapper stop
+  relaunching on that error and find what holds the port first, rather than retrying
+  in a loop. `rig daemon start` exits 1 on every failure, so its exit code doesn't
+  tell failures apart; only the daemon's own bind failure has a status of its own,
+  69, and only a supervisor that runs the daemon process itself sees it (for
+  example, `RestartPreventExitStatus=69` in a systemd unit).
+- **Don't let the supervisor clear `daemon-start.lock`.** A reservation from an
+  earlier boot is archived by the next start, and so is one whose recorded launcher
+  and child are both gone in the same pid namespace, unless `rig daemon stop`
+  retained it. Any other reservation stays; a person reads the start error, which
+  says what to inspect and when the reservation can be archived.
 
 ## Kernel framing (what `rig setup` does and does not do)
 
@@ -1422,6 +1469,23 @@ inspect or unset inherited overrides when changing homes.
 Separate instances should use separate databases; the check is a startup observation,
 not a lock against later concurrent starts. Changing the setting applies on the next
 daemon start.
+
+## Daemon start wait
+
+`rig daemon start` waits up to 180 seconds for the child it started to answer on its
+listeners. `rig config set daemon.start_readiness_wait_seconds <seconds>` (an integer from
+1 up to 2147464, the longest a Node timer can hold for the TUI's call) or
+`OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS` sets that wait for later starts:
+`rig daemon start`, `rig start`, the auto-start of `rig up` and `rig context add`, and the
+TUI's start, which allows its own call that wait plus the probe, cleanup and a margin
+(when it can't read the setting, it allows the longest accepted wait).
+A running daemon isn't affected.
+When the wait runs out and the child is still alive, the start ends pending as before:
+the child is left running and the start reservation is kept, so inspect before retrying.
+A wait shorter than the host needs only makes the start end pending sooner; it doesn't
+stop the child.
+Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow
+start faster.
 
 ## Custom settings and precedence
 
