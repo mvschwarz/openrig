@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import {
@@ -281,5 +284,96 @@ describe("rig ui open", () => {
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]).then(() => undefined));
     expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:8888"]);
     expect(logs).not.toContain(UI_DISABLED_GUIDANCE);
+  });
+});
+
+// The web UI takes its tokens from its address's fragment (#termToken=…&mcToken=…), which a browser never sends. `rig ui
+// open` gives it the tokens this CLI itself sends to the daemon. Every token here is synthetic.
+describe("rig ui open on a daemon with tokens", () => {
+  const ENV_KEYS = ["OPENRIG_TERMINAL_BEARER_TOKEN", "OPENRIG_AUTH_BEARER_TOKEN", "OPENRIG_HOME", "OPENRIG_UI_URL"] as const;
+  type EnvKey = (typeof ENV_KEYS)[number];
+
+  async function openWith(env: Partial<Record<EnvKey, string>>, opts: { terminalTokenFile?: string; probeUi?: UiDeps["probeUi"] } = {}) {
+    const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]])) as Record<EnvKey, string | undefined>;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "rig-ui-open-"));
+    if (opts.terminalTokenFile !== undefined) fs.writeFileSync(path.join(home, "terminal-token"), opts.terminalTokenFile);
+    for (const key of ENV_KEYS) delete process.env[key];
+    process.env["OPENRIG_HOME"] = home;
+    Object.assign(process.env, env);
+    const priorExitCode = process.exitCode;
+    try {
+      const execFn = vi.fn(async (_cmd: string, _args: string[]) => {});
+      const deps = runningDeps(8888, execFn);
+      if (opts.probeUi) deps.probeUi = opts.probeUi;
+      const program = new Command();
+      program.addCommand(uiCommand(deps));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]).then(() => undefined));
+      return { execFn, output: logs.join("\n"), exitCode: process.exitCode };
+    } finally {
+      process.exitCode = priorExitCode;
+      for (const key of ENV_KEYS) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  /** What the UI's primer takes from an address: the fragment split on `&`, each value URI-decoded. */
+  function fragmentTokens(address: string): Record<string, string> {
+    const at = address.indexOf("#");
+    if (at < 0) return {};
+    return Object.fromEntries(address.slice(at + 1).split("&").map((part) => {
+      const eq = part.indexOf("=");
+      return [part.slice(0, eq), decodeURIComponent(part.slice(eq + 1))];
+    }));
+  }
+
+  it("opens the UI with this CLI's terminal and operator tokens in the fragment, and prints the address without them", async () => {
+    const terminal = "synthetic-term+/=&#token";
+    const operator = "synthetic-operator token";
+    const { execFn, output } = await openWith({ OPENRIG_TERMINAL_BEARER_TOKEN: terminal, OPENRIG_AUTH_BEARER_TOKEN: operator });
+
+    expect(execFn).toHaveBeenCalledTimes(1);
+    const [command, [opened]] = execFn.mock.calls[0]!;
+    expect(command).toBe("open");
+    expect(opened.startsWith("http://127.0.0.1:8888#")).toBe(true);
+    expect(fragmentTokens(opened)).toEqual({ termToken: terminal, mcToken: operator });
+    expect(output).toContain("http://127.0.0.1:8888");
+    expect(output).not.toContain("synthetic");
+  });
+
+  it("takes the terminal token from $OPENRIG_HOME/terminal-token when the environment has none, as the CLI's own requests do", async () => {
+    const { execFn, output } = await openWith({}, { terminalTokenFile: "synthetic-file-token\n" });
+
+    const [, [opened]] = execFn.mock.calls[0]!;
+    // With no operator token set, the CLI's operator requests send the terminal token; the UI gets the same.
+    expect(fragmentTokens(opened)).toEqual({ termToken: "synthetic-file-token", mcToken: "synthetic-file-token" });
+    expect(output).not.toContain("synthetic");
+  });
+
+  it("opens a tokenless daemon's UI at its plain address", async () => {
+    const { execFn } = await openWith({});
+    expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:8888"]);
+  });
+
+  it("opens an explicit OPENRIG_UI_URL as given, with no tokens added", async () => {
+    const { execFn } = await openWith({
+      OPENRIG_UI_URL: "http://localhost:5173",
+      OPENRIG_TERMINAL_BEARER_TOKEN: "synthetic-term",
+      OPENRIG_AUTH_BEARER_TOKEN: "synthetic-operator",
+    });
+    expect(execFn).toHaveBeenCalledWith("open", ["http://localhost:5173"]);
+  });
+
+  it("a daemon with the UI off opens nothing and prints no token", async () => {
+    const { execFn, output, exitCode } = await openWith(
+      { OPENRIG_TERMINAL_BEARER_TOKEN: "synthetic-term", OPENRIG_AUTH_BEARER_TOKEN: "synthetic-operator" },
+      { probeUi: vi.fn(async () => ({ status: 404, headers: new Headers({ "x-openrig-web-ui": "off" }) })) },
+    );
+    expect(execFn).not.toHaveBeenCalled();
+    expect(exitCode).toBe(1);
+    expect(output).toContain(UI_DISABLED_GUIDANCE);
+    expect(output).not.toContain("synthetic");
   });
 });
