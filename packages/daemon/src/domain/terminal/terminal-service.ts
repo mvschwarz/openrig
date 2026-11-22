@@ -157,6 +157,8 @@ export interface OpenAllRequest {
   provider?: string;
   session?: string;
   viewportColumns?: number;
+  /** Focus a workspace that still shows a rig's view live instead of opening a copy. On by default: open all opens
+   *  what's absent and focuses what's there, so a repeat adds no views and no tmux clients. `false` opens copies. */
   reuseLive?: boolean;
   herdrApp?: HerdrAppTarget;
 }
@@ -743,9 +745,10 @@ export class TerminalService {
 
     const identities = await this.rigIdentities();
     const rigs: OpenAllRigResult[] = [];
+    const reuseLive = req.reuseLive !== false;
     for (const rig of identities) {
       try {
-        rigs.push(await this.openSingleRigBulk(rig.id, provider, session, req.viewportColumns, req.reuseLive, rig.name));
+        rigs.push(await this.openSingleRigBulk(rig.id, provider, session, req.viewportColumns, reuseLive, rig.name));
       } catch (err) {
         rigs.push({ rig: rig.name, rigId: rig.id, view: `rig:${rig.id}`, outcome: "failed",
           opened: [], absent: [], degraded: [], skipped: [], error: err instanceof Error ? err.message : String(err) });
