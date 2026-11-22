@@ -209,6 +209,64 @@ is the documented entry.
 This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
 additional adapter callbacks that those options do not implement.
 
+### Supply a caller resolver
+
+An embedding can pass `resolver` and `resolverTimeoutMs` to `startMcpHttpServer`. The supported
+`@openrig/cli/mcp.js` entry exports the `CallerResolver` and `CallerResolution` types. There is no module loader:
+your application supplies the function and owns its credential authority.
+
+The resolver receives `{ bearer, instance, methods, signal }` on each request. `instance` is this daemon's
+reported instance id, not a client parameter. `methods` lists the JSON-RPC methods in message order; it is empty
+for non-POST requests or an unreadable body. It is operation metadata, not permission to run those methods.
+A successful result has this shape:
+
+```ts
+{
+  ok: true,
+  principal: { source: "example-authority", id: "guest-42" },
+  seat: "guest@team",
+  access: {
+    principal: "guest-42", owner: false, workspace: false, rigs: [], roots: [],
+    external: {
+      objects: { queue: ["create", "show", "list"], team: ["list"] },
+      peerSeats: ["lead@team", "helper@team"]
+    }
+  }
+}
+```
+
+The exact seat must already exist in this daemon, including a materialized seat that has not launched.
+Core does not create or start it during resolution. The principal's opaque `source` and `id`, with optional
+`grant`, `version` and `label`, are attribution, never credentials. `access.principal` is normalized to that id.
+`external.objects` uses the existing object/action capability evaluator. With `external.peerSeats`, only those
+exact peers are in scope for destinations, rows and team members; rig selection follows the named seat addresses.
+Without `peerSeats`, the existing rig-scoped rule remains. Without peers or rigs, only the caller's own rows are
+in scope. An external work profile has `owner: false` and `workspace: false`.
+
+A result may also reduce the profile with `readOnly: true`, or set `newWorkRetryAfterMs`. Read-only connections
+are offered only read operations and cannot invoke hidden writes. Backoff holds only new creates, returns a
+retryable result with the same request id, and leaves reads, claims, updates and already-landed same-id retries
+available. The existing backoff range is 1–600 seconds for a positive delay; zero means no backoff.
+
+A refusal is `{ ok: false, refusal }`. `unknown`, `revoked`, `expired` and `wrong_instance` return HTTP 401 with a
+Bearer challenge; `malformed` and `unavailable` return 503. A thrown error, unusable result, missing instance or
+unavailable seat is also unavailable. Resolver exceptions are not echoed or logged. No result falls back to the
+token file or the process's seat. A resolver and a grant service cannot both be selected.
+
+The default 5000 ms budget covers reading the body, looking up the instance, calling the resolver and checking
+the seat. The signal aborts on that deadline or a disconnected client. Core bounds its wait even when the returned
+promise ignores the signal, and ignores late completion. Authentication refusals take precedence over JSON
+parse errors; an authenticated malformed body still gets 400, and a body over 4 MiB gets 413. OAuth resource
+metadata and the configured task destination can also be used with a resolver.
+
+### Use the same profile in a local token file
+
+A token-file entry can optionally carry `objects`, `peerSeats`, `readOnly` and `newWorkRetryAfterSeconds`.
+`objects` selects the scoped work profile above; `peerSeats` requires `objects`. An entry without these fields
+keeps its existing rig, workspace and owner behavior. The read-only reduction and new-work delay also work on
+ordinary local grants. Rotation preserves the optional fields, and a malformed optional profile affects only
+requests using that entry, not other valid grants. No service or service-shaped principal id is needed.
+
 ## Assistants connected through a grant service
 
 With `rig mcp serve --http --grant-service <url>`, an outside service answers each connection's key with its grant

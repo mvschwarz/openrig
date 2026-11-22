@@ -540,8 +540,16 @@ const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|
  *  address (never team-internal items, other callers' items between themselves, or an external address's items to
  *  another seat), change only the items addressed to its own seat (with the claim and update pairs), follow a handed-on
  *  item only where it came back to it, and read the artifacts of its own items under its named roots. */
+function externalRigNames(access: McpAccess, seat: string | undefined): readonly string[] {
+  const peers = access.external?.peerSeats;
+  if (peers === undefined) return access.rigs;
+  return [...new Set([seat, ...peers].filter((value): value is string => !!value)
+    .map(value => value.slice(value.lastIndexOf("@") + 1)))];
+}
+
 function externalScope(access: McpAccess, seatOf: () => string | undefined): Scope {
-  const rigs = new Set(access.rigs);
+  const rigs = new Set(externalRigNames(access, seatOf()));
+  const peers = access.external?.peerSeats;
   // team/list makes the caller one of its rigs' participants: it may reach another connected assistant's seat.
   const participant = access.external?.objects.team?.includes("list") === true;
   const caller = (value: unknown): boolean => typeof value === "string" && value !== "" && value === seatOf();
@@ -551,7 +559,8 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
     const parts = value.split("@");
     return parts.length === 2 && parts[0] !== "" && parts[1] !== "external" && rigs.has(parts[1]!);
   };
-  const team = (value: unknown): boolean => member(value) && !caller(value) && (participant || !CALLER_SHAPED.test(value as string));
+  const team = (value: unknown): boolean => typeof value === "string" && !caller(value)
+    && (peers !== undefined ? peers.includes(value) : member(value) && (participant || !CALLER_SHAPED.test(value)));
   // An external address as a source (<local>@external), matched by its shape, not a registry check: a registered person's
   // id, a scheme-prefixed ref and a shared channel's address (which its unregistered writers post under) all match. The
   // boundary is the exact destination: only an item addressed to the caller's own seat is reached this way, and show and
@@ -601,9 +610,10 @@ function outOfScope(what: string, hint?: string): TextResult {
 
 /** A new create the grant service's fair-use limit holds back: nothing was written, and it says when to retry with the same
  *  id. `unread`: whether an earlier create with this id was saved couldn't be read. */
-function fairUseRetryLater(qitemId: string, retryAfterSeconds: number, unread: boolean): TextResult {
+function fairUseRetryLater(qitemId: string, retryAfterSeconds: number, unread: boolean, generic = false): TextResult {
   const earlier = unread ? ` Whether an earlier attempt with this id was saved is unknown: check rig_queue_show with qitemId ${qitemId} before retrying.` : "";
-  const message = `OpenRig: this account has reached its fair-use limit for new work just now. Nothing was created by this call.${earlier}`
+  const reason = generic ? "this connection is waiting before accepting new work" : "this account has reached its fair-use limit for new work just now";
+  const message = `OpenRig: ${reason}. Nothing was created by this call.${earlier}`
     + ` Retry after ${retryAfterSeconds} seconds with the same qitemId ${qitemId}. Work you already have continues as usual: read, claim, answer and`
     + " close it, and to reply to an item addressed to you, put the reply in its resolution when you close it.";
   return errorResult(message, "fair_use_retry_later", message,
@@ -706,6 +716,10 @@ export type McpAccessClass = "work" | "workspace" | "owner" | "person";
  *  destination is. An external grant (`external`) is narrower: see externalScope. */
 export type McpAccess = {
   principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
+  /** Reduce this connection to read operations, including when it otherwise has owner access. */
+  readOnly?: boolean;
+  /** Generic backoff for new creates only. Same-id readback/retry and existing work are unchanged. */
+  newWorkRetryAfterMs?: number;
   /** A token-file grant's person (`rig mcp token add --person`): the gateway entity id of the registered person this
    *  connection may answer the team's questions for. Never inferred from the seat or the owner flag. */
   person?: string;
@@ -713,6 +727,8 @@ export type McpAccess = {
    *  with, `person`, the gateway entity id of the person the grant service vouches owns this connection, and `throttle`,
    *  the service's fair-use limit on new work for this request: the seconds before a new create is accepted again. */
   external?: { objects: Readonly<Record<string, readonly string[]>>; grant?: { id: string; version?: number | string }; person?: string;
+    /** Exact peer membership, when supplied; otherwise retain the existing rig-scoped behavior. */
+    peerSeats?: readonly string[];
     throttle?: { retryAfterSeconds: number } };
 };
 
@@ -895,7 +911,21 @@ function externalInboxInstructions(tools: ReadonlySet<string>): string {
 /** For a token-file grant bound to a person: the same rule as an external grant's person, beside the member's instructions. */
 const FILE_PERSON_INSTRUCTION = "This connection is bound to a person: the team's questions to them are in rig_question_list. Submit only the answer they explicitly give you, with rig_question_answer (the qitemId, the revision you showed them, and the options they chose or exactly what they typed), and never choose for them.";
 
+function offeredTools(access: McpAccess | undefined): (tool: string) => boolean {
+  const operations = new Map(MCP_OPERATIONS.map(op => [op.tool, op]));
+  const external = access?.external ? externalTools(access.external) : null;
+  return (tool: string): boolean => {
+    const operation = operations.get(tool);
+    if (access?.readOnly && operation?.effect !== "read") return false;
+    if (external) return external.has(tool);
+    if (operation?.access === "person") return Boolean(access?.person);
+    if (!access || access.owner) return true;
+    return operation?.access === "work" || (operation?.access === "workspace" && access.workspace);
+  };
+}
+
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
+  if (access?.readOnly) return ["This connection offers read operations only.", ...sharedInstructions(offeredTools(access))].join("\n");
   if (!access?.external) {
     const base = frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
     return access?.person ? `${base}\n${FILE_PERSON_INSTRUCTION}` : base;
@@ -1175,18 +1205,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     return `[Unknown sender ${unknownSender}: this app has no OpenRig seat (${why}).${said ? ` Its MCP client says it is ${said}.` : ""}`
       + (kind === "task" ? " There's no return address: it follows this by its task id.]" : " There's no return address.]");
   };
-  const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
-  // A local caller (no access) is offered every tool; an authenticated one, its class's; an external caller, its
-  // grant's pairs.
-  const external = access?.external ? externalTools(access.external) : null;
-  const offered = (tool: string): boolean => {
-    if (external) return external.has(tool);
-    const kind = accessClass.get(tool);
-    // Only a token-file grant explicitly bound to a person is offered the person tools; a local caller and the owner aren't.
-    if (kind === "person") return Boolean(access?.person);
-    if (!access || access.owner) return true;
-    return kind === "work" || (kind === "workspace" && access.workspace);
-  };
+  const offered = offeredTools(access);
   const scope = access && !access.owner ? scopeFor(access, seatOf) : null;
   /** A tool's title and plain opening for a connected assistant (an external grant), whose client shows a person these;
    *  rig_whoami's are true for every caller, so it has them everywhere. Another caller keeps the tool's own text, which
@@ -1857,7 +1876,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
       // The grant service's fair-use limit holds back new work only. A retry of a create that already landed isn't new
       // work: the daemon answers it from the stored row, so it goes through as before.
-      const throttle = access?.external?.throttle;
+      const delay = access?.newWorkRetryAfterMs;
+      const throttle = delay === undefined ? access?.external?.throttle
+        : delay > 0 ? { retryAfterSeconds: Math.min(600, Math.max(1, Math.ceil(delay / 1000))) } : undefined;
       if (throttle) {
         let landed: boolean | undefined = false;
         if (qitemId) {
@@ -1866,7 +1887,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             landed = existing.status < 400 ? true : existing.status === 404 ? false : undefined;
           } catch { landed = undefined; }
         }
-        if (landed !== true) return fairUseRetryLater(id, throttle.retryAfterSeconds, landed === undefined);
+        if (landed !== true) return fairUseRetryLater(id, throttle.retryAfterSeconds, landed === undefined, delay !== undefined);
       }
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
       const note = unknownSenderNote("task");
@@ -2256,7 +2277,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             const message = "Pass a rig name or identifier as rigId.";
             return errorResult(message, "rig_required", message);
           }
-          const rigs = [...new Set(access.rigs)];
+          const rigs = [...new Set(externalRigNames(access, seatOf()))];
           if (rigs.length !== 1) return mapResult({ status: 200, data: { rigs,
             message: rigs.length ? "Choose one of this grant's rigs and pass its name as rigId." : "This grant names no rigs; ask the connection operator to check its scope." } }, undefined, { structured: true });
           rigId = rigs[0]!;
@@ -2280,6 +2301,23 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const inventory = Array.isArray(nodes.data) ? nodes.data as Array<{ logicalId?: string; canonicalSessionName?: string | null; hostSelfId?: string | null }> : [];
         // A node is a seat whether or not it has a session yet: its address derives from its logical id (pod.member).
         const logicalAddress = (logicalId: unknown) => typeof logicalId === "string" ? `${logicalId.replace(".", "-")}@${rigName}` : null;
+        const exactPeers = access?.external?.peerSeats !== undefined;
+        if (exactPeers) {
+          const selected: Array<Record<string, unknown>> = (view.seats as Array<Record<string, unknown>>).flatMap(seat => {
+            const address = logicalAddress(seat.logicalId);
+            const name = scope?.names?.(seat.session as string) ? seat.session : address && scope?.names?.(address) ? address : null;
+            return name ? [{ ...seat, session: name }] : [];
+          });
+          const ids = new Set(selected.map(seat => seat.logicalId));
+          const links = (value: unknown) => Array.isArray(value) ? value.filter(id => ids.has(id)) : [];
+          view.seats = selected.map(seat => ({ ...seat, reportsTo: links(seat.reportsTo), delegatesTo: links(seat.delegatesTo) }));
+          const lead = view.lead as { session: string; logicalId: string | null } | null;
+          if (lead) {
+            const visible = selected.find(seat => seat.logicalId === lead.logicalId || seat.session === lead.session);
+            view.lead = visible ? { ...lead, session: visible.session } : null;
+            if (!visible) view.leadNote = "The rig's lead is outside this connection's peer scope.";
+          }
+        }
         const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName, logicalAddress(seat.logicalId)])
           .filter((name): name is string => typeof name === "string"));
         // An external caller's own seat, under any name it's matched by: its session's name or its logical address, the
@@ -2318,7 +2356,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const note = hosted.note ? { hostedMembersNote: hosted.note } : {};
         // A declared entry point names the lead only where the daemon names no single lead; a lead it names always wins.
         // One per seat (either of its names) and team: the same seat declaring two teams is two declarations.
-        const resolved = (hosted.declaredLeads ?? []).map((d) => ({ ...d, logicalId: inventory.find((seat) =>
+        const resolved = (hosted.declaredLeads ?? []).filter(d => !exactPeers || scope?.names?.(d.session)).map((d) => ({ ...d, logicalId: inventory.find((seat) =>
           seat.canonicalSessionName === d.session || logicalAddress(seat.logicalId) === d.session)?.logicalId ?? null }));
         const declaredSeat = (d: { session: string; logicalId: string | null }) => d.logicalId ?? d.session;
         const led = declaredLead(view, resolved.filter((d, i) =>
@@ -2339,7 +2377,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const { activity: _activity, sessionStatus: _status, ...identity } = merged;
           return identity;
         });
-        const hostedMembers = hosted.members.map((member) => {
+        const hostedMembers = hosted.members.filter(member => !exactPeers || scope?.names?.(member.session)).map((member) => {
           if (!ownNames.has(member.session)) return member;
           const { activity: _activity, ...identity } = member;
           return identity;
