@@ -128,6 +128,33 @@ describe("Node Inventory Projection", () => {
     expect(entries.every((e) => e.podNamespace === "dev")).toBe(true);
   });
 
+  it("#2940: reports keepAlive only for a seat that declares it, in the list and the detail", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig");
+    db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run("node-1");
+    const entries = getNodeInventory(db, "rig-1");
+    expect(entries.find((e) => e.nodeId === "node-1")?.keepAlive).toBe(true);
+    expect("keepAlive" in entries.find((e) => e.nodeId === "node-2")!).toBe(false);
+    expect(getNodeDetail(db, "rig-1", "dev.impl")?.keepAlive).toBe(true);
+  });
+
+  it("#2940: an exhausted keep_alive incident asks for attention only until the seat is stopped", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig", { id: "sess-fell", status: "detached" });
+    db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run("node-1");
+    db.prepare(`INSERT INTO node_keep_alive_budget (node_id, incident_id, fallen_session_id, attempts, last_error, exhausted_at)
+      VALUES ('node-1', 'incident-1', 'sess-fell', 2, 'no harness', '2026-11-17 00:00:00')`).run();
+    const entry = () => getNodeInventory(db, "rig-1").find((e) => e.nodeId === "node-1")!;
+    expect(entry()).toMatchObject({ lifecycleState: "attention_required", keepAliveIncident: { attempts: 2, exhausted: true } });
+
+    // The person stops the seat; the supervisor hasn't ended the incident yet (or never will: an archived rig).
+    db.prepare("UPDATE sessions SET status = 'exited', intentionally_stopped = 1 WHERE id = 'sess-fell'").run();
+    db.prepare("DELETE FROM bindings WHERE node_id = 'node-1'").run();
+    expect(entry().lifecycleState).not.toBe("attention_required");
+    expect(entry().intentionallyStopped).toBe(true);
+    expect("keepAliveIncident" in entry()).toBe(false);
+  });
+
   // Test 2: Inventory includes correct canonical session names
   it("includes correct canonical session names", () => {
     seedPodAwareRig(db);

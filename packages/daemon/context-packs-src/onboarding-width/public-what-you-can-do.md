@@ -787,6 +787,13 @@ not have to tear one down to change it, and you rarely have to start from nothin
   seat in the rig is paused or being typed in, and it takes a seat's session name, including an
   adopted seat's raw tmux name; ambiguous names aren't launched, and the other unambiguous
   selections are handled normally.
+- **`keep_alive: true`** (rig spec member, or an AgentSpec's `lifecycle.keep_alive`; off by default)
+  — the daemon relaunches that seat through the same one-seat launch when it falls while the daemon
+  runs, and leaves it down after `rig seat stop` or `rig down`, which record the stop before stopping
+  anything. A daemon stop changes no seat's desired state. Each fall gets 2 attempts, counted durably;
+  when they run out the seat reads `attention_required` (`keepAliveIncident` in
+  `rig ps --nodes --json --full`) until you start it with `rig launch`. Not for seats attached from
+  outside (`docs/reference/rig-spec.md`, "Keep a seat running").
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a
@@ -882,7 +889,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
   Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
   line about every 20 s: let it finish rather than starting again. Synchronous work can run past
-  the budget, and it isn't a cure for a slow start.
+  the budget, and it isn't a cure for a slow start. `rig config set daemon.start_readiness_wait_seconds <seconds>`
+  (whole seconds, or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS`) sets that budget for later starts.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
   slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
   of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,

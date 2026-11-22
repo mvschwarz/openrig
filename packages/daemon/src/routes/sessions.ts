@@ -2,6 +2,7 @@ import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import type { Context } from "hono";
 import { expectedConversation, resolveExpectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
 import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
+import { RemoteControlObservationStore } from "../domain/remote-control-observations.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
 import { observeInventoryHandler } from "../domain/request-phase-observer.js";
@@ -229,8 +230,20 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const hostSelfId = getSelfHostId();
   const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
   const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
+  // #3513: the Remote Control session the seat's own hooks last reported, for its current occupant and conversation;
+  // null when none applies. An observation with its time ("last seen"), not proof of a live connection.
+  const remoteControlStore = new RemoteControlObservationStore(deps.rigRepo.db);
+  const remoteControlOf = (nodeId: string) => {
+    try {
+      return remoteControlStore.current({ nodeId,
+        isCurrentOccupant: (generation) => deps.sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation) });
+    } catch {
+      return null;
+    }
+  };
   const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
     modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
+    remoteControl: remoteControlOf(n.nodeId),
   }));
   return c.json(nodes);
 });
