@@ -47,6 +47,8 @@ export interface Node {
   processLimits?: import("./process-limits.js").ProcessLimits | null;
   /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
   processLimitsError?: string;
+  /** #2940: the seat declares keep_alive (resolved member > profile > agent defaults); present only when on. */
+  keepAlive?: boolean;
   /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
    *  null/absent = none. */
   statuslineThrottle?: number | null;
@@ -206,6 +208,11 @@ export type RigEvent =
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
+  // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
+  // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
+  | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
+  | { type: "seat.keep_alive.recovered"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status: string }
+  | { type: "seat.keep_alive.exhausted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status?: string; lastError?: string }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
@@ -224,7 +231,7 @@ export type RigEvent =
   // failed/attention_required restoreOutcome to operator_recovered after
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
-  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: import("./runtime-recovery.js").RecoveryEvidence | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
@@ -411,6 +418,9 @@ export type RigEvent =
   | { type: "classifier.dead"; leaseId: string; classifierSession: string; lastHeartbeat: string; detectedAt: string }
   | { type: "classifier.reclaimed"; leaseId: string; previousClassifierSession: string; reclaimedBySession: string; reason: string; reclaimedAt: string }
   | { type: "view.changed"; viewName: string; cause: string }
+  // settings.changed: an HTTP caller set or reset a setting that defines what this daemon may reach.
+  // Stored, so a person asking later why the file surface changed has something to find.
+  | { type: "settings.changed"; key: string; action: "set" | "reset" }
   // PL-004 Phase C: daemon-native Watchdog supervision tree events.
   // Three policies in scope (periodic-reminder, artifact-pool-ready,
   // edge-artifact-required); workflow-keepalive deferred to Phase D.
@@ -639,11 +649,13 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
   sourceSessionId?: string;
   resultSessionId?: string;
-  /** Set only by an explicit selected-history startup: this launch was rolled back, and the seat's binding and sessions
-   *  as they were before it were put back. */
+  /** Set by an explicit selected-history startup, and by a keep_alive relaunch refused for a daemon shutdown (#2940):
+   *  this launch was rolled back (every terminal it started was stopped, tmux confirmed it), and the seat's binding and
+   *  sessions as they were before it were put back. */
   compensated?: true;
-  /** Set only by an explicit selected-history startup: this seat's restore returned before its launch, so no terminal was
-   *  started, no session registered and no resume sent. */
+  /** Set by an explicit selected-history startup, and by a keep_alive relaunch refused for a daemon shutdown (#2940):
+   *  this seat's restore returned before its launch, so no terminal was started, no session registered and no resume
+   *  sent. */
   notStarted?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
@@ -892,6 +904,14 @@ export interface NodeInventoryEntry {
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
+  /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
+  stopRequested?: boolean;
+  /** #2940: the seat declares keep_alive, so the daemon relaunches it when it falls; absent = off. */
+  keepAlive?: boolean;
+  /** #2940: the keep_alive seat's current recovery incident, when it has one: the attempts spent, whether they ran out
+   *  (the seat then waits for a person, as lifecycle `attention_required` while it isn't running), the last error and
+   *  when the last attempt started. */
+  keepAliveIncident?: { attempts: number; exhausted: boolean; lastError: string | null; lastAttemptAt: string | null };
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -982,6 +1002,8 @@ export interface NodeInventoryEntry {
     decidedBy: string | null;
     seq: number;
     lastSwap: { generation: string; at: string } | null;
+    /** A typed usage limit ended the last turn (the activity reads unknown): when it was seen and its stated reset. */
+    usageLimit?: { rung: string; observedAt: string; resetsAt: string | null };
   } | null;
   /**
    * ARCH RULING 3a947fb1 (FR-7 additive) — the seat's RAW `lastActivityAt`
@@ -1191,6 +1213,9 @@ export interface LifecycleDefaults {
    *  is a materialization-time refusal for apprentice-handover. */
   mechanic?: string;
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
+  /** #2940: relaunch the seat when it falls while the daemon runs (not when it is stopped on purpose). Absent at every
+   *  level = off; unlike the fields above, the defaults level doesn't materialize it. */
+  keepAlive?: boolean;
 }
 
 /** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
@@ -1438,6 +1463,8 @@ export interface RigSpecPodMember {
   env?: Record<string, string>;
   cwd: string;
   restorePolicy?: string;
+  /** #2940: spec `keep_alive`; overrides the agent spec's lifecycle.keep_alive (most-specific-wins). Absent = inherit. */
+  keepAlive?: boolean;
   /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
    *  deprecated-alias spelling, normalized at resolution). Absent = inherit. */
   compactionStrategy?: string;
@@ -1791,7 +1818,11 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
+  // "pi_usage_entries" is Pi's OWN persisted usage (fed by the runner's posted
+  // entries) — kept distinct from "runner_reported" because the token
+  // threshold's reader treats runner_reported rows as non-samples, and `rig ps`
+  // renders the two labels differently.
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "pi_usage_entries" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

@@ -19,7 +19,13 @@ import { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
 import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import Database from "better-sqlite3";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { reconcileSeatPoolNode } from "../src/domain/seat-pool-registration.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { stringify as stringifyYaml } from "yaml";
@@ -38,7 +44,9 @@ function mockTmux(): TmuxAdapter {
     hasSession: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242),
+    getPaneCommand: vi.fn(async () => "claude"),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
   } as unknown as TmuxAdapter;
 }
@@ -93,7 +101,9 @@ describe("PodRigInstantiator", () => {
     const eventBus = new EventBus(db);
     const tmux = mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, ...(launcherDeps ?? {}) });
-    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {},
+      listProcesses: async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242, executableName: "codex",
+        command: "codex", argv: ["codex"], startedAt: "Sat Jan  1 12:00:00 2000" }] });
     const adapter = mockAdapter();
     const codexAdapter = mockAdapter("codex");
     const files = fsFiles ?? { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") };
@@ -158,7 +168,8 @@ describe("PodRigInstantiator", () => {
 
   it.each(["pi", "omp"])("does not invent an unresolved launch pane for grant-owning %s", async runtime => {
     const adapter = mockAdapter(runtime);
-    const { db, inst } = setup(undefined, { [runtime]: adapter });
+    const { db, inst, tmux } = setup(undefined, { [runtime]: adapter });
+    vi.mocked(tmux.listPanes).mockResolvedValue([]);
     try {
       const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = runtime;
       expect((await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT)).ok).toBe(true);
@@ -1920,6 +1931,52 @@ state: 2-named
     db.close();
   });
 
+  // A first start held at a trust dialog or another attention state leaves a live session the person clears later. It gets
+  // the seat's continuity notice as a ready start does, and arming it again keeps that job. A failed start gets none.
+  it.each([["ready", 1], ["attention_required", 1], ["failed", 0]] as const)(
+    "a first start that ends %s arms the seat's managed-compaction notice %i time(s)", async (outcome, armed) => {
+      const managedAgent = `
+version: "0.2"
+name: impl
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: managed-compaction
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: []
+`.trim();
+      // The watchdog store on its own fully migrated database, as the daemon has it: the instantiator's fixture lacks 074's columns.
+      const jobsDb = new Database(":memory:");
+      migrate(jobsDb, ALL_MIGRATIONS);
+      const jobs = new WatchdogJobsRepository(jobsDb);
+      const materializer = new ContinuityPolicyMaterializer(jobs, () => null);
+      const arm = vi.spyOn(materializer, "arm");
+      const startNode = async () => ({ ok: false as const, startupStatus: outcome, errors: [`startup ended ${outcome}`] });
+      const { db, inst } = setup({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: managedAgent }, undefined, undefined, undefined, materializer,
+        outcome === "ready" ? undefined : { startupOrchestrator: { startNode } });
+
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+      expect(result.ok).toBe(outcome === "ready");
+      const notices = () => jobs.listActive().filter((job) => job.specYaml.includes("continuity_mode: managed-compaction"));
+      expect(notices()).toHaveLength(armed);
+      if (armed) {
+        // The notice watches the session this start left running.
+        const seat = db.prepare("SELECT session_name FROM sessions").all() as Array<{ session_name: string }>;
+        expect(seat).toHaveLength(1);
+        expect(notices()[0]!.targetSession).toBe(seat[0]!.session_name);
+        const first = notices().map((job) => job.jobId);
+        expect(materializer.arm(arm.mock.calls[0]![0]).map((job) => job.jobId)).toEqual(first);
+        expect(notices().map((job) => job.jobId)).toEqual(first);
+      }
+      db.close();
+      jobsDb.close();
+    });
+
   it("HG-3 attention_required result carries the attentionNodes list (operator approve→resume path)", async () => {
     const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
@@ -2430,6 +2487,168 @@ state: 2-named
     });
   });
 
+  describe("keep_alive resolution and retention (#2940)", () => {
+    const keptAgentYaml = (name: string) =>
+      `name: ${name}\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    keep_alive: true\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`;
+    const keepOf = (db: ReturnType<typeof createFullTestDb>, nodeId: string) =>
+      (db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(nodeId) as { keep_alive: number }).keep_alive;
+
+    it("stores the resolved value at every creation site: agent defaults, a member override and a terminal's own", async () => {
+      const { db, rigRepo, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: keptAgentYaml("impl"),
+        [`${RIG_ROOT}/agents/qa/agent.yaml`]: keptAgentYaml("qa"),
+        [`${RIG_ROOT}/agents/plain/agent.yaml`]: agentYaml("plain"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const members = [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." },
+          { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "codex" as const, cwd: ".", keepAlive: false },
+          { id: "plain", agentRef: "local:agents/plain", profile: "default", runtime: "codex" as const, cwd: "." },
+          { id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: ".", keepAlive: true },
+        ];
+        const yaml = RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev", members, edges: [] }] }));
+        const expected = { "dev.impl": 1, "dev.qa": 0, "dev.plain": 0, "dev.server": 1 };
+
+        const made = await inst.instantiate(yaml, RIG_ROOT);
+        expect(made.ok, JSON.stringify(made)).toBe(true);
+        if (!made.ok) return;
+        const upNodes = rigRepo.getRig(made.result.rigId)!.nodes;
+        expect(Object.fromEntries(upNodes.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual(expected);
+
+        // materialize creates the nodes through createMemberNode, before any launch
+        const mat = await inst.materialize(RigSpecCodec.serialize(makeRigSpec({ name: "kept-mat", pods: [{ id: "dev", label: "Dev", members, edges: [] }] })), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matNodes = rigRepo.getRig(mat.result.rigId)!.nodes;
+        expect(Object.fromEntries(matNodes.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual(expected);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a re-applied spec writes the newly resolved value; a fresh launch from the recipe keeps the stored one", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." };
+        const spec = (keepAlive?: boolean) => RigSpecCodec.serialize(makeRigSpec({
+          pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(keepAlive === undefined ? {} : { keepAlive }) }], edges: [] }],
+        }));
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+
+        const mat = await inst.materialize(spec(true), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(keepOf(db, nodeId)).toBe(1);
+
+        const launched = await inst.launchMaterialized(spec(true), RIG_ROOT, rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        expect(keepOf(db, nodeId)).toBe(1);
+
+        clearOccupancy(rigId);
+        const turnedOff = await inst.launchMaterialized(spec(), RIG_ROOT, rigId);
+        expect(turnedOff.ok, JSON.stringify(turnedOff)).toBe(true);
+        expect(keepOf(db, nodeId)).toBe(0);
+
+        rigRepo.setNodeKeepAlive(nodeId, true);
+        clearOccupancy(rigId);
+        await inst.launchPersistedFresh(rigId, nodeId);
+        expect(keepOf(db, nodeId)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a first-start retry whose member resolves keep_alive differently isn't refused: it carries the seat's saved value", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: ".", keep_alive: true };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        expect(keepOf(db, worker.id)).toBe(1);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        // Without the member's keep_alive, its agent spec resolves it off; the recovery keeps the saved value instead.
+        const { keep_alive: _dropped, ...withoutKeepAlive } = memberRaw;
+        const retried = await inst.retryFirstStart(rigId, worker.id, withoutKeepAlive, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        expect(keepOf(db, worker.id)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a re-applied keep_alive: false stays off across export and import; a member that never declares it exports no key", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: keptAgentYaml("impl"),
+        [`${RIG_ROOT}/agents/plain/agent.yaml`]: agentYaml("plain"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const spec = (name: string, keepAlive?: boolean) => RigSpecCodec.serialize(makeRigSpec({ name, pods: [{ id: "dev", label: "Dev", members: [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: ".", ...(keepAlive === undefined ? {} : { keepAlive }) },
+          { id: "plain", agentRef: "local:agents/plain", profile: "default", runtime: "codex" as const, cwd: "." },
+        ], edges: [] }] }));
+        const mat = await inst.materialize(spec("kept-rt"), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const impl = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.impl")!;
+        expect(keepOf(db, impl.id)).toBe(1);
+        // The member turns off what its agent spec turns on, in a spec re-applied after the seat was created.
+        const reapplied = await inst.launchMaterialized(spec("kept-rt", false), RIG_ROOT, rigId);
+        expect(reapplied.ok, JSON.stringify(reapplied)).toBe(true);
+        expect(keepOf(db, impl.id)).toBe(0);
+
+        const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+        const exported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(rigId) as RigSpec;
+        const members = exported.pods.find((p) => p.id === "dev")!.members;
+        expect(members.find((m) => m.id === "impl")?.keepAlive).toBe(false);
+        expect("keepAlive" in members.find((m) => m.id === "plain")!).toBe(false);
+
+        const imported = await inst.materialize(RigSpecCodec.serialize({ ...exported, name: "kept-rt-imported" }), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        if (!imported.ok) return;
+        const back = rigRepo.getRig(imported.result.rigId)!.nodes;
+        expect(Object.fromEntries(back.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual({ "dev.impl": 0, "dev.plain": 0 });
+
+        // The first start of a materialized seat launches its saved, resolved settings, not a declaration of the member's:
+        // the member that never declared keep_alive still exports without it.
+        const first = await inst.launchFirstMaterializedNode(imported.result.rigId, back.find((n) => n.logicalId === "dev.plain")!.id);
+        expect(first, JSON.stringify(first)).toMatchObject({ ok: true });
+        const reexported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(imported.result.rigId) as RigSpec;
+        expect("keepAlive" in reexported.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "plain")!).toBe(false);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   describe("pool block stored on the model node (#3395 Piece 1)", () => {
     const memberBase = { id: "impl", agent_ref: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." };
     const yamlSpec = (pool?: unknown, name = "test-rig") => stringifyYaml({
@@ -2577,6 +2796,46 @@ state: 2-named
       }
     });
 
+    // #3395 C6/C7: the advisory text, counted in the whole outcome, so a second copy anywhere fails
+    const advisory = "dev.impl pool.max: must be at least min (4); pool not used";
+    const occurrences = (outcome: unknown) => JSON.stringify(outcome).split(advisory).length - 1;
+
+    it("Launch paths (`materializeStructured`, `launchMaterialized`, `addMemberToPod`) return the pool advisory in their warnings exactly once.", async () => {
+      const { db, inst, clearOccupancy } = poolSetup();
+      try {
+        const bad = { max: 2, min: 4 };
+        const structured = await inst.materializeStructured(RigSpecCodec.parse(yamlSpec(bad)), RIG_ROOT);
+        expect(structured.ok, JSON.stringify(structured)).toBe(true);
+        if (!structured.ok) return;
+        expect(structured.result.warnings.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(structured)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const launched = await inst.launchMaterialized(yamlSpec(bad), RIG_ROOT, structured.result.rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        if (!launched.ok) return;
+        expect(launched.result.warnings?.filter((w) => w.includes(" pool."))).toEqual([advisory]);
+        expect(occurrences(launched)).toBe(1);
+
+        clearOccupancy(structured.result.rigId);
+        const clean = await inst.launchMaterialized(yamlSpec({ max: 3 }), RIG_ROOT, structured.result.rigId);
+        expect(JSON.stringify(clean)).not.toContain(" pool.");
+      } finally {
+        db.close();
+      }
+    });
+
+    it("Import returns the pool advisory in `warnings` exactly once (C6, through the load front).", async () => {
+      const { db, inst } = poolSetup();
+      try {
+        const imported = await inst.instantiate(yamlSpec({ max: 2, min: 4 }, "import-rig"), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        expect(occurrences(imported)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
     it("A fresh launch of the model seat from its launch recipe leaves the stored block as it is.", async () => {
       const { db, rigRepo, inst, clearOccupancy } = poolSetup();
       try {
@@ -2591,6 +2850,72 @@ state: 2-named
         const relaunched = await inst.launchPersistedFresh(rigId, nodeId);
         expect(relaunched.status, JSON.stringify(relaunched)).toBe("launched");
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 7 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A rig launched and then re-applied with a valid `pool` block registers no seat-pool job while the job is unarmed.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        const seatPoolJobs = () => (db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs WHERE policy = 'seat-pool'").get() as { n: number }).n;
+        const mat = await inst.materialize(yamlSpec({ max: 3, min: 1 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ min: 1 }));
+        expect(seatPoolJobs()).toBe(0);
+
+        clearOccupancy(rigId);
+        const again = await inst.launchMaterialized(yamlSpec({ max: 5, min: 2 }), RIG_ROOT, rigId);
+        expect(again, JSON.stringify(again)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 5, min: 2 }));
+        expect(seatPoolJobs()).toBe(0);
+
+        // `rig up` (import) goes through instantiate: no job there either
+        const up = await inst.instantiate(yamlSpec({ max: 2 }, "up-rig"), RIG_ROOT);
+        expect(up.ok, JSON.stringify(up)).toBe(true);
+        expect(seatPoolJobs()).toBe(0);
+
+        // the node is one the registration would arm: the 0 above comes from the unarmed job, not from the node
+        const jobsRepo = new WatchdogJobsRepository(db);
+        expect(reconcileSeatPoolNode({ db, rigRepo, jobsRepo }, nodeId)).toMatchObject({ outcome: "registered", job: { targetSession: "dev-impl@test-rig" } });
+        expect(seatPoolJobs()).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    // #3395, spec section 5, "Stored": the retry launches from the seat's stored settings (its fragment can't carry
+    // `pool`), so it reads the stored pool block from the node, as the first start does.
+    it("A first-start retry of a seat reports its stored pool block that can't be used once in its warnings, and the retry still launches.", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: "." };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        // Stored as a re-apply writes a block that can't be used: as authored.
+        expect(rigRepo.setNodePool(worker.id, { raw: { max: -1 } })).toBe(true);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        const stored = "dev.worker pool.max: must be a whole number of 0 or more; pool not used";
+        expect(JSON.stringify(retried).split(stored).length - 1, JSON.stringify(retried)).toBe(1);
+        expect(rigRepo.getNodePool(worker.id)).toEqual({ raw: { max: -1 }, error: expect.any(String) });
       } finally {
         db.close();
       }

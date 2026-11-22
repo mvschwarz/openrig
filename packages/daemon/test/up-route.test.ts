@@ -278,6 +278,11 @@ describe("Up API route", () => {
     const withOverride = given !== "none";
     const cwdOverride = given === "relative" ? path.relative(process.cwd(), here) : here;
     if (given === "relative") expect(path.isAbsolute(cwdOverride)).toBe(false);
+    // This synthetic shell stays in the requested launch directory; it does not model a fallback to "/".
+    const listPanes = tmuxAdapter.listPanes;
+    tmuxAdapter.listPanes = async session => (await listPanes(session)).map(pane => ({
+      ...pane, cwd: withOverride ? here : moved,
+    }));
     try {
       const rig = rigRepo.createRig("moved-home");
       const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: moved });

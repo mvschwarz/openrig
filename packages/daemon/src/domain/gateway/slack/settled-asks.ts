@@ -7,7 +7,8 @@ import { resolveRegisteredHumanAddress } from "../human-registry.js";
 import { callWebApi, type FetchImpl, type WebApiResult } from "./slack-api.js";
 import { budgetLeft, HISTORY, REPLIES, MethodBackoff, newRecoveryBudget } from "./recovery-budget.js";
 import { parsePostedStamp } from "./thread-seat-map.js";
-import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, recommendationLabel, escapeSlackText, redactSecrets } from "./message.js";
+import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, SLACK_SECTION_CAP, recommendationLabel, escapeSlackText, redactSecrets } from "./message.js";
+import { chosenAnswers, type HumanAnswers, type HumanQuestion } from "../../human-questions.js";
 
 const UPDATE = "chat.update";
 const EDITED = "slack-ask-settled";
@@ -43,16 +44,51 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
     if (at >= 0) text = text.slice(0, at) + text.slice(at + hint.length + 1);
     return [];
   });
+  // plain_text, as the settled labels below are: a chosen label's `*`, `_` or `~` shows as written, not as styling.
   return { text: status + "\n" + text,
-    blocks: [{ type: "context", block_id: STATUS_BLOCK, elements: [{ type: "mrkdwn", text: status }] }, ...blocks] };
+    blocks: [{ type: "context", block_id: STATUS_BLOCK, elements: [{ type: "plain_text", text: status }] }, ...blocks] };
 }
 
-function statusLine(t: QueueTransition, label?: string): string {
+/** What an episode's card may name (C8). The answers are the item's, and a re-park's click writes over an earlier park's,
+ *  so only the latest episode names anything. After an earlier episode, an answer counts only when this one recorded it:
+ *  a click by its human-answer-recorded note, as recordHumanAnswer reads "this park". Typed words carry no note, and
+ *  they're stored only under a question with no answer yet, so they count only while no earlier episode was answered. */
+function episodeChoices(questions: readonly HumanQuestion[], answers: HumanAnswers, episode: QueueTransition,
+  transitions: QueueTransition[]): Array<string | null> {
+  const episodes = transitions.filter((t) => t.ownerNotificationKind === "human-required");
+  if (episodes.at(-1)?.transitionId !== episode.transitionId) return [];
+  if (episodes.length === 1) return chosenAnswers(questions, answers);
+  const answeredBefore = transitions.some((t) => t.transitionId < episode.transitionId && t.ownerNotificationKind === "human-decision-resolved");
+  const recorded = new Set(transitions.filter((t) => t.transitionId > episode.transitionId).map((t) => t.transitionNote));
+  return chosenAnswers(questions, Object.fromEntries(Object.entries(answers).filter(([questionId, answer]) => typeof answer === "string"
+    ? recorded.has(`human-answer-recorded: ${JSON.stringify({ questionId, optionId: answer })}`) : !answeredBefore)));
+}
+
+/** An answered card names what was chosen (C8); a typed reply's words stay in the thread, so the card says only that.
+ *  Each label is redacted as the question card's inert() redacts it; statusLine escapes the whole line. */
+function answeredLine(chosen: ReadonlyArray<string | null>): string {
+  if (!chosen.length) return "Answered";
+  return chosen.every((c) => c === null) ? "Answered with a typed reply"
+    : `Answered: ${chosen.map((c) => c === null ? "a typed reply" : redactSecrets(c)).join("; ")}`;
+}
+
+function statusLine(t: QueueTransition, label?: string, chosen: ReadonlyArray<string | null> = []): string {
   const what = label ?? (t.closureReason === "denied" ? "Denied"
-    : t.ownerNotificationKind === "human-decision-resolved" ? "Answered" : t.state === "done" ? "Done"
+    : t.ownerNotificationKind === "human-decision-resolved" ? answeredLine(chosen) : t.state === "done" ? "Done"
     : t.state === "canceled" ? "Canceled" : terminal.has(t.state) ? t.state : "Handled");
   const note = redactSecrets((t.transitionNote ?? "").replace(/\s+/g, " ")).slice(0, 1000);
-  return escapeSlackText([what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · "));
+  const text = [what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · ");
+  const escaped = escapeSlackText(text);
+  if (escaped.length <= SLACK_SECTION_CAP) return escaped;
+  // The context text object has the same limit. Keep escaped entities and
+  // Unicode code points intact when budgeting the final wire string.
+  let prefix = "";
+  for (const character of text) {
+    const piece = escapeSlackText(character);
+    if (prefix.length + piece.length >= SLACK_SECTION_CAP) break;
+    prefix += piece;
+  }
+  return prefix + "…";
 }
 
 export class SlackAskSettlement {
@@ -169,8 +205,9 @@ export class SlackAskSettlement {
     const after = transitions.filter((t) => t.transitionId > episode.transitionId && ![
       "slack-posted ", "slack-owner-notification-posted ", EDITED + " ", RATE_LIMIT + " ", UNAVAILABLE + " ",
     ].some((prefix) => (t.transitionNote ?? "").startsWith(prefix)));
+    const chosen = episodeChoices(item.humanQuestions ?? [], item.humanAnswers ?? {}, episode, transitions);
     const make = (t: QueueTransition, label?: string) => {
-      const status = statusLine(t, label);
+      const status = statusLine(t, label, chosen);
       return { status, revision: createHash("sha256").update(status).digest("hex").slice(0, 24) };
     };
     const exit = after.find((t) => terminal.has(t.state) || t.ownerNotificationKind === "human-decision-resolved"

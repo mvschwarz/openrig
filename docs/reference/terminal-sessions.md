@@ -99,6 +99,10 @@ Once attached, keys and paste use native tmux input handling.
 Use tmux's inherited `window-size latest` policy for the terminal most recently
 used to control sizing. OpenRig does not change a person's global tmux policy.
 A deliberate `window-size manual` setting remains an explicit fixed-size choice.
+`rig capture --readable` reads such a window as it is and names the command that
+drops the window's own setting (`tmux set-window-option -t <window> -u window-size`
+with the daemon's server flags, to run on the daemon's host), for when you want it
+to follow its inherited sizing again.
 OpenRig's temporary layout and readable-capture pins release by unsetting the
 window's local `window-size` option; they do not restore an old local override.
 With the last pin released, the window inherits the global policy again.
@@ -585,7 +589,11 @@ with a coalesced scope invalidation event. There is no repeating membership
 poll. Structural edits under additional legacy roots, or a filesystem where
 watching is unavailable, require `rig`'s existing slice refresh endpoint
 `POST /api/slices/refresh` or reopening the view. Missing or unreadable sources
-keep prior viewers; they never certify that the work disappeared.
+keep prior viewers; they never certify that the work disappeared. That includes
+the project catalog: a catalogued project whose own read fails (an unreadable root,
+a `project.yaml` or root work source that doesn't parse), or a catalog that can't
+be read, is named in a `scope_unavailable` for a scope that isn't found elsewhere.
+A project whose root is missing, or whose missions root escapes it, holds no scopes.
 
 
 Scope identity reads are bounded to 4,096 directory entries, 16 KiB per selected
@@ -596,8 +604,8 @@ or a qitem view. This is separate from unreadable or malformed sources.
 Queue membership reads are bounded to 50,000 active rows plus one lookahead,
 16 KiB of encoded tags per row and 8 MiB of aggregate encoded tags. They remain
 fresh on each render. Identities are reused within a scope-source generation
-only while the primary-root watcher is live and existing additional roots are
-covered by that root. A source event or explicit refresh invalidates them;
+only while the primary-root watcher is live, existing additional roots are
+covered by that root and no catalogued project is unreadable. A source event or explicit refresh invalidates them;
 errors discard the cache. Unavailable watching or an existing unwatched legacy
 root uses fresh bounded identity reads instead. Missing legacy roots are checked
 on each call so an appearing root cannot reuse an older cached identity set.

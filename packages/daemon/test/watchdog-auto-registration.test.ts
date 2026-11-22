@@ -15,6 +15,7 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-policy-engine.js";
 import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.js";
+import { makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "../src/domain/policies/parked-owner-consumer.js";
 import { createFullTestDb, mockTmuxAdapter } from "./helpers/test-app.js";
 
 const AUTO_POLICY = "idle-gate-qitem";
@@ -156,7 +157,8 @@ describe("W2c watchdog auto-registration — production composition", () => {
       deps.sessionRegistry.registerClaimedSession(claimed.id, "external-seat-without-canonical-rig");
       deps.sessionRegistry.registerClaimedSession(node.id, "bad:seat@exclusion-rig");
 
-      expect(register).not.toHaveBeenCalled();
+      // The seats' own (idle-gate) jobs: a running seat also arms its rig name's parked-owner job (#3634).
+      expect(register.mock.calls.filter(([input]) => (input as { policy?: string }).policy === "idle-gate-qitem")).toEqual([]);
       if (ensure) expect(ensure).not.toHaveBeenCalled();
       if (coverage) expect(coverage).not.toHaveBeenCalled();
       expect(autoRows(db, "r01-dev-qa")).toHaveLength(0);
@@ -602,4 +604,399 @@ describe("B6 — idle-gate auto-registration default-off / opt-in gate", () => {
       expect(flipped.assertCoverage(node.id, sessionName)).not.toBeNull();
     } finally { db.close(); }
   });
+});
+
+// #3634: a parked-owner-consumer job is armed for a rig name while it has an unarchived row or a running seat.
+// Archive and delete retire it in the same act once the name has neither; unarchive and re-creation under the same
+// name put the same job back (id and history kept); an operator-stopped job stays stopped; jobs earlier daemons left
+// active are not cleaned up here.
+describe("#3634 parked-owner-consumer jobs follow archive, unarchive, delete and re-creation", () => {
+  const originalNoKernel = process.env.OPENRIG_NO_KERNEL;
+  const roots: string[] = [];
+  beforeAll(() => { process.env.OPENRIG_NO_KERNEL = "1"; });
+  afterAll(() => {
+    if (originalNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
+    else process.env.OPENRIG_NO_KERNEL = originalNoKernel;
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  });
+
+  const boot = (dbPath = ":memory:") => createDaemon({ dbPath, tmuxExec: async () => "", cmuxExec: async () => "" });
+  const fileDb = (prefix: string) => {
+    const root = mkdtempSync(join(tmpdir(), prefix));
+    roots.push(root);
+    return join(root, "openrig.sqlite");
+  };
+  const parked = (db: Database.Database, rigName: string) =>
+    new WatchdogJobsRepository(db).listExactTuple(PARKED_OWNER_POLICY_NAME, makeRigAnchor(rigName), null);
+  const states = (db: Database.Database, rigName: string) => parked(db, rigName).map((job) => job.state);
+  const ids = (db: Database.Database, rigName: string) => parked(db, rigName).map((job) => job.jobId);
+  const parkedJob = (rigName: string) => ({
+    policy: PARKED_OWNER_POLICY_NAME,
+    targetSession: makeRigAnchor(rigName),
+    registeredBySession: "daemon@kernel",
+    intervalSeconds: 120,
+    specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${makeRigAnchor(rigName)}\ncontext:\n  rig: ${rigName}\n`,
+  });
+
+  it("a daemon start arms names with an unarchived row, never re-arms a retired name, and puts a re-created name's job back", async () => {
+    const dbPath = fileDb("parked-start-");
+    const seed = createDb(dbPath);
+    migrate(seed, ALL_MIGRATIONS);
+    const rigs = new RigRepository(seed);
+    const jobs = new WatchdogJobsRepository(seed);
+    rigs.createRig("live");
+    rigs.archiveRig(rigs.createRig("never-armed").id);
+    rigs.archiveRig(rigs.createRig("retired").id);
+    rigs.archiveRig(rigs.createRig("reborn").id);
+    rigs.createRig("reborn");
+    rigs.archiveRig(rigs.createRig("leftover").id);
+    const seated = rigs.createRig("seated");
+    const seatedNode = rigs.addNode(seated.id, "dev-qa", { role: "qa", runtime: "codex" });
+    const seatedSession = new SessionRegistry(seed).registerSession(seatedNode.id, "dev-qa@seated");
+    new SessionRegistry(seed).updateStatus(seatedSession.id, "running");
+    rigs.archiveRig(seated.id);
+    for (const name of ["retired", "reborn", "seated"]) {
+      const job = jobs.register(parkedJob(name));
+      jobs.markTerminal(job.jobId, "rig archived");
+    }
+    jobs.register(parkedJob("leftover"));
+    const rebornId = ids(seed, "reborn");
+    const seatedId = ids(seed, "seated");
+    seed.close();
+
+    const { db, eventLoopMonitor } = await boot(dbPath);
+    try {
+      expect(states(db, "live")).toEqual(["active"]);
+      expect(states(db, "never-armed")).toEqual([]);
+      expect(states(db, "retired")).toEqual(["terminal"]);
+      expect(states(db, "reborn")).toEqual(["active"]);
+      expect(ids(db, "reborn")).toEqual(rebornId);
+      // An archived rig with a running seat is still watched: its retired job comes back at start.
+      expect(states(db, "seated")).toEqual(["active"]);
+      expect(ids(db, "seated")).toEqual(seatedId);
+      // No one-time cleanup: a job an earlier daemon left active stays as it was.
+      expect(states(db, "leftover")).toEqual(["active"]);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("archive through the route retires the job in the same act, and unarchive puts the same job back", async () => {
+    const { app, db, deps, eventLoopMonitor } = await boot();
+    try {
+      const rig = deps.rigRepo.createRig("solo");
+      const armed = ids(db, "solo");
+      expect((await app.request(`/api/rigs/${rig.id}/archive`, { method: "POST" })).status).toBe(200);
+      expect(states(db, "solo")).toEqual(["terminal"]);
+      expect(parked(db, "solo")[0]!.terminalReason).toBe("rig archived");
+      expect((await app.request(`/api/rigs/${rig.id}/unarchive`, { method: "POST" })).status).toBe(200);
+      expect(states(db, "solo")).toEqual(["active"]);
+      expect(ids(db, "solo")).toEqual(armed);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("delete, direct and through the route, retires the job once the last unarchived row of the name is gone", async () => {
+    const { app, db, deps, eventLoopMonitor } = await boot();
+    try {
+      const older = deps.rigRepo.createRig("twice");
+      const newer = deps.rigRepo.createRig("twice");
+      deps.rigRepo.deleteRig(older.id);
+      expect(states(db, "twice")).toEqual(["active"]);
+      deps.rigRepo.deleteRig(newer.id);
+      expect(states(db, "twice")).toEqual(["terminal"]);
+      expect(parked(db, "twice")[0]!.terminalReason).toBe("rig deleted");
+      const deletedId = ids(db, "twice");
+      deps.rigRepo.createRig("twice");
+      expect(states(db, "twice")).toEqual(["active"]);
+      expect(ids(db, "twice")).toEqual(deletedId);
+      const routed = deps.rigRepo.createRig("routed");
+      expect((await app.request(`/api/rigs/${routed.id}`, { method: "DELETE" })).status).toBe(204);
+      expect(states(db, "routed")).toEqual(["terminal"]);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a same-name replacement (archive the old generation, create the new, one transaction) keeps the same job", async () => {
+    const { db, deps, eventLoopMonitor } = await boot();
+    try {
+      const old = deps.rigRepo.createRig("replaced");
+      const armed = ids(db, "replaced");
+      db.transaction(() => {
+        deps.rigRepo.archiveRig(old.id);
+        deps.rigRepo.createRig("replaced");
+      })();
+      expect(states(db, "replaced")).toEqual(["active"]);
+      expect(ids(db, "replaced")).toEqual(armed);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a rolled-back replacement leaves the job as it was: the transaction aborted, and the failed import undone", async () => {
+    const { db, deps, eventLoopMonitor } = await boot();
+    try {
+      const old = deps.rigRepo.createRig("rolled");
+      const armed = ids(db, "rolled");
+      expect(() => db.transaction(() => {
+        deps.rigRepo.archiveRig(old.id);
+        throw new Error("generation changed");
+      })()).toThrow("generation changed");
+      expect(states(db, "rolled")).toEqual(["active"]);
+      expect(ids(db, "rolled")).toEqual(armed);
+      // The instantiator's undo after a failed replacement: delete the new generation, unarchive the old one.
+      let created = "";
+      db.transaction(() => {
+        deps.rigRepo.archiveRig(old.id);
+        created = deps.rigRepo.createRig("rolled").id;
+      })();
+      deps.rigRepo.deleteRig(created);
+      deps.rigRepo.unarchiveRig(old.id);
+      expect(states(db, "rolled")).toEqual(["active"]);
+      expect(ids(db, "rolled")).toEqual(armed);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("an operator-stopped job stays stopped through archive, unarchive and a daemon start", async () => {
+    const dbPath = fileDb("parked-stopped-");
+    const seed = createDb(dbPath);
+    migrate(seed, ALL_MIGRATIONS);
+    const rigs = new RigRepository(seed);
+    const jobs = new WatchdogJobsRepository(seed);
+    rigs.createRig("held-live");
+    rigs.archiveRig(rigs.createRig("held-gone").id);
+    for (const name of ["held-live", "held-gone"]) jobs.stop(jobs.register(parkedJob(name)).jobId);
+    seed.close();
+
+    const { db, deps, eventLoopMonitor } = await boot(dbPath);
+    try {
+      expect(states(db, "held-live")).toEqual(["stopped"]);
+      expect(states(db, "held-gone")).toEqual(["stopped"]);
+      const live = deps.rigRepo.findUnarchivedRigsByName("held-live")[0]!;
+      deps.rigRepo.archiveRig(live.id);
+      expect(states(db, "held-live")).toEqual(["stopped"]);
+      deps.rigRepo.unarchiveRig(live.id);
+      expect(states(db, "held-live")).toEqual(["stopped"]);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("unarchiving one generation while another keeps the name armed leaves the same single job", async () => {
+    const { db, deps, eventLoopMonitor } = await boot();
+    try {
+      const older = deps.rigRepo.createRig("pair");
+      deps.rigRepo.createRig("pair");
+      deps.rigRepo.archiveRig(older.id);
+      const before = parked(db, "pair");
+      deps.rigRepo.unarchiveRig(older.id);
+      expect(parked(db, "pair")).toEqual(before);
+      expect(states(db, "pair")).toEqual(["active"]);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("archive --force of a rig with a running seat keeps its job armed, also across a daemon start", async () => {
+    const dbPath = fileDb("parked-forced-");
+    const first = await boot(dbPath);
+    try {
+      const rig = first.deps.rigRepo.createRig("forced");
+      const node = first.deps.rigRepo.addNode(rig.id, "dev-qa", { role: "qa", runtime: "codex" });
+      const session = first.deps.sessionRegistry.registerSession(node.id, "dev-qa@forced");
+      first.deps.sessionRegistry.updateStatus(session.id, "running");
+      const res = await first.app.request(`/api/rigs/${rig.id}/archive`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(first.deps.rigRepo.findUnarchivedRigsByName("forced")).toEqual([]);
+      expect(states(first.db, "forced")).toEqual(["active"]);
+    } finally {
+      first.eventLoopMonitor.stop();
+      first.db.close();
+    }
+    const second = await boot(dbPath);
+    try {
+      expect(states(second.db, "forced")).toEqual(["active"]);
+    } finally {
+      second.eventLoopMonitor.stop();
+      second.db.close();
+    }
+  }, 30_000);
+
+  it("a watchdog row in an unknown state warns and never blocks the unarchive", async () => {
+    const { app, db, deps, eventLoopMonitor } = await boot();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const rig = deps.rigRepo.createRig("damaged");
+      deps.rigRepo.archiveRig(rig.id);
+      db.prepare("UPDATE watchdog_jobs SET state = 'bogus' WHERE policy = ? AND target_session = ?")
+        .run(PARKED_OWNER_POLICY_NAME, makeRigAnchor("damaged"));
+      expect((await app.request(`/api/rigs/${rig.id}/unarchive`, { method: "POST" })).status).toBe(200);
+      expect(deps.rigRepo.findUnarchivedRigsByName("damaged").map((row) => row.id)).toEqual([rig.id]);
+      expect(warn.mock.calls.some(([message]) => String(message).includes("auto_registration_state_invalid"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a seat of an archived rig that runs again (restore or launch, no unarchive) brings the same job back", async () => {
+    const { db, deps, eventLoopMonitor } = await boot();
+    try {
+      const rig = deps.rigRepo.createRig("returning");
+      const node = deps.rigRepo.addNode(rig.id, "dev-qa", { role: "qa", runtime: "codex" });
+      const armed = ids(db, "returning");
+      deps.rigRepo.archiveRig(rig.id);
+      expect(states(db, "returning")).toEqual(["terminal"]);
+      const session = deps.sessionRegistry.registerSession(node.id, "dev-qa@returning");
+      deps.sessionRegistry.updateStatus(session.id, "running");
+      expect(states(db, "returning")).toEqual(["active"]);
+      expect(ids(db, "returning")).toEqual(armed);
+      expect(deps.rigRepo.findUnarchivedRigsByName("returning")).toEqual([]);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a seat of an archived name with no job gets exactly one active job when it runs, with no restart or unarchive", async () => {
+    const dbPath = fileDb("parked-seat-unarmed-");
+    const seed = createDb(dbPath);
+    migrate(seed, ALL_MIGRATIONS);
+    const rigs = new RigRepository(seed);
+    const jobs = new WatchdogJobsRepository(seed);
+    const unarmed = rigs.createRig("never-armed");
+    const unarmedNode = rigs.addNode(unarmed.id, "dev-qa", { role: "qa", runtime: "codex" });
+    rigs.archiveRig(unarmed.id);
+    const held = rigs.createRig("held");
+    const heldNode = rigs.addNode(held.id, "dev-qa", { role: "qa", runtime: "codex" });
+    rigs.archiveRig(held.id);
+    jobs.stop(jobs.register(parkedJob("held")).jobId);
+    const heldId = ids(seed, "held");
+    seed.close();
+
+    const { db, deps, eventLoopMonitor } = await boot(dbPath);
+    try {
+      // The start skips both: archived, with no running seat.
+      expect(states(db, "never-armed")).toEqual([]);
+      expect(states(db, "held")).toEqual(["stopped"]);
+      for (const [nodeId, name] of [[unarmedNode.id, "dev-qa@never-armed"], [heldNode.id, "dev-qa@held"]] as const) {
+        deps.sessionRegistry.updateStatus(deps.sessionRegistry.registerSession(nodeId, name).id, "running");
+      }
+      expect(states(db, "never-armed")).toEqual(["active"]);
+      expect(deps.rigRepo.findUnarchivedRigsByName("never-armed")).toEqual([]);
+      // Control: the same transition leaves an operator-stopped job stopped.
+      expect(states(db, "held")).toEqual(["stopped"]);
+      expect(ids(db, "held")).toEqual(heldId);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a claimed seat of an unarchived name with no job gets exactly one active job, with no restart", async () => {
+    const { db, deps, eventLoopMonitor } = await boot();
+    try {
+      // A rig created by a repository without the hook: an unarchived name that never got its job.
+      const raw = new RigRepository(db);
+      const rig = raw.createRig("hookless");
+      const node = raw.addNode(rig.id, "dev-qa", { role: "qa", runtime: "codex" });
+      expect(states(db, "hookless")).toEqual([]);
+      deps.sessionRegistry.registerClaimedSession(node.id, "dev-qa@hookless");
+      expect(states(db, "hookless")).toEqual(["active"]);
+      // Another transition leaves that one job as it is.
+      const armed = ids(db, "hookless");
+      deps.sessionRegistry.registerClaimedSession(node.id, "dev-qa@hookless");
+      expect(ids(db, "hookless")).toEqual(armed);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("a failed put-back warns and never stops a daemon start, an unarchive or a running seat", async () => {
+    const dbPath = fileDb("parked-revive-fails-");
+    const seed = createDb(dbPath);
+    migrate(seed, ALL_MIGRATIONS);
+    const rigs = new RigRepository(seed);
+    rigs.createRig("steady");
+    const back = rigs.createRig("back");
+    rigs.archiveRig(back.id);
+    const seat = rigs.createRig("seat");
+    const seatNode = rigs.addNode(seat.id, "dev-qa", { role: "qa", runtime: "codex" });
+    rigs.archiveRig(seat.id);
+    seed.close();
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const revive = vi.spyOn(WatchdogJobsRepository.prototype, "reviveRetired").mockImplementation(() => {
+      throw new Error("disk I/O error");
+    });
+    try {
+      const { app, db, deps, eventLoopMonitor } = await boot(dbPath);
+      try {
+        expect(states(db, "steady")).toEqual(["active"]);
+        expect((await app.request(`/api/rigs/${back.id}/unarchive`, { method: "POST" })).status).toBe(200);
+        expect(deps.rigRepo.findUnarchivedRigsByName("back").map((row) => row.id)).toEqual([back.id]);
+        expect(states(db, "back")).toContain("active");
+        const session = deps.sessionRegistry.registerSession(seatNode.id, "dev-qa@seat");
+        expect(() => deps.sessionRegistry.updateStatus(session.id, "running")).not.toThrow();
+        expect(states(db, "seat")).toContain("active");
+        expect(revive).toHaveBeenCalled();
+        expect(warn.mock.calls.some(([message]) => String(message).includes("could not put back"))).toBe(true);
+      } finally {
+        eventLoopMonitor.stop();
+        db.close();
+      }
+    } finally {
+      revive.mockRestore();
+      warn.mockRestore();
+    }
+  }, 30_000);
+
+  it("a failed job lookup for a running seat warns and never fails the status write or the claim", async () => {
+    const { db, deps, eventLoopMonitor } = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+    });
+    const rig = deps.rigRepo.createRig("lookup-fails");
+    const node = deps.rigRepo.addNode(rig.id, "dev-qa", { role: "qa", runtime: "codex" });
+    const session = deps.sessionRegistry.registerSession(node.id, "dev-qa@lookup-fails");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listExactTuple = WatchdogJobsRepository.prototype.listExactTuple;
+    const lookup = vi.spyOn(WatchdogJobsRepository.prototype, "listExactTuple").mockImplementation(
+      function (this: WatchdogJobsRepository, ...args: Parameters<typeof listExactTuple>) {
+        if (args[0] === PARKED_OWNER_POLICY_NAME) throw new Error("disk I/O error");
+        return listExactTuple.apply(this, args);
+      },
+    );
+    try {
+      expect(() => deps.sessionRegistry.updateStatus(session.id, "running")).not.toThrow();
+      expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id) as { status: string }).status)
+        .toBe("running");
+      expect(() => deps.sessionRegistry.registerClaimedSession(node.id, "dev-qa@lookup-fails", "handover")).not.toThrow();
+      expect(lookup).toHaveBeenCalled();
+      expect(warn.mock.calls.some(([message]) => String(message).includes("for a running seat"))).toBe(true);
+    } finally {
+      lookup.mockRestore();
+      warn.mockRestore();
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
 });

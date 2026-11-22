@@ -156,15 +156,18 @@ export async function spawnScenarioDaemon(
       );
     }
   };
+  const baseUrl = `http://127.0.0.1:${port}`;
   const killProc = async () => {
     // `rig daemon stop` reads daemon.json under the scratch OPENRIG_HOME and
-    // SIGTERMs the daemon. Best-effort (already-down is fine).
-    await runRig(["daemon", "stop"], scaffold.env, rigBin, timeoutMs).catch(() => {});
+    // SIGTERMs the daemon. Best-effort (already-down is fine). Addressed to this
+    // daemon's own URL: once a stop has removed daemon.json, the scrubbed env
+    // would otherwise check the configured default, 127.0.0.1:7433, which can be
+    // the machine's own daemon (#3631).
+    await runRig(["daemon", "stop"], { ...scaffold.env, OPENRIG_URL: baseUrl }, rigBin, timeoutMs).catch(() => {});
   };
 
   await startProc();
 
-  const baseUrl = `http://127.0.0.1:${port}`;
   const readEnv: Record<string, string | undefined> = { ...scaffold.env, OPENRIG_URL: baseUrl };
 
   return {

@@ -26,14 +26,21 @@ use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent pi
 ```
 
-Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
-you what it will run and change before it does, install OpenRig, open the OpenRig view and pass your goal to
-OpenRig's operator. If Claude Code was already running when you added the skill, type `/reload-skills` first, or start
+**OMP:** this pin installs the shared skill only. The `v0.7.21` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
+but complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in.
+
+Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already
+open), and say what you want built. The skill has your agent tell you what it will run and change before it does,
+install OpenRig, open the OpenRig view and pass your goal to OpenRig's operator. If Claude Code was already running
+when you added the skill, type `/reload-skills` first, or start
 a new session: a session doesn't see a skills folder created after it started.
 
 You need Node.js 22 or 24 (22 on Apple silicon), tmux, macOS or Linux (WSL2 on Windows), and Claude Code or Codex
@@ -69,11 +76,11 @@ Setting up Node.js on Linux, on a Mac where you aren't an administrator, or on W
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.7.18` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.21` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.18/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.18/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh
 ```
 
 If the last step isn't ready, the installer reports `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any reported Fix, then rerun `rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider sign-ins, sign in to each selected provider as below and continue.

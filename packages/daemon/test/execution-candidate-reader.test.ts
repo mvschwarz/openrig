@@ -62,7 +62,7 @@ describe("cooperative candidate reads", () => {
   it("reads every row in rowid order on its own connection, a window at a time, letting other callbacks run between windows", async () => {
     const { file } = walTable(500);
     const loop = turns(), reader = recordingOpen();
-    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], reader.open, 64);
+    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], reader.open, 64, { targetMs: Infinity });
     loop.stop();
     expect(reader.readers.map((db) => [db.readonly, db.open, db.inTransaction])).toEqual([[true, false, false]]); // readonly, and closed before returning
     expect(read.rows.map((r) => r.id)).toEqual(Array.from({ length: 500 }, (_, i) => i + 1));
@@ -73,7 +73,8 @@ describe("cooperative candidate reads", () => {
   it("yields between windows even when the filter matches almost nothing", async () => {
     const { file } = walTable(2000);
     const loop = turns();
-    const read = await readRowsCooperatively<{ id: number }>(file, "t", "SELECT id FROM t WHERE id > ? AND id <= ? AND v LIKE ?", ['%"a":2000}%']);
+    const read = await readRowsCooperatively<{ id: number }>(file, "t", "SELECT id FROM t WHERE id > ? AND id <= ? AND v LIKE ?", ['%"a":2000}%'],
+      undefined, undefined, { targetMs: Infinity });
     loop.stop();
     expect(read.rows).toEqual([{ id: 2000 }]);
     expect(read.windows).toBe(8); // 2000 rowids, 256 per window
@@ -85,9 +86,26 @@ describe("cooperative candidate reads", () => {
     const { file, db } = walTable(0);
     expect(await readRowsCooperatively(file, "t", WINDOW_SQL, [])).toMatchObject({ rows: [], windows: 0 });
     db.prepare("INSERT INTO t(id, v) VALUES (1, 'a'), (1000, 'b')").run();
-    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, []);
+    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], undefined, undefined, { targetMs: Infinity });
     expect(read.rows.map((r) => r.id)).toEqual([1, 1000]);
     expect(read.windows).toBe(4);
+  });
+
+  it("halves a window that runs past its target, down to one rowid, so a costly scan keeps yielding", async () => {
+    const { file } = walTable(500);
+    // A target below zero counts every window as slow: 64, 32, 16, 8, 4, 2 and 1 rowids cover 127, then one rowid each.
+    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], undefined, 64, { targetMs: -1 });
+    expect(read.rows.map((r) => r.id)).toEqual(Array.from({ length: 500 }, (_, i) => i + 1));
+    expect(read.windows).toBe(7 + 373);
+  });
+
+  it("stops at the next window once its signal aborts, returns nothing, and closes its reader", async () => {
+    const { file } = walTable(500);
+    const reader = recordingOpen(), abort = new AbortController();
+    setImmediate(() => abort.abort(new Error("client went away"))); // runs at the first yield, after one window
+    await expect(readRowsCooperatively(file, "t", WINDOW_SQL, [], reader.open, 64, { signal: abort.signal }))
+      .rejects.toThrow("client went away");
+    expect(reader.readers.map((db) => db.open)).toEqual([false]);
   });
 
   it("keeps one snapshot for every window while writers commit between windows; the next read sees them", async () => {
@@ -105,6 +123,31 @@ describe("cooperative candidate reads", () => {
     expect(after.rows).toHaveLength(500);
     expect(after.rows.some((r) => r.id === 400)).toBe(false);
     expect(after.rows.slice(-2)).toEqual([{ id: 500, v: "changed" }, { id: 501, v: "new" }]);
+  });
+
+  it("hands each window's rows to onWindow in rowid order and keeps none; a throw from it ends the read and closes the reader", async () => {
+    const { file } = walTable(500);
+    const loop = turns(), reader = recordingOpen(), windows: number[][] = [];
+    const read = await readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], reader.open, 64, {
+      targetMs: Infinity,
+      onWindow: (rows) => { windows.push(rows.map((r) => r.id)); },
+    });
+    loop.stop();
+    expect(read.rows).toEqual([]);
+    expect(read.windows).toBe(8);
+    expect(windows).toHaveLength(8);
+    expect(windows.flat()).toEqual(Array.from({ length: 500 }, (_, i) => i + 1));
+    expect(loop.count()).toBeGreaterThan(1);
+
+    const failing = recordingOpen();
+    let seen = 0;
+    const thrown = readRowsCooperatively<{ id: number }>(file, "t", WINDOW_SQL, [], failing.open, 64, {
+      targetMs: Infinity,
+      onWindow: (rows) => { seen += rows.length; if (seen > 128) throw new Error("consumer fault"); },
+    });
+    await expect(thrown).rejects.toThrow("consumer fault");
+    expect(seen).toBe(192);
+    expect(failing.readers.map((db) => [db.open, db.inTransaction])).toEqual([[false, false]]);
   });
 
   it("rethrows a native error raised in a later window, returns nothing, and leaves no reader pinning the WAL", async () => {
@@ -177,6 +220,28 @@ describe("the projector's execution queue", () => {
     await expect(projector.show("execution")).rejects.toThrow("slices root unreadable");
     expect((await projector.show("execution")).rowCount).toBe(1);
     expect(started).toBe(4);
+  });
+
+  it("skips a queued build whose caller aborted before its turn", async () => {
+    const db = fixture(tempFile("abort.sqlite"));
+    let started = 0, release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let gitCalls = 0;
+    const projector = new ViewProjector(db, new EventBus(db), { now: () => NOW });
+    projector.setExecutionDeps({
+      db, now: () => NOW, rigsRoot: () => tempFile("rigs"), slicesRoot: () => { started++; return null; },
+      exec: async () => { if (++gitCalls === 1) await gate; throw new Error("not a repository"); },
+    });
+    insertRow(db, "qitem-a", "in-progress", ["slice:S1"], "Lane A.\nworktree_path=/nowhere/a\n");
+    const first = projector.show("execution");
+    while (gitCalls === 0) await tick();
+    const abort = new AbortController();
+    const second = projector.show("execution", { signal: abort.signal });
+    abort.abort(new Error("client went away"));
+    release();
+    expect((await first).rowCount).toBe(1);
+    await expect(second).rejects.toThrow("client went away");
+    expect(started).toBe(1); // the abandoned build never began
   });
 
   it("runs a caller's build inside its transaction at once, seeing its uncommitted rows", async () => {

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
-import { reconcileToken } from "../src/domain/gateway/slack/message.js";
+import { reconcileToken, SLACK_SECTION_CAP, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
@@ -31,6 +31,40 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
   const stores = () => ({ delivered: new SeenStore(join(home, "delivered")), attempted: new SeenStore(join(home, "attempted")), outboundSeen: new SeenStore(join(home, "seen")) });
   const opts = () => ({ ...stores(), botToken: "synthetic", channel: "C-TEST", sourceLabel: "fixture" });
 
+  it.each([false, true])("delivers a four-question decision with private PNG evidence as a link (needs compact format=%s)", async compact => {
+    const base = "https://host.example/";
+    const path = compact ? "a".repeat(SLACK_SECTION_CAP - base.length - ".png".length) + ".png" : "shot.png";
+    const evidenceRef = base + path;
+    const humanQuestions = Array.from({ length: 4 }, (_, index) => ({
+      id: `question-${index + 1}`,
+      question: `Decision ${index + 1}?`,
+      options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }],
+    }));
+    const ask = {
+      ...decision,
+      payload: { ...request, qitemId: "q-rejected", evidenceRef, humanQuestions },
+    };
+    const posts: { text: string; blocks: { type: string; elements?: { type: string; text?: string }[] }[] }[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const post = JSON.parse(String(init?.body));
+      posts.push(post);
+      return post.blocks.some((block: { type: string }) => block.type === "image")
+        ? reply({ ok: false, error: "invalid_blocks" })
+        : reply({ ok: true, ts: "2.1" });
+    });
+    const onTransportFailed = vi.fn();
+
+    expect(await subsystemSlackDeliver({ ...opts(), fetchImpl, onTransportFailed })(ask)).toEqual({ ok: true });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.text).toContain(evidenceRef);
+    expect(posts[0]!.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
+    const blocks = posts[0]!.blocks;
+    const evidence = blocks.filter((block) => block.type === "context").flatMap(block => block.elements ?? []);
+    expect(evidence).toContainEqual({ type: "mrkdwn", text: compact ? evidenceRef : `Evidence: <${evidenceRef}|evidence>` });
+    expect(blocks.filter((block) => block.type === "actions").map((block) => block.elements?.length)).toEqual([2, 2, 2, 2]);
+    expect(onTransportFailed).not.toHaveBeenCalled();
+  });
+
   it("keeps the rejection across restart without a post, history scan, or delivered mark", async () => {
     const fetchImpl = vi.fn(async () => reply({ ok: false, error: "invalid_blocks" }));
     const onTransportFailed = vi.fn();
@@ -51,9 +85,12 @@ describe("Slack invalid_blocks is a permanent rejection (#47)", () => {
       posts.push(JSON.parse(String(init?.body)));
       return posts.length === 1 ? reply({ ok: false, error: "invalid_blocks" }) : reply({ ok: true, ts: "2.1" });
     });
-    const rejected = { ...decision, payload: { ...decision.payload as object, evidenceRef: "https://example.com/page.png" } };
+    const rejected = {
+      ...decision,
+      payload: { ...decision.payload as object, media: [{ imageUrl: "https://example.com/page.png", altText: "Evidence" }] },
+    };
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl })(rejected)).toMatchObject({ class: "slack-invalid-blocks" });
-    const corrected = { ...rejected, payload: { ...rejected.payload, evidenceRef: "https://example.com/proof.md" } };
+    const corrected = { ...decision, payload: { ...decision.payload as object, evidenceRef: "https://example.com/proof.md" } };
     expect(await subsystemSlackDeliver({ ...opts(), fetchImpl })(corrected)).toEqual({ ok: true });
     expect(posts).toHaveLength(2);
     expect(JSON.stringify(posts[0])).toContain('"type":"image"');

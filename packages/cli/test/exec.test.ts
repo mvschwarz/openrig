@@ -133,6 +133,16 @@ describe("rig exec", () => {
     expect(notes(h)).toEqual([]);
   }, 30_000);
 
+  it("runs an explicit ACP executable and its arguments through the same queue lifecycle", async () => {
+    const h = setup();
+    const argv = [process.execPath, FAKE_AGENT];
+    const started = await rig(h, ["run", "qitem-task", "--", ...argv]);
+    expect(started.code).toBe(0);
+    const run = await ended(h, startedId(started.out)!);
+    expect(run).toMatchObject({ agent: argv, harness: "acp", state: "finished", outcome: "completed" });
+    expect(readRows(h.queueFile)["qitem-task"]!.state).toBe("in-progress");
+  }, 30_000);
+
   it("keeps running after the calling CLI exits, and records the outcome as the agent's report", async () => {
     const h = setup("scenario:slow");
     const started = await rig(h, ["run", "qitem-task", "--harness", "claude"]);

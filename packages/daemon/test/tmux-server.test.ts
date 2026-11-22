@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { setDaemonTmuxServer, tmuxAttachCommand, tmuxServerArgs } from "../src/adapters/tmux-server.js";
+import { setDaemonTmuxServer, tmuxAttachCommand, tmuxServerArgs, tmuxUnsetWindowSizeCommand } from "../src/adapters/tmux-server.js";
 import { composeView, type ViewMemberInput } from "../src/domain/terminal/view-composer.js";
 
 describe("the daemon's tmux server", () => {
@@ -55,6 +55,22 @@ describe("the daemon's tmux server", () => {
     expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L person attach -t dev-build@starter");
     setDaemonTmuxServer(["-S", "/tmp/my sockets/team"]);
     expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -S '/tmp/my sockets/team' attach -t dev-build@starter");
+  });
+
+  it("names the window by its id, on the daemon's server, in the command that drops a window's own window-size", () => {
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux set-window-option -t @7 -u window-size");
+    setDaemonTmuxServer(["-L", "person"]);
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -L person set-window-option -t @7 -u window-size");
+    setDaemonTmuxServer(["-S", "/tmp/my sockets/team"]);
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -S '/tmp/my sockets/team' set-window-option -t @7 -u window-size");
+  });
+
+  it("quotes a server name with `=`, which zsh would read as a command lookup", () => {
+    setDaemonTmuxServer(["-L", "=person"]);
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -L '=person' set-window-option -t @7 -u window-size");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L '=person' attach -t dev-build@starter");
+    setDaemonTmuxServer(["-S", "/tmp/a=b/team"]);
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -S '/tmp/a=b/team' set-window-option -t @7 -u window-size");
   });
 
   it("quotes a session name that would otherwise reach the shell as code", () => {

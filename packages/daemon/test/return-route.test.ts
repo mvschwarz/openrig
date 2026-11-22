@@ -12,6 +12,7 @@ import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { execFileSync } from "node:child_process";
 import { issuedReturnAddress, relayTaskId, resolveEscalationReturnRoute } from "../src/domain/return-route.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 import { QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
@@ -298,6 +299,68 @@ describe("first-user return route", () => {
       expect(foreign).toMatchObject({ returnRoute: "conversation-abc@kernel@host-a", returnRouteBasis: "issued-actor" });
       const home = await (await create({ returnRoute: "front@kernel@host-b", sourceSession: "front@kernel" })).json() as Record<string, unknown>;
       expect(home).toMatchObject({ returnRoute: "front@kernel", returnRouteBasis: "named" });
+    });
+  });
+
+  describe("work a seat gives out as a new row", () => {
+    // The first-user check's run2 and control: the operator gave the builder a fresh row rather than handing the routed
+    // goal on, so the builder's prompts had no route and ended undeliverable or unread.
+    const operator = deriveCanonicalSessionName("operator", "agent", "kernel");
+    const route = issuedReturnAddress("qitem-goal-1");
+    const goalAt = async (holder: string, address: string) => {
+      const goal = await repo.create({ sourceSession: address, destinationSession: holder, body: "goal", nudge: false,
+        returnRoute: address, returnRouteBasis: "issued-actor" });
+      repo.claim({ qitemId: goal.qitemId, destinationSession: holder });
+      return goal;
+    };
+    const give = async (body: Record<string, unknown>) => {
+      const res = await create(body, operator);
+      expect(res.status).toBe(201);
+      return await res.json() as { qitemId: string; returnRoute?: string; returnRouteBasis?: string };
+    };
+
+    it("inherits the route of the one routed row the seat holds, so a prompt escalation about that work finds the person's route", async () => {
+      await goalAt(operator, route);
+      const work = await give({ destinationSession: lead, body: "build the change" });
+      expect(work).toMatchObject({ returnRoute: route, returnRouteBasis: "inherited" });
+      expect(resolveEscalationReturnRoute(db, { qitemId: "alert", tags: [`recovery-for:${work.qitemId}`] })).toMatchObject({ kind: "route", route });
+    });
+
+    it("gets none when the seat holds two distinct routes, or its routed row is closed", async () => {
+      const first = await goalAt(operator, route);
+      await goalAt(operator, issuedReturnAddress("qitem-goal-2"));
+      expect(await give({ destinationSession: lead, body: "which goal?" })).not.toHaveProperty("returnRoute");
+      await repo.update({ qitemId: first.qitemId, actorSession: operator, state: "done", closureReason: "no-follow-on" });
+      expect(await give({ destinationSession: lead, body: "the other goal" })).toMatchObject({ returnRoute: issuedReturnAddress("qitem-goal-2") });
+      const other = await goalAt(reviewer, route);
+      await repo.update({ qitemId: other.qitemId, actorSession: reviewer, state: "done", closureReason: "no-follow-on" });
+      const res = await create({ destinationSession: lead, body: "nothing routed open" }, reviewer);
+      expect(await res.json()).not.toHaveProperty("returnRoute");
+    });
+
+    it("keeps a route the creator names, and a question addressed to the route itself gets none", async () => {
+      await goalAt(operator, route);
+      const named = issuedReturnAddress("qitem-named");
+      expect(await give({ destinationSession: lead, body: "x", returnRoute: named })).toMatchObject({ returnRoute: named, returnRouteBasis: "named" });
+      expect(await give({ destinationSession: route, body: "a question for the person" })).not.toHaveProperty("returnRoute");
+    });
+
+    it("keeps a route that names another host, even when its address matches the local destination's", async () => {
+      setSelfHostId("host-b");
+      const foreign = `${route}@host-a`;
+      await goalAt(operator, foreign);
+      expect(await give({ destinationSession: route, body: "work for this host's conversation of the same name" }))
+        .toMatchObject({ returnRoute: foreign, returnRouteBasis: "inherited" });
+    });
+
+    it("one route held on several rows is still one, and an inherited basis survives a cross-host carry", async () => {
+      setSelfHostId("host-b");
+      await goalAt(operator, route);
+      await goalAt(operator, route);
+      expect(await give({ destinationSession: lead, body: "one goal, two rows" })).toMatchObject({ returnRoute: route, returnRouteBasis: "inherited" });
+      const carried = `${route}@host-a`;
+      expect(await give({ destinationSession: lead, body: "carried here", returnRoute: carried, returnRouteBasis: "inherited" }))
+        .toMatchObject({ returnRoute: carried, returnRouteBasis: "inherited" });
     });
   });
 

@@ -8,7 +8,7 @@ import {
   type WatchdogJobsRepository,
   WatchdogJobsError,
 } from "../domain/watchdog-jobs-repository.js";
-import { parseWatchdogSpec } from "../domain/watchdog-policy-engine.js";
+import { parseWatchdogSpec, type WatchdogPolicyEngine } from "../domain/watchdog-policy-engine.js";
 import { updateWatchdogJob } from "../domain/watchdog-job-update.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 
@@ -24,7 +24,7 @@ import { requireSenderIdentity } from "./require-sender-identity.js";
  *   GET  /list              list all watchdog jobs (active + stopped + terminal)
  *   GET  /sse               SSE stream of watchdog.* events
  *   GET  /:job_id           show one job
- *   GET  /:job_id/status    job + recent history (compact summary)
+ *   GET  /:job_id/status    job + recent history (compact summary) + quiet count since the daemon started
  *   POST /:job_id/stop      operator stop
  *   POST /:job_id/update    change an active job's interval, spec or message in place
  */
@@ -39,6 +39,9 @@ export function watchdogRoutes(): Hono {
   }
   function getEventBus(c: { get: (key: string) => unknown }): EventBus {
     return c.get("eventBus" as never) as EventBus;
+  }
+  function getPolicyEngine(c: { get: (key: string) => unknown }): WatchdogPolicyEngine | undefined {
+    return c.get("watchdogPolicyEngine" as never) as WatchdogPolicyEngine | undefined;
   }
 
   function errorResponse(
@@ -223,7 +226,9 @@ export function watchdogRoutes(): Hono {
     const job = getJobsRepo(c).getById(jobId);
     if (!job) return c.json({ error: "job_not_found", jobId }, 404);
     const recentHistory = getHistoryLog(c).listForJob(jobId, 20);
-    return c.json({ job, recentHistory });
+    // #3643: the quiet count comes from the engine that evaluates the jobs; without one nothing is counted, so it's left out.
+    const engine = getPolicyEngine(c);
+    return c.json(engine ? { job, recentHistory, quiet: engine.quietCount(jobId) } : { job, recentHistory });
   });
 
   app.post("/:job_id/stop", async (c) => {

@@ -40,6 +40,8 @@ it.each([[140, 42], [80, 24]])("native judgments drive outcomes, queue drives wo
     expect(body()).toContain("OUTCOMES OPEN"); expect(body()).toContain("Planned: planned");
     expect(body()).toContain("NEXT      one · ready to start");
     expect(body()).not.toContain("OUTCOMES COMPLETE"); // checked evidence + folded code do not accept an outcome
+    expect(execution.readiness).toMatchObject({ state: "not-ready", activeSlices: 2 });
+    expect(body()).not.toContain("no active slice"); // active work that isn't ready keeps its reading
     execution.q1_lanes = [{ slice: "one", seat: "actual@fixture", qitem_id: "q1", activity: { activity: "working" } }];
     execution.q2_sequencing[0]!.work_rows = [{ qitem_id: "q1", seat: "actual@fixture", state: "in-progress", summary: "Build readable mission overview" }];
     expect(body()).toContain("Owner: actual"); expect(body()).toContain("working");
@@ -88,4 +90,26 @@ it.each(["empty", "unknown-assigned", "unknown-unassigned"])("does not infer com
   expect(text).toContain(assigned ? "NOW       one · actual · assigned" : "NOW       no open slice work in this read");
   expect(text).toContain(empty ? "NEXT      next eligibility unknown" : assigned ? "NEXT      await current work; outcomes remain open" : "NEXT      one · dependency eligibility unknown");
   if (!empty) expect(text).toContain("1 proof unknown");
+});
+
+it("names a mission with no active slice instead of leaving it to read as open work (#3614)", () => {
+  const root = mkdtempSync(join(tmpdir(), "ux-no-active-"));
+  const mission = join(root, "missions", "trial");
+  const write = (file: string, value: unknown) => { mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, typeof value === "string" ? value : YAML.stringify(value)); };
+  const composition = (active: boolean) => write(join(mission, "mission.yaml"), { kind: "mission", metadata: { name: "trial", status: "complete" }, composition: { slices: [{ ref: "slices/one/slice.yaml", order: 1, active }] } });
+  write(join(mission, "slices", "one", "slice.yaml"), { kind: "slice", metadata: { id: "one" }, execution: { depends_on: [] } });
+  write(join(mission, "slices", "one", "SPEC.md"), "---\nid: one\nstatus: done\n---\n# one\n\n## Proof contract\n- [x] Verify one.\n");
+  const execution: ExecutionViewSnap = { view: "execution", mission: "trial", sources: {}, q1_lanes: [], q2_sequencing: [], q4_ladder: [], q5_park: [] };
+  const text = () => { execution.readiness = readMissionReadiness(mission); return executionContentLines(execution, undefined, [], null, 120).map(line => line.text).join("\n"); };
+  const line = "ACTIVE    no active slice in mission.yaml · nothing is being judged";
+  try {
+    composition(false);
+    expect(execution.readiness = readMissionReadiness(mission)).toMatchObject({ state: "not-ready", activeSlices: 0 });
+    expect(text()).toContain(line);
+    expect(text()).toContain("LIFECYCLE complete · separate from outcomes");
+    composition(true);
+    expect(text()).not.toContain("no active slice");
+    rmSync(join(mission, "mission.yaml"));
+    expect(text()).not.toContain("no active slice"); // legacy keeps its own reading
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

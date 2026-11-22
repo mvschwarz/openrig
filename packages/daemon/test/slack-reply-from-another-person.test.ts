@@ -9,6 +9,7 @@ import { MissionControlActionLog } from "../src/domain/mission-control/mission-c
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 
 // A reply that comes through the gateway keeps its sender's identity: in one trusted workspace, a different registered
 // person's Slack reply to a question parked on someone else resumes it, recorded as them on that person's ask.
@@ -130,5 +131,60 @@ describe("a Slack reply from someone other than the person a question is parked 
     expect(repo.listTransitions(parked.qitemId).at(-1)).toMatchObject({ actorSession: MIKE,
       transitionNote: `go ahead; by ${MIKE}, a registered person, on ${ANA}'s ask` });
     expect(log.listForQitem(parked.qitemId).at(-1)).toMatchObject({ actorSession: MIKE });
+  });
+
+  describe("a direct ask's close records who answered", () => {
+    const asker = deriveCanonicalSessionName("dev", "asker", "r");
+    const askAna = () => repo.create({ sourceSession: asker, destinationSession: ANA, body: "Which day?", summary: "Which day?",
+      humanIntent: "decision", evidenceRef: "/fixture/day", nudge: false });
+    const closes = (qitemId: string) => repo.listTransitions(qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved")
+      .map((t) => ({ actor: t.actorSession, provenance: t.identityProvenance, principal: t.identityPrincipal }));
+    const reply = (qitemId: string, actorSession: string, identityPrincipal?: string) => makeHumanReplyResolver(repo, contract)({
+      qitemId, actorSession, decision: "Tuesday", messageTs: "2.2", typedReply: true, ...(identityPrincipal ? { identityPrincipal } : {}) });
+    const anasAnswer = (qitemId: string, identity: boolean) => repo.createHumanAnswer({ sourceSession: ANA, destinationSession: asker,
+      body: "Wednesday works", summary: "Wednesday works", inboundReplyTo: qitemId, nudge: false,
+      ...(identity ? { identityProvenance: "gateway:slack:v1", identityPrincipal: "human-ana" } : {}) } as never);
+
+    it("a Slack reply closes it with the replying person's provenance and entity", async () => {
+      const ask = await askAna();
+      expect(await reply(ask.qitemId, ANA, "human-ana")).toBe("resolved");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: "gateway:slack:v1", principal: "human-ana" }]);
+    });
+
+    it("an earlier answer from someone else keeps its own recorded identity, through a retry, never the latest caller's", async () => {
+      const ask = await askAna();
+      await anasAnswer(ask.qitemId, true);
+      expect(await reply(ask.qitemId, MIKE, "human-mike")).toBe("not-applicable");
+      expect(await reply(ask.qitemId, MIKE, "human-mike")).toBe("already-resolved");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: "gateway:slack:v1", principal: "human-ana" }]);
+    });
+
+    it("the person's own answer recorded with no identity stays unknown when they complete it later", async () => {
+      const ask = await askAna();
+      await anasAnswer(ask.qitemId, false);
+      expect(await reply(ask.qitemId, ANA, "human-ana")).toBe("resolved");
+      expect(await reply(ask.qitemId, ANA, "human-ana")).toBe("already-resolved");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: null, principal: null }]);
+    });
+
+    it("the person's own committed answer keeps its recorded identity over the completing call's", async () => {
+      const ask = await askAna();
+      await anasAnswer(ask.qitemId, true);
+      expect(await reply(ask.qitemId, ANA, "human-ana-relinked")).toBe("resolved");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: "gateway:slack:v1", principal: "human-ana" }]);
+    });
+
+    it("an earlier answer recorded with no identity stays unknown", async () => {
+      const ask = await askAna();
+      await anasAnswer(ask.qitemId, false);
+      expect(await reply(ask.qitemId, MIKE, "human-mike")).toBe("not-applicable");
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: null, principal: null }]);
+    });
+
+    it("an answer from outside Slack closes it as before, with no identity", async () => {
+      const ask = await askAna();
+      await contract.act({ verb: "answer", qitemId: ask.qitemId, actorSession: ANA, decision: "Tuesday" });
+      expect(closes(ask.qitemId)).toEqual([{ actor: ANA, provenance: null, principal: null }]);
+    });
   });
 });
