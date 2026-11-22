@@ -1073,6 +1073,9 @@ export interface SeatSkillCatalog {
    *  (`edited`), or the catalog's path isn't inside the seat's storage (`linked`, a link on the way). */
   kept?: boolean;
   reason?: "edited" | "linked";
+  /** #3245: the list's text when no file is kept for it (a Claude seat without its plugin that keeps no skills), so an
+   *  apply can still send the empty list in place of one the occupant was sent earlier. */
+  text?: string;
 }
 
 /** The launch or restore warning for a catalog that wasn't written, naming why. */
@@ -1146,7 +1149,7 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths, opts?: {
   // earlier list OpenRig wrote is removed (an edited one was kept above).
   if (opts?.claudeWithoutPlugin && count === 0) {
     if (lexists(paths.catalogPath)) removeInsideSeatStorage(paths.root, paths.catalogPath);
-    return { path: paths.catalogPath, digest, count };
+    return { path: paths.catalogPath, digest, count, text };
   }
   writeInsideSeatStorage(paths.root, paths.catalogPath, text);
   writeProjections(paths.root, { ...record, generated: { ...record.generated, [paths.catalogPath]: digest } });

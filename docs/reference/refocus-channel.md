@@ -52,10 +52,10 @@ exits 0 before running anything unless OpenRig gave that seat `OPENRIG_SEAT_PROJ
 set `disableSideloadFlags`, so no Claude seat starts. `rig config set launch.claude_sideload false` (default `true`) launches
 Claude seats without the variable on every path above. Such a seat doesn't load `openrig-core`, so these hooks don't run
 there, and its activity reports come only from the `claude_activity_hooks` copy in its `settings.local.json`. Its skills,
-`openrig-core`'s included, are sent once it's ready as a list of files to read, as a Codex seat's are; no list is sent when
-it keeps none, and a native resume sends none (its result names where the list is). Its router lists the same files and
-says it is a file to read, not an installed skill. `rig skill loadout --seat <seat> --apply`
-sends a changed list to the running seat. Each launch's `--settings` allows reading that list, the seat's own skills and
+`openrig-core`'s included, are sent once it's ready as a list of files to read, as a Codex seat's are; no list is sent at
+launch when it keeps none, and a native resume sends none (its result names where the list is). Its router lists the same
+files and says it is a file to read, not an installed skill. `rig skill loadout --seat <seat> --apply` sends a changed list
+to the running seat, an empty one included. Each launch's `--settings` allows reading that list, the seat's own skills and
 `openrig-core`'s, beside the restore reads, and nothing else. A plugin-backed `agent_file`, `plugin_dirs` and a
 `CLAUDE_CODE_PLUGIN_DIRS` in the seat's `env:` are left out. Each launch names what the seat asked for and didn't get. When
 Claude's refusal is on the pane and the machine's managed settings file (`/etc/claude-code/managed-settings.json`, or

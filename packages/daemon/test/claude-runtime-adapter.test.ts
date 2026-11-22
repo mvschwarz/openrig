@@ -553,20 +553,22 @@ describe("Claude Code runtime adapter", () => {
   // turn off. Nothing is changed and nothing retried.
   const policyPath = claudeManagedSettingsPath();
   it.runIf(policyPath !== undefined)("checkReady suggests launch.claude_sideload only when the managed settings file sets disableSideloadFlags (#3245)", async () => {
-    const withPolicy = await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": true }' });
-    expect(withPolicy).toMatchObject({ ready: false, code: "returned_to_shell" });
-    expect((withPolicy as { reason: string }).reason).toBe(`${sideloadReason(sideloadRefusalCore)} ${policyPath} sets disableSideloadFlags. To start Claude seats under it, run \`rig config set launch.claude_sideload false\` and relaunch: seats then start without OpenRig's plugin folders, get their skills as a list to read, and each launch names what they don't get (such as openrig-core's refocus and compaction-restore hooks).`);
+    // The setting is set for each case here, so an inherited OPENRIG_LAUNCH_CLAUDE_SIDELOAD can't change the result.
     const saved = process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"];
-    process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "false";
     try {
+      process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "true";
+      const withPolicy = await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": true }' });
+      expect(withPolicy).toMatchObject({ ready: false, code: "returned_to_shell" });
+      expect((withPolicy as { reason: string }).reason).toBe(`${sideloadReason(sideloadRefusalCore)} ${policyPath} sets disableSideloadFlags. To start Claude seats under it, run \`rig config set launch.claude_sideload false\` and relaunch: seats then start without OpenRig's plugin folders, get their skills as a list to read, and each launch names what they don't get (such as openrig-core's refocus and compaction-restore hooks).`);
+      // A file that doesn't set it is no evidence: the reason stays as it was.
+      expect(await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": false }' }))
+        .toEqual({ ready: false, reason: sideloadReason(sideloadRefusalCore), code: "returned_to_shell" });
+      process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "false";
       const alreadyOff = await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": true }' });
       expect((alreadyOff as { reason: string }).reason).toContain("launch.claude_sideload is already off, so OpenRig passed no plugin folders");
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"]; else process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = saved;
     }
-    // A file that doesn't set it is no evidence: the reason stays as it was.
-    expect(await idleShellAfter(sideloadRefusal, undefined, { [policyPath!]: '{ "disableSideloadFlags": false }' }))
-      .toEqual({ ready: false, reason: sideloadReason(sideloadRefusalCore), code: "returned_to_shell" });
   });
 
   it("checkReady keeps a wrapped sideload refusal whole by reading the joined capture (#3245)", async () => {

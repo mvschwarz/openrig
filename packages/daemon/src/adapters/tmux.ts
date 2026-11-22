@@ -1891,7 +1891,7 @@ export class TmuxAdapter {
   }
 
   async createSession(name: string, cwd?: string, env?: Record<string, string>,
-    launchOpts?: { processLimitsMode?: ProcessLimitsMode }): Promise<TmuxResult> {
+    launchOpts?: { processLimitsMode?: ProcessLimitsMode; removeEnv?: readonly string[] }): Promise<TmuxResult> {
     if (this.deliveryGuard && (!env?.OPENRIG_NODE_ID || !this.deliveryGuard.ownsLifecycle(env.OPENRIG_NODE_ID))) {
       return { ok: false, code: "guard_lease_required", message: "Managed launch requires a lifecycle lease before terminal creation." };
     }
@@ -1987,7 +1987,7 @@ export class TmuxAdapter {
   }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>,
-    launchOpts?: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem }): Promise<TmuxResult> {
+    launchOpts?: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem; removeEnv?: readonly string[] }): Promise<TmuxResult> {
     // These are the daemon's resolved capture settings, not seat overrides.
     // An empty per-session value prevents the tmux server's inherited values
     // from pinning an old policy over config.json inside a newly launched seat.
@@ -2062,8 +2062,8 @@ export class TmuxAdapter {
         const kept = await this.probeSession(name).catch(() => ({ state: "unknown" as const }));
         return kept.state === "present"
           ? this.respawnPaneUnchecked(created, undefined, { ...(cwd != null ? { cwd } : {}), env: seatEnv,
-            processLimitsMode: "recovery", failedStart })
-          : this.createSessionUnchecked(name, cwd, env, { processLimitsMode: "recovery", failedStart });
+            processLimitsMode: "recovery", failedStart, ...(launchOpts?.removeEnv ? { removeEnv: launchOpts.removeEnv } : {}) })
+          : this.createSessionUnchecked(name, cwd, env, { processLimitsMode: "recovery", failedStart, ...(launchOpts?.removeEnv ? { removeEnv: launchOpts.removeEnv } : {}) });
       }
     }
     // A tmux server started from a Claude Code session or Herdr pane hands
@@ -2071,7 +2071,7 @@ export class TmuxAdapter {
     // and restart the fresh pane so its shell starts without it. The session
     // exists either way, so a failure here is a warning, never a failed launch.
     try {
-      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv)) && !scopedCommand) {
+      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv), launchOpts?.removeEnv) && !scopedCommand) {
         if (!/^%\d+$/.test(created)) throw new Error(`new-session reported no pane id ("${created}"), so no pane was restarted`);
         const respawn = ["tmux", "respawn-pane", "-k", "-t", created];
         if (cwd != null) respawn.push("-c", cwd);
@@ -2109,14 +2109,17 @@ export class TmuxAdapter {
    * values stay. Returns whether anything was marked. Throws when the global
    * environment can't be read: the caller can't tell whether the seat inherits
    * an identity, so it reports a warning (the launch still goes ahead). */
-  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
+  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = [], remove: readonly string[] = []): Promise<boolean> {
     const inherited = await this.globalEnvironment();
     const keys = parentSessionEnvKeys(inherited).filter((key) => !keep.includes(key));
-    for (const key of keys) {
+    // The caller's names (#3245: CLAUDE_CODE_PLUGIN_DIRS for a Claude seat with launch.claude_sideload off) are removed
+    // whether tmux holds them globally or in this session from an earlier launch's -e.
+    const named = remove.filter((key) => !keep.includes(key) && !keys.includes(key));
+    for (const key of [...keys, ...named]) {
       const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
       await this.run(argv, posixJoinArgv(argv));
     }
-    return keys.length > 0;
+    return keys.length > 0 || named.some((key) => key in inherited);
   }
 
   /**
@@ -2522,7 +2525,9 @@ export class TmuxAdapter {
     command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode;
       /** #3253: a bare respawn (no `env`) of this seat that keeps its limit in a new scope (seatProcessLimitsKeepPlan). */
-      keepLimitOf?: string },
+      keepLimitOf?: string;
+      /** Names the successor must not get from the session's or tmux's environment (`tmux set-environment -r`). */
+      removeEnv?: readonly string[] },
   ): Promise<TmuxResult> {
     return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
       beforeWrite();
@@ -2536,7 +2541,7 @@ export class TmuxAdapter {
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode; keepLimitOf?: string;
-      failedStart?: SeatProcessLimitsProblem }): Promise<TmuxResult> {
+      failedStart?: SeatProcessLimitsProblem; removeEnv?: readonly string[] }): Promise<TmuxResult> {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
@@ -2562,7 +2567,7 @@ export class TmuxAdapter {
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
     try {
-      await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
+      await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}), opts?.removeEnv);
     } catch (err) {
       warnings.push(parentSessionEnvWarning(exact, err));
     }

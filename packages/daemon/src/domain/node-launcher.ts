@@ -17,7 +17,7 @@ import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
-import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, seatPluginEnv } from "./claude-core-plugin-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, claudeSideloadRemovedEnv, seatCodexCorePluginDir, seatCorePluginDir, seatPluginEnv } from "./claude-core-plugin-env.js";
 import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
@@ -265,12 +265,16 @@ export class NodeLauncher {
     if (!selectedRegistrationAllowed()) {
       return { ok: false, code: "selection_changed", message: "The selected node or history changed before launch." };
     }
+    // #3245: a Claude seat with launch.claude_sideload off mustn't get CLAUDE_CODE_PLUGIN_DIRS from tmux's environment.
+    const removeEnv = claudeSideloadRemovedEnv(node.runtime);
+    const removedEnv = removeEnv.length ? { removeEnv } : {};
     const tmuxResult = opts?.keepPane
-      ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id)
+      ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id, removeEnv)
       // #3253: the launch mode is passed only when there is one, so a launch without it calls createSession as before.
       : opts?.processLimitsMode
-        ? await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv, { processLimitsMode: opts.processLimitsMode })
-        : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
+        ? await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv, { processLimitsMode: opts.processLimitsMode, ...removedEnv })
+        : removeEnv.length ? await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv, removedEnv)
+          : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message,
         ...(tmuxResult.retryable !== undefined ? { retryable: tmuxResult.retryable } : {}),
@@ -421,7 +425,8 @@ export class NodeLauncher {
   /** A kept pane's takeover, as a handover's cutover does it: its process ends in place (the pane survives it, with its
    *  scrollback), then a shell starts in it with this launch's environment, for the runtime to launch into. Nothing is
    *  touched when the pane isn't in the session. */
-  private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
+  private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string,
+    removeEnv: readonly string[] = []):
     Promise<{ ok: true; warnings?: string[]; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
       | { ok: false; code: string; message: string; retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem }> {
     let panes: Array<{ id: string }> = [];
@@ -438,7 +443,8 @@ export class NodeLauncher {
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env, processLimitsMode: "recovery" });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env, processLimitsMode: "recovery",
+      ...(removeEnv.length ? { removeEnv } : {}) });
     if (!respawned.ok) {
       return { ok: false, code: "pane_not_respawned", message: `The seat's process in pane ${pane} ended, but a shell couldn't start there: ${respawned.message}` };
     }

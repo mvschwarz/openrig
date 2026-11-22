@@ -850,7 +850,8 @@ describe("handover successor, on a real tmux server", () => {
   }
 
   let lastHandover: { result: Awaited<ReturnType<SeatHandoverService["handover"]>>; pane: string; catalogPath: string } | undefined;
-  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false): Promise<Record<string, string>> {
+  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false,
+    handover: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn()): Promise<Record<string, string>> {
     const { pluginsDir, vendored } = vendoredPlugins(scratch);
     const seat = `dev-impl@${rigName}`;
     seats.push(seat);
@@ -885,7 +886,7 @@ describe("handover successor, on a real tmux server", () => {
         predecessorRecapResolver: () => ({ recap: [], recordPath: join(scratch, "none.jsonl") }),
         readinessTimeoutMs: 3000, sleep,
       });
-      const result = await service.handover({ seatRef: seat, reason: "context ~85%", source: "fresh", operator: "orch@seat" });
+      const result = await handover(() => service.handover({ seatRef: seat, reason: "context ~85%", source: "fresh", operator: "orch@seat" }));
       expect(result.ok).toBe(true);
       await sleep(300);
       lastHandover = { result, pane: await tmux(`capture-pane -p -J -S -200 -t ${q(seat)}`), catalogPath: skillPaths.catalogPath };
@@ -906,6 +907,13 @@ describe("handover successor, on a real tmux server", () => {
     const other = await successorEnviron("coreplug-no", [{ category: "plugin", absolutePath: "/elsewhere" }]);
     expect(other).not.toHaveProperty(PLUGIN_ENV);
     expect(other).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+  }, 90_000);
+
+  it.runIf(available)("#3245: has no plugin folder when launch.claude_sideload is turned off after the predecessor started with it on", async () => {
+    // The predecessor's launch left the variable in the seat's tmux session environment, which the respawned pane starts from.
+    const env = await successorEnviron("coreplug-flip", ["vendored"], false, sideloadOff);
+    expect((await tmux(`show-environment -t ${q("dev-impl@coreplug-flip")} ${PLUGIN_ENV}`)).trim()).toBe(`-${PLUGIN_ENV}`);
+    expect(env).not.toHaveProperty(PLUGIN_ENV);
   }, 90_000);
 
   it.runIf(available)("#3245: has no plugin folder with launch.claude_sideload off, though the seat selected the plugin and keeps skills", async () => {

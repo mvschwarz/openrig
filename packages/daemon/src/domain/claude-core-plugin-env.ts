@@ -181,6 +181,16 @@ export function seatPluginEnv(seatEnv: SeatEnv, dirs: ReadonlyArray<string | und
 }
 
 /**
+ * #3245: the names a Claude seat's pane mustn't get from tmux when `launch.claude_sideload` is off: a CLAUDE_CODE_PLUGIN_DIRS
+ * in tmux's global environment, or in the session's from a launch made with the setting on. Only a pane that starts from
+ * tmux's environment (`terminal.inherit_tmux_environment`, or no scoped launch) could get it; the scoped launch starts
+ * from `env -i`.
+ */
+export function claudeSideloadRemovedEnv(runtime: string | null): string[] {
+  return runtime === "claude-code" && !claudeSideloadEnabled() ? [CLAUDE_PLUGIN_DIRS_ENV] : [];
+}
+
+/**
  * #3245: what a Claude seat asked for that a launch with `launch.claude_sideload` off doesn't deliver, one line each:
  * none for another runtime or with the setting on. Launch additions it can't pass are named by
  * `seatLaunchAdditionsForLaunch` with the seat's other refused additions.

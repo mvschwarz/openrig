@@ -1643,6 +1643,30 @@ describe("TmuxAdapter", () => {
       ]);
     });
 
+    // #3245: a name the caller removes (CLAUDE_CODE_PLUGIN_DIRS, for a Claude seat with launch.claude_sideload off) is removed
+    // on the pane's session even when only that session holds it, from an earlier launch's -e.
+    it("respawnPane marks a caller's removeEnv names removed on the pane's session, also when tmux's global environment lacks them", async () => {
+      const exec = execWithGlobal("PATH=/usr/bin\n");
+      await adapterFor(exec).respawnPane("%3", "sh", { env: { OPENRIG_NODE_ID: "n" }, removeEnv: ["CLAUDE_CODE_PLUGIN_DIRS"] });
+      expect(exec.mock.calls.map((c) => c[0])).toEqual([
+        "tmux show-environment -g",
+        "tmux set-environment -t %3 -r CLAUDE_CODE_PLUGIN_DIRS",
+        "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'sh'",
+      ]);
+    });
+
+    it("createSession removes a caller's removeEnv name, and restarts the fresh pane only when tmux's global environment has it", async () => {
+      const without = execWithGlobal("PATH=/usr/bin\n");
+      await adapterFor(without).createSession("s", undefined, undefined, { removeEnv: ["CLAUDE_CODE_PLUGIN_DIRS"] });
+      expect(without.mock.calls.map((c) => c[0]).slice(2)).toEqual(["tmux set-environment -t =s -r CLAUDE_CODE_PLUGIN_DIRS"]);
+      const withIt = execWithGlobal("CLAUDE_CODE_PLUGIN_DIRS=/plugins\n");
+      await adapterFor(withIt).createSession("s", undefined, undefined, { removeEnv: ["CLAUDE_CODE_PLUGIN_DIRS"] });
+      expect(withIt.mock.calls.map((c) => c[0]).slice(2)).toEqual([
+        "tmux set-environment -t =s -r CLAUDE_CODE_PLUGIN_DIRS",
+        "tmux respawn-pane -k -t %9",
+      ]);
+    });
+
     // An unreadable global environment can't show whether the seat inherits an identity: the launch
     // goes ahead as before (no pane restarted), and the warning says the cleanup didn't happen.
     it("an unreadable global environment leaves the launch as it was, with a warning", async () => {

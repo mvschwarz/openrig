@@ -1,7 +1,7 @@
 import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
-import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, claudeSideloadRemovedEnv } from "./claude-core-plugin-env.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
@@ -308,7 +308,11 @@ export class SuccessorSessionLauncher {
     // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
     const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, { cwd, env, processLimitsMode: "recovery" });
+    // #3245: a Claude successor with launch.claude_sideload off mustn't get CLAUDE_CODE_PLUGIN_DIRS from the session's
+    // environment, which a launch with the setting on may have left there.
+    const removeEnv = claudeSideloadRemovedEnv(input.node.runtime);
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, { cwd, env, processLimitsMode: "recovery",
+      ...(removeEnv.length ? { removeEnv } : {}) });
     if (!respawned.ok) {
       return {
         ok: false,
@@ -420,8 +424,9 @@ export class SuccessorSessionLauncher {
     // the successor then fails, a later step throwing included.
     let limitsNotice: { processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice } = {};
     try {
+      const removeEnv = claudeSideloadRemovedEnv(input.node.runtime ?? null);
       const created = await this.tmuxAdapter.createSession(input.stagingSession, input.node.cwd ?? undefined, env,
-        { processLimitsMode: "recovery" });
+        { processLimitsMode: "recovery", ...(removeEnv.length ? { removeEnv } : {}) });
       if (!created.ok) return { ok: false, code: created.code ?? "successor_create_failed", message: created.message ?? "The staging session couldn't be created." };
       if (created.processLimits) limitsNotice = { processLimits: created.processLimits };
       const panes = await this.tmuxAdapter.listPanes(input.stagingSession);

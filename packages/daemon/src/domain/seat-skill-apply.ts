@@ -226,13 +226,13 @@ export async function applySeatSkills(input: {
   if (catalog.kept) return result({ state: "not-sent", reason: catalog.reason === "linked"
     ? `${catalog.path} is not inside this seat's storage (a link on the way); nothing was written or sent`
     : `${catalog.path} differs from what OpenRig last wrote; kept as it is and not sent` });
-  if (claudeWithoutPlugin && catalog.count === 0) return result({ state: "not-sent", reason:
-    "the seat keeps no skills now, so no list is sent; a list it was sent earlier in this conversation is out of date" });
   const occupant = input.occupant;
   if (!occupant) return result({ state: "not-sent", reason: "the seat has no running occupant to send to" });
   if (!input.sender) return result({ state: "not-sent", reason: "no transport is available on this daemon" });
 
-  const text = fs.readFileSync(catalog.path, "utf8");
+  // #3245: a Claude seat without its plugin that keeps no skills has no list file; the empty list replaces one the occupant
+  // may have been sent at its start (not recorded here), once per occupant like any other list.
+  const text = catalog.text ?? fs.readFileSync(catalog.path, "utf8");
   const outbox = new OutboxHandler(db);
   // Reserve and claim this attempt in one transaction, after reading the earlier ones: two overlapping calls can't
   // both get here, and the row exists before anything is sent.

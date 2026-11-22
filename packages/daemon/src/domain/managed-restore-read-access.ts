@@ -49,6 +49,12 @@ function spellings(value: string): string[] {
   return [...new Set([resolved, real])].map(literalPath);
 }
 
+/** #3245: the allow rules for a seat's skill reads, as `withManagedRestoreReads` adds them. */
+export function skillReadRules(skillReads: { files: string[]; trees: string[] }): string[] {
+  return [...skillReads.files.flatMap(file => spellings(file)), ...skillReads.trees.flatMap(tree => spellings(tree).map(dir => `${dir}/**`))]
+    .map(file => `Read(/${file})`);
+}
+
 /** Merge seat-local restore reads into the launch's ONE settings value. Native
  * deny/ask rules still win; nothing is written to shared project/user settings.
  * Arbitrary operator-selected sources keep their ordinary permission checks. */

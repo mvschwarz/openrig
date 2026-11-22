@@ -185,6 +185,19 @@ describe("B: `rig skill loadout --seat` reconciles a seat's own selection and te
       const again = await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") });
       expect(again.delivery).toMatchObject({ state: "already-delivered" });
       expect(f.sent).toHaveLength(1);
+      // The seat stops keeping its skills: the occupant is sent the empty list in place of the one it has, once.
+      const none = resolveSkillLoadout({ catalogRoot: f.cat.catalog, topologySkills: [] });
+      expect(reconcileSkillLoadout({ loadout: none.loadout, runtime: "claude-code", cwd: f.seat.cwd, apply: true, topologyOwner: f.seat.sessionName,
+        location: seatSkillLocation(f.paths, "claude-code") }).ok).toBe(true);
+      const emptied = await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") });
+      expect(emptied.delivery).toMatchObject({ state: "sent", record: { occupant: "gen-1", outcome: "delivered" } });
+      expect(f.sent).toHaveLength(2);
+      expect(f.sent[1]!.text).toContain("This list replaces any earlier OpenRig skill list in this conversation.");
+      expect(f.sent[1]!.text).toContain("No OpenRig skills are kept for this seat.");
+      expect(existsSync(f.paths.catalogPath)).toBe(false);
+      expect((await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") })).delivery)
+        .toMatchObject({ state: "already-delivered" });
+      expect(f.sent).toHaveLength(2);
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"]; else process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = saved;
     }
