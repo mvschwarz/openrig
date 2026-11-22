@@ -10,6 +10,7 @@ import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { resolveRigRepresentativeById } from "../queue-owner.js";
 import { NetworkBindingError, readPrivateToken, writePrivateToken, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 
 export interface NetworkInstallation {
@@ -246,14 +247,14 @@ export class NetworkInstallationStore {
       // In this installation's turn: checked again, with the enrollment as it is now (a replace may have run while this
       // waited), and every list sent reads the names to keep afresh.
       const current = this.get(installation.id);
-      bindings.freeSeat(input.session);
+      const connecting = { ...bindings.freeSeat(input.session), name };
       if (this.listedNames(bindings, current).includes(name)) throw new NetworkBindingError("participant_already_connected", `${name} is already connected here.`, 409);
       const others = () => this.listedNames(bindings, current).filter((n) => n !== name);
-      let answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
+      let answer = await this.setParticipants(bindings, current, () => [...others(), name], until, connecting);
       let bearer = answer.participants.find((p) => p.name === name)?.bearer;
       if (!bearer) {
         await this.setParticipants(bindings, current, others, until);
-        answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
+        answer = await this.setParticipants(bindings, current, () => [...others(), name], until, connecting);
         bearer = answer.participants.find((p) => p.name === name)?.bearer;
         if (!bearer) throw new NetworkBindingError("account_unexpected", `The account listed ${name} without a bearer, twice.`, 502);
       }
@@ -320,12 +321,24 @@ export class NetworkInstallationStore {
     return Date.now() + (this.opts.timeoutMs ?? ACCOUNT_DEADLINE_MS);
   }
 
-  private async setParticipants(bindings: NetworkBindingStore, installation: NetworkInstallation, names: () => string[], until: number): Promise<Identities> {
+  private async setParticipants(bindings: NetworkBindingStore, installation: NetworkInstallation, names: () => string[], until: number, connecting?: { session: string; nodeId: string; name: string }): Promise<Identities> {
     const instance = this.instance();
     const repair = `Get a new code from the account page and run rig network enroll <code> --site ${installation.site} --replace.`;
     const key = readPrivateToken(networkInstallationKeyFile(this.home, installation.id),
       (file) => `The installation key for ${installation.id} isn't at ${file}. ${repair}`);
-    const put = () => this.call(installation.site, "PUT", "/api/connector/identities", key, { instance, participants: names() }, until);
+    const put = () => {
+      const participants = names();
+      const candidates = bindings.active().filter((binding) => binding.installationId === installation.id && binding.participantName)
+        .map((binding) => ({ name: binding.participantName!, session: binding.localSession, nodeId: binding.nodeId }));
+      if (connecting) candidates.push(connecting);
+      const leads = [...new Set(candidates.filter((candidate) => {
+        if (!participants.includes(candidate.name)) return false;
+        const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(candidate.nodeId) as { rig_id: string } | undefined;
+        return node && resolveRigRepresentativeById(this.db, node.rig_id) === candidate.session;
+      }).map((candidate) => candidate.name))];
+      // Keep the existing string list: older services ignore the additive top-level lead declarations.
+      return this.call(installation.site, "PUT", "/api/connector/identities", key, { instance, participants, ...(leads.length ? { leads } : {}) }, until);
+    };
     let answer = await put();
     // The account couldn't apply a drop while something else changed this installation: the list is read and sent once more.
     if (answer.status === 409 && errorCode(answer.body) === "drop_failed") answer = await put();
