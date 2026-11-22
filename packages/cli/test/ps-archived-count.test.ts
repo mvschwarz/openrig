@@ -32,6 +32,7 @@ describe("rig ps reads its archived count from the daemon's header (#3636)", () 
   let port: number;
   let requests: string[];
   let sendHeader: boolean;
+  let archivedStatus: number;
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -43,16 +44,20 @@ describe("rig ps reads its archived count from the daemon's header (#3636)", () 
         res.end(JSON.stringify([ACTIVE]));
         return;
       }
+      if (url === "/api/ps?archived=only") {
+        res.writeHead(archivedStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(archivedStatus < 400 ? [ARCHIVED] : { error: "busy" }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      if (url === "/api/ps?archived=only") res.end(JSON.stringify([ARCHIVED]));
-      else if (url === "/api/ps?includeArchived=true") res.end(JSON.stringify([ACTIVE, ARCHIVED]));
+      if (url === "/api/ps?includeArchived=true") res.end(JSON.stringify([ACTIVE, ARCHIVED]));
       else res.end(JSON.stringify([]));
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());
-  beforeEach(() => { requests = []; sendHeader = true; });
+  beforeEach(() => { requests = []; sendHeader = true; archivedStatus = 200; });
 
   async function ps(...args: string[]): Promise<{ out: string; exitCode: number | undefined }> {
     const lines: string[] = [];
@@ -94,6 +99,13 @@ describe("rig ps reads its archived count from the daemon's header (#3636)", () 
     expect(missing.exitCode).toBe(1);
   });
 
+  it("reports a failed archived lookup as a failure, not as 'not found'", async () => {
+    archivedStatus = 503;
+    const { out, exitCode } = await ps("--rig", "old-rig");
+    expect(out).toBe("Failed to fetch rig list from daemon (HTTP 503). Check daemon status with: rig status");
+    expect(exitCode).toBe(2);
+  });
+
   it("keeps the earlier single fetch, archived included, for a daemon that sends no count", async () => {
     sendHeader = false;
     const { out } = await ps();
@@ -107,5 +119,3 @@ describe("rig ps reads its archived count from the daemon's header (#3636)", () 
     expect(requests.filter((url) => url.startsWith("/api/ps"))).toEqual(["/api/ps?includeArchived=true"]);
   });
 });
-</content>
-</invoke>

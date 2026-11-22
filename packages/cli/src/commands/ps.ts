@@ -1200,7 +1200,13 @@ Exit codes:
         let archivedRig = named(all);
         if (!archivedRig && headerCount !== null && headerCount > 0) {
           const archived = await client.get<PsEntry[]>("/api/ps?archived=only");
-          archivedRig = archived.status < 400 && named(archived.data);
+          // A failed lookup hasn't shown the rig is missing: report it as the first rig-list read does.
+          if (archived.status >= 400) {
+            console.error(`Failed to fetch rig list from daemon (HTTP ${archived.status}). Check daemon status with: rig status`);
+            process.exitCode = 2;
+            return;
+          }
+          archivedRig = named(archived.data);
         }
         if (archivedRig) {
           console.error(`Rig '${opts.rig}' is archived. Show it with: rig ps --rig ${opts.rig} --include-archived`);
