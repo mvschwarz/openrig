@@ -1,4 +1,4 @@
-import { DaemonClient, ForeignLocalDaemonError } from "../client.js";
+import { DaemonClient, ForeignLocalDaemonError, resolveOperatorToken, resolveTerminalToken } from "../client.js";
 import { Command } from "commander";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
@@ -16,6 +16,18 @@ export const UI_DISABLED_GUIDANCE =
 
 export const UI_MAINTENANCE_NOTICE =
   "The OpenRig UI is experimental and in maintenance mode. It is not under active development; support is best-effort. The CLI is the primary supported interface. Contributions welcome.";
+
+/** The web UI takes its tokens from its address's fragment, which a browser never sends: the terminal and operator
+ *  tokens this CLI itself sends to the daemon. With neither set, the address is unchanged. */
+export function uiTokenFragment(): string {
+  const terminal = resolveTerminalToken();
+  const operator = resolveOperatorToken();
+  const parts = [
+    ...(terminal ? [`termToken=${encodeURIComponent(terminal)}`] : []),
+    ...(operator ? [`mcToken=${encodeURIComponent(operator)}`] : []),
+  ];
+  return parts.length > 0 ? `#${parts.join("&")}` : "";
+}
 
 export function uiCommand(depsOverride?: UiDeps): Command {
   const cmd = new Command("ui").description("UI commands");
@@ -74,7 +86,8 @@ export function uiCommand(depsOverride?: UiDeps): Command {
       console.log(url);
 
       try {
-        await deps.exec("open", [url]);
+        // The printed address carries no token; the opened one gives the UI its tokens.
+        await deps.exec("open", [`${url}${uiTokenFragment()}`]);
       } catch {
         console.error("Failed to open browser — open the URL manually");
         process.exitCode = 1;

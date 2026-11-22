@@ -71,7 +71,9 @@ refused for want of it, `rig host` and the TUI say what to set.
 The web UI takes its tokens from its address. To use its token-protected actions (terminals, Mission Control writes),
 open it once at `http://<daemon>/#termToken=<terminal token>&mcToken=<auth token>`. The tokens go after `#`, a part of
 the address the browser keeps to itself and never sends. The page keeps them in that browser and takes them out of the
-address. With neither token set, the UI needs nothing.
+address. With neither token set, the UI needs nothing. `rig ui open` opens it this way with the tokens the CLI itself
+sends (the terminal token, and `OPENRIG_AUTH_BEARER_TOKEN` or else the terminal token), and prints the address without
+them.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.

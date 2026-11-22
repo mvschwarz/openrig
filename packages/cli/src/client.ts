@@ -17,9 +17,13 @@ export function terminalAuthHeaders(): Record<string, string> {
 /** The credential for operator-gated writes (Mission Control actions, a pairing decision): an explicit bearer, else the
  *  daemon's operator bearer configured as OPENRIG_AUTH_BEARER_TOKEN, else the terminal credential (the same token on a
  *  daemon that aliases them; none where none is needed). */
+export function resolveOperatorToken(bearer?: string): string | null {
+  return bearer?.trim() || process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim() || resolveTerminalToken();
+}
+
 export function operatorAuthHeaders(bearer?: string): Record<string, string> {
-  const token = bearer?.trim() || process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim();
-  return token ? { Authorization: `Bearer ${token}` } : terminalAuthHeaders();
+  const token = resolveOperatorToken(bearer);
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 /** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
@@ -71,7 +75,7 @@ export function remoteDaemonClient(
   return client;
 }
 
-function resolveTerminalToken(): string | null {
+export function resolveTerminalToken(): string | null {
   const env = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
   if (env) return env;
   try {
