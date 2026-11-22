@@ -139,7 +139,7 @@ export function readQueueTransfer(db: Database.Database, selection: QueueExportS
       : `rig_name IN ${scopeValues}`;
     const erasedRigs = collect(`SELECT ${columns.queue_erased_rigs.join(",")} FROM queue_erased_rigs
       WHERE ${wholeHost ? "1" : erasedRigPredicate} ORDER BY rig_id`,
-    { names: JSON.stringify(selection.kind === "rig" ? names : [...selectedRigs]) });
+    { names: JSON.stringify(selection.kind === "rig" ? selected : [...selectedRigs]) });
     for (const receipt of erasedIds) selectedIds.add(String(receipt.qitemId));
     if (selection.kind === "qitems" && selectedIds.size > 0) {
       const missing = names.filter(name => !selectedIds.has(name));

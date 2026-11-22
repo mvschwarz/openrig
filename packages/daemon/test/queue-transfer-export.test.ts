@@ -97,9 +97,18 @@ it("warns and skips host-qualified rig selectors, keeping the valid part", () =>
   const mixed = buildQueueTransfer(db, { kind: "rig", names: ["demo", "demo@elsewhere"] });
   expect(mixed.skippedSelectors).toEqual(["demo@elsewhere"]);
   expect(mixed.scope.rigs).toEqual(["demo", "demo@elsewhere"]);
-  // The same rows a plain --rig demo export selects: the foreign endpoint's own work stays
-  // out, while a local row may mention the endpoint verbatim in its fields.
+  // The same rows a plain --rig demo export selects — and the plain export provably
+  // leaves the foreign endpoint's work out.
+  expect(plain.rows.map(row => row.qitemId)).toEqual(["qitem-a"]);
   expect(mixed.rows).toEqual(plain.rows);
+  // A host-qualified selector must not pick up an erased-rig receipt by that name:
+  // the mixed export's receipts equal the plain one's, and the all-skipped export has none.
+  db.exec("INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES ('rig-elsewhere', 'demo@elsewhere', 'digest', '2026-02-03T04:05:06.000Z')");
+  const plainReceipts = buildQueueTransfer(db, { kind: "rig", names: ["demo"] });
+  const mixedReceipts = buildQueueTransfer(db, { kind: "rig", names: ["demo", "demo@elsewhere"] });
+  expect(mixedReceipts.erasedRigs).toEqual(plainReceipts.erasedRigs);
+  const emptyReceipts = buildQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere", "other@x"] });
+  expect(emptyReceipts.erasedRigs).toEqual([]);
   // All-@ input: the empty archive stays valid, with both selectors named as skipped.
   const empty = buildQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere", "other@x"] });
   expect(empty.rows).toEqual([]);
