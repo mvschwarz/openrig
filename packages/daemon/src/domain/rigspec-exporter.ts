@@ -14,6 +14,7 @@ import { seatLaunchAdditionsForLaunch, seatLaunchAdditionsForNode } from "./seat
 import { isAbsolute, normalize } from "node:path";
 import { validateSafePath } from "./path-safety.js";
 import { SeatPoolSlotsRepository } from "./seat-pool-slots.js";
+import { RigSpecCodec } from "./rigspec-codec.js";
 
 /** The member-local id of a pod node: `impl` for `dev.impl`; a logical id without a pod is its own. */
 function memberLocalId(logicalId: string): string {
@@ -284,6 +285,18 @@ export class RigSpecExporter {
     const node = this.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) throw new Error(`Cannot export node '${nodeId}': no such node in rig '${rigId}'`);
     return this.memberFromNode(rigId, node, restorePolicyOf(this.sessionRegistry.getSessionsForRig(rigId), node));
+  }
+
+  /**
+   * #3395: the same member in the spec's own keys (`agent_ref`, `claude_mcp`, ...), the fragment a pod member add takes.
+   * It goes through the rig codec's own serializer (a one-pod spec written and read back), so it has exactly the keys
+   * the export writes.
+   */
+  exportedRawMemberFromNode(rigId: string, nodeId: string): Record<string, unknown> {
+    const member = this.exportedMemberFromNode(rigId, nodeId);
+    const spec: RigSpec = { version: "0.2", name: "member", pods: [{ id: "pod", label: "pod", members: [member], edges: [] }], edges: [] };
+    const written = RigSpecCodec.parse(RigSpecCodec.serialize(spec)) as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    return written.pods[0]!.members[0]!;
   }
 
   private memberFromNode(rigId: string, node: import("./types.js").NodeWithBinding, restorePolicy: string | undefined): RigSpecPodMember {
