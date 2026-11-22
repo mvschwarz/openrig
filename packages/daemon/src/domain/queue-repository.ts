@@ -427,7 +427,8 @@ export interface QueueNudgeTransport {
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
     opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean; openrigNotice?: true }
-  ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string }>;
+  ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string;
+    sessionName?: string; usageLimit?: { asOf: string; resetsAt: string } }>;
 }
 
 /** The result of one wake attempt: its classification and its recorded result. */
@@ -442,6 +443,8 @@ type WakeAttemptOutcome = {
   classified: "verified" | "indeterminate" | "failed" | "retained" | "bridged";
   nudgeResult: string;
   preInputFailure?: boolean;
+  /** The transport's usage-limit record for a wake whose text reached the seat's input, with the session it was sent to. */
+  usageLimit?: { asOf: string; resetsAt: string; sessionName?: string };
 };
 
 /** `principal:v1` marks only the transitions that record the request's own action. What that action sets off elsewhere
@@ -1528,13 +1531,16 @@ export class QueueRepository {
     // Queued for the seat's hook bridge: it reaches the seat's context at the next turn boundary, which isn't a claim.
     // The bridge owns the row now (handed to the hook, typed by its fallback, or named uncertain), so it isn't finalized.
     if (res.outcome === "bridged") return { classified: "bridged", nudgeResult: "bridged:queued" };
-    if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified" } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending" };
+    // The nudge result keeps its words; a wake that reached a seat at its usage limit, or may have, also gets a note on the row.
+    const usageLimit = res.usageLimit ? { usageLimit: { asOf: res.usageLimit.asOf, resetsAt: res.usageLimit.resetsAt,
+      ...(res.sessionName ? { sessionName: res.sessionName } : {}) } } : {};
+    if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified", ...usageLimit } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending", ...usageLimit };
     const detail = res.error ?? res.reason ?? "unknown";
     // Input evidence survives receipt removal: an issued paste or uncertain Enter is never an unsent failure.
     const inputUncertain = res.sent === true || res.inputPhase === "attempted" || res.inputPhase === "written"
       || (res.sent !== false && res.inputPhase !== "not_reached" && (res.reason === "delivery_indeterminate" || res.reason === "submit_failed"));
     if (inputUncertain || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
-      return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}` };
+      return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}`, ...usageLimit };
     }
     return { classified: "failed", nudgeResult: `failed:${detail}`, preInputFailure: res.inputPhase === "not_reached" && res.sent !== true };
   }
@@ -2002,7 +2008,7 @@ export class QueueRepository {
             ?.slice(AUTO_UNPARK_BLOCKER_TAG_PREFIX.length)
         : undefined;
       const wakeEvent = this.db.transaction(() => {
-        if (!this.wakeOutcomeStale(intent)) this.recordNudgeAttempt(qitemId, nudgeResult);
+        if (!this.wakeOutcomeStale(intent)) this.recordNudgeAttempt(qitemId, nudgeResult, outcome.usageLimit);
         if (finalState) this.outbox!.finalizeDelivery(intent.outboxId, finalState);
         // Only a first attempt creates proof: an actual retry consumes it even if it again fails before input.
         if (intent.deliveryState === "pending" && finalState === "failed" && outcome.preInputFailure === true) {
@@ -2198,7 +2204,7 @@ export class QueueRepository {
     if (!opts?.explicit && this.deliveryDrains.holds(destinationSession)) return;
     if (!this.transport) return;
     const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger, undefined, opts?.explicit === true);
-    this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
+    this.recordNudgeAttempt(qitemId, outcome.nudgeResult, outcome.usageLimit);
   }
 
   /** The following startup intent drain owns durable pending wakes. Legacy packets
@@ -6355,16 +6361,17 @@ export class QueueRepository {
    *  as prompt-clear recovery of a refused wake) read the real end and not `bridged:queued` (#3270). A typed fallback's
    *  result is recorded as a typed wake's is. */
   recordBridgedWakeEnd(qitemId: string, end: import("./hook-bridge.js").HookBridgeEnd): void {
-    const result = end.kind === "typed" && end.result ? this.classifyWakeResult(end.result as Awaited<ReturnType<QueueNudgeTransport["send"]>>).nudgeResult
+    const typed = end.kind === "typed" && end.result ? this.classifyWakeResult(end.result as Awaited<ReturnType<QueueNudgeTransport["send"]>>) : null;
+    const result = typed ? typed.nudgeResult
       : end.kind === "handed-to-hook" ? "bridged:handed-to-hook"
       : end.kind === "not-delivered" ? "failed:hook_bridge_not_delivered"
       : "indeterminate:hook_bridge_claimed_unacked";
     const intent = this.outbox?.getById(end.outboxId);
     if (intent && this.wakeOutcomeStale(intent)) return;
-    this.recordNudgeAttempt(qitemId, result);
+    this.recordNudgeAttempt(qitemId, result, typed?.usageLimit);
   }
 
-  recordNudgeAttempt(qitemId: string, result: string): void {
+  recordNudgeAttempt(qitemId: string, result: string, usageLimit?: { asOf: string; resetsAt: string; sessionName?: string }): void {
     const ts = new Date().toISOString();
     this.db
       .prepare(
@@ -6373,6 +6380,17 @@ export class QueueRepository {
          WHERE qitem_id = ?`
       )
       .run(ts, result, qitemId);
+    if (usageLimit) {
+      // The receipt's words stay as every reader knows them; the row says what they can't. Delivery bookkeeping, so a
+      // reserved daemon actor: it isn't a change to the row for the wake ladder, the stuck sweep or recovery
+      // (lastMeaningfulTransition), as closure-overdue's note isn't.
+      const row = this.getById(qitemId);
+      // It names the session the wake was sent to, which a reroute during the send can't change, and an in-progress row
+      // keeps its retained claim blocker, as every other non-state receipt does.
+      if (row) this.transitionLog.append({ qitemId, state: row.state, actorSession: "daemon@system",
+        transitionNote: `wake reached ${usageLimit.sessionName ?? row.destinationSession}, or may have, at its usage limit (recorded ${usageLimit.asOf}; resets ${usageLimit.resetsAt}); delivery=${result}. Its agent isn't expected to read it before the reset.`,
+        closureTarget: row.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined });
+    }
     // The transport's definite no-write refusal establishes the episode even when a
     // fresh hook hid needs_input. Uncertain delivery never arms clear-triggered replay.
     if (!this.promptClearRetries.has(qitemId) && isPromptOwnedWakeRefusal(result)) {
