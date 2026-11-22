@@ -23,7 +23,7 @@ export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
     }
     const queryToken = c.req.query("token");
     if (queryToken && constantTimeEqual(queryToken.trim(), token)) { await next(); return; }
-    return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query. In the web UI, open it once with #termToken=<token> after its address." }, 401);
+    return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query" }, 401);
   };
 }
 
