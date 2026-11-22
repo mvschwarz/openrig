@@ -1207,7 +1207,10 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     ]) repo.transitionLog.append({qitemId:bad.qitemId,state:"pending",actorSession:"watchdog@system",transitionNote});
     db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("{",bad.qitemId);
     await refusal(); const posts: unknown[] = []; const log=vi.fn();
-    for (let i=0;i<2;i++) expect((await tick(engine(posts),{log})).outcome).not.toBe("failed");
+    // One engine for both ticks, as a daemon runs one Slack wire: a second wire would re-present the first's dispatch,
+    // still unconfirmed, as a possible repeat.
+    const port = engine(posts);
+    for (let i=0;i<2;i++) expect((await tick(port,{log})).outcome).not.toBe("failed");
     await vi.waitFor(() => expect(posts).toHaveLength(1));
   });
 

@@ -310,7 +310,8 @@ drop everyone else's messages. A sender's newest held message retires its earlie
 ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
 <id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
 held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
-record stays readable with `--id`. Held messages are never replayed, so this changes
+record stays readable with `--id`. Held messages are never replayed (a `draft-aware`
+queue wake's bounded retry, below, delivers only an entry still held), so this changes
 no delivery. A `draft-aware` attempt takes its sender's place only once it settles
 as held; one that is then delivered leaves the held messages as they are. A queue
 wake to a `draft-aware` seat counts its sender's held message there as room, by the
@@ -418,7 +419,20 @@ and remain unchanged before Enter. Labels alone do not prove arbitrary content.
 Migration `100_typing_guard_modes` extends the existing guard/audit rows and
 adds receipt metadata to the original outbox rows; it creates no tables, retry
 indexes or executable requests. Combined wakes retain each original ID and body.
-A held queue wake stays on the existing queue recovery path. Interrupted historical
+A held queue wake stays on the existing queue recovery path. A row created straight to
+a `draft-aware` seat is tried again when the seat next reports idle while it's still in
+`draft-aware` mode, through the same guarded delivery and within `queue.wake_retry_cap`.
+Switching modes alone replays nothing; a retry already admitted while the seat was
+`draft-aware` goes once. Still held past that cap or
+`queue.wake_unconfirmed_window_minutes`, or held in `hold` mode past the window, the row
+gets the wake ladder's one escalation to its owner and one notice to its sender, once
+per held episode. Nothing is typed into the held seat. The sender's notice is recorded in
+the outbox (`held-sender-notice-<qitem>-<episode>`) before the owner's escalation is
+marked. If the daemon stops before sending it, or the send definitely wrote nothing, it
+stays owed, and the ladder sends it on a later tick: a failed one after the retry
+interval, up to the retry cap. One that may have reached the sender isn't sent again, and
+one being sent when the daemon stopped reads unknown at the next start. A notice whose
+row is no longer held is retired, not sent. Interrupted historical
 writes become indeterminate at startup. That history never suppresses a current
 explicit request and is not consulted to determine its result.
 
