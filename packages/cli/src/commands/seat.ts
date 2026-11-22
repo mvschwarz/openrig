@@ -732,6 +732,13 @@ Examples:
     });
   cmd.command("retire-held-message").argument("<seat>").argument("<id>").requiredOption("--reason <text>").option("--json")
     .description("Release one held message's active quota, preserving evidence; does not deliver or close work")
+    .addHelpText("after", `
+This works from an ordinary terminal as well as from a seat's shell. From a
+managed seat's shell (OPENRIG_SESSION_NAME set), retirement is recorded under
+that seat. Without a seat identity, it is recorded as "unattributed (no seat identity)".
+The actor comes only from transport identity, never the request body or target.
+Retirement requires a reason; it does not deliver, claim native consumption or close work.
+`)
     .action(async (seat: string, id: string, opts: {reason: string; json?: boolean}) => {
       await guardRequest("POST", `/api/seat/retire-held-message/${encodeURIComponent(seat)}/${encodeURIComponent(id)}`, { reason: opts.reason }, opts.json);
     });
@@ -1822,7 +1829,8 @@ Examples:
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
-Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
+Siblings are untouched. A dead seat is refused (use rig seat clean), except a
+seat that declares keep_alive: its stop is recorded, so it stays down. An adopted
 session is refused: to end only it, run rig unclaim <session> (it releases the
 session and leaves its process running), then end that process and the
 underlying tmux session, including any remaining shell. Closing only its
@@ -1844,6 +1852,10 @@ rig stopped. Examples:
     .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
       await runLifecycleVerb("stop", seat, { reason: opts.reason, operator: opts.operator }, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        if (data["alreadyDown"]) {
+          console.log(`${String(data["message"])} (seat ${s?.logicalId}@${s?.rigName})`);
+          return;
+        }
         console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}).`);
         console.log("Session marked exited, binding cleared; siblings untouched. Relaunch via the normal launch surface.");
         if (data["paneOnly"]) console.log("Only the community seat viewer was closed. Native execution, storage and compute may remain; inspect the selected environment or harness lifecycle.");

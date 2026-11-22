@@ -49,6 +49,8 @@ export interface ResolvedNodeConfig {
   compactionStrategy: string;
   /** Resolved continuity mechanic; absent unless explicitly declared. */
   mechanic: string | undefined;
+  /** #2940: the seat is relaunched when it falls (most-specific-wins; absent everywhere = false). */
+  keepAlive: boolean;
   lifecycle: LifecycleDefaults | undefined;
   selectedResources: ResolvedResources;
   startup: StartupBlock;
@@ -418,6 +420,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       restorePolicy: restorePolicyResult.policy,
       compactionStrategy: compactionResult.strategy,
       mechanic: mechanicResult.mechanic,
+      keepAlive: resolveKeepAlive(spec, profile, member),
       lifecycle,
       selectedResources: selectedResult!,
       startup,
@@ -611,6 +614,17 @@ function resolveCompactionStrategy(
     current = canonical;
   }
   return { ok: true, strategy: current };
+}
+
+/** #2940: keep_alive is most-specific-wins like the continuity mode (spec default < profile < member), and either
+ *  direction: a member can turn off what its agent spec turns on. A level that doesn't declare it doesn't participate;
+ *  absent everywhere is off. The schemas have already refused a value that isn't a boolean. */
+export function resolveKeepAlive(
+  spec: Pick<AgentSpec, "defaults">,
+  profile: Pick<ProfileSpec, "lifecycle"> | undefined,
+  member: Pick<RigSpecPodMember, "keepAlive">,
+): boolean {
+  return member.keepAlive ?? profile?.lifecycle?.keepAlive ?? spec.defaults?.lifecycle?.keepAlive ?? false;
 }
 
 /** S20 A8: mechanic follows the exact shipped strategy path: spec default < profile < member. */

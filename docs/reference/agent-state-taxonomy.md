@@ -55,6 +55,10 @@ hook. A permission prompt can independently supply human-input evidence. See
 [Claude usage-limit detection](claude-status-line.md#claude-usage-limit-detection)
 for the separate provider signal and queue timer.
 
+The arbitrated state holds Claude's typed limit too. After `StopFailure/rate_limit`, `activity` reads `unknown`, never
+working or idle, and `usageLimit` carries when the limit was seen and the reset it stated. Both hold until a strictly
+newer turn starts, from a hook or Claude's own status. An idle prompt, a redraw or the limit's menu doesn't clear them.
+
 ### Per-seat attention in the node inventory
 
 `rig ps --nodes` carries the daemon's `needsAttention` result, using the same predicate
@@ -65,6 +69,26 @@ A zero prompt count alone is not an observed clear. Absent arbitration evidence 
 the existing live-hook fallback in effect; lifecycle, startup, held and error signals
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
+
+Claude's other `StopFailure` errors keep a typed reason in the legacy `agentActivity`
+field, with `state: unknown` and the raw `error` value in `rawSubtype`.
+`authentication_failed`, `oauth_org_not_allowed` and `cloud_credential_error` read
+`provider_auth_error`; `billing_error` and `account_on_hold` read
+`provider_billing_error`. The current occupant's last such failure raises attention
+until a hook shows a newer turn (a prompt, a question to a person, a `Stop` or
+`PostToolBatch`, or another `StopFailure`) or another occupant takes the seat; as for any
+hook, an occupant that can't be told shows nothing.
+Retention is bounded to the node's newest 200 activity records: a failure followed by 200 records that
+show no newer turn stops showing, even without a newer turn or occupant; this does not mean the account recovered.
+Claude's idle notification and the
+five-minute hook freshness window alone don't end it, and hook freshness is unchanged
+for everything else. The row serves that failure, with its original event time, over the cached pane
+reading, and the reason column names it. It says the last reported failure hasn't been
+superseded, not that OpenRig checked the account; a newer turn doesn't certify a repair.
+A newer picker or permission prompt in the pane outranks it, and a draft in the input box
+doesn't. These failures aren't a question, so they hold no send or wake. Any other value,
+documented or not, reads `provider_error`, stays with the pane reading and raises no
+attention.
 
 A handover whose successor started without a required file also raises attention. That's
 a projected guidance file or a guidance startup file marked `required` still missing from
@@ -218,6 +242,16 @@ LIFECYCLE); see the
   live seat passes its check, and `rig seat clear-attention <seat>` runs that check on
   demand; `rig seat continue` doesn't change it
   ([startup guide](agent-startup-guide.md#after-a-restored-seats-prompt)).
+- **Stop request:** `stopRequested: true` in node inventory is a `rig seat stop` or `rig down`
+  that was recorded and isn't confirmed yet, for example after a timeout or a partial kill. The
+  seat isn't reported as exited until it's confirmed, and observing the session doesn't clear
+  the request ([checked seat stop](checked-seat-stop.md#the-stop-request)).
+- **Keep-alive:** `keepAlive: true` marks a seat that declares `keep_alive`, and
+  `keepAliveIncident` (`attempts`, `exhausted`, `lastError`, `lastAttemptAt`) its current
+  recovery after a fall. An exhausted incident makes the seat's lifecycle `attention_required`
+  while it isn't running, so it raises `needsAttention` until someone starts or stops it (a stop
+  request, pending or confirmed, ends that at once, and the daemon's next check ends the incident)
+  ([keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive)).
 
 ## Rejected oracles — dated receipts (2026-08-26), so nobody re-derives them expensively
 

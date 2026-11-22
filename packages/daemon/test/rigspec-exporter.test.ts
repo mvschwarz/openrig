@@ -666,6 +666,47 @@ describe("RigSpecExporter (pod-aware)", () => {
       .toEqual({ tasksMax: 512, memoryMax: 4294967296 });
   });
 
+  it("#2940: exports a seat's keep_alive as keep_alive: true and round-trips it; a seat without it exports no key", () => {
+    const { rig, n2 } = seedPodRig();
+    rigRepo.setNodeKeepAlive(n2.id, true);
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const devMembers = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(devMembers.find((m) => m.id === "qa")?.keepAlive).toBe(true);
+    expect("keepAlive" in devMembers.find((m) => m.id === "impl")!).toBe(false);
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml.match(/keep_alive/g)).toEqual(["keep_alive"]);
+    expect(yaml).toContain("keep_alive: true");
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.keepAlive).toBe(true);
+    rigRepo.setNodeKeepAlive(n2.id, false);
+    expect(PodRigSpecCodec.serialize(exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec)).not.toContain("keep_alive");
+  });
+
+  // #2940: keep_alive is most-specific-wins, and a member can turn off what its agent spec turns on. The stored value is
+  // the resolved one, so the export carries the member's own `keep_alive: false` from its authored source: dropping it
+  // would let the agent spec turn the seat back on at the next `rig up`.
+  it("#2940: keeps a member's keep_alive: false override; a seat that declares nothing still exports no key", () => {
+    const rig = rigRepo.createRig("keep-off");
+    const devPod = podRepo.createPod(rig.id, "dev", "Dev");
+    const member = (id: string, keepAlive?: boolean) => ({ id, agentRef: "local:agents/qa", profile: "default", runtime: "codex", cwd: ".",
+      ...(keepAlive === undefined ? {} : { keepAlive }) });
+    const rigSpec = { version: "0.2", name: "keep-off", pods: [{ id: "dev", label: "Dev", members: [member("off", false), member("plain")] }], edges: [] };
+    for (const id of ["off", "plain"]) {
+      rigRepo.addNode(rig.id, `dev.${id}`, { runtime: "codex", podId: devPod.id, agentRef: "local:agents/qa", profile: "default", cwd: ".",
+        launchRecipe: { version: 1, rigRoot: "/tmp", rigSpec } as never });
+    }
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const members = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(members.find((m) => m.id === "off")?.keepAlive).toBe(false);
+    expect("keepAlive" in members.find((m) => m.id === "plain")!).toBe(false);
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml.match(/keep_alive/g)).toEqual(["keep_alive"]);
+    const normalized = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "off")?.keepAlive).toBe(false);
+  });
+
   it("exports selected launch_wrapper array for pi and codex pod members only and round-trips through codec/schema", () => {
     const { rig, n2, devPod } = seedPodRig();
     const nPi = rigRepo.addNode(rig.id, "dev.pi-seat", {

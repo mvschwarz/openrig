@@ -10,7 +10,7 @@ import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
-import { CLAUDE_NOT_STATUS_LINE_ROW, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -81,13 +81,29 @@ const INPUT_BOX_READ_DEADLINE_MS = 500;
 const STALE_BOUND_PANE = "The session does not have the expected bound pane";
 
 // Mid-work detection patterns (cheap heuristics)
+const WORKING_WORD_PATTERN = /Working/;
 const MID_WORK_PATTERNS = [
   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, // spinner chars
-  /Working/,
+  WORKING_WORD_PATTERN,
   /^[✶✢✳✻✽·]\s+\S.*(?:…|\.{3})\s+\([^)]*\bthinking\)$/m,
   /esc to interrupt/,
   COMPOSER_SELECTION_SCAN_PATTERN,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
+
+// Under an empty prompt, the word alone is a finished turn's prose ("Working tree is clean; ready for an
+// assignment.", #3544). There only a status-shaped row counts: "Working" after an optional marker, then a
+// timer paren, an ellipsis that ends the line or opens the timer, or the end of the line
+// ("• Working (3s • esc to interrupt)", "✻ Working…", "⠋ Working"), or a digit timer paren later on the row,
+// as in a reasoning header clipped before "esc to interrupt" ("• Working on the test fixtures (6m 12s").
+// Prose such as "Working (as requested), …" or "Working... then I committed it." has no timer. The timer paren holds
+// only timer parts, then closes the row, opens the "• esc to interrupt" tail or is clipped: prose such as
+// "Working on the tests (2s per test), I found it." has more words in the paren. A paren clipped right after
+// its first timer digit ("• Working on the test fixtures (6") still reads live.
+const LIVE_TIMER_PAREN = String.raw`\(\s*\d+(?:[hms](?:\s+\d+[hms]?)*\s*(?:\)\s*$|[•·]|$)|\s*$)`;
+const LIVE_WORKING_ROW_PATTERN = new RegExp(String.raw`^(?:\S\s+)?Working(?:\s*${LIVE_TIMER_PAREN}` +
+  String.raw`|\s*(?:…|\.{3})\s*(?:${LIVE_TIMER_PAREN}|$)|\s*$|\b.*${LIVE_TIMER_PAREN})`);
+const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>
+  pattern === WORKING_WORD_PATTERN ? LIVE_WORKING_ROW_PATTERN : pattern);
 
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
 // Lines like '❯ Working on a task.' have text after the prompt char and
@@ -305,30 +321,6 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   return null;
 }
 
-// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
-// Recognize the complete input block, never a warning or historical prompt alone.
-const CLAUDE_STATUS_WARNINGS = [
-  /^✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor$/,
-  /^✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)$/,
-  /^✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai\/claude-c…$/,
-  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
-  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
-  // #1641: Claude 2.1.293's update banner, whatever installer it names.
-  /^Update available! Run: \S.*$/,
-  // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
-  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
-  /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
-  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
-  // "Restart to update" on its own row (Claude 2.1.319, #2605).
-  /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
-];
-// Claude can draw noninteractive UI rows after its mode footer. They do not
-// replace the composer and should only be skipped when they match a known row.
-const CLAUDE_STATUS_DECORATIONS = [
-  /^\d[\d,]* tokens$/,
-  /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
-  /^\/rc$/,
-];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -974,7 +966,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   const midWorkEvidence = findPatternEvidence(recentLines, [
-    ...MID_WORK_PATTERNS,
+    ...(idlePromptLine ? MID_WORK_PATTERNS_UNDER_IDLE_PROMPT : MID_WORK_PATTERNS),
     CLAUDE_LIVE_STATUS_PATTERN,
     ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
   ]);

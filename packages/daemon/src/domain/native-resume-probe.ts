@@ -32,6 +32,10 @@ export interface NativeResumeProbeResult {
   code: string;
   detail: string;
   loginRefusal?: { message: ClaudeLoginRefusal; row: "response" | "result" };
+  /** Claude is the pane's foreground process, with nothing else seen. That shows a process is running, not that its
+   *  conversation resumed: a resume of a missing conversation is in the foreground until it reports "No conversation
+   *  found" and exits. A resume check keeps polling on it, and accepts it only when its wait ends. */
+  foregroundOnly?: true;
 }
 
 export interface ProbeShellReadyInput {
@@ -442,6 +446,7 @@ export function assessNativeResumeProbe(
         status: "resumed",
         code: "active_runtime",
         detail: "Claude is the active foreground process in the probe pane.",
+        foregroundOnly: true,
       };
     }
     if (/(^|\n)\s*❯/.test(paneContent)

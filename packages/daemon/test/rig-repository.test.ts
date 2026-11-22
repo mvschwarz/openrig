@@ -611,3 +611,40 @@ describe("RigRepository process_limits persistence (#3253)", () => {
       .process_limits).toBe("not json");
   });
 });
+
+describe("RigRepository keep_alive persistence (#2940)", () => {
+  let db: Database.Database;
+  let repo: RigRepository;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    repo = new RigRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("stores keep_alive on a %s seat; absent is off and leaves the node unchanged", (runtime) => {
+    const rig = repo.createRig("keep-rig");
+    const kept = repo.addNode(rig.id, "kept", { runtime, keepAlive: true });
+    expect(kept.keepAlive).toBe(true);
+    expect(db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(kept.id)).toEqual({ keep_alive: 1 });
+    const plain = repo.addNode(rig.id, "plain", { runtime });
+    const off = repo.addNode(rig.id, "off", { runtime, keepAlive: false });
+    for (const node of [plain, off]) {
+      expect("keepAlive" in node).toBe(false);
+      expect(db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(node.id)).toEqual({ keep_alive: 0 });
+    }
+  });
+
+  it("turns keep_alive on and off on an existing seat", () => {
+    const rig = repo.createRig("keep-rig");
+    const node = repo.addNode(rig.id, "seat", { runtime: "codex" });
+    expect(repo.setNodeKeepAlive(node.id, true)).toBe(true);
+    expect(repo.getRig(rig.id)!.nodes[0]!.keepAlive).toBe(true);
+    expect(repo.setNodeKeepAlive(node.id, false)).toBe(true);
+    expect("keepAlive" in repo.getRig(rig.id)!.nodes[0]!).toBe(false);
+    expect(repo.setNodeKeepAlive("no-such-node", true)).toBe(false);
+  });
+});

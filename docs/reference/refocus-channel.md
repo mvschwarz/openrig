@@ -158,8 +158,11 @@ With the switch on:
   the agent can correct a stale tag. Anything less certain lists every
   candidate's one-line intent and asks the agent to name its mission (or to say
   it has no current work), giving the `--work-start` route that then shows
-  that mission's intent as text. The project-level chain appears only as
-  labelled orientation.
+  that mission's intent as text. With nothing in progress and a project
+  selected for the seat, the missions it lists and that route are the
+  project's, under its own missions root, and the route names the project root
+  as `--work-root` so it runs on its own; otherwise they are workspace.root's.
+  The project-level chain appears only as labelled orientation.
 - A tag that does not resolve on this host is named, never replaced. A
   retargeted handoff or a remote ancestor gives no assumed mission. A mission
   named only in body text is not evidence.

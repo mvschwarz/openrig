@@ -5,6 +5,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SeatDeliveryGuard, UNATTRIBUTED_GUARD_ACTOR, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { seatRoutes } from "../src/routes/seat.js";
 
@@ -41,8 +42,49 @@ function fixture() {
     preference: db.prepare("SELECT actor, reason FROM seat_delivery_guards WHERE node_id='a'").all(),
     audit: db.prepare("SELECT actor, reason FROM seat_delivery_guard_changes WHERE node_id='a' ORDER BY id").all(),
   });
-  return { guard, post, recorded, writes };
+  const outbox = new OutboxHandler(db);
+  outbox.retain({ outboxId: "held", senderSession: "sender@test", destinationSession: "worker@test", body: "reviewed message" },
+    { nodeId: "a", occupant: "g1", session: "worker@test", pane: "%1" }, false);
+  const retire = (body: unknown, session?: string, seat = "worker@test") => app.request(`/api/seat/retire-held-message/${seat}/held`, {
+    method: "POST", headers: { "content-type": "application/json", ...(session === undefined ? {} : { "x-openrig-session": session }) },
+    body: JSON.stringify(body),
+  });
+  return { guard, post, recorded, writes, outbox, retire };
 }
+
+describe("retire-held-message route attribution", () => {
+  it.each([["no header", undefined, UNATTRIBUTED_GUARD_ACTOR], ["a blank header", "   ", UNATTRIBUTED_GUARD_ACTOR],
+    ["a seat header", "lead@test", "lead@test"]])("retires with %s, ignoring the body actor and preserving evidence", async (_label, session, actor) => {
+    const f = fixture();
+    expect(f.outbox.retentionUsage("a").count).toBe(1);
+    const before = f.outbox.getById("held");
+    const response = await f.retire({ reason: "read outside the terminal", actor: "spoof@test" }, session);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ entry: { deliveryState: "retired", retiredBy: actor, retirementReason: "read outside the terminal" },
+      effect: "Retired from active quota; evidence preserved. No delivery, native consumption or work closure is asserted." });
+    expect(f.outbox.getById("held")).toMatchObject({ ...before, deliveryState: "retired", retiredBy: actor,
+      retirementReason: "read outside the terminal", retiredAt: expect.any(String) });
+    expect(f.outbox.retentionUsage("a").count).toBe(0);
+    expect(f.writes).toEqual([]);
+    expect(f.recorded()).toEqual({ preference: [], audit: [] });
+  });
+
+  it.each([undefined, "lead@test"])("still requires a reason with identity %s", async session => {
+    for (const reason of [undefined, "", "   ", 7]) {
+      const f = fixture();
+      expect((await f.retire({ reason, actor: "spoof@test" }, session)).status).toBe(400);
+      expect(f.outbox.getById("held")).toMatchObject({ deliveryState: "retained", retiredBy: null });
+      expect(f.outbox.retentionUsage("a").count).toBe(1);
+      expect(f.writes).toEqual([]);
+    }
+  });
+
+  it("still refuses a message outside the target seat without changing its evidence", async () => {
+    const f = fixture(), before = f.outbox.getById("held");
+    expect((await f.retire({ reason: "reviewed" }, undefined, "nobody@test")).status).toBe(409);
+    expect(f.outbox.getById("held")).toEqual(before);
+  });
+});
 
 const SHAPE_REFUSAL = { error: "Supply exactly one enabled boolean or mode, and a reason" };
 const INVALID_BODIES: Array<[unknown, Record<string, unknown>]> = [

@@ -295,7 +295,9 @@ describe("BootstrapOrchestrator", () => {
           return { ok: true };
         }),
         sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
-        hasSession: async () => false, listPanes: async () => [],
+        hasSession: async () => false,
+        listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+        getPanePid: async () => 4242, getPaneCommand: async () => "claude",
         listSessions: async () => [], listWindows: async () => [],
         unsetSessionEnv: vi.fn(async (session: string, key: string) => {
           if (fault && isDevSession(session)) throw new Error("private unset fault");

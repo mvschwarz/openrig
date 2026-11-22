@@ -49,7 +49,9 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242),
+    getPaneCommand: vi.fn(async () => "claude"),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
     ...overrides,
@@ -135,6 +137,12 @@ describe("StartupOrchestrator", () => {
         resolveOne: () => ({ value: 30, source: "default", defaultValue: 30 }),
       } as unknown as Pick<SettingsStore, "resolveOne">),
       sleep: async () => {},
+      listProcesses: async () => {
+        const latest = sessionRegistry.getSessionsForRig(rigRepo.listRigs()[0]?.id ?? "").at(-1);
+        const argv = latest?.resumeToken ? ["codex", "resume", latest.resumeToken] : ["codex"];
+        return [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242, executableName: "codex",
+          command: argv.join(" "), argv, startedAt: "Sat Jan  1 12:00:00 2000" }];
+      },
     });
   }
 
@@ -307,11 +315,12 @@ describe("StartupOrchestrator", () => {
       expect(tmux.sendKeys).not.toHaveBeenCalled();
     });
 
-    it.each([true, false])("uses the native receipt for a post-ready held-message notice (acknowledged=%s)", async acknowledged => {
+    it.each([true, false])("settles the native held-message receipt before marking startup ready (acknowledged=%s)", async acknowledged => {
       const cancel = vi.fn();
       const received = Object.assign(vi.fn(async () => { if (!acknowledged) throw new Error("notice receipt timed out"); }), { cancel });
       const prepareInput = vi.fn(() => received);
       const { input, seed } = ompStartup("after_ready", prepareInput);
+      cancel.mockImplementation(() => sessionRegistry.getSessionsForRig(seed.rigId)[0]?.startupStatus);
       input.startupActions = [];
       db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
       const outbox = new OutboxHandler(db);
@@ -324,6 +333,7 @@ describe("StartupOrchestrator", () => {
       expect(tmux.sendText).toHaveBeenCalledOnce();
       expect(tmux.sendKeys).toHaveBeenCalledTimes(acknowledged ? 1 : 0);
       expect(cancel).toHaveBeenCalledOnce();
+      expect(cancel).toHaveReturnedWith("pending");
       if (!acknowledged) expect(result.warnings).toContainEqual(expect.stringContaining("Held-message notice submission unconfirmed: notice receipt timed out"));
       expect(outbox.getById("held-omp-startup")).toEqual(heldBefore);
     });
@@ -2403,6 +2413,64 @@ describe("StartupOrchestrator", () => {
       expect(sendText.mock.calls[0]![1]).toContain("startup orientation challenge");
       expect(sendText.mock.calls[1]![1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
       expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+    });
+
+    it.each(["bundled", "standalone"] as const)("skips the reminder when Claude submits the %s challenge before the reminder", async prompt => {
+      const seed = seedSession();
+      const store = new AgentActivityStore({ db, eventBus });
+      let staged = "";
+      const sendText = vi.fn(async (_session: string, text: string) => {
+        staged = text;
+        return { ok: true as const };
+      });
+      const sendKeys = vi.fn(async () => {
+        const [command, challengeId, answer] = staged.match(/rig startup-proof submit --challenge-id (\w+) --answer (\w+)/) ?? [];
+        if (command) {
+          expect(verifyStartupProof({ store, eventBus }, { nodeId: seed.nodeId, challengeId, answer }).ok).toBe(true);
+        }
+        return { ok: true as const };
+      });
+      const startupActions = prompt === "bundled" ? challengeAndIdentity() : challengeAndIdentity().slice(0, 1);
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText, sendKeys }) }).startNode(makeInput(seed, { startupActions }));
+
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(deriveOriented(db, seed.nodeId)).toBe("verified");
+      expect(sendText.mock.calls.map(([, text]) => text)).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("skips the reminder when Claude proves the challenge during the pre-paste readiness check", async () => {
+      const seed = seedSession();
+      const store = new AgentActivityStore({ db, eventBus });
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      let promptObserved = false;
+      const capturePaneContent = vi.fn(async () => {
+        promptObserved = true;
+        return "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n";
+      });
+      const adapter = mockAdapter({ checkReady: vi.fn(async () => {
+        if (promptObserved && deriveOriented(db, seed.nodeId) === "missing") {
+          const [, challengeId, answer] = sendText.mock.calls[0]![1]
+            .match(/rig startup-proof submit --challenge-id (\w+) --answer (\w+)/)!;
+          expect(verifyStartupProof({ store, eventBus }, { nodeId: seed.nodeId, challengeId, answer }).ok).toBe(true);
+        }
+        return { ready: true };
+      }) });
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText, capturePaneContent }) })
+        .startNode(makeInput(seed, { adapter, startupActions: challengeAndIdentity() }));
+
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(deriveOriented(db, seed.nodeId)).toBe("verified");
+      expect(sendText.mock.calls.map(([, text]) => text)).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("still sends a reminder when only a previous challenge was verified", async () => {
+      const { seed } = seedVerifiedProof();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+      expect(sendText.mock.calls.map(([, text]) => text)).toContain(STARTUP_PROOF_INSTRUCTION_LINE);
     });
 
     it("sends no line to a Codex seat, which already acts on the pasted challenge", async () => {
