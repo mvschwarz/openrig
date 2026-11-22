@@ -124,8 +124,8 @@ attention stays unknown while its existing prompt, startup and error hints remai
   armed wake (`rig view show held`). Stopping on purpose is HELD; stopping by accident is
   PARKED. A HELD row is healthy only while its wake is live, and not fired-but-unconsumed
   unless the stuck sweep owns its recovery; an unhealthy HELD row on a stopped seat makes
-  the seat parked. One exception: a row held on an `external:` gate with no recorded wake
-  is an event-only HELD. Its owner chose to wait on something outside, so it is healthy:
+  the seat parked. One exception: a row held on a named `external:` gate (`external:<name>`,
+  with a non-blank name) and no recorded wake is an event-only HELD. Its owner chose to wait on something outside, so it is healthy:
   it stays on the held view and in `rig parked` with its blocker and last update, and no
   reminder fires for it. `rig queue resolve <id> --decision "<what happened>"` ends it.
   Other typed gates, custom blockers and plain holds read as before.

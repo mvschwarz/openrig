@@ -4,6 +4,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { diagnoseSeatParked, PARKED_OBLIGATION_LIMIT, type ObligationRow, type ParkedQueryDeps } from "../src/domain/parked-query.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, type ParkedOwnerConsumerDeps } from "../src/domain/policies/parked-owner-consumer.js";
+import type { PolicyJob } from "../src/domain/policies/types.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -51,6 +53,23 @@ describe("#1933: an external: hold with no wake is an event-only HELD", () => {
     const d = diagnoseSeatParked(deps([{ qitemId: "qitem-open", state: "pending", summary: "owed" }, held("external:ci")]), SEAT);
     expect(d.parked).toBe(true);
     expect(reminded(d)).toEqual(["qitem-open"]);
+  });
+
+  it("the parked-owner policy itself, fed this diagnosis, reminds the owner of the open row and not the event-only hold", async () => {
+    const d = diagnoseSeatParked(deps([{ qitemId: "qitem-open", state: "pending", summary: "owed" }, held("external:ci")]), SEAT);
+    const stated = (qitemId: string) => [{ ts: "2026-11-22T09:00:00.000Z", transitionNote: "created", actorSession: SEAT.sessionName,
+      state: qitemId === "qitem-held" ? "blocked" : "pending", transitionId: qitemId === "qitem-held" ? 2 : 1 }];
+    const rows: ParkedOwnerConsumerDeps["rows"] = { listTransitions: stated, appendNote: () => ({ ok: true }),
+      recordNudgeResult: () => {}, listOpenIds: () => ["qitem-open", "qitem-held"] };
+    const policy = makeParkedOwnerConsumerPolicy({ diagnoseRig: () => ({ seats: [d] }), rows,
+      history: { listForJob: () => [], countForJob: () => 0 }, occupantGeneration: () => "gen-1" });
+    const result = await policy.evaluate({ jobId: "job-1933", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("park-rig") },
+      intervalSeconds: 120, activeWakeIntervalSeconds: null, scanIntervalSeconds: null, context: {}, lastEvaluationAt: null,
+      lastFireAt: null, registeredBySession: "daemon@kernel", registeredAt: "2026-11-22T09:00:00.000Z" } as PolicyJob);
+    expect(result.action).toBe("send");
+    const named = JSON.stringify(result.notes ?? {});
+    expect(named).toContain("qitem-open");
+    expect(named).not.toContain("qitem-held");
   });
 
   it("an external: hold the owner gave a wake keeps that wake's reading: fired and unconsumed is still unhealthy", () => {

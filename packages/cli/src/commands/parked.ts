@@ -106,7 +106,9 @@ export function parkedCommand(): Command {
       console.log(`rig: ${verdictWord(rig.parked)} — ${rig.reason}`);
       if (rig.scope) console.log(`scope: rig ${rig.scope.rig} (from ${rig.scope.resolvedFrom})`);
       for (const d of rig.seats) {
-        if (d.parked === false) continue; // the interesting cells are parked + indeterminate
+        // The interesting cells are parked + indeterminate, and a seat holding an event-only hold: it's never reminded,
+        // so this is where it's shown.
+        if (d.parked === false && !d.obligations.held?.some((h) => h.eventOnly)) continue;
         renderSeat(d);
       }
     });
