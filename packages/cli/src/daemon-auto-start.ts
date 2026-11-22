@@ -40,6 +40,7 @@ export async function prepareDaemonAutoStart(
       contextRoot: config.context.root,
       skillsRoot: config.skills.root,
       topologyRoot: config.topology.root,
+      readinessWaitSeconds: config.daemon.startReadinessWaitSeconds,
     },
   };
 }

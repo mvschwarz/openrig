@@ -8,7 +8,7 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
-import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
+import { WRAPPED_CLAUDE_LOOKUP_REFUSAL, type SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -106,6 +106,23 @@ function claudeSideloadRefusalReason(line: string): string {
   return `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on `
     + "disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load "
     + "this seat's skills and plugins, so this seat can't start while that setting applies.";
+}
+
+/** #3746: the wrapped classic launch's refusal when `claude` in the pane's shell is a function or alias, from the last lines
+ *  of a pane back at its shell. Read from a joined capture where needed, so a wrapped line stays whole. */
+const WRAPPED_LOOKUP_REFUSALS = [WRAPPED_CLAUDE_LOOKUP_REFUSAL("function"), WRAPPED_CLAUDE_LOOKUP_REFUSAL("alias")];
+const mayShowWrappedLookupRefusal = (paneContent: string): boolean => paneContent.replace(/\n/g, "").includes("a launch_wrapper needs claude");
+function claudeWrappedLookupLine(paneContent: string): string | null {
+  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse()
+    .find((line) => WRAPPED_LOOKUP_REFUSALS.includes(line)) ?? null;
+}
+
+function claudeWrappedLookupReason(line: string): string {
+  const kind = line.includes("shell alias") ? "alias" : "function";
+  return `the pane shows OpenRig's launch refusal (${line}) A launch_wrapper starts Claude's executable file, and OpenRig doesn't `
+    + `look past a shell ${kind} named claude, which may set this seat's account, endpoint or hooks. Make claude an executable file `
+    + `on PATH (for example a script that applies the same settings and then execs Claude), or remove the ${kind} from the shell `
+    + "OpenRig's panes start, then relaunch this seat.";
 }
 
 /**
@@ -585,6 +602,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const notFound = probe.code === "returned_to_shell"
       ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
     if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell" };
+    // So does the wrapped launch's refusal of a claude function or alias (#3746).
+    const lookup = probe.code === "returned_to_shell" && mayShowWrappedLookupRefusal(paneContent)
+      ? claudeWrappedLookupLine((await this.tmux.capturePaneContent(binding.tmuxSession, 40, { joinWrappedLines: true })) ?? paneContent)
+      : null;
+    if (lookup) return { ready: false, reason: claudeWrappedLookupReason(lookup), code: "returned_to_shell" };
     // Claude's sideload refusal says why too, read from a joined capture so a wrapped refusal line stays whole. It stays
     // a wait for the same reason.
     const refusal = probe.code === "returned_to_shell" && mayShowSideloadRefusal(paneContent)
@@ -804,9 +826,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         };
       }
 
-      // Claude's process alone, with nothing of its screen drawn yet, doesn't end the wait: a dialog Claude opens first
-      // (its trust dialog in a moved folder) is drawn after the process starts. It stands only when the wait runs out.
-      if (probe.status === "resumed" && probe.basis !== "process") {
+      // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen or its
+      // "No conversation found" through the window (and a longer wait, below), and accept it at the final read if that's
+      // still all there is.
+      if (probe.status === "resumed" && !probe.foregroundOnly) {
         return { ok: true };
       }
 
@@ -859,9 +882,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // Only a boot in progress (no verdict, no gate, a label that proves nothing) is worth waiting for; a real
       // gate (login, trust or MCP approval, auto-mode identity) won't clear itself.
       const booting = probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
-      // Claude's process with nothing of its screen drawn yet keeps waiting here too, as in the first window: its first
-      // frame (its trust dialog, say) can come next. The final read still takes it, with its warning.
-      if (slowStart && !booting && probe.basis !== "process") {
+      // A foreground Claude alone keeps the longer wait going too, to its end, as in the quick window: a resume of a
+      // missing conversation is one until it reports that and exits. It isn't a boot for the checks below, so its process
+      // label never reads as a ready screen there.
+      if (slowStart && !booting && !probe.foregroundOnly) {
         slowStart = false;
         break;
       }
@@ -880,7 +904,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const windowEnd = attempt === windowAttempts - 1;
       // Claude's process with nothing drawn yet gets the longer wait at the window's end too: its trust dialog can be drawn
       // after the quick window. In the longer wait it sleeps and polls (above), as it does after a boot.
-      const processOnly = probe.status === "resumed" && probe.basis === "process";
+      const processOnly = probe.status === "resumed" && probe.foregroundOnly === true;
       if (windowEnd ? booting || processOnly : booting && slowStart && (attempt - windowAttempts + 1) % checkEvery === 0) {
         if (await this.paneReturnedToShell(binding, await this.tmux.getPaneCommand(tmuxSession))) {
           // Provably back at its shell: the final check reports it. If it isn't by then, the seat is kept.
@@ -906,7 +930,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
 
     if (finalProbe.status === "resumed") {
-      return finalProbe.basis === "process" ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
+      return finalProbe.foregroundOnly ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
     const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
 
@@ -940,12 +964,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     if (await returnedToShell()) {
       const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
-      const refusal = notFound || !mayShowSideloadRefusal(finalContent) ? null
+      const lookup = notFound || !mayShowWrappedLookupRefusal(finalContent) ? null
+        : claudeWrappedLookupLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
+      const refusal = notFound || lookup || !mayShowSideloadRefusal(finalContent) ? null
         : claudeSideloadRefusalLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
       return {
         ok: false,
         probe: probeEvidence,
-        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound)
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : lookup ? claudeWrappedLookupReason(lookup)
           : refusal ? claudeSideloadRefusalReason(refusal) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };

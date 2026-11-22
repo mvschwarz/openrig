@@ -32,11 +32,13 @@ export interface NativeResumeProbeResult {
   code: string;
   detail: string;
   loginRefusal?: { message: ClaudeLoginRefusal; row: "response" | "result" };
-  /** `process`: a `resumed` that rests on the pane's foreground command alone, with nothing of Claude's screen recognized. */
-  basis?: "process";
+  /** Claude is the pane's foreground process, with nothing else seen. That shows a process is running, not that its
+   *  conversation resumed: a resume of a missing conversation is in the foreground until it reports "No conversation
+   *  found" and exits. A resume check keeps polling on it, and accepts it only when its wait ends. */
+  foregroundOnly?: true;
 }
 
-/** The note a resume's result carries when its wait ended on a `basis: "process"` verdict. */
+/** The note a resume's result carries when its wait ended on a `foregroundOnly` verdict. */
 export const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
   + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
 
@@ -453,7 +455,7 @@ export function assessNativeResumeProbe(
         code: "active_runtime",
         detail: "Claude is the active foreground process in the probe pane.",
         // An auto-mode composer whose header scrolled out is Claude's drawn screen, not the process alone.
-        ...(autoModeScreen ? {} : { basis: "process" as const }),
+        ...(autoModeScreen ? {} : { foregroundOnly: true as const }),
       };
     }
     if (autoModeScreen) {

@@ -269,9 +269,10 @@ export class ClaudeResumeAdapter {
         };
       }
 
-      // Claude's process alone, with nothing of its screen drawn yet, doesn't end the wait: a dialog Claude opens first
-      // (its trust dialog in a moved folder) is drawn after the process starts. It stands only when the wait runs out.
-      if (probe.status === "resumed" && probe.basis !== "process") {
+      // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen (a dialog
+      // Claude opens first, such as its trust dialog in a moved folder, is drawn after the process starts) or its
+      // "No conversation found", and accept it at the final read below, with its warning, if that's still all there is.
+      if (probe.status === "resumed" && !probe.foregroundOnly) {
         return { ok: true };
       }
 
@@ -295,7 +296,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "attention_required", message: finalProbe.detail, evidence: finalContent.split("\n").slice(-12).join("\n") };
     }
     if (finalProbe.status === "resumed") {
-      return finalProbe.basis === "process" ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
+      return finalProbe.foregroundOnly ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
 
     // The exact --resume identity is stronger evidence than a pane command or

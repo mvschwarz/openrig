@@ -471,7 +471,7 @@ describe("native resume probe", () => {
       status: "resumed",
       code: "active_runtime",
       detail: "Claude is the active foreground process in the probe pane.",
-      basis: "process",
+      foregroundOnly: true,
     });
   });
 
@@ -479,7 +479,7 @@ describe("native resume probe", () => {
     const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
       paneContent: `● Done.\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ auto mode on (shift+tab to cycle)` });
     expect(probe).toMatchObject({ status: "resumed", code: "active_runtime" });
-    expect(probe.basis).toBeUndefined();
+    expect(probe.foregroundOnly).toBeUndefined();
   });
 
   it("reads the trust dialog's heading, drawn before its options, as the trust gate, not the foreground process", () => {
