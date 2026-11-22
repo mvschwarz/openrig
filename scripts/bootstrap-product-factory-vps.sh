@@ -7,6 +7,12 @@
 #   ./bootstrap-product-factory-vps.sh --artifact <@openrig/cli@X.Y.Z | /path/to/openrig-cli.tgz> \
 #     --authorized-key "ssh-ed25519 AAAA... operator@home" [--ts-authkey tskey-...]
 #
+# The two vendor installers this script runs (Tailscale's and NodeSource's) are downloaded to a
+# file first, and verified against a SHA-256 when you pin one:
+#   TS_INSTALL_SHA256=<hex> NODESOURCE_SETUP_SHA256=<hex> ./bootstrap-product-factory-vps.sh ...
+# Neither vendor publishes a stable checksum for its installer script, so when a variable is unset
+# the step prints that it is running unverified rather than implying the bytes were checked.
+#
 # The script is deliberately stepwise and loud; each step is safe to re-run.
 # It NEVER prints secret material. There is intentionally no `rig host
 # bootstrap` verb (host verbs are capped at add/list/doctor) — this script +
@@ -18,6 +24,8 @@ set -euo pipefail
 ARTIFACT=""
 AUTHORIZED_KEY=""
 TS_AUTHKEY="${TS_AUTHKEY:-}"
+TS_INSTALL_SHA256="${TS_INSTALL_SHA256:-}"
+NODESOURCE_SETUP_SHA256="${NODESOURCE_SETUP_SHA256:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +41,46 @@ done
 [[ "$(id -u)" == "0" ]] || { echo "run as root (fresh-VPS bootstrap)" >&2; exit 1; }
 
 step() { echo; echo "==> $*"; }
+
+# Fetch a vendor installer, verify it when a SHA-256 was pinned, then run it. This step runs as root,
+# and `curl … | sh` would execute whatever the network returned with no chance to look at it: the
+# bytes are written to a file first so a mismatch can stop the bootstrap before anything runs. With
+# no checksum pinned the step says so out loud — the point is that the script never implies a
+# verification it did not do.
+# The temporary file must not outlive this call on ANY path — a failed download, a mismatched hash, an
+# installer that exits non-zero, or success. Under `set -e` a bare failing command ends the script
+# before any later cleanup runs, so every failure path returns through its own `rm -f` and the
+# installer's status is captured rather than allowed to abort. A retry therefore never accumulates a
+# half-downloaded installer in $TMPDIR.
+download_and_run_installer() {
+  local url="$1" expected="$2" interpreter="$3"
+  local file status=0
+  file="$(mktemp "${TMPDIR:-/tmp}/openrig-installer.XXXXXX")"
+  echo "   fetching $url"
+  if ! curl -fsSL "$url" -o "$file"; then
+    rm -f "$file"
+    return 1
+  fi
+  if [[ -n "$expected" ]]; then
+    local actual
+    if ! actual="$(sha256sum "$file" | awk '{print $1}')"; then
+      echo "could not compute the SHA-256 of $url — sha256sum failed" >&2
+      rm -f "$file"
+      return 1
+    fi
+    if [[ "$actual" != "$expected" ]]; then
+      echo "refusing to run $url: SHA-256 is ${actual}, not the pinned ${expected}" >&2
+      rm -f "$file"
+      return 1
+    fi
+    echo "   sha256 ok: $actual"
+  else
+    echo "   WARNING: running $url unverified — pin it with the matching *_SHA256 variable to check the bytes"
+  fi
+  "$interpreter" "$file" || status=$?
+  rm -f "$file"
+  return "$status"
+}
 
 step "1/8 non-root openrig user (key-only)"
 if ! id -u openrig >/dev/null 2>&1; then
@@ -69,7 +117,7 @@ ufw status verbose
 
 step "4/8 Tailscale (tag:openrig-vps; no routes, no exit node, no ts-ssh)"
 if ! command -v tailscale >/dev/null 2>&1; then
-  curl -fsSL https://tailscale.com/install.sh | sh
+  download_and_run_installer https://tailscale.com/install.sh "$TS_INSTALL_SHA256" sh
 fi
 if [[ -n "$TS_AUTHKEY" ]]; then
   tailscale up --authkey "$TS_AUTHKEY" --advertise-tags=tag:openrig-vps --accept-routes=false
@@ -81,7 +129,7 @@ tailscale set --ssh=false >/dev/null 2>&1 \
 
 step "5/8 Node 22 + tmux (LTS — odd majors are refused by the CLI's ABI guard)"
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'process.versions.node.split(".")[0] % 2')" != "0" ]]; then
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  download_and_run_installer https://deb.nodesource.com/setup_22.x "$NODESOURCE_SETUP_SHA256" bash
   apt-get install -y -qq nodejs >/dev/null
 fi
 if ! command -v tmux >/dev/null 2>&1; then
