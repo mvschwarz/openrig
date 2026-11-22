@@ -23,6 +23,9 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
+import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
 
 // No test here may read a real Codex home: the fake io answers every native-thread read. The real resolver is watched for
 // the whole file, and any call fails the test that made it.
@@ -99,6 +102,9 @@ interface WorldOptions {
   launchWrapper?: string[];
   /** Build the resume command through the production CodexRuntimeAdapter (and SeatLaunchEnvironment when "env"). */
   realResumeBuilder?: "env" | "without_env";
+  /** A real Codex home: the running Codex and its session run on it, and the real resume builder brings that home's
+   *  config.toml to OpenRig's managed hooks block whenever it builds a restart's command (never a preview's). */
+  codexConfigHome?: string;
   /** Executables placed on the daemon launch PATH when realResumeBuilder === "env". */
   wrapperEnvBins?: string[];
   /** Shell-backed root shell process name (default "bash"). */
@@ -205,7 +211,7 @@ function world(options: WorldOptions = {}) {
       ? {}
       : { getDefaultShell: async () => (options.defaultShell === undefined ? "/bin/bash" : options.defaultShell) }),
     getSessionEnv: async (_s: string, key: string) =>
-      key === "CODEX_HOME" ? HOME
+      key === "CODEX_HOME" ? options.codexConfigHome ?? HOME
       : options.realResumeBuilder === "env" && key === "OPENRIG_NODE_ID" ? node.id
       : options.realResumeBuilder === "env" && key === "OPENRIG_SESSION_NAME" ? SEAT
       : options.realResumeBuilder === "env" && key === "OPENRIG_RUNTIME" ? "codex"
@@ -283,7 +289,16 @@ function world(options: WorldOptions = {}) {
         HOME,
       )
     : undefined;
-  const realBuilder = options.realResumeBuilder
+  const configHome = options.codexConfigHome;
+  const realBuilder = configHome
+    ? new CodexRuntimeAdapter({
+        tmux,
+        fsOps: { homedir: os.tmpdir(), readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
+          exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } },
+        codexHome: configHome, activityRelayPath: path.join(configHome, "activity-relay.cjs"),
+        resolveManagedConfigSettings: async () => ({ enabled: true, codexVersion: "0.155.1" }),
+      })
+    : options.realResumeBuilder
     ? new CodexRuntimeAdapter({
         tmux,
         fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {} },
@@ -334,7 +349,7 @@ function world(options: WorldOptions = {}) {
   const io: Partial<InPlaceRestartIo> = {
     readProcess: async (pid) => {
       if (relaunched) maybeThrow("readProcessAfter");
-      return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts();
+      return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts(options.codexConfigHome ? { env: { CODEX_HOME: options.codexConfigHome } } : {});
     },
     readThreadId: async (pid) => (pid === 200 ? options.threadId : undefined),
     // Always answered here, never by the real reader. With no evidence given, the fake readThreadId's answer, as a read
@@ -1993,5 +2008,69 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
     expect(w.calls).toEqual([]);
     expect(w.launches).toEqual([]);
     expect(w.events()).toEqual([]);
+  });
+});
+
+describe("rig provider assign's plan over a Codex seat", () => {
+  // #3625: the plan checks a Codex seat's restart with the restart preview (#3707), so it changes nothing, its Codex home's
+  // config.toml included; a check that built the restart's own command would bring that file to the managed hooks block.
+  const USER_CONFIG = '# user sentinel\nmodel = "fixture"\n';
+  const roots: string[] = [];
+  afterEach(() => { for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true }); });
+
+  function setup() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "assign-plan-preview-")); roots.push(root);
+    const home = path.join(root, "codex");
+    fs.mkdirSync(path.join(home, "auth-profiles"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(home, "auth-profiles", "team.json"), "synthetic", { mode: 0o600 });
+    fs.writeFileSync(path.join(home, "activity-relay.cjs"), "");
+    const config = path.join(home, "config.toml");
+    fs.writeFileSync(config, USER_CONFIG);
+    // The running Codex's arguments are the ones the real builder relaunches with, so the check gets as far as the command.
+    const w = world({ codexConfigHome: home, runningArgs: `-m gpt-5.5 -s workspace-write -c check_for_update_on_startup=false resume ${TOKEN}` });
+    new ProviderAccountRefsRepository(w.db).add({ provider: "codex", label: "team", codexHome: home, login: "team" });
+    const svc = new ProviderServiceImpl({ db: w.db, listRigs: () => w.db.prepare("SELECT id FROM rigs").all() as Array<{ id: string }>,
+      env: { HOME: root, CODEX_HOME: home }, platform: "linux",
+      claudePrecedence: async () => ({ conflicts: [], checked: [], notChecked: [] }) });
+    const seatRestart = { plan: (seat: string) => w.service.restartInPlace({ seatRef: seat, plan: true }), run: vi.fn() };
+    const plan = async () => {
+      const planned = await svc.assignmentPlan({ rig: "r", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" }, seatRestart as never);
+      if (!planned.ok) throw new Error(planned.message);
+      return planned.plan;
+    };
+    const before = fs.readFileSync(config);
+    const unchanged = () => {
+      expect(fs.readFileSync(config)).toEqual(before);
+      expect(fs.readFileSync(config, "utf8")).not.toContain("OPENRIG MANAGED");
+    };
+    return { w, home, plan, unchanged };
+  }
+
+  it("checks a seat it would switch with the preview, and leaves the home's config.toml byte-for-byte as it was", async () => {
+    const { w, plan, unchanged } = setup();
+    const p = await plan();
+    expect(p.rows).toEqual([expect.objectContaining({ seat: SEAT, effect: "change", precheck: { safe: true, reasons: [] } })]);
+    expect(w.previews).toEqual([true]);
+    unchanged();
+    expect(w.calls).toEqual([]);
+  });
+
+  it("checks an unchanged seat that restarts with the home the same way", async () => {
+    const { w, home, plan, unchanged } = setup();
+    const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
+    // Another seat of the rig on the same home switches it; this seat is on team as an earlier apply left it.
+    const other = new RigRepository(w.db).addNode(rigId, "dev.other", { runtime: "codex", cwd: "/work" });
+    new SessionRegistry(w.db).registerSession(other.id, "dev-other@r");
+    const repo = new ProviderAccountAssignmentsRepository(w.db);
+    repo.setIntent({ rigId, provider: "codex", label: "team", reference: "the login team", requestedBy: null, at: "t" });
+    repo.saveResult({ rigId, provider: "codex", nodeId: w.node.id, seat: SEAT, label: "team", kind: "switched", detail: "d", recovery: null,
+      activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome: home, login: "team" }, file: null, fileKind: null, codexHome: home, codexLogin: "team" } });
+    const p = await plan();
+    expect(p.rows.find((r) => r.seat === SEAT)).toMatchObject({ effect: "unchanged", asApplied: true, precheck: { safe: true, reasons: [] } });
+    expect(p.rows.find((r) => r.seat === "dev-other@r")).toMatchObject({ effect: "change" });
+    expect(w.previews.length).toBeGreaterThan(0);
+    expect(w.previews.every(Boolean)).toBe(true);
+    unchanged();
+    expect(w.calls).toEqual([]);
   });
 });
