@@ -427,6 +427,11 @@ export function sliceStatusBucket(raw: string | undefined): SliceStatus {
   return "active";
 }
 
+export type QueueCountRow = { state: string; tags: string | null };
+const QUEUE_COUNT_SQL = `SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`;
+// The same rows one rowid window at a time, for readRowsCooperatively. The count is per row, so their order is free.
+const QUEUE_COUNT_WINDOW_SQL = `SELECT state, tags FROM queue_items WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND tags LIKE '%slice:%'`;
+
 export class SliceIndexer {
   readonly projectId?: string;
   /** `projectId` and its declared former ids: the tags this indexer's project membership accepts. */
@@ -755,7 +760,11 @@ export class SliceIndexer {
   observedQueueCounts(
     entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
     resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
-    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean; canonicalProjectId?: (id: string) => string } = {},
+    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean; canonicalProjectId?: (id: string) => string;
+      /** Hands over the per-row count instead of running the statement: the caller runs it over rows it read itself
+       *  (readQueueCountRowsCooperatively, countQueueRowsCooperatively), filling the returned counts in place. It's
+       *  not called when there's nothing to count. */
+      deferRows?: (countRow: (row: QueueCountRow) => void) => void } = {},
   ): Map<string, SliceQueueCounts | null> {
     const result = new Map<string, SliceQueueCounts | null>();
     interface TargetScope {
@@ -908,54 +917,84 @@ export class SliceIndexer {
       return result;
     }
 
-    const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
-    runSyncSite("slices.queue_counts_scan", () => {
-      for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
-        if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
-        const scope = parseTypedQueueScope(row.tags);
-        if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
-        const taggedProject = scope.projects.values().next().value;
-        // A former id a catalogued project declares counts as that project (#3261).
-        const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
-        const firstSlice = scope.slices.values().next().value!;
-        const candidates = targetsBySliceToken.get(firstSlice);
-        if (!candidates) continue;
+    const countRow = (row: QueueCountRow): void => {
+      if (!KNOWN_QUEUE_STATES.has(row.state)) return;
+      const scope = parseTypedQueueScope(row.tags);
+      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) return;
+      const taggedProject = scope.projects.values().next().value;
+      // A former id a catalogued project declares counts as that project (#3261).
+      const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
+      const firstSlice = scope.slices.values().next().value!;
+      const candidates = targetsBySliceToken.get(firstSlice);
+      if (!candidates) return;
 
-        let uniqueMatch: TargetScope | null = null;
-        for (const target of candidates) {
-          if (rowProject !== undefined && target.projectId !== rowProject) continue;
-          let allSlicesMatch = true;
-          for (const slice of scope.slices) {
-            if (!target.sliceKeys.has(slice)) {
-              allSlicesMatch = false;
-              break;
-            }
-          }
-          if (!allSlicesMatch) continue;
-          let allMissionsMatch = true;
-          for (const mission of scope.missions) {
-            if (!target.missionKeys.has(mission)) {
-              allMissionsMatch = false;
-              break;
-            }
-          }
-          if (!allMissionsMatch) continue;
-          if (uniqueMatch) {
-            uniqueMatch = null;
+      let uniqueMatch: TargetScope | null = null;
+      for (const target of candidates) {
+        if (rowProject !== undefined && target.projectId !== rowProject) continue;
+        let allSlicesMatch = true;
+        for (const slice of scope.slices) {
+          if (!target.sliceKeys.has(slice)) {
+            allSlicesMatch = false;
             break;
           }
-          uniqueMatch = target;
         }
-
-        if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
-        uniqueMatch.counts[row.state as ObservedQueueState]++;
+        if (!allSlicesMatch) continue;
+        let allMissionsMatch = true;
+        for (const mission of scope.missions) {
+          if (!target.missionKeys.has(mission)) {
+            allMissionsMatch = false;
+            break;
+          }
+        }
+        if (!allMissionsMatch) continue;
+        if (uniqueMatch) {
+          uniqueMatch = null;
+          break;
+        }
+        uniqueMatch = target;
       }
+
+      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) return;
+      uniqueMatch.counts[row.state as ObservedQueueState]++;
+    };
+    if (candidateOptions.deferRows) {
+      candidateOptions.deferRows(countRow);
+      return result;
+    }
+    const rows = this.db.prepare(QUEUE_COUNT_SQL).iterate() as Iterable<QueueCountRow>;
+    runSyncSite("slices.queue_counts_scan", () => {
+      for (const row of rows) countRow(row);
     });
 
     return result;
   }
 
   // --- internals ---
+
+  /** observedQueueCounts' rows, read on their own read-only connection one rowid window at a time, yielding to the event
+   *  loop between windows (readRowsCooperatively), for a route to pass in as `rows` before its synchronous work. The
+   *  statement reads every row's tags, which sit past its body, in one stretch. Null when the read can't run this way
+   *  (a transaction, a memory database or a non-WAL file) or there's no tags column: the count then reads them itself. */
+  /** Runs a deferred count (observedQueueCounts' deferRows) over the rows in time-sized chunks, yielding to the event
+   *  loop between chunks, so counting a large queue's tagged rows isn't one synchronous stretch. A chunk ends once it
+   *  has run `targetMs`; each row is counted once, in order. */
+  async countQueueRowsCooperatively(rows: readonly QueueCountRow[], countRow: (row: QueueCountRow) => void, targetMs = 16): Promise<void> {
+    let next = 0;
+    while (next < rows.length) {
+      const started = performance.now();
+      do countRow(rows[next++]!);
+      while (next < rows.length && performance.now() - started < targetMs);
+      if (next < rows.length) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
+  async readQueueCountRowsCooperatively(): Promise<QueueCountRow[] | null> {
+    const file = cooperativeReadFile(this.db);
+    if (!file) return null;
+    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "tags")) return null;
+    return (await readRowsCooperatively<QueueCountRow>(file, "queue_items", QUEUE_COUNT_WINDOW_SQL, [])).rows;
+  }
 
   private readSliceLocations(): SliceLocation[] {
     return this.walkSliceLocations(false, [], undefined, this.missionId || undefined);
