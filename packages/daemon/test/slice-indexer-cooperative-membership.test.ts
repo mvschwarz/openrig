@@ -9,7 +9,7 @@
 // has to reproduce in JS; that a standalone read runs neither scan on the main handle and lets the event loop turn;
 // and where the synchronous path stays.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -168,6 +168,52 @@ describe("SliceIndexer cooperative membership", () => {
       expect(typed.indexOf("q-\u{1f600}")).toBeLessThan(typed.indexOf("q-～"));
     });
   }
+
+  it("the typed rows are put in SQLite's order with no allocation per comparison", async () => {
+    seedSlices();
+    insert(() => {
+      for (let i = 0; i < 2000; i++) {
+        insertRow(db, `q-${(i * 7919) % 2000}-${i}`, "x", tagList("slice:01-typed"), `2026-07-0${1 + (i % 3)}T00:00:00.000Z`);
+      }
+      // A tie on ts_created that UTF-16 order breaks the other way: U+FF5E against U+1F600, a surrogate pair.
+      insertRow(db, "q-～", "x", tagList("slice:01-typed"), "2026-07-09T00:00:00.000Z");
+      insertRow(db, "q-\u{1f600}", "x", tagList("slice:01-typed"), "2026-07-09T00:00:00.000Z");
+    });
+    const sync = internals(indexer()).ensureMembershipIndex(null);
+    const from = vi.spyOn(Buffer, "from");
+    try {
+      const cooperative = await internals(indexer()).readMembershipIndexCooperatively(file, null);
+      // The previous comparator made two Buffers per comparison: tens of thousands for these 2,002 rows.
+      expect(from).not.toHaveBeenCalled();
+      expect(cooperative).toEqual(sync);
+      expect(cooperative.typedBySlice.get("01-typed")!.slice(0, 2)).toEqual(["q-\u{1f600}", "q-～"]);
+    } finally {
+      from.mockRestore();
+    }
+  });
+
+  it("an invalidate() during a cooperative read answers that request and keeps nothing it cached", async () => {
+    seedSlices();
+    seedRows(13, 600);
+    const expected = indexer().get("02-plain");
+
+    // The control: with no invalidate() during the read, the record is cached and the next get() reads no scan.
+    const kept = indexer();
+    await kept.getCooperatively("02-plain");
+    expect((await preparedDuring(db, () => kept.get("02-plain"))).sql.filter(isMembershipScan)).toEqual([]);
+
+    const dropped = indexer();
+    const pending = dropped.getCooperatively("02-plain");
+    dropped.invalidate();
+    expect(await pending).toEqual(expected);
+    expect((await preparedDuring(db, () => dropped.get("02-plain"))).sql.filter(isMembershipScan)).toHaveLength(2);
+
+    const listed = indexer();
+    const listing = listed.withMembershipBatchCooperatively(() => listed.list());
+    listed.invalidate();
+    expect(await listing).toEqual(indexer().list());
+    expect((await preparedDuring(db, () => listed.list())).sql.filter(isMembershipScan)).toHaveLength(2);
+  });
 
   it("with a project selected, both builds count only that project's rows", async () => {
     seedSlices();

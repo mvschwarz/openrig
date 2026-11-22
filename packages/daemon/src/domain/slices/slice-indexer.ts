@@ -281,14 +281,32 @@ const FALLBACK_MEMBERSHIP_WINDOW_SQL = `SELECT qitem_id, body, tags FROM queue_i
 const FALLBACK_BODY_MEMBERSHIP_WINDOW_SQL = `SELECT qitem_id, body FROM queue_items WHERE ${WINDOW}`;
 
 /** SQLite's ascending order for one column value: NULL, then numbers, then text by its UTF-8 bytes (BINARY), then
- *  blobs by their bytes. */
+ *  blobs by their bytes. Nothing is allocated per comparison: the typed sort makes O(n log n) of them. */
 function compareSqliteValues(a: unknown, b: unknown): number {
   const rank = (v: unknown) => v === null || v === undefined ? 0 : typeof v === "number" || typeof v === "bigint" ? 1 : typeof v === "string" ? 2 : 3;
   const ra = rank(a), rb = rank(b);
   if (ra !== rb) return ra - rb;
   if (ra === 0) return 0;
   if (ra === 1) return (a as number) < (b as number) ? -1 : (a as number) > (b as number) ? 1 : 0;
-  return Buffer.compare(Buffer.from(a as string | Buffer), Buffer.from(b as string | Buffer));
+  if (ra === 2) return compareUtf8(a as string, b as string);
+  return Buffer.compare(a as Buffer, b as Buffer);
+}
+
+/** Two strings in the order of their UTF-8 bytes, which is code point order. UTF-16 unit order differs only where a
+ *  surrogate (U+D800-DFFF, half of a code point above U+FFFF) meets a unit in U+E000-FFFF: moving surrogates above
+ *  that range at the first differing unit gives code point order. */
+function compareUtf8(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    let x = a.charCodeAt(i), y = b.charCodeAt(i);
+    if (x === y) continue;
+    if (x >= 0xd800 && y >= 0xd800) {
+      x = x >= 0xe000 ? x - 0x800 : x + 0x2000;
+      y = y >= 0xe000 ? y - 0x800 : y + 0x2000;
+    }
+    return x - y;
+  }
+  return a.length - b.length;
 }
 
 /** Puts windowed typed rows in TYPED_MEMBERSHIP_SQL's order: ts_created DESC, then qitem_id DESC. */
@@ -427,6 +445,8 @@ export class SliceIndexer {
   private membershipIndex: MembershipIndex | null = null;
   // An index read cooperatively for the next build with the same served scope (getCooperatively).
   private preparedMembership: { served: Set<string> | null; index: MembershipIndex } | null = null;
+  // Counts invalidate() calls, so a cooperative read can tell that one landed during its awaits.
+  private invalidations = 0;
   // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
   private idAliases: SliceIdAliases | null = null;
   private missionAliases: MissionIdAliases | null = null;
@@ -486,6 +506,7 @@ export class SliceIndexer {
 
   /** Drops both caches. Used by tests + by a future explicit-refresh route. */
   invalidate(): void {
+    this.invalidations++;
     this.listingCache = null;
     this.detailCache.clear();
     this.missionStatusCache = null;
@@ -634,8 +655,7 @@ export class SliceIndexer {
     const cached = this.detailCache.get(name);
     const file = cached && cached.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
     if (!file || !this.findSliceLocation(name)) return this.get(name);
-    const served = new Set([name]);
-    return this.withPreparedMembership(served, await this.readMembershipIndexCooperatively(file, served), () => this.get(name));
+    return this.withCooperativeMembership(file, new Set([name]), () => this.get(name));
   }
 
   /** withMembershipBatch(), for a route whose batch starts with list(): when the listing isn't cached, the batch's
@@ -645,7 +665,21 @@ export class SliceIndexer {
     this.reconcileComposition();
     const file = this.listingCache && this.listingCache.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
     if (!file) return this.withMembershipBatch(fn);
-    return this.withPreparedMembership(null, await this.readMembershipIndexCooperatively(file, null), () => this.withMembershipBatch(fn));
+    return this.withCooperativeMembership(file, null, () => this.withMembershipBatch(fn));
+  }
+
+  /** Reads the membership index for `served` cooperatively, then runs `fn` with it as the next membership build. An
+   *  invalidate() during the read's awaits makes that index older than the caches `fn` fills: the request is still
+   *  answered from it, as of the read's start, and nothing it cached is kept. */
+  private async withCooperativeMembership<T>(file: string, served: Set<string> | null, fn: () => T): Promise<T> {
+    const invalidations = this.invalidations;
+    const index = await this.readMembershipIndexCooperatively(file, served);
+    if (invalidations === this.invalidations) return this.withPreparedMembership(served, index, fn);
+    try {
+      return this.withPreparedMembership(served, index, fn);
+    } finally {
+      this.invalidate();
+    }
   }
 
   /** Runs `fn` with `index` as the next membership build for `served`. The await that read it is over, so nothing
