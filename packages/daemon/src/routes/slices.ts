@@ -65,6 +65,8 @@ export function slicesRoutes(): Hono {
     // One request-local policy reader for every readiness in this response
     // (the listing and the project readiness below); never across requests.
     const readPolicy = createProofPolicyRead();
+    // The queue-count rows are read first, without holding the event loop; the count in the batch uses them.
+    const queueCountRows = await deps.indexer.readQueueCountRowsCooperatively();
     const listing = deps.indexer.withMembershipBatch(() => {
       const all = deps.indexer.list();
       let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
@@ -105,6 +107,7 @@ export function slicesRoutes(): Hono {
         additionalSliceRoots: projectLookup.additionalSliceRoots,
         complete: projectLookup.complete,
         canonicalProjectId: projectLookup.canonicalProjectId,
+        ...(queueCountRows ? { rows: queueCountRows } : {}),
       });
       const authored = deps.indexer.missionAuthoredStatuses();
       const parentRoots = new Map<string, ParentScopeNode[]>();

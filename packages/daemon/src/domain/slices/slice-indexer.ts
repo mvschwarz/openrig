@@ -21,6 +21,7 @@ import { parseScopeTags } from "./qitem-membership.js";
 import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 import { runSyncSite } from "../sync-site-wrap.js";
+import { cooperativeReadFile, readRowsCooperatively } from "../execution-candidate-reader.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
 
@@ -368,6 +369,11 @@ export function sliceStatusBucket(raw: string | undefined): SliceStatus {
   return "active";
 }
 
+type QueueCountRow = { state: string; tags: string | null };
+const QUEUE_COUNT_SQL = `SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`;
+// The same rows one rowid window at a time, for readRowsCooperatively. The count is per row, so their order is free.
+const QUEUE_COUNT_WINDOW_SQL = `SELECT state, tags FROM queue_items WHERE queue_items.rowid > ? AND queue_items.rowid <= ? AND tags LIKE '%slice:%'`;
+
 export class SliceIndexer {
   readonly projectId?: string;
   /** `projectId` and its declared former ids: the tags this indexer's project membership accepts. */
@@ -632,7 +638,9 @@ export class SliceIndexer {
   observedQueueCounts(
     entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
     resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
-    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean; canonicalProjectId?: (id: string) => string } = {},
+    candidateOptions: { additionalSliceRoots?: readonly string[]; complete?: boolean; canonicalProjectId?: (id: string) => string;
+      /** The scan's rows, already read (readQueueCountRowsCooperatively); without them the statement below reads them. */
+      rows?: Iterable<QueueCountRow> } = {},
   ): Map<string, SliceQueueCounts | null> {
     const result = new Map<string, SliceQueueCounts | null>();
     interface TargetScope {
@@ -785,9 +793,9 @@ export class SliceIndexer {
       return result;
     }
 
-    const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
+    const rows = candidateOptions.rows ?? this.db.prepare(QUEUE_COUNT_SQL).iterate() as Iterable<QueueCountRow>;
     runSyncSite("slices.queue_counts_scan", () => {
-      for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+      for (const row of rows) {
         if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
         const scope = parseTypedQueueScope(row.tags);
         if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
@@ -833,6 +841,18 @@ export class SliceIndexer {
   }
 
   // --- internals ---
+
+  /** observedQueueCounts' rows, read on their own read-only connection one rowid window at a time, yielding to the event
+   *  loop between windows (readRowsCooperatively), for a route to pass in as `rows` before its synchronous work. The
+   *  statement reads every row's tags, which sit past its body, in one stretch. Null when the read can't run this way
+   *  (a transaction, a memory database or a non-WAL file) or there's no tags column: the count then reads them itself. */
+  async readQueueCountRowsCooperatively(): Promise<QueueCountRow[] | null> {
+    const file = cooperativeReadFile(this.db);
+    if (!file) return null;
+    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "tags")) return null;
+    return (await readRowsCooperatively<QueueCountRow>(file, "queue_items", QUEUE_COUNT_WINDOW_SQL, [])).rows;
+  }
 
   private readSliceLocations(): SliceLocation[] {
     return this.walkSliceLocations(false, [], undefined, this.missionId || undefined);

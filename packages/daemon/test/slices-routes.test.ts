@@ -1770,6 +1770,25 @@ describe("GET /api/slices observed queue counts", () => {
     expect((await list(app, "?filter=closed")).map((s) => s.name).sort()).toEqual(["deferred", "superseded"]);
   });
 
+  it("on a WAL file, reads the count rows before the batch, off the main handle, with the same counts", async () => {
+    db.close();
+    db = createDb(path.join(root, "openrig.sqlite"));
+    migrate(db, ALL_MIGRATIONS);
+    addSlice("alpha", "shipping", "shared");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (const state of states) row("selected-" + state, state, ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("other-project", "failed", ["project:beta", "mission:shipping", "slice:shared"]);
+    // Several windows' worth of rows the count doesn't take.
+    for (let i = 0; i < 600; i++) row(`noise-${i}`, "done", null, "x".repeat(200));
+    const sql: string[] = [];
+    const original = db.prepare;
+    (db as unknown as { prepare: (s: string) => unknown }).prepare = (s: string) => { sql.push(s); return original.call(db, s); };
+    let entries: Entry[];
+    try { entries = await list(route("alpha").app); } finally { (db as unknown as { prepare: typeof original }).prepare = original; }
+    expect(entries[0]!.queueCounts).toEqual({ pending: 1, "in-progress": 1, done: 1, blocked: 1, failed: 1, denied: 1, canceled: 1, "handed-off": 1 });
+    expect(sql.filter((statement) => statement.startsWith("SELECT state, tags FROM queue_items"))).toEqual([]);
+  });
+
   it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {
     const dir = addSlice("alpha", "shipping", "shared", "shipped");
     addSlice("beta", "shipping", "shared");
