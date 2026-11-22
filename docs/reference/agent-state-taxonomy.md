@@ -70,6 +70,26 @@ the existing live-hook fallback in effect; lifecycle, startup, held and error si
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
 
+Claude's other `StopFailure` errors keep a typed reason in the legacy `agentActivity`
+field, with `state: unknown` and the raw `error` value in `rawSubtype`.
+`authentication_failed`, `oauth_org_not_allowed` and `cloud_credential_error` read
+`provider_auth_error`; `billing_error` and `account_on_hold` read
+`provider_billing_error`. The current occupant's last such failure raises attention
+until a hook shows a newer turn (a prompt, a question to a person, a `Stop` or
+`PostToolBatch`, or another `StopFailure`) or another occupant takes the seat; as for any
+hook, an occupant that can't be told shows nothing.
+Retention is bounded to the node's newest 200 activity records: a failure followed by 200 records that
+show no newer turn stops showing, even without a newer turn or occupant; this does not mean the account recovered.
+Claude's idle notification and the
+five-minute hook freshness window alone don't end it, and hook freshness is unchanged
+for everything else. The row serves that failure, with its original event time, over the cached pane
+reading, and the reason column names it. It says the last reported failure hasn't been
+superseded, not that OpenRig checked the account; a newer turn doesn't certify a repair.
+A newer picker or permission prompt in the pane outranks it, and a draft in the input box
+doesn't. These failures aren't a question, so they hold no send or wake. Any other value,
+documented or not, reads `provider_error`, stays with the pane reading and raises no
+attention.
+
 A handover whose successor started without a required file also raises attention. That's
 a projected guidance file or a guidance startup file marked `required` still missing from
 the guidance file, or, for a fresh or rebuild successor, a required `send_text` startup
