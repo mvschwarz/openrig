@@ -158,10 +158,10 @@ broadcast can duplicate the message.`)
       } catch (err) {
         // A timeout, or a connection lost after the request may have arrived: the fan-out may be running. A 2xx
         // answer that could not be read came after the fan-out ended (the route answers 2xx only then). A non-2xx
-        // one (the daemon's plain-text 500 when the route throws, possibly partway through) keeps the generic error.
-        const ended = err instanceof DaemonResponseError && err.status >= 200 && err.status < 300;
-        if (!ended && !(err instanceof DaemonConnectionError && requestMayHaveArrived(err))) throw err;
-        renderLocalBroadcastTimeout(err as Error, seatSender, Boolean(opts.json), ended);
+        // one (the daemon's plain-text 500 when the route throws) may come from a fan-out that stopped partway.
+        if (!(err instanceof DaemonResponseError) && !(err instanceof DaemonConnectionError && requestMayHaveArrived(err))) throw err;
+        const how = !(err instanceof DaemonResponseError) ? "running" : err.status >= 200 && err.status < 300 ? "ended" : "failed";
+        renderLocalBroadcastTimeout(err as Error, seatSender, Boolean(opts.json), how);
         process.exitCode = 1;
         return;
       }
@@ -232,10 +232,15 @@ async function runCrossHostBroadcast(
     timeoutMs: timeoutMs ?? BROADCAST_REMOTE_TIMEOUT_MS,
   });
 
+  const hint = result.ok || !result.outcomeUnknown ? undefined : seatSender
+    ? `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. A missing receipt is not proof of non-delivery: check each recipient's outcome on that host (its outbox) before resending only to the ones recorded as failed.`
+    : `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. It had no sender identity, so that host keeps no per-recipient record of it: check the recipients there with rig capture before resending to any.`;
+
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
       result,
+      ...(hint ? { hint } : {}),
     }));
     const results = ((result.data as Record<string, unknown> | undefined)?.["results"] as Array<{ ok: boolean }> | undefined) ?? [];
     if (!result.ok || ((result.data as Record<string, unknown> | undefined)?.["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) process.exitCode = 1;
@@ -243,9 +248,7 @@ async function runCrossHostBroadcast(
   }
 
   if (!result.ok) {
-    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, !result.outcomeUnknown ? undefined : seatSender
-      ? `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. A missing receipt is not proof of non-delivery: check each recipient's outcome on that host (its outbox) before resending only to the ones recorded as failed.`
-      : `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. It had no sender identity, so that host keeps no per-recipient record of it: check the recipients there with rig capture before resending to any.`);
+    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, hint);
     return;
   }
 
@@ -269,16 +272,21 @@ function parseTimeoutMs(value: string | undefined): number | undefined | null {
  * each recipient's outcome in the sender's outbox when it ends. Point there instead of a bare "outcome
  * UNKNOWN": resending the whole broadcast duplicates it at the recipients that already have it.
  */
-function renderLocalBroadcastTimeout(err: Error, seatSender: string | undefined, json: boolean, ended = false): void {
-  const consequence = ended
+function renderLocalBroadcastTimeout(err: Error, seatSender: string | undefined, json: boolean, how: "running" | "ended" | "failed"): void {
+  const ended = how === "ended";
+  const consequence = how === "ended"
     ? "The daemon went through the recipients, but its answer could not be read."
-    : "The broadcast may still be running: the daemon keeps going through the recipients after this command stops waiting.";
+    : how === "failed"
+      ? "The daemon answered with an error, possibly from a fan-out that stopped partway: some recipients may have the message, and this broadcast's per-recipient record may be missing."
+      : "The broadcast may still be running: the daemon keeps going through the recipients after this command stops waiting.";
   const outboxCommand = seatSender ? `rig queue outbox-list ${seatSender} --limit 1000` : undefined;
-  const action = outboxCommand
+  const action = how === "failed"
+    ? `Don't retry the whole broadcast: that can duplicate the message. Check the recipients with rig capture before resending to any${outboxCommand ? ` (rows in '${outboxCommand}' may be missing for this broadcast)` : ""}.`
+    : outboxCommand
     ? `Don't retry the whole broadcast: that can duplicate the message. Read each recipient's outcome with '${outboxCommand}' (this broadcast's rows are the newest, written when its fan-out ends); a missing receipt is not proof of non-delivery. Resend only to the recipients recorded as failed (rig send --to <a>,<b>); a retained one is held for its seat and is typed later (rig seat held-messages), and check any other with rig capture first.${ended ? "" : " Raise --timeout for a large fan-out."}`
     : `Don't retry the whole broadcast: that can duplicate the message. This broadcast had no sender identity, so the daemon keeps no per-recipient record of it: check the recipients with rig capture before resending to any.${ended ? "" : " Raise --timeout for a large fan-out."}`;
   if (json) {
-    console.log(JSON.stringify({ error: { fact: err.message, consequence, action, ...(outboxCommand ? { outboxCommand } : {}) } }));
+    console.log(JSON.stringify({ error: { fact: err.message, consequence, action, ...(outboxCommand && how !== "failed" ? { outboxCommand } : {}) } }));
     return;
   }
   console.error(err.message);

@@ -510,8 +510,17 @@ describe("Broadcast CLI", () => {
 
     it("an unreadable non-2xx answer, which can come from a fan-out that stopped partway, is not rendered as an ended one", async () => {
       const failed = () => ({ post: async () => { throw new DaemonResponseError(500, "Internal Server Error"); } }) as unknown as DaemonClient;
-      await expect(makeCmd({ ...runningDeps(port), clientFactory: failed }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]))
-        .rejects.toThrow("The daemon returned an unreadable response (HTTP 500).");
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: failed }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("HTTP 500");
+      expect(output).toContain("possibly from a fan-out that stopped partway");
+      expect(output).toContain("Don't retry the whole broadcast");
+      expect(output).toContain("Check the recipients with rig capture");
+      expect(output).not.toContain("went through the recipients");
+      expect(output).not.toContain("may still be running");
+      expect(exitCode).toBe(1);
     });
 
     it("a connection that never reached the daemon is not rendered as a running broadcast", async () => {
