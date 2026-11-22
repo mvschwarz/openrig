@@ -1,0 +1,106 @@
+name: macOS package tests
+
+# Runs the macOS package suites (daemon, cli) for a head a maintainer approved, not for every push. Both are
+# required checks, so a pull request's head merges only after an approval of that exact head starts this workflow
+# and both suites pass on it. A push after the approval leaves the new head without these checks until it is
+# approved again. scripts/ci-macos-ready-plan.mjs makes the decision, and scripts/ci-macos-ready-plan.test.mjs
+# tests it. The Linux suites stay in tests.yml and run on every push.
+# No provider credentials or operator configuration are supplied; the suites deny external networking.
+
+on:
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per approved head. A run already queued or running is never cancelled.
+  group: macos-package-tests-${{ github.event.pull_request.number || github.ref }}-${{ github.event.review.commit_id || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      head: ${{ steps.plan.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci-macos-ready-plan.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - id: plan
+        run: node scripts/ci-macos-ready-plan.mjs
+
+  package-tests:
+    needs: plan
+    # Each entry's check name comes from the plan: `package-tests (daemon)` and `package-tests (cli)` for an
+    # approval of the current head, otherwise one placeholder that is not a required check. No entry is skipped
+    # by a job-level condition, because a skipped job reports success.
+    name: ${{ matrix.check }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.package == 'daemon' && 90 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - if: matrix.package == 'none'
+        name: Nothing to test for this event
+        run: echo "The macOS package suites run for an approval of the pull request's current head; the plan job's summary says why this event didn't."
+      - if: matrix.package != 'none'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - if: matrix.package != 'none' && needs.plan.outputs.head != ''
+        name: Check that the checkout is the approved head merged into main
+        env:
+          APPROVED_HEAD: ${{ needs.plan.outputs.head }}
+        run: |
+          set -euo pipefail
+          tested=$(git rev-parse HEAD^2)
+          if [ "$tested" != "$APPROVED_HEAD" ]; then
+            echo "::error::This run checked out $tested, not the approved head $APPROVED_HEAD. Approve the current head to test it."
+            exit 1
+          fi
+      - if: matrix.package != 'none'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - if: matrix.package != 'none'
+        run: brew install tmux
+      - if: matrix.package != 'none'
+        run: npm ci
+      - if: matrix.package != 'none'
+        name: Build the packages the tests import
+        run: npm run build
+      - if: matrix.package != 'none'
+        name: Run the suite without ambient credentials or external network
+        run: |
+          suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
+          suite_root=$(cd "$suite_root" && pwd -P)
+          mkdir -p "$suite_root/home" "$suite_root/bin"
+          # Same system bytes, nonprivileged mode; no system file is changed.
+          /usr/bin/install -m 0755 /bin/ps "$suite_root/bin/ps"
+          # Only this job's temporary sockets (including tmux) are reachable.
+          env -i HOME="$suite_root/home" PATH="$PATH" TMPDIR="$suite_root" TMUX_TMPDIR="$suite_root" \
+            CI=true TERM=xterm-256color \
+            sandbox-exec -D IPC_ROOT="$suite_root" -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (subpath (param "IPC_ROOT")))' \
+            /bin/bash -s "${{ matrix.package }}" <<'SUITE'
+          set -euo pipefail
+          node scripts/ci-macos-process-probe.mjs
+          # The production readers use bare ps. Select real system bytes only after
+          # self/owned-child observation and network/IPC confinement are proved.
+          export PATH="$TMPDIR/bin:$PATH"
+          test "$(command -v ps)" = "$TMPDIR/bin/ps"
+          exec npm run test -w "packages/$1"
+          SUITE
