@@ -260,6 +260,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** #2940: relaunches a keep_alive seat that falls while the daemon runs. Started after the listener binds; stopped first. */
+  keepAliveSupervisor?: import("./domain/keep-alive-supervisor.js").KeepAliveSupervisor;
   /** The outbound network connector (`rig network`); started after the listener binds. */
   networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
@@ -1010,9 +1012,12 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
-    // The page is served as built. The UI takes its tokens from its address's fragment (#termToken=…&mcToken=…), given
-    // once by the person who holds them, and keeps them in that browser.
-    return c.html(fs.readFileSync(uiIndexPath, "utf-8"));
+    const indexHtml = fs.readFileSync(uiIndexPath, "utf-8");
+    const tokenScript = deps.terminalBearerToken
+      ? `<script>if(!window.localStorage.getItem("openrig.terminalBearerToken"))window.localStorage.setItem("openrig.terminalBearerToken",${JSON.stringify(deps.terminalBearerToken)})</script>`
+      : "";
+    const injected = tokenScript ? indexHtml.replace("</head>", `${tokenScript}</head>`) : indexHtml;
+    return c.html(injected);
   });
 
   return app;

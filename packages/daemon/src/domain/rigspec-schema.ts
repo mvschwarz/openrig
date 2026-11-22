@@ -73,7 +73,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges", "cold_start"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "pool", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "pool", "cwd", "restore_policy", "keep_alive",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env", "cold_start",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
@@ -696,6 +696,12 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   // #2829 slice 1 — opt-in queue-driven cold start for this seat
   if (member["cold_start"] !== undefined && typeof member["cold_start"] !== "boolean") {
     errors.push(`${prefix}.cold_start: must be a boolean`);
+  }
+
+  // #2940: keep_alive is a plain opt-in. Valid on every runtime, terminal included: the one-seat launch that recovers a
+  // seat relaunches a terminal too, and a fresh shell is its whole restore (it has no conversation to lose).
+  if (member["keep_alive"] !== undefined && typeof member["keep_alive"] !== "boolean") {
+    errors.push(`${prefix}.keep_alive: must be true or false (got ${JSON.stringify(member["keep_alive"])})`);
   }
 
   // agent_ref: must be local: or path: with correct shape (skip for terminal sentinel)
@@ -1401,6 +1407,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
+    ...(typeof m["keep_alive"] === "boolean" ? { keepAlive: m["keep_alive"] } : {}),
     // OPR.0.5.6.20 A5 — aliases normalize at ingestion; absent stays undefined so the
     // resolver's F-6 default remains the one authority for absence.
     compactionStrategy: m["compaction_strategy"] !== undefined

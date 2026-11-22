@@ -264,6 +264,17 @@ describe("typing guard modes", () => {
     expect(f.writes.filter(line => line.includes("send-keys"))).toHaveLength(0);
   });
 
+  // Managed compaction's lease (draftChecked) reaches an active protected seat; its writes still run draft-aware's checks.
+  // Any other lifecycle lease keeps the refusal.
+  it("a draft-checked lifecycle lease reaches an active protected seat, and its writes stay draft-checked", async () => {
+    const f = fixture(); await f.guard.set("a", { mode: "draft-aware" }, "operator", "keep my draft");
+    let effects = 0;
+    await f.guard.lifecycle(["a"], async () => { effects++; expect(f.guard.needsInputCheck("a")).toBe(true); }, [], { draftChecked: true });
+    expect(effects).toBe(1);
+    await expect(f.guard.lifecycle(["a"], async () => { effects++; })).rejects.toMatchObject({ code: "draft_aware_lifecycle" });
+    expect(effects).toBe(1);
+  });
+
   it("refuses lifecycle effects on an active protected seat but permits a fresh, owned launch", async () => {
     const f = fixture(); await f.guard.set("a", { mode: "draft-aware" }, "operator", "keep my draft");
     let effects = 0;

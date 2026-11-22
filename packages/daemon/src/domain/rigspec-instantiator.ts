@@ -332,7 +332,7 @@ import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS, poolAdvisories } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
-import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
+import { resolveAdvisorModel, resolveKeepAlive, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
@@ -967,7 +967,7 @@ export class PodRigInstantiator {
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
           // #3395: the first start keeps the stored pool block, as an ordinary launch does.
           pool: undefined, unusablePool: undefined,
-          permissionPolicy: undefined },
+          keepAlive: live.keepAlive === true, permissionPolicy: undefined },
         effortChoice: live.effortChoice ?? null, env: this.deps.rigRepo.getRigEnv(rigId),
         policyRef: live.permissionPolicy ?? null, rigPolicyRef: this.deps.rigRepo.getRigPermissionPolicy(rigId),
         policy: this.deps.rigRepo.getNodePolicyProvenance(nodeId), rigPolicy: this.deps.rigRepo.getRigPolicyProvenance(rigId) };
@@ -999,7 +999,8 @@ export class PodRigInstantiator {
     if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
     if (saved.policyRef !== (context.member.permissionPolicy ?? null)
       || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
-    const launched = await this.launchValidatedSpec(selected, source.root, rigId);
+    // #2940: the synthetic spec carries the seat's resolved keep_alive, not a declaration of the member's.
+    const launched = await this.launchValidatedSpec(selected, source.root, rigId, undefined, { authoredKeepAlive: false });
     if (!launched.ok) return failure(launched.code, "message" in launched ? launched.message : launched.errors.join("; "));
     const result = launched.result.nodes[0]!;
     if (changes.length) preflight.warnings.push(`First start uses the seat's current saved ${changes.join(", ")} instead of the materialized declaration.`);
@@ -1059,7 +1060,7 @@ export class PodRigInstantiator {
     rigRoot: string,
     targetRigId: string,
     cwdOverride?: string,
-    launchOpts?: { keepRecordedAdditions?: boolean },
+    launchOpts?: { keepRecordedAdditions?: boolean; authoredKeepAlive?: boolean },
   ): Promise<LaunchMaterializedOutcome> {
     const launchOrder = this.computePodLaunchOrder(rigSpec);
     const podWarnings: string[] = [];
@@ -1088,6 +1089,12 @@ export class PodRigInstantiator {
         continue;
       }
 
+      // #2940: an authored spec applied now is the member's current keep_alive declaration, as its launch rewrites the
+      // resolved value; the recipe an export reads keeps it. A synthetic spec built from the seat's saved settings
+      // (`authoredKeepAlive: false`) declares nothing.
+      if (launchOpts?.authoredKeepAlive !== false) {
+        try { this.deps.rigRepo.setNodeAuthoredKeepAlive(node.id, logicalId, memberContext.member.keepAlive); } catch { /* best-effort */ }
+      }
       const launched = await this.launchValidatedMember({
         createCwd: true,
         rigId: targetRigId,
@@ -1391,7 +1398,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "restore_policy", "cold_start"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "restore_policy", "cold_start", "keep_alive"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1421,9 +1428,11 @@ export class PodRigInstantiator {
     if (!config.ok) return refuse(config.errors.join("; "));
     // A seat whose first start failed before Advisor support recorded no Advisor, though its unchanged agent spec (the
     // hash above) may name one. Its retry keeps the launch it recorded: no Advisor, stored and launched alike. Any
-    // other Advisor difference changes the launch and is refused below.
-    const launchConfig = node.advisor == null && member.advisor === undefined && config.config.advisor != null
+    // other Advisor difference changes the launch and is refused below. #2940: the retry carries the seat's saved
+    // keep_alive, whatever the member now resolves: it is a recovery of the seat as it was, not a change to it.
+    const advisorKept = node.advisor == null && member.advisor === undefined && config.config.advisor != null
       ? { ...config, config: { ...config.config, advisor: undefined } } : config;
+    const launchConfig = { ...advisorKept, config: { ...advisorKept.config, keepAlive: node.keepAlive === true } };
     if (!same(launchConfig.config.model, node.model) || !same(launchConfig.config.effort, node.effort) || !same(launchConfig.config.advisor, node.advisor) || !same(launchConfig.config.cwd, node.cwd) || !same(launchConfig.config.restorePolicy, node.restorePolicy)) {
       return refuse("Resolved model, effort, advisor, cwd or restore policy differs from the failed first start.");
     }
@@ -1775,6 +1784,8 @@ export class PodRigInstantiator {
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
+            // #2940: the resolved value (member > profile > agent defaults), as for restore_policy.
+            keepAlive: configResult.config.keepAlive,
             podId,
             agentRef: member.agentRef,
             profile: member.profile,
@@ -2077,6 +2088,8 @@ export class PodRigInstantiator {
           label: member.label,
           // #3253: stored with the node, as for agent members, so a seat that never launches still shows its request.
           processLimits: effectiveProcessLimits(member.processLimits),
+          // #2940: a terminal has no agent spec, so the member's own value is the resolved one.
+          keepAlive: member.keepAlive === true,
           pool: memberPoolBlock(member),
         });
         recordCreated?.(rigId, node.id);
@@ -2146,15 +2159,24 @@ export class PodRigInstantiator {
     // Export and snapshot can run before launch. Resolve inherited Advisor values
     // during creation; launch still re-resolves the original spec for later edits.
     let advisor = resolveAdvisorModel(input.member.advisor);
-    if (advisor === undefined && input.member.agentRef !== "builtin:terminal") {
+    // #2940: keep_alive is stored resolved, like the Advisor. A member that declares it needs no agent spec.
+    let keepAlive = input.member.keepAlive ?? false;
+    const isAgent = input.member.agentRef !== "builtin:terminal";
+    if (isAgent && (advisor === undefined || input.member.keepAlive === undefined)) {
       const resolved = resolveAgentRef(input.member.agentRef, input.rigRoot, this.deps.fsOps);
-      if (!resolved.ok) {
-        throw new Error(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
+      const spec = resolved.ok ? resolved.resolved.spec : undefined;
+      const profile = spec?.profiles[input.member.profile];
+      if (advisor === undefined) {
+        // Unchanged: an Advisor that has to come from the agent spec needs that spec.
+        if (!resolved.ok) {
+          throw new Error(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
+        }
+        if (!profile) throw new Error(`Profile "${input.member.profile}" not found in spec "${spec!.name}"`);
+        advisor = resolveAdvisorModel(undefined, profile.preferences?.advisor, spec!.defaults?.advisor);
       }
-      const spec = resolved.resolved.spec;
-      const profile = spec.profiles[input.member.profile];
-      if (!profile) throw new Error(`Profile "${input.member.profile}" not found in spec "${spec.name}"`);
-      advisor = resolveAdvisorModel(undefined, profile.preferences?.advisor, spec.defaults?.advisor);
+      // An agent spec that can't be read here doesn't stop creation (it didn't before): the seat's launch resolves it
+      // again and stores the value (updateNodeResolvedConfig).
+      if (spec) keepAlive = resolveKeepAlive(spec, profile, input.member);
     }
     const node = this.deps.rigRepo.addNode(input.rigId, input.qualifiedId, {
       role: input.member.role,
@@ -2179,6 +2201,7 @@ export class PodRigInstantiator {
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
       restorePolicy: input.member.restorePolicy,
+      keepAlive,
       podId: input.podId,
       agentRef: input.member.agentRef,
       profile: input.member.profile,
@@ -2208,6 +2231,8 @@ export class PodRigInstantiator {
     processLimitsMode?: ProcessLimitsMode;
     createCwd?: boolean;
     launchCwd?: string;
+    beforeNativeDispatch?: () => boolean;
+    onSessionRegistered?: (sessionId: string) => void;
   }) {
     return this.launchBinding(input);
   }
@@ -2241,6 +2266,10 @@ export class PodRigInstantiator {
     createCwd?: boolean;
     /** A folder the person chose for this run (a restore's --cwd): the terminal starts there, not in the saved folder. */
     launchCwd?: string;
+    /** #2940: an agent seat's last read before its native dispatch (startNode's beforeNativeLaunch); absent asks nothing. */
+    beforeNativeDispatch?: () => boolean;
+    /** Told the new session's id as soon as its row is committed (NodeLauncher's onSessionRegistered). */
+    onSessionRegistered?: (sessionId: string) => void;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string;
     warnings?: string[]; retryable?: boolean; processLimits?: LaunchLimits }> {
     return input.member.agentRef === "builtin:terminal"
@@ -2262,6 +2291,12 @@ export class PodRigInstantiator {
       processLimitsMode?: ProcessLimitsMode;
       /** A restore run's `--cwd`, used ahead of the saved folder for this launch only; the saved folder is unchanged. */
       cwdOverride?: string;
+      /** #2940: asked again just before the native dispatch into the new shell (after configuration, shell and startup
+       *  preparation are awaited); false dispatches nothing and the launch fails as a refused native start does. */
+      beforeNativeDispatch?: () => boolean;
+      /** #2940: told the new session's id as soon as its row is committed, as a restore's own launch is, so daemon start's
+       *  automatic restore follows the session this replacement leaves (a keep_alive incident adopts it). */
+      onSessionRegistered?: (sessionId: string) => void;
     },
   ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     processLimits?: SeatProcessLimitsNotice }> {
@@ -2308,6 +2343,8 @@ export class PodRigInstantiator {
       // A restore's saved folder missing on this machine isn't recreated. A --cwd the person gave for this run is where the
       // terminal starts (the launch otherwise starts in the saved folder), and it's created if it isn't there yet.
       ...(opts?.cwdOverride ? { launchCwd: opts.cwdOverride, createCwd: true } : {}),
+      ...(opts?.beforeNativeDispatch ? { beforeNativeDispatch: opts.beforeNativeDispatch } : {}),
+      ...(opts?.onSessionRegistered ? { onSessionRegistered: opts.onSessionRegistered } : {}),
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
     // #3253: the recovery notice is what a restore reports; a fresh refusal's problem stays in the code and message.
@@ -2339,6 +2376,8 @@ export class PodRigInstantiator {
       ...(node.env !== null && node.env !== undefined ? { env: node.env } : {}),
       ...(node.cwd !== null ? { cwd: node.cwd } : {}),
       ...(node.restorePolicy !== null ? { restorePolicy: node.restorePolicy } : {}),
+      // #2940: the stored value is already resolved; carrying it as the member's keeps it across a restart.
+      keepAlive: node.keepAlive === true,
       ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
     };
   }
@@ -2537,6 +2576,8 @@ export class PodRigInstantiator {
     processLimitsMode?: ProcessLimitsMode;
     createCwd?: boolean;
     launchCwd?: string;
+    beforeNativeDispatch?: () => boolean;
+    onSessionRegistered?: (sessionId: string) => void;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -2705,6 +2746,7 @@ export class PodRigInstantiator {
       env: input.envOverride,
       pluginPaths: selectedPluginPaths(configResult.config.selectedResources),
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}),
+      ...(input.onSessionRegistered ? { onSessionRegistered: input.onSessionRegistered } : {}),
     });
     if (!launchResult.ok) {
       // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
@@ -2976,6 +3018,7 @@ export class PodRigInstantiator {
       isRestore: false,
       ...(forkSourceOpt ?? {}),
       ...(rebuildArtifactsOpt ?? {}),
+      ...(input.beforeNativeDispatch ? { beforeNativeLaunch: input.beforeNativeDispatch } : {}),
     });
 
     // Bump fork_count only on launch success. lastUsedAt already
@@ -3040,6 +3083,7 @@ export class PodRigInstantiator {
     processLimitsMode?: ProcessLimitsMode;
     createCwd?: boolean;
     launchCwd?: string;
+    onSessionRegistered?: (sessionId: string) => void;
   }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -3074,7 +3118,8 @@ export class PodRigInstantiator {
     if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, ...(input.createCwd ? { createCwd: true } : {}),
       ...(input.launchCwd ? { cwd: input.launchCwd } : {}), env: input.envOverride,
-      ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });
+      ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}),
+      ...(input.onSessionRegistered ? { onSessionRegistered: input.onSessionRegistered } : {}) });
     if (!launchResult.ok) {
       // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
       return { status: "failed", code: launchResult.code, error: launchResult.message,
@@ -3087,6 +3132,8 @@ export class PodRigInstantiator {
       this.db.prepare("UPDATE nodes SET restore_policy = ? WHERE id = ?")
         .run("checkpoint_only", input.nodeId);
     } catch { /* best-effort */ }
+    // #2940: a terminal's keep_alive is its member's own (it has no agent spec).
+    try { this.deps.rigRepo.setNodeKeepAlive(input.nodeId, input.member.keepAlive === true); } catch { /* best-effort */ }
 
     try {
       this.db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?")
@@ -3164,6 +3211,7 @@ export class PodRigInstantiator {
     nodeId: string,
     config: {
       restorePolicy: string;
+      keepAlive?: boolean;
       resolvedSpecName: string;
       resolvedSpecVersion: string;
       resolvedSpecHash: string;
@@ -3206,6 +3254,8 @@ export class PodRigInstantiator {
     } catch {
       /* best-effort */
     }
+    // #2940: the resolved keep_alive, written apart so an error above doesn't skip it.
+    try { this.deps.rigRepo.setNodeKeepAlive(nodeId, config.keepAlive === true); } catch { /* best-effort */ }
   }
 
   private buildTerminalResolvedStartupFiles(
