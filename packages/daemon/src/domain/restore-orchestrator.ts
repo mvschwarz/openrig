@@ -2516,7 +2516,7 @@ export class RestoreOrchestrator {
         // Keep the usable provisional shell when the callback exists but its
         // recipe/member inputs are unavailable. A callback being present alone
         // is not proof that a fresh launch can actually be attempted.
-        if (this.freshLaunchAvailable && !this.freshLaunchAvailable(rigId, node.id)) {
+        if (this.freshLaunchAvailable && !this.freshLaunchAvailable(rigId, launchResult.session.nodeId)) {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
           this.markHarnessNotStarted(rigId, launchResult.session.nodeId, launchResult.session.id, error);
@@ -2580,7 +2580,7 @@ export class RestoreOrchestrator {
           // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
           // applied doesn't stop the seat, and its notice is the node's. The replacement launches where the provisional
           // shell did: this run's `--cwd`, else the saved folder.
-          const fresh = await this.freshLaunch(rigId, node.id,
+          const fresh = await this.freshLaunch(rigId, launchResult.session.nodeId,
             { processLimitsMode: "recovery", ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
               ...(replacementNativeAllowed ? { beforeNativeDispatch: replacementNativeAllowed } : {}),
               ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(node.id, sessionId) } : {}) });
@@ -2668,7 +2668,7 @@ export class RestoreOrchestrator {
           // it is, an edited one is named, and a missing one whose recorded source is gone or has changed is not put back
           // with today's bytes. Only the rest is projected or installed. Nothing is re-resolved from today's spec. Native
           // resume replays nothing (sourceEntries is empty). The whole selection stays in the saved startup context.
-          const seatSkills = (replayCtx.runtime === "claude-code" || replayCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, node.id) : undefined;
+          const seatSkills = (replayCtx.runtime === "claude-code" || replayCtx.runtime === "codex") && !replayContained ? seatSkillPathsForNode(this.db, launchResult.session.nodeId) : undefined;
           let replaySkip: { entryIds: Set<string>; files: Set<string> } | undefined;
           if (seatSkills) {
             const replay = seatSkillReplay({ entries: filteredEntries, files: filteredFiles, paths: seatSkills,
@@ -2706,7 +2706,7 @@ export class RestoreOrchestrator {
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
             // (both restore paths consume persisted provenance — preflight surface 3).
-            launchPosture: this.resolveRestorePosture(node.id, rigId),
+            launchPosture: this.resolveRestorePosture(launchResult.session.nodeId, rigId),
             // OPR.0.4.6.PI1 VM leg finding: the restore binding dropped the
             // node's model declaration, so a resumed Pi seat relaunched with
             // no --model — and the runner's provider-key allowlist (keyed off
@@ -2726,7 +2726,8 @@ export class RestoreOrchestrator {
             const shouldLaunchHarness = isPodAware;
             const startupResult = await startupOrch.startNode({
               rigId,
-              nodeId: node.id,
+              // The live node, where the launch registered this session; the replay inputs stay the snapshot's.
+              nodeId: launchResult.session.nodeId,
               sessionId: launchResult.session.id,
               binding: binding as import("./runtime-adapter.js").NodeBinding,
               adapter,

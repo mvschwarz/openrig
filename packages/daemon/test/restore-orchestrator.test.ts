@@ -143,6 +143,7 @@ describe("RestoreOrchestrator", () => {
     omp?: OmpResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     freshLaunch?: RestoreOrchestratorDeps["freshLaunch"];
+    freshLaunchAvailable?: RestoreOrchestratorDeps["freshLaunchAvailable"];
     harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
@@ -156,6 +157,7 @@ describe("RestoreOrchestrator", () => {
       ompResume: opts?.omp,
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
+      freshLaunchAvailable: opts?.freshLaunchAvailable,
       seatSkillSelection: opts?.seatSkillSelection,
       harnessNotStartedNotice: opts?.harnessNotStartedNotice,
     });
@@ -2089,6 +2091,62 @@ describe("RestoreOrchestrator", () => {
     expect(freshLaunch).toHaveBeenCalled();
     expect(result.ok && result.result.nodes[0]!.status).toBe("failed");
     expect(sessionRegistry.getBindingForNode(live.id)).toMatchObject({ tmuxSession: "earlier-design-shell", tmuxPane: "%9" });
+  });
+
+  // A recreated seat restored fresh, with no saved startup context: the recipe check and the fresh launch look the seat up
+  // among the live rig's nodes, so they get its live node; the snapshot's id isn't there.
+  it("a recreated seat restored fresh checks and launches its live node", async () => {
+    const rig = rigRepo.createRig("recreated-fresh-ok-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-recreated-fresh-ok", rig.id, "Dev");
+    const saved = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-recreated-fresh-ok" });
+    const session = sessionRegistry.registerSession(saved.id, "r43-design");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(saved.id);
+    const live = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-recreated-fresh-ok" });
+    const freshLaunchAvailable = vi.fn((_rigId: string, nodeId: string) => nodeId === live.id);
+    const freshLaunch = vi.fn(async () => ({ status: "failed" as const, error: "recipe unavailable" }));
+    const adapter = { runtime: "claude-code", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })), launchHarness: vi.fn(async () => ({ ok: true as const })) };
+    await createOrchestrator({ freshLaunch, freshLaunchAvailable })
+      .restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.design"] });
+    expect(freshLaunchAvailable).toHaveBeenCalledWith(rig.id, live.id);
+    expect(freshLaunch).toHaveBeenCalledWith(rig.id, live.id, expect.anything());
+  });
+
+  // The replay of a recreated seat's saved startup context runs startup on its live node, where its launch registered the
+  // session. On the snapshot's id, startup's runtime check finds no session there and ends attention_required.
+  it("a recreated seat with a saved startup context resumes through the replay on its live node", async () => {
+    const rig = rigRepo.createRig("recreated-replay-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-recreated-replay", rig.id, "Dev");
+    const saved = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-recreated-replay" });
+    const session = sessionRegistry.registerSession(saved.id, "dev-impl@recreated-replay-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "resume-token-recreated");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+      .run(saved.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(saved.id);
+    db.prepare("DELETE FROM node_startup_context WHERE node_id = ?").run(saved.id);
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(saved.id);
+    const live = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-recreated-replay" });
+    expect(live.id).not.toBe(saved.id);
+    const adapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "resume-token-recreated", resumeType: "claude_id" })),
+    };
+    const result = await createOrchestrator({ listProcesses: nativeLineage("claude-code", "resume-token-recreated") })
+      .restore(snap.id, { adapters: { "claude-code": adapter } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(adapter.launchHarness).toHaveBeenCalled();
+    expect(result.result.nodes[0]).toMatchObject({ status: "resumed", nodeId: live.id });
   });
 
   it("restore_policy=resume_if_possible + claude_name -> Claude resume called", async () => {
