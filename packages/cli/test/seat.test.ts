@@ -94,6 +94,39 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it.each([undefined, "lead@test"])("retirement uses transport identity %s and sends only the required reason", async session => {
+    const previous = process.env.OPENRIG_SESSION_NAME;
+    try {
+      if (session === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = session;
+      const requests: Array<{ path: string; actor: string | null; body: unknown }> = [];
+      const deps: StatusDeps = { lifecycleDeps: mockLifecycleDeps(), clientFactory: url => new DaemonClient(url, {
+        fetchImpl: async (url, init) => {
+          requests.push({ path: new URL(String(url)).pathname, actor: new Headers(init?.headers).get("X-OpenRig-Session"), body: JSON.parse(String(init?.body)) });
+          return new Response(JSON.stringify({ entry: { deliveryState: "retired" } }), { status: 200 });
+        },
+      }) };
+      await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "retire-held-message", "worker@test", "held-1",
+        "--reason", "read outside the terminal", "--json"]).then(() => undefined));
+      expect(requests).toEqual([{ path: "/api/seat/retire-held-message/worker%40test/held-1", actor: session ?? null, body: { reason: "read outside the terminal" } }]);
+    } finally {
+      if (previous === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = previous;
+    }
+  });
+
+  it("retirement help explains attribution for both terminal paths and preserves the required reason", () => {
+    const cmd = seatCommand(makeDeps({ status: 200, data: {} }, [])).commands.find(c => c.name() === "retire-held-message")!;
+    let help = "";
+    cmd.configureOutput({ writeOut: text => { help += text; } });
+    cmd.outputHelp();
+    expect(help).toContain("OPENRIG_SESSION_NAME");
+    expect(help).toContain("unattributed (no seat identity)");
+    expect(help).toContain("--reason <text>");
+    expect(cmd.options.find(o => o.long === "--reason")?.required).toBe(true);
+    expect(cmd.options.find(o => o.long === "--reason")?.mandatory).toBe(true);
+  });
+
   it("shows body-free current and historical native recovery evidence in human and JSON seat status", async () => {
     const nativeInput = { input: true, wake: true, cancel: false, target: null,
       unresolved: [{ requestId: "uncertain", runId: "old", inCurrentRun: false, kind: "cancel", stage: "completed", outcome: "requested", destination: "dev@rig" }],
