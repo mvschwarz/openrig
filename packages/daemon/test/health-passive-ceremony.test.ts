@@ -315,6 +315,69 @@ it("screens on live and archived transitions together: a family split across the
   expect(t.projection.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 242, evaluated: 242, omitted: 0, partial: false, screened: 240, deepCandidates: 2 })]);
 });
 
+function archiveRows(t: Awaited<ReturnType<typeof setup>>, qitemId: string, where = "1 = 1", ...args: string[]) {
+  t.db.prepare(`INSERT INTO queue_transitions_archive (transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, archived_at)
+    SELECT transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, '2026-09-05T12:00:10.000Z' FROM queue_transitions WHERE qitem_id = ? AND ${where}`).run(qitemId, ...args);
+  t.db.prepare(`DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_id IN (SELECT transition_id FROM queue_transitions_archive WHERE qitem_id = ?) AND ${where}`).run(qitemId, qitemId, ...args);
+}
+const lineageIds = (t: Awaited<ReturnType<typeof setup>>) => t.projection.records().map((r) => r.ceremony!.lineageId).sort();
+const coverageOf = (t: Awaited<ReturnType<typeof setup>>) => t.projection.list({ limit: 200 }).coverage;
+
+it("discovers a family whose in-window transitions are all archived", async () => {
+  const t = await setup();
+  addFamilies(t, [24, 3]);
+  archiveRows(t, "family-000");
+  expect((t.db.prepare("SELECT COUNT(*) n FROM queue_transitions WHERE qitem_id = 'family-000'").get() as { n: number }).n).toBe(0);
+  expect(lineageIds(t)).toEqual(["family-000", "root"]);
+  expect(coverageOf(t)).toEqual([expect.objectContaining({ total: 3, evaluated: 3, omitted: 0, partial: false, screened: 1, deepCandidates: 2 })]);
+});
+
+it("counts a handed-off member that exists only in the archive toward its family", async () => {
+  const t = await setup();
+  addFamilies(t, [10]);
+  t.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body,handed_off_from) VALUES('family-000-child','2026-09-05T11:59:00.000Z','2026-09-05T11:59:00.000Z','a@rig','b@rig','pending',?,'child','family-000')")
+    .run(JSON.stringify(["mission:mission", "slice:slice-1"]));
+  const add = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES('family-000-child',?,'pending','a@rig')");
+  for (let k = 0; k < 15; k++) add.run(new Date(Date.parse("2026-09-05T11:59:00.000Z") + k * 1000).toISOString());
+  archiveRows(t, "family-000-child");
+  expect(lineageIds(t)).toEqual(["family-000", "root"]);
+});
+
+it("counts a qitem stored in both tables once, with both counts summed, and ignores archived rows outside the window", async () => {
+  const t = await setup();
+  addFamilies(t, [24, 10]);
+  archiveRows(t, "family-000", "ts < ?", "2026-09-05T11:59:12.000Z");
+  const live = (t.db.prepare("SELECT COUNT(*) n FROM queue_transitions WHERE qitem_id = 'family-000'").get() as { n: number }).n;
+  expect(live).toBe(12);
+  // family-001 has 10 live rows and 15 archived rows far outside the window: it must not qualify.
+  const old = t.db.prepare("INSERT INTO queue_transitions_archive (transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, archived_at) VALUES(?,?,?,'pending',NULL,'a@rig',NULL,NULL,'2026-09-05T12:00:10.000Z')");
+  for (let k = 0; k < 15; k++) old.run(9_000_000 + k, "family-001", new Date(Date.parse("2026-01-01T00:00:00.000Z") + k * 1000).toISOString());
+  expect(lineageIds(t)).toEqual(["family-000", "root"]);
+  expect(coverageOf(t)).toEqual([expect.objectContaining({ total: 3, evaluated: 3, omitted: 0, partial: false, screened: 1, deepCandidates: 2 })]);
+});
+
+it("reads a schema without an archive table from the live table alone", async () => {
+  const t = await setup();
+  addFamilies(t, [24, 3]);
+  t.db.exec("DROP TABLE queue_transitions_archive");
+  // A queue built on a schema with no archive, as an old database presents it.
+  const queue = new QueueRepository(t.db, new EventBus(t.db));
+  const source = new PassiveCeremonySource(t.workspace, queue, t.policy, () => "2026-09-05T12:00:30.000Z");
+  const read = new HealthProjectionService(source, () => t.policy.read(), delegatedPostureFixture);
+  expect(read.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(["family-000", "root"]);
+  expect(read.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 3, evaluated: 3, omitted: 0, partial: false })]);
+});
+
+it("throws on the combined live and archived discovery past 2000 qitems, and accepts exactly 2000", async () => {
+  const t = await setup();
+  addFamilies(t, Array<number>(1999).fill(1));
+  for (let i = 1000; i < 1999; i++) archiveRows(t, `family-${String(i).padStart(3, "0")}`);
+  expect(() => t.source.read()).not.toThrow();
+  addFamilies(t, [1], "extra");
+  archiveRows(t, "extra-000");
+  expect(() => t.source.read()).toThrow("health_passive_queue_window_truncated");
+});
+
 it("a family that does not qualify on counted transitions stays evaluated, and a real stale family stays a finding", async () => {
   const t = await setup();
   addFamilies(t, [...Array<number>(240).fill(2), 25]);

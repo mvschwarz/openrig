@@ -58,10 +58,10 @@ export class PassiveCeremonySource implements HealthObservationSource {
     this.lineageRows = undefined;
     const now = this.now(); const p = this.policy.read().policy;
     const start = new Date(Date.parse(now) - p.observationWindowSeconds * 1000).toISOString();
-    const touched = this.queue.db.prepare("SELECT qitem_id AS id, COUNT(*) AS n FROM queue_transitions WHERE ts >= ? AND ts <= ? GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001").all(start, now) as Array<{ id: string; n: number }>;
+    // Retention moves old transitions to the archive and the deep read counts those too, so discovery and screening
+    // read both: each qitem once, with its live and archived in-window transitions summed.
+    const touched = this.discoverTouched(start, now);
     if (touched.length > 2000) throw new Error("health_passive_queue_window_truncated");
-    // Retention moves old transitions to the archive, and the deep read counts those too, so screening does as well.
-    const archived = this.archivedWindowCounts(touched.map((item) => item.id), start, now);
     type Member = { qitemId: string; handedOffFrom: string | null; tags: string[] };
     const roots = new Map<string, Member>();
     const members = new Map<string, Set<string>>();
@@ -86,7 +86,7 @@ export class PassiveCeremonySource implements HealthObservationSource {
           roots.set(row.qitemId, row);
           if (!members.has(row.qitemId)) members.set(row.qitemId, new Set());
           members.get(row.qitemId)!.add(item.id);
-          activity.set(row.qitemId, (activity.get(row.qitemId) ?? 0) + item.n + (archived.get(item.id) ?? 0));
+          activity.set(row.qitemId, (activity.get(row.qitemId) ?? 0) + item.n);
           break;
         }
         row = get(row.handedOffFrom);
@@ -226,14 +226,14 @@ export class PassiveCeremonySource implements HealthObservationSource {
     return observations;
   }
 
-  /** In-window archived transitions per qitem: one grouped read over the archive's (qitem_id, ts) index, none when the schema has no archive. */
-  private archivedWindowCounts(ids: string[], start: string, end: string): Map<string, number> {
-    const counts = new Map<string, number>();
-    if (!ids.length || !this.queue.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'queue_transitions_archive'").get()) return counts;
-    const rows = this.queue.db.prepare(`SELECT qitem_id AS id, COUNT(*) AS n FROM queue_transitions_archive WHERE qitem_id IN (${ids.map(() => "?").join(",")}) AND ts >= ? AND ts <= ? GROUP BY qitem_id`)
-      .all(...ids, start, end) as Array<{ id: string; n: number }>;
-    for (const row of rows) counts.set(row.id, row.n);
-    return counts;
+  /** Every qitem with a transition in the window, live or archived, with its combined count. At most 2001 rows. */
+  private discoverTouched(start: string, end: string): Array<{ id: string; n: number }> {
+    const hasArchive = !!this.queue.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'queue_transitions_archive'").get();
+    // A side with more than 2000 distinct qitems already exceeds the combined limit, so each side stops at 2001.
+    const side = (table: string) => `SELECT qitem_id, COUNT(*) AS n FROM ${table} WHERE ts >= ? AND ts <= ? GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001`;
+    if (!hasArchive) return this.queue.db.prepare(side("queue_transitions").replace("qitem_id,", "qitem_id AS id,").replace("ORDER BY qitem_id", "ORDER BY id")).all(start, end) as Array<{ id: string; n: number }>;
+    return this.queue.db.prepare(`SELECT qitem_id AS id, SUM(n) AS n FROM (SELECT qitem_id, n FROM (${side("queue_transitions")}) UNION ALL SELECT qitem_id, n FROM (${side("queue_transitions_archive")}))
+      GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001`).all(start, end, start, end) as Array<{ id: string; n: number }>;
   }
 
   /** The whole handoff family under a root, dormant members included (the window only knows the touched ones), down
