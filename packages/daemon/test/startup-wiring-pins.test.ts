@@ -34,6 +34,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 // What production startup hands the watchdog's delivery and two of its policies, recorded on the way through to the
 // real factories (nothing else changes): their queue-only seams are closures with no other handle.
@@ -366,6 +367,44 @@ describe("the seat-pool executor's composition (#3395)", () => {
     } finally {
       route.mockRestore(); obligations.mockRestore(); list.mockRestore(); held.mockRestore();
       custody.mockRestore(); seatState.mockRestore(); cycle.mockRestore();
+    }
+  });
+});
+
+describe("the seat-pool drain's composition (#3395)", () => {
+  it("Startup composes the seat-pool drain with the delivery guard's lifecycle lease, the snapshot capture's `auto-rehydrate` kind and the seat lifecycle service's checked stop.", async () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const drain = (composed.seatPoolExecutor[0]!.deps as SeatPoolExecutorDeps).drain;
+    expect(drain).toBeDefined();
+
+    // a node of its own, with a running session, so the delivery guard resolves it
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("pin-drain");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.drain", { runtime: "claude-code", podId: pod.id });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(node.id, "dev-drain@pin-drain").id, "running");
+
+    const lifecycle = vi.spyOn(deps.tmuxAdapter.deliveryGuard!, "lifecycle");
+    const capture = vi.spyOn(deps.snapshotCapture, "captureSnapshot").mockReturnValue({ id: "snap-pin" } as never);
+    const stop = vi.spyOn(SeatLifecycleService.prototype, "stopSeat")
+      .mockResolvedValue({ ok: false, code: "stop_uncertain", message: "m", partialEffect: true });
+    try {
+      // the delivery guard's lifecycle lease
+      expect(await drain!.lifecycle([node.id], async () => "ran")).toBe("ran");
+      expect(lifecycle).toHaveBeenCalledWith([node.id], expect.any(Function));
+      // the snapshot capture, as an auto-rehydrate snapshot of the rig
+      expect(drain!.capture(rig.id)).toEqual({ snapshotId: "snap-pin" });
+      expect(capture).toHaveBeenCalledWith(rig.id, "auto-rehydrate");
+      // the checked stop: the expected session is passed through, and a refusal keeps its code, message and partial effect
+      const expected = { nodeId: node.id, sessionId: "session-1" };
+      expect(await drain!.stopSeat({ seatRef: "dev-drain@pin-drain", reason: "r", expected }))
+        .toEqual({ ok: false, code: "stop_uncertain", message: "m", partialEffect: true });
+      expect(stop).toHaveBeenCalledWith({ seatRef: "dev-drain@pin-drain", reason: "r", operator: null, expected });
+      stop.mockResolvedValueOnce({ ok: true } as never);
+      expect(await drain!.stopSeat({ seatRef: "dev-drain@pin-drain", reason: "r", expected })).toEqual({ ok: true });
+    } finally {
+      lifecycle.mockRestore(); capture.mockRestore(); stop.mockRestore();
     }
   });
 });

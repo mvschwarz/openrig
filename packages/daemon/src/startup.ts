@@ -176,6 +176,7 @@ import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
@@ -2590,8 +2591,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
-    // the seats' activity and the rig's events; it runs only through the policy.
+    // the seats' activity and the rig's events, and the drain's effects: the delivery guard's lifecycle lease, the
+    // `auto-rehydrate` capture and the checked seat stop; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
+    const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
       db,
       rigRepo,
@@ -2603,6 +2606,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       seatState: (nodeId) => seatActivityService.getSeatState(nodeId),
       custody: (nodeIds, fn) => deliveryGuard.custody(nodeIds, fn),
       now: () => new Date(),
+      drain: {
+        lifecycle: (nodeIds, fn) => deliveryGuard.lifecycle(nodeIds, fn),
+        capture: (rigId) => ({ snapshotId: snapshotCapture.captureSnapshot(rigId, "auto-rehydrate").id }),
+        stopSeat: async ({ seatRef, reason, expected }) => {
+          const stopped = await seatPoolStops.stopSeat({ seatRef, reason, operator: null, expected });
+          if (stopped.ok) return { ok: true, ...(stopped.alreadyDown ? { alreadyDown: true as const, ...(stopped.message ? { message: stopped.message } : {}) } : {}) };
+          return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
+        },
+      },
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;

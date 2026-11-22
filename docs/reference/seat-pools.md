@@ -46,6 +46,7 @@ members of the rig.
 
 Once armed, each evaluation of the job reads the pool afresh: the model's stored block, its slot rows, each pool
 agent's latest session, its activity, its open rows and its held messages, and the rows waiting for the model.
+Under `drain: true`, nothing is moved.
 
 - **Moving waiting rows.** A pending row addressed to the model (with `dispatch_tag`, only a row carrying the tag) that
   has waited `dispatch_after_s` is moved to a free pool agent: in phase `live`, its latest session running, idle at its
@@ -60,7 +61,35 @@ agent's latest session, its activity, its open rows and its held messages, and t
 - **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
   evaluation, up to one more interval later. That is not a dispatch deadline: a row moves only to an agent that is
   free when it is checked, so with more waiting rows than free agents, the rest stay pending for later evaluations.
-- **Holds.** The whole pool is held, and nothing is moved, while:
+- **Draining free agents.** When the pool holds more agents than it wants (above `min` and the work waiting, or every
+  agent under `drain: true`), the extra free agents are drained, the newest first. An agent drains only once it has
+  sat free and idle at its prompt for `idle_grace_s`, and outside the `cooldown_s` after the latest drain. Under
+  `drain: true` the cooldown is skipped but the grace is not: each agent drains only after it has been free and idle
+  for `idle_grace_s`. That is the behaviour at this stage. A drain:
+  - decides under the model's custody lease, checking the agent again, and marks its slot `draining`;
+  - then, under the agent's lifecycle lease, reads the agent again: a row or a held message that reached it, or a
+    wake since the evaluation read it, sends the slot back to `live` and nothing is stopped; an agent relaunched since
+    then is left alone;
+  - captures an `auto-rehydrate` snapshot of the rig while the agent still runs, right before the stop. A capture that
+    fails stops nothing: the slot stays `draining` for that evaluation and goes back to `live` in the next;
+  - stops the agent with the checked seat stop (the seat stop given an expected node and session), which stops it
+    only while its latest session is still the one the evaluation read.
+
+  What the stop returned goes in the notes as `stop.result`, never two at once:
+
+  | `stop.result` | When | The slot |
+  | --- | --- | --- |
+  | `stopped` | The stop succeeded. | `drained` |
+  | `absent` | The stop found the session absent in tmux (`session_not_live`, or a `keep_alive` seat already down): a confirmed absence, not a stop. | `drained` |
+  | `changed_owner` | The seat or its latest session changed before anything was stopped (`selection_changed`). | `live` |
+  | `unconfirmed` | Anything else, with the real code and message (for example `stop_uncertain`). | `draining`. When the stop attempted a kill, the next evaluation stops the same session again, with no new capture, once the agent is free (an agent that still runs and got work or a wake is not stopped); a session relaunched since is `changed_owner`. When the stop had no effect, the next evaluation gives the slot back to `live`, and a later drain starts again with a new capture. |
+
+  A drained agent keeps its node, its sessions and its history: nothing is removed. `rig up` leaves it stopped.
+  Bringing a drained agent back is done by a later change.
+- **After `pool: {}`.** Clearing the block on re-apply leaves the job running: it drains the free agents with the
+  block it was last ensured with (`context.pool`), leaves busy agents `live` until they are free, and ends
+  (`terminal`) once every agent is `drained`.
+- **Holds.** The whole pool is held, and nothing is moved or drained, while:
   - the job is not `active` (stopped by an operator, or ended);
   - the stored block can't be read (the notes carry an advisory; nothing is removed);
   - the rig's latest `rig.stopped` has no `restore.completed` after it. Any later `restore.completed` ends the hold,
@@ -79,9 +108,9 @@ agent's latest session, its activity, its open rows and its held messages, and t
 
 Deleting a model node removes its slot rows but leaves its agent nodes and sessions as ordinary members of the rig,
 so their pool association and any phase or hold kept only on a slot go with it. Recreating a model with the same name
-doesn't recover its former slot numbers. While the model node is gone, its job moves nothing and reports
+doesn't recover its former slot numbers. While the model node is gone, its job moves and drains nothing and reports
 `held: model node gone`.
 
 ## What the job does not do yet
 
-It does not add agents, drain them or bring drained agents back.
+It does not add agents or bring drained agents back.
