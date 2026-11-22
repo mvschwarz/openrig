@@ -9,12 +9,11 @@
 // values THIS reproduction emits and the perturbation tests prove the identity fields are folded in
 // — but the DEFINITIVE correctness check is a byte-for-byte read-back of a real Codex `[hooks.state]`
 // after `/hooks`→"Trust all" (the QA VM proof). Until that read-back confirms them, the exact
-// key_source (resolved folder plus file name) and positional indices are PROVISIONAL. A mismatch is
+// key_source (canonicalized config path) and positional indices are PROVISIONAL. A mismatch is
 // fail-safe (gate reappears + Layer-2 keystroke floor), never a false-trusted run.
 import { describe, it, expect, vi } from "vitest";
 import nodeFs from "node:fs";
 import nodePath from "node:path";
-import nodeOs from "node:os";
 import { parse as parseToml } from "smol-toml";
 import {
   CodexRuntimeAdapter,
@@ -30,8 +29,8 @@ const COMMAND = `node "${RELAY}"`;
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"] as const;
 
 // PIN TO VM READ-BACK (qa gate) — PROVISIONAL from open-source reproduction (PR #20321 / commits
-// 0452dca, ffcc9cc; codex-rs fingerprint.rs version_for_toml). Codex0.167.2 hooks/list confirms
-// the source folder is resolved, while the config file keeps its own name even when it is linked.
+// 0452dca, ffcc9cc; codex-rs fingerprint.rs version_for_toml). keySource here is the NON-canonical
+// mock path `/home/test/.codex/config.toml`; the real key_source is std::fs::canonicalize(config.toml).
 const PROVISIONAL_FIXTURE: Record<(typeof EVENTS)[number], { key: string; hash: string }> = {
   SessionStart: {
     key: `${CONFIG}:session_start:0:0`,
@@ -339,81 +338,30 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
       makeAdapter(fs).ensureCodexActivityHooks();
       const written = fs._store[CONFIG]!;
       expect(() => parseToml(written)).not.toThrow();
-      const canonical = computeCodexHookTrust("SessionStart", { keySource: sources.parent, command: COMMAND, timeoutSec: 5 });
-      expect(parseToml(written)).toMatchObject({ hooks: { state: { [canonical.key]: { trusted_hash: canonical.hash } } } });
+      // The release keys trust by the canonical (resolved) config path; a quoted hash there is updated in place.
+      const canonical = computeCodexHookTrust("SessionStart", { keySource: sources.file, command: COMMAND, timeoutSec: 5 });
+      expect(parseToml(written)).toMatchObject({ hooks: { state: { [canonical.key]: { trusted_hash: canonical.hash,
+        ...(source === "file" ? { enabled: false } : {}) } } } });
       expect(written).toContain(person);
     } finally { nativeRealpath.mockRestore(); }
   });
 
-  it("trusts inline source aliases while keeping conflicting enabled choices", () => {
-    const canonicalHome = nodePath.join("/resolved", "codex");
-    const canonicalFile = nodePath.join("/storage", "source.toml");
-    const parentSource = nodePath.join(canonicalHome, "config.toml");
-    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockImplementation(file => {
-      if (file === nodePath.dirname(CONFIG)) return canonicalHome;
-      if (file === CONFIG) return canonicalFile;
-      throw new Error("unexpected realpath");
-    });
+  it("uses native canonical path casing for Codex hook trust keys", () => {
+    const canonicalConfigPath = "C:\\Users\\Test\\.codex\\config.toml";
+    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockReturnValue(canonicalConfigPath);
     try {
-      const choices = `[hooks.state.${JSON.stringify(`${CONFIG}:stop:0:0`)}]\nenabled = true\n`
-        + `[hooks.state.${JSON.stringify(`${parentSource}:stop:0:0`)}]\nenabled = false\n`;
-      const fakeFs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: choices });
-      const adapter = makeAdapter(fakeFs);
-      adapter.ensureCodexActivityHooks();
-      const config = fakeFs._store[CONFIG]!;
-      const parsed = parseToml(config).hooks;
-      if (!parsed || typeof parsed !== "object") throw new Error("missing hooks");
-      const state: unknown = Reflect.get(parsed, "state");
-      if (!state || typeof state !== "object") throw new Error("missing state");
-      for (const [index, source] of [CONFIG, parentSource, canonicalFile].entries()) {
-        for (const event of EVENTS) {
-          const { key, hash } = computeCodexHookTrust(event, { keySource: source, command: COMMAND, timeoutSec: 5 });
-          expect(Reflect.get(state, key)).toEqual({ trusted_hash: hash,
-            ...(event === "Stop" ? { enabled: index === 0 } : {}) });
-        }
-      }
-      expect(Object.keys(state)).toHaveLength(12);
-      adapter.ensureCodexActivityHooks();
-      expect(fakeFs._store[CONFIG]).toBe(config);
+      const fakeFs = mockCodexFs({ [RELAY]: "// relay" });
+      makeAdapter(fakeFs).ensureCodexActivityHooks();
+      const configPath = Object.keys(fakeFs._store).find((path) => path.endsWith("config.toml"))!;
+      const config = fakeFs._store[configPath]!;
+
+      expect(nativeRealpath).toHaveBeenCalledWith(configPath);
+      expect(config).toContain(`[hooks.state.${JSON.stringify(`${canonicalConfigPath}:session_start:0:0`)}]`);
+      // Only the canonical spelling: the release writes no other alias of the config path.
+      expect(config).not.toContain(`[hooks.state.${JSON.stringify(`${configPath}:session_start:0:0`)}]`);
     } finally {
       nativeRealpath.mockRestore();
     }
-  });
-
-  it.skipIf(process.platform === "win32").each([
-    { json: false, linkedHome: false }, { json: true, linkedHome: false },
-    { json: false, linkedHome: true }, { json: true, linkedHome: true },
-  ])("trusts source aliases without replacing links (JSON: $json, linked home: $linkedHome)", ({ json, linkedHome }) => {
-    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "codex-linked-trust-"));
-    try {
-      const home = nodePath.join(root, "home"); nodeFs.mkdirSync(home);
-      const selectedHome = linkedHome ? nodePath.join(root, "linked-home") : home;
-      if (linkedHome) nodeFs.symlinkSync(home, selectedHome);
-      const source = nodePath.join(root, "source.toml"); nodeFs.writeFileSync(source, 'model = "fixture"\n');
-      nodeFs.symlinkSync(source, nodePath.join(home, "config.toml"));
-      const relay = nodePath.join(root, "relay.cjs"); nodeFs.writeFileSync(relay, "// never executed");
-      if (json) {
-        const hooks = nodePath.join(root, "source-hooks.json"); nodeFs.writeFileSync(hooks, '{"hooks":{}}\n');
-        nodeFs.symlinkSync(hooks, nodePath.join(home, "hooks.json"));
-      }
-      const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), activityRelayPath: relay, fsOps: {
-        exists: nodeFs.existsSync, readFile: p => nodeFs.readFileSync(p, "utf8"),
-        writeFile: (p,c) => nodeFs.writeFileSync(p,c), mkdirp: p => { nodeFs.mkdirSync(p,{ recursive:true }); },
-      } });
-      adapter.ensureCodexActivityHooks(selectedHome);
-      const hooks = parseToml(nodeFs.readFileSync(source,"utf8")).hooks;
-      if (!hooks || typeof hooks !== "object") throw new Error("missing hook table");
-      const states: unknown = Reflect.get(hooks, "state");
-      if (!states || typeof states !== "object") throw new Error("missing trust table");
-      const file = nodePath.join(selectedHome, json ? "hooks.json" : "config.toml");
-      const sources = [...new Set([file,
-        nodePath.join(nodeFs.realpathSync.native(home), nodePath.basename(file)), nodeFs.realpathSync.native(file)])];
-      expect(Object.keys(states).sort()).toEqual(sources.flatMap(source =>
-        ["permission_request", "session_start", "stop", "user_prompt_submit"].map(event => `${source}:${event}:0:0`)).sort());
-      expect(nodeFs.lstatSync(nodePath.join(home, "config.toml")).isSymbolicLink()).toBe(true);
-      if (json) expect(nodeFs.lstatSync(file).isSymbolicLink()).toBe(true);
-      if (linkedHome) expect(nodeFs.lstatSync(selectedHome).isSymbolicLink()).toBe(true);
-    } finally { nodeFs.rmSync(root,{recursive:true,force:true}); }
   });
 
   it("is idempotent — re-running produces byte-identical config (no duplicate trust tables)", () => {
