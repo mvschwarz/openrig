@@ -59,6 +59,152 @@ describe("continuity policy materializer (S20 P4)", () => {
     });
   });
 
+  describe("an operator-stopped notice stands (#3579 R1)", () => {
+    const stored = (plan: ReturnType<typeof materializeContinuityPolicy>, index: number, over: Record<string, unknown>) => ({
+      jobId: `job-${index}`,
+      state: "active" as const,
+      terminalReason: null,
+      specYaml: plan.jobs[index]!.specYaml,
+      requiresJobId: null as string | null,
+      watchedFilePath: plan.jobs[index]!.watchedFilePath ?? null,
+      thresholdBytes: plan.jobs[index]!.thresholdBytes ?? null,
+      intervalSeconds: plan.jobs[index]!.intervalSeconds,
+      activeWakeIntervalSeconds: plan.jobs[index]!.activeWakeIntervalSeconds ?? null,
+      scanIntervalSeconds: plan.jobs[index]!.scanIntervalSeconds ?? null,
+      registeredBySession: plan.jobs[index]!.registeredBySession,
+      ...over,
+    });
+    const MANAGED = { ...CLAUDE_SEAT, compactionStrategy: "managed-compaction" as const, mechanic: undefined };
+    const NEW_OCCUPANT_FILE = "/tmp/advice-lead-new-occupant.jsonl";   // the restore or fresh launch's transcript: not the stopped job's file
+
+    it("keeps a stopped single job whose watched file is another occupant's: nothing retired, nothing registered", () => {
+      const register = vi.fn();
+      const markTerminal = vi.fn();
+      const plan = materializeContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE });
+      const stopped = stored(plan, 0, { state: "stopped", terminalReason: "operator_stopped", watchedFilePath: "/tmp/advice-lead-old-occupant.jsonl" });
+
+      const armed = armContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE }, { register, markTerminal, listExactTuple: () => [stopped] });
+
+      expect(armed.map((job) => job.jobId)).toEqual(["job-0"]);
+      expect(register).not.toHaveBeenCalled();
+      expect(markTerminal).not.toHaveBeenCalled();
+    });
+
+    it("keeps a stopped apprentice pair whose watched file is another occupant's", () => {
+      const register = vi.fn();
+      const markTerminal = vi.fn();
+      const seat = { ...CLAUDE_SEAT, watchedFilePath: NEW_OCCUPANT_FILE };
+      const plan = materializeContinuityPolicy(seat);
+      const old = "/tmp/advice-lead-old-occupant.jsonl";
+      const prepare = stored(plan, 0, { state: "stopped", terminalReason: "operator_stopped", watchedFilePath: old });
+      const cutover = stored(plan, 1, { state: "stopped", terminalReason: "operator_stopped", watchedFilePath: old, requiresJobId: "job-0" });
+
+      const armed = armContinuityPolicy(seat, { register, markTerminal, listExactTuple: () => [prepare, cutover] });
+
+      expect(armed.map((job) => job.jobId)).toEqual(["job-0", "job-1"]);
+      expect(register).not.toHaveBeenCalled();
+      expect(markTerminal).not.toHaveBeenCalled();
+    });
+
+    it("control: an ACTIVE job watching another occupant's file is still retired and registered afresh", () => {
+      const register = vi.fn().mockReturnValue({ jobId: "fresh-job" });
+      const markTerminal = vi.fn();
+      const plan = materializeContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE });
+      const active = stored(plan, 0, { watchedFilePath: "/tmp/advice-lead-old-occupant.jsonl" });
+
+      armContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE }, { register, markTerminal, listExactTuple: () => [active] });
+
+      expect(markTerminal).toHaveBeenCalledWith("job-0", "continuity_policy_reconciled");
+      expect(register).toHaveBeenCalledTimes(1);
+    });
+
+    describe("an apprentice pair with only one job operator-stopped (Helios, 9a7d3b7)", () => {
+      const OLD = "/tmp/advice-lead-old-occupant.jsonl";
+      const pair = (seat: Record<string, unknown>, stopWhich: "prepare" | "cutover" | "none", over: Record<string, unknown> = {}) => {
+        const plan = materializeContinuityPolicy(seat as never);
+        const stop = { state: "stopped", terminalReason: "operator_stopped" };
+        return [
+          stored(plan, 0, { watchedFilePath: OLD, ...(stopWhich === "prepare" ? stop : {}) }),
+          stored(plan, 1, { watchedFilePath: OLD, requiresJobId: "job-0", ...(stopWhich === "cutover" ? stop : {}), ...over }),
+        ];
+      };
+      for (const stopWhich of ["prepare", "cutover"] as const) {
+        for (const [label, watchedFilePath] of [["a transcript not written yet (null)", undefined], ["the new occupant's transcript", NEW_OCCUPANT_FILE]] as const) {
+          it(`keeps the pair when only the ${stopWhich} job is stopped and the path is ${label}: nothing retired, nothing registered, the stop is still the stop`, () => {
+            const register = vi.fn();
+            const markTerminal = vi.fn();
+            const seat = { ...CLAUDE_SEAT, watchedFilePath };
+            const jobs = pair(seat, stopWhich);
+
+            const armed = armContinuityPolicy(seat, { register, markTerminal, listExactTuple: () => jobs });
+
+            expect(armed.map((job) => job.jobId)).toEqual(["job-0", "job-1"]);
+            expect(register).not.toHaveBeenCalled();
+            expect(markTerminal).not.toHaveBeenCalled();
+            expect(armed.map((job) => (job as { state: string }).state)).toEqual(stopWhich === "prepare" ? ["stopped", "active"] : ["active", "stopped"]);
+          });
+        }
+      }
+      it("control: the same pair with NO job stopped and another occupant's file is still retired and registered afresh", () => {
+        const register = vi.fn().mockReturnValue({ jobId: "fresh-job" });
+        const markTerminal = vi.fn();
+        const seat = { ...CLAUDE_SEAT, watchedFilePath: NEW_OCCUPANT_FILE };
+
+        armContinuityPolicy(seat, { register, markTerminal, listExactTuple: () => pair(seat, "none") });
+
+        expect(markTerminal).toHaveBeenCalledWith("job-0", "continuity_policy_reconciled");
+        expect(markTerminal).toHaveBeenCalledWith("job-1", "continuity_policy_reconciled");
+        expect(register).toHaveBeenCalledTimes(2);
+      });
+      it("control: a pair with one job stopped but the other of a different shape (another threshold) is still replaced", () => {
+        const register = vi.fn().mockReturnValue({ jobId: "fresh-job" });
+        const markTerminal = vi.fn();
+        const seat = { ...CLAUDE_SEAT, watchedFilePath: NEW_OCCUPANT_FILE };
+
+        armContinuityPolicy(seat, { register, markTerminal, listExactTuple: () => pair(seat, "prepare", { thresholdBytes: 1 }) });
+
+        expect(markTerminal).toHaveBeenCalledWith("job-0", "continuity_policy_reconciled");
+        expect(markTerminal).toHaveBeenCalledWith("job-1", "continuity_policy_reconciled");
+        expect(register).toHaveBeenCalledTimes(2);
+      });
+      it("control: a cutover that does not depend on the prepare job is not a pair, even with one job stopped", () => {
+        const register = vi.fn().mockReturnValue({ jobId: "fresh-job" });
+        const markTerminal = vi.fn();
+        const seat = { ...CLAUDE_SEAT, watchedFilePath: NEW_OCCUPANT_FILE };
+
+        armContinuityPolicy(seat, { register, markTerminal, listExactTuple: () => pair(seat, "prepare", { requiresJobId: "some-other-job" }) });
+
+        expect(register).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it("R2: arming a seat that is not Claude (the default strategy) plans nothing and retires a job an earlier Claude start left behind", () => {
+      const register = vi.fn();
+      const markTerminal = vi.fn();
+      const claudePlan = materializeContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE });
+      const leftBehind = stored(claudePlan, 0, {});
+
+      const armed = armContinuityPolicy({ ...MANAGED, runtime: "codex", compactionStrategy: "default-compaction" as const, watchedFilePath: NEW_OCCUPANT_FILE },
+        { register, markTerminal, listExactTuple: () => [leftBehind] });
+
+      expect(armed).toEqual([]);
+      expect(register).not.toHaveBeenCalled();
+      expect(markTerminal).toHaveBeenCalledWith("job-0", "continuity_policy_reconciled");
+    });
+
+    it("control: a stopped job of a different shape (another threshold) is still retired", () => {
+      const register = vi.fn().mockReturnValue({ jobId: "fresh-job" });
+      const markTerminal = vi.fn();
+      const plan = materializeContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE });
+      const stopped = stored(plan, 0, { state: "stopped", terminalReason: "operator_stopped", thresholdBytes: 1 });
+
+      armContinuityPolicy({ ...MANAGED, watchedFilePath: NEW_OCCUPANT_FILE }, { register, markTerminal, listExactTuple: () => [stopped] });
+
+      expect(markTerminal).toHaveBeenCalledWith("job-0", "continuity_policy_reconciled");
+      expect(register).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("reuses one complete nonterminal materialized pair instead of duplicating it on relaunch", () => {
     const register = vi.fn();
     const plan = materializeContinuityPolicy(CLAUDE_SEAT);

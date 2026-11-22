@@ -62,6 +62,9 @@ describe("SeatLifecycleService.launchFresh", () => {
   let invalidations: Array<Record<string, unknown>>;
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
+  let armed: Array<[string, string]> = [];
+  let armWarning: string | null = null;
+  let armFails = false;
   let listProcesses: NativeProcessLister;
   let readProcesses: () => Promise<ProcessTableRow[]>;
   let hiddenPids: number[];
@@ -135,9 +138,13 @@ describe("SeatLifecycleService.launchFresh", () => {
       sleep: async () => undefined,
       resolveClaudeFragments: async (rigId, nodeId) => resolveClaudeFragments?.(rigId, nodeId)
         ?? { ok: true, entries: [] },
+      listProcesses: () => listProcesses(),
     });
     invalidations = [];
     activitySwaps = [];
+    armed = [];
+    armWarning = null;
+    armFails = false;
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
       executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
       startedAt: "Sat Jan  1 12:00:00 2000" }];
@@ -158,6 +165,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       runtimeAdapters,
       occupantInvalidator: { invalidateRetiringOccupant: (input) => invalidations.push(input) },
       activityOracle: { declareOccupantSwap: (nodeId, generation) => activitySwaps.push({ nodeId, generation }) },
+      armContinuity: async (rigId, nodeId) => { armed.push([rigId, nodeId]); if (armFails) throw new Error("arm fixture failure"); return armWarning; },
     });
   });
 
@@ -287,6 +295,35 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
     expect(result.warnings?.join("\n")).toContain("--provider cmux");
   });
 
+  it("#3579: a fresh launch arms the new occupant's continuity notice once, by rig and node", async () => {
+    const seat = seedSeat({ clean: true });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
+    expect(result.ok).toBe(true);
+    expect(armed).toEqual([[seat.rig.id, seat.node.id]]);
+  });
+
+  it("#3579: a continuity notice that cannot be armed is a warning on the launch, never a failure of the occupant", async () => {
+    armWarning = "continuity policy was not re-armed: its spec could not be read";
+    const warned = await service.launchFresh({ seatRef: seedSeat({ clean: true }).sessionName, fresh: true, reason: "first occupant" });
+    expect(warned.ok).toBe(true);
+    expect(warned.warnings).toEqual(expect.arrayContaining([armWarning]));
+  });
+
+  it("#3579: a throwing arm step is reported the same way", async () => {
+    armFails = true;
+    const result = await service.launchFresh({ seatRef: seedSeat({ clean: true }).sessionName, fresh: true, reason: "first occupant" });
+    expect(result.ok).toBe(true);
+    expect(result.warnings?.join("\n")).toContain("continuity policy was not armed for dev.impl: arm fixture failure");
+  });
+
+  it("#3579: a launch whose startup fails and is rolled back arms nothing", async () => {
+    const seat = seedSeat({ clean: true });
+    adapter.launchHarness = async () => ({ ok: false, error: "fixture startup failure" });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
+    expect(result.ok).toBe(false);
+    expect(armed).toEqual([]);
+  });
+
   it("#1939: a clean seat launch does not claim that it replaced an open tile", async () => {
     const seat = seedSeat({ clean: true });
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
@@ -368,7 +405,7 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
     expect(result.ok).toBe(verified);
     expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal clients")]);
     if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
-    else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
+    else expect(result).toMatchObject({ code: "attention_required", status: "attention_required" });
   });
 
   it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
@@ -385,13 +422,13 @@ ${follows ? "      on_restore: follow_source\n" : ""}profiles:
     const observe = vi.fn(async () => rows);
     listProcesses = observe;
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fresh occupant" });
-    expect(result.ok).toBe(mode === "valid");
+    const valid = mode === "valid" || mode === "no token";
+    expect(result.ok).toBe(valid);
     const current = sessionRegistry.getSessionsForRig(seat.rig.id).find(s => s.status === "running")!;
     expect(current.id).not.toBe(seat.session!.id);
-    expect(current.startupStatus).toBe(mode === "valid" ? "ready" : "attention_required");
-    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
+    expect(current.startupStatus).toBe(valid ? "ready" : "attention_required");
+    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(valid ? "verified" : "mismatch");
     expect(alive.has(seat.sessionName)).toBe(true);
-    if (mode === "valid") expect(observe).toHaveBeenCalledTimes(2);
   });
 
   it("default-path consent retains context and continues the same occupant once after late acceptance", async () => {

@@ -106,6 +106,9 @@ function validateLifecycle(raw: unknown, prefix: string): { errors: string[]; ad
   if (obj["restore_policy"] !== undefined && !VALID_RESTORE_POLICIES.has(obj["restore_policy"] as string)) {
     errors.push(`${prefix}.restore_policy: must be one of ${[...VALID_RESTORE_POLICIES].join(", ")} (got "${obj["restore_policy"]}")`);
   }
+  if (obj["keep_alive"] !== undefined && typeof obj["keep_alive"] !== "boolean") {
+    errors.push(`${prefix}.keep_alive: must be true or false (got ${JSON.stringify(obj["keep_alive"])})`);
+  }
   return { errors, advisories };
 }
 
@@ -463,6 +466,9 @@ function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
     restorePolicy: raw["restore_policy"] !== undefined
       ? (raw["restore_policy"] as LifecycleDefaults["restorePolicy"])
       : undefined,
+    // #2940: absent stays absent at every level, the defaults one included (off is the resolver's default), so a spec
+    // without keep_alive normalizes exactly as before.
+    ...(typeof raw["keep_alive"] === "boolean" ? { keepAlive: raw["keep_alive"] } : {}),
   };
 }
 

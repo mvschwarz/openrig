@@ -35,6 +35,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator, rollupRestoreRigResult, snapshotLaunchOutcome } from "../src/domain/restore-orchestrator.js";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { noticeLine, TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
@@ -146,6 +147,7 @@ describe("RestoreOrchestrator", () => {
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     freshLaunch?: RestoreOrchestratorDeps["freshLaunch"];
     harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
+    armContinuity?: RestoreOrchestratorDeps["armContinuity"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -161,6 +163,7 @@ describe("RestoreOrchestrator", () => {
       seatSkillSelection: opts?.seatSkillSelection,
       resolveClaudeFragments: opts?.resolveClaudeFragments,
       harnessNotStartedNotice: opts?.harnessNotStartedNotice,
+      armContinuity: opts?.armContinuity,
     });
   }
 
@@ -723,6 +726,31 @@ describe("RestoreOrchestrator", () => {
     expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.id).toBe(replacement.id);
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it("#3579 a resumed seat gets its continuity notice armed once, by rig and node", async () => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const armed: Array<[string, string]> = [];
+    const orch = createOrchestrator({ claude: mockClaudeResume(), listProcesses: nativeLineage("claude-code", "carried-conversation"),
+      armContinuity: async (rigId, nodeId) => { armed.push([rigId, nodeId]); return null; } });
+    const first = await orch.launchSingleNode(original.rigId, "lead");
+    expect(first.launched?.[0]?.status).toBe("resumed");
+    expect(armed).toEqual([[original.rigId, first.launched![0]!.nodeId]]);
+  });
+
+  it("#3579 a continuity notice that cannot be armed warns on the restore and leaves the resumed seat resumed", async () => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const orch = createOrchestrator({ claude: mockClaudeResume(), listProcesses: nativeLineage("claude-code", "carried-conversation"),
+      armContinuity: async () => "continuity policy was not re-armed for node x: its spec could not be read" });
+    const result = await orch.launchSingleNode(original.rigId, "lead");
+    expect(result.launched?.[0]?.status).toBe("resumed");
+    expect(JSON.stringify(result)).toContain("continuity policy was not re-armed for node x");
   });
 
   it.each(["intact ledger", "pruned predecessor"])("#1822 resumes the second named agent after a periodic capture between separate launches (%s)", async (mode) => {
@@ -2207,7 +2235,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.nodes[0]?.status).toBe("attention_required");
-    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch" });
+    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId))
+      .toEqual({ verdict: failure === "process-error" ? "tmux_unavailable" : "mismatch" });
     expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
@@ -2397,7 +2426,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it.each([null, "node"])(
-    "keeps a native resume partial when the joined pane command is ambiguous (%s)",
+    "keeps a native resume partial when the joined pane does not prove identity (%s)",
     async (command) => {
       const snap = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -2413,10 +2442,18 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       expect(result.result.rigResult).toBe("partially_restored");
       expect(result.result.nodes[0]!.status).toBe("attention_required");
-      expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
-      expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
-      expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
-        .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+      expect(result.result.nodes[0]!.error).toContain("no replacement was started");
+      const verdict = db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
+        .get(result.result.nodes[0]!.nodeId);
+      if (command === null) {
+        expect(result.result.nodes[0]!.error).toContain("foreground command of tmux pane");
+        expect(result.result.nodes[0]!.error).toContain("could not be read");
+        expect(verdict).toEqual({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+      } else {
+        expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
+        expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
+        expect(verdict).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+      }
     },
   );
 
@@ -2773,12 +2810,19 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("restore.started: exact payload in DB", async () => {
+  it("`rig up` persists `restore.started` before it launches any node (the existing exact-payload assertion, extended).", async () => {
     const snap = seedRigAndSnapshot({
-      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }, { logicalId: "helper", role: "worker", runtime: "claude-code" }],
       edges: [],
     });
-    const orch = createOrchestrator();
+    const tmux = mockTmux();
+    // At each launch, how many restore.started rows are already in the database.
+    const startedAtLaunch: number[] = [];
+    tmux.createSession = vi.fn(async () => {
+      startedAtLaunch.push((db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.started'").get() as { n: number }).n);
+      return { ok: true as const };
+    }) as unknown as TmuxAdapter["createSession"];
+    const orch = createOrchestrator({ tmux });
     await orch.restore(snap.id);
 
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.started'").all() as { payload: string }[];
@@ -2786,6 +2830,202 @@ describe("RestoreOrchestrator", () => {
     const payload = JSON.parse(events[0]!.payload);
     expect(payload.rigId).toBe(snap.data.rig.id);
     expect(payload.snapshotId).toBe(snap.id);
+    expect(startedAtLaunch).toEqual([1, 1]);
+  });
+
+  describe("a seat pool agent the pool drained (#3395 Piece 1)", () => {
+    const AT = "2026-11-18T10:00:00.000Z";
+    const KEPT = "drained pool agent, not started";
+
+    // A model and one pool agent, both stopped by rig down after the snapshot; the agent's slot is in `phase`.
+    function seedPool(phase: "drained" | "live", opts: { resumeTenure?: boolean; agentCheckpoint?: boolean } = {}) {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }, { logicalId: "dev.impl-s1", role: "worker", runtime: "claude-code" }],
+        edges: [], resumeType: "claude_name", resumeToken: "conv-x", restorePolicy: "resume_if_possible",
+        ...(opts.agentCheckpoint ? { withCheckpoint: "dev.impl-s1" } : {}),
+      });
+      const nodes = rigRepo.getRig(snap.rigId)!.nodes;
+      const model = nodes.find((node) => node.logicalId === "dev.impl")!;
+      const agent = nodes.find((node) => node.logicalId === "dev.impl-s1")!;
+      let snapshot = snap;
+      if (opts.resumeTenure) {
+        // The agent's last tenure is a resume: a second session of the same generation took over the conversation.
+        const first = sessionRegistry.getSessionsForRig(snap.rigId).find((sess) => sess.nodeId === agent.id)!;
+        sessionRegistry.markIntentionallyStopped(first.id);
+        const generation = sessionRegistry.currentOccupantTenure(agent.id)!.generationUuid;
+        const resumed = sessionRegistry.registerSession(agent.id, "r99-dev.impl-s1-r", "initial", generation);
+        sessionRegistry.updateStatus(resumed.id, "running");
+        db.prepare("UPDATE sessions SET resume_type = 'claude_name', resume_token = 'conv-x', restore_policy = 'resume_if_possible' WHERE id = ?")
+          .run(resumed.id);
+        snapshot = snapshotCapture.captureSnapshot(snap.rigId, "manual");
+      }
+      for (const sess of sessionRegistry.getSessionsForRig(snap.rigId)) {
+        if (sess.status === "running") sessionRegistry.markIntentionallyStopped(sess.id);
+      }
+      new SeatPoolSlotsRepository(db).insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase, at: AT });
+      return { snapshot, model, agent };
+    }
+    const sessionsOf = (nodeId: string) => db.prepare("SELECT * FROM sessions WHERE node_id = ? ORDER BY created_at, id").all(nodeId);
+    // The model resumes its own conversation, so the rest of the rig comes back whole.
+    const orchestrator = (tmux?: TmuxAdapter) => createOrchestrator({ tmux, listProcesses: nativeLineage("claude-code", "conv-x") });
+
+    it("An idle agent the pool drained stays down after `rig up` with a \"drained pool agent, not started\" result, keeps its node and sessions, and the rig is not `partially_restored`.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const before = sessionsOf(agent.id);
+      const tmux = mockTmux();
+      const result = await orchestrator(tmux).restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(result.result.nodes[0]!.status).not.toBe("failed");
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(rigRepo.getRig(snapshot.rigId)!.nodes.map((node) => node.id)).toContain(agent.id);
+      expect(sessionsOf(agent.id)).toEqual(before);
+      // Only the model is launched: one session, and none for the agent under any spelling of its name.
+      const launched = vi.mocked(tmux.createSession).mock.calls.map((call) => String(call[0]));
+      expect(launched).toHaveLength(1);
+      expect(launched.filter((name) => /impl[-_.]s1/.test(name))).toEqual([]);
+      // The model and the agent share a conversation: the kept-down agent is not named as a seat this restore resumes.
+      expect(result.result.warnings.filter((line) => line.includes("have the same recorded"))).toEqual([]);
+      // The completed attempt records the same result, the kept-down agent with it.
+      const completed = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get() as { payload: string };
+      expect(JSON.parse(completed.payload).result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+    });
+
+    it("The attempt receipt leaves a kept-down agent out of its current nodes, so its verdict is the rest of the rig's.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started'").get() as { seq: number };
+      const receipt = deriveRestoreAttemptReceipt(db, snapshot.rigId, attempt.seq);
+      if (!receipt.ok) throw new Error(receipt.message);
+      expect(receipt.intendedRoster.map((node) => node.nodeId)).toContain(agent.id);
+      expect(receipt.currentNodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(receipt.unresolvedIntendedSeats).toEqual([]);
+      expect(receipt.currentIntendedSetVerdict).toBe("fully_restored");
+      expect(receipt.originalResult.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+    });
+
+    it("A drained agent whose last tenure is a resume also stays down after `rig up`.", async () => {
+      const { snapshot, model, agent } = seedPool("drained", { resumeTenure: true });
+      expect(db.prepare("SELECT COUNT(*) AS n FROM occupant_tenures WHERE node_id = ?").get(agent.id)).toEqual({ n: 1 });
+      const before = sessionsOf(agent.id);
+      expect(before).toHaveLength(2);
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(sessionsOf(agent.id)).toEqual(before);
+    });
+
+    it("A pool agent whose slot is `live` is restored as a plain member, with nothing kept down.", async () => {
+      const { snapshot, agent } = seedPool("live");
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toBeUndefined();
+      expect(result.result.nodes.map((node) => node.nodeId)).toContain(agent.id);
+    });
+
+    it("A blocker found only on a drained agent doesn't hold the rest of the rig's restore; it is named as a warning.", async () => {
+      // A checkpoint with no working directory to write it to blocks the whole restore when it is a seat restore launches.
+      const { snapshot, model, agent } = seedPool("drained", { agentCheckpoint: true });
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(result.result.warnings.join("\n")).toContain("restore keeps dev.impl-s1 down, so this doesn't block a restore");
+    });
+
+    it("A drained agent the snapshot saved under an earlier node id is still kept down: restore launches a seat by its name.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const earlier = updateSnapshotData(snapshot, (data) => {
+        for (const node of data.nodes) if (node.id === agent.id) node.id = "earlier-node";
+        for (const session of data.sessions) if (session.nodeId === agent.id) session.nodeId = "earlier-node";
+        if (data.activeSessionIdByNode?.[agent.id] !== undefined) {
+          data.activeSessionIdByNode["earlier-node"] = data.activeSessionIdByNode[agent.id];
+          delete data.activeSessionIdByNode[agent.id];
+        }
+        if (data.activeOccupantsByNode?.[agent.id] !== undefined) {
+          data.activeOccupantsByNode["earlier-node"] = data.activeOccupantsByNode[agent.id];
+          delete data.activeOccupantsByNode[agent.id];
+        }
+        if (data.topologyRoster) data.topologyRoster.intendedNodeIds = data.topologyRoster.intendedNodeIds.map((id: string) => id === agent.id ? "earlier-node" : id);
+      });
+      const before = sessionsOf(agent.id);
+      const result = await orchestrator().restore(earlier.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(sessionsOf(agent.id)).toEqual(before);
+    });
+
+    it("A drained agent this snapshot's roster doesn't list is kept down, not named as a skipped seat.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const narrowed = updateSnapshotData(snapshot, (data) => {
+        data.topologyRoster = { version: 1, source: "materialized_topology", intendedNodeIds: [model.id] };
+      });
+      const result = await orchestrator().restore(narrowed.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.excludedNodes).toEqual([]);
+      expect(result.result.warnings.join("\n")).not.toContain("was skipped");
+      expect(result.result.rigResult).toBe("fully_restored");
+    });
+
+    it("A pool-slot read that throws doesn't fail the restore: every seat restores on the ordinary path, and a warning names the failed read.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const read = vi.spyOn(SeatPoolSlotsRepository.prototype, "isDrainedPoolNode").mockImplementation(() => {
+        throw new Error("pool read down");
+      });
+      try {
+        const result = await orchestrator().restore(snapshot.id);
+        expect(read).toHaveBeenCalled();
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) return;
+        // Its pool state unknown, the drained agent is an ordinary seat: restore starts it, and keeps nothing down.
+        expect(result.result.keptDown).toBeUndefined();
+        expect(result.result.nodes.map((node) => node.nodeId)).toEqual(expect.arrayContaining([model.id, agent.id]));
+        const warning = result.result.warnings.find((line) => line.includes("seat pool read failed"));
+        expect(warning).toContain("dev.impl-s1");
+        expect(warning).toContain("pool read down");
+        expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
+      } finally { read.mockRestore(); }
+    });
+
+    it("A selection of a single drained agent launches nothing and keeps it down: a fully restored result and receipt, not a validation failure with no blocker.", async () => {
+      const { snapshot, agent } = seedPool("drained");
+      // What the snapshot route records from `intendedSeats` naming only the agent.
+      const selected = updateSnapshotData(snapshot, (data) => {
+        data.topologyRoster = { version: 1, source: "operator_explicit", intendedNodeIds: [agent.id] };
+      });
+      const before = sessionsOf(agent.id);
+      const tmux = mockTmux();
+      const result = await orchestrator(tmux).restore(selected.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(result.result.nodes).toEqual([]);
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.blockers).toBeUndefined();
+      expect(result.result.warnings.join("\n")).toContain("nothing to launch: dev.impl-s1 is a drained seat pool agent");
+      expect(vi.mocked(tmux.createSession)).not.toHaveBeenCalled();
+      expect(sessionsOf(agent.id)).toEqual(before);
+      // The attempt's receipt has no seat to roll up and keeps the attempt's verdict, not the empty rollup's `failed`.
+      const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started'").get() as { seq: number };
+      const receipt = deriveRestoreAttemptReceipt(db, selected.rigId, attempt.seq);
+      if (!receipt.ok) throw new Error(receipt.message);
+      expect(receipt.currentNodes).toEqual([]);
+      expect(receipt.unresolvedIntendedSeats).toEqual([]);
+      expect(receipt.currentIntendedSetVerdict).toBe("fully_restored");
+    });
   });
 
   it("restore.completed: exact payload with RestoreResult in DB + subscriber", async () => {

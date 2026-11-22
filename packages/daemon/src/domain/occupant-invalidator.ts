@@ -38,7 +38,7 @@ export interface OccupantInvalidator {
 /** Deps the default invalidator composes — structural so tests inject fakes and there is no hard
  *  import cycle with the enforcer / context-usage store. */
 export interface OccupantInvalidatorDeps {
-  enforcer: { invalidateOccupant(sessionName: string): void };
+  enforcer: { invalidateOccupant(sessionName: string, retiringGeneration?: string): void };
   contextUsage: { invalidateOccupantSidecar(sessionName: string, keepGeneration?: string): void };
   /** (e/Class-B) durable watchdog_jobs store — armed jobs the retiring generation registered for its own
    *  seat are stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒
@@ -75,7 +75,7 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
 
     // Class-A — hard-delete by name (safe by TIMING; runs at commit() before the successor writes, except a recovery's
     // successor, whose own sidecar is kept by generation, best effort).
-    this.deps.enforcer.invalidateOccupant(retiringSessionName);
+    this.deps.enforcer.invalidateOccupant(retiringSessionName, retiringGeneration);
     this.deps.contextUsage.invalidateOccupantSidecar(retiringSessionName, args.successorGeneration);
 
     // Class-B — gen-scoped ONLY. Never name-scope (a shared name can't discriminate retiree from

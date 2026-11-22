@@ -188,6 +188,7 @@ defaults:
 | `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1). `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing) |
 | `restore_policy` | string | `resume_if_possible` | `resume_if_possible`, `relaunch_fresh`, `checkpoint_only` |
 | `mechanic` | string | — | A canonical `seat@rig` session address; needed by `apprentice-handover` |
+| `keep_alive` | boolean | — (off) | `true` or `false`. When `true`, the daemon relaunches a seat using this agent if it falls while the daemon is running, and leaves it down if it was stopped on purpose. Absent means off. See [Keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive). |
 
 ---
 
@@ -268,7 +269,7 @@ profiles:
 | `preferences.advisor` | string | no | — | Preferred Claude Advisor model; overrides `defaults.advisor` and can be overridden by the member. |
 | `uses` | Uses | no | all empty | Selects which declared resources are active for this profile. |
 | `startup` | StartupBlock | no | — | Profile-level startup files and actions. Merged with agent-level startup via layering. |
-| `lifecycle` | Lifecycle | no | — | Profile-level lifecycle overrides. `restore_policy` can only narrow (`resume_if_possible` → `relaunch_fresh` → `checkpoint_only`); `compaction_strategy` and `mechanic` take the most specific value (defaults, then profile, then member). |
+| `lifecycle` | Lifecycle | no | — | Profile-level lifecycle overrides. `restore_policy` can only narrow (`resume_if_possible` → `relaunch_fresh` → `checkpoint_only`); `compaction_strategy`, `mechanic` and `keep_alive` take the most specific value (defaults, then profile, then member); a profile or member can turn `keep_alive` off as well as on. |
 
 ### Uses
 
@@ -576,6 +577,7 @@ restore behavior, and the distinction between readiness and verified proof.
 12. Lifecycle `execution_mode` must be `interactive_resident`.
 13. Lifecycle `compaction_strategy` must be one of `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover` — or a deprecated alias (`harness_native`, `pod_continuity`), which validates with a deprecation advisory and normalizes to its canonical value (OPR.0.5.6.20).
 14. Lifecycle `restore_policy` must be `resume_if_possible`, `relaunch_fresh`, or `checkpoint_only`.
+14a. Lifecycle `keep_alive`, when present, must be `true` or `false`.
 15. Startup files and actions follow the same validation rules as in RigSpec.
 
 Unknown keys are ignored, not refused. `rig agent validate <path> [--json]` runs these syntax checks through the running

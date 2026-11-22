@@ -17,7 +17,7 @@ import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
-import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
+import { claudeProviderFailureReason, isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import { deriveDisplayActivity, type ArbitratedSeatState, type EvidenceRungId } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -81,6 +81,11 @@ interface InventoryRow {
   rig_non_interruptive: number | null;
   claude_mcp: ClaudeMcp | null;
   launch_wrapper: string | null;
+  keep_alive: number | null;
+  keep_alive_attempts: number | null;
+  keep_alive_exhausted_at: string | null;
+  keep_alive_last_error: string | null;
+  keep_alive_last_attempt_at: string | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -101,6 +106,7 @@ interface InventoryRow {
   session_community_harness?: string | null;
   session_community_runner?: number | null;
   intentionally_stopped: number | null;
+  stop_attempt: string | null;
   startup_status: string | null;
   resume_type: string | null;
   resume_token: string | null;
@@ -789,8 +795,8 @@ export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: strin
 
 /** Current positive stopped-executor evidence, without conflating a retained pane with a missing session. */
 export function nodeExecutorStoppedReason(db: Database.Database, nodeId: string): "session_missing" | "pane_exited" | null {
-  const reason = currentIdentityVerdict(db, nodeId)?.reason;
-  return reason === "session_missing" || reason === "pane_exited" ? reason : null;
+  const verdict = currentIdentityVerdict(db, nodeId);
+  return identityVerdictConfirmsSessionMissing(verdict) ? "session_missing" : verdict?.reason === "pane_exited" ? "pane_exited" : null;
 }
 
 export function nodeExecutorConfirmedStopped(db: Database.Database, nodeId: string): boolean {
@@ -867,6 +873,12 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
     .map((row) => (row as { name?: string }).name));
   const rigColumnOrNull = (name: string) => rigColumns.has(name) ? `r.${name}` : "NULL";
   const codexConfigProfileSelect = nodeColumnOrNull("codex_config_profile");
+  // #2940: a keep_alive seat's recovery incident, on a database that has the budget table.
+  const keepAliveBudget = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'node_keep_alive_budget'").get();
+  const keepAliveColumn = (name: string) => keepAliveBudget ? `kb.${name}` : "NULL";
+  // #2940: the attempt that recorded a session's stop request, on a database that has it.
+  const sessionStopAttemptSelect = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>)
+    .some((column) => column.name === "stop_attempt") ? "s.stop_attempt" : "NULL";
   const stmt = db.prepare(`
     SELECT
       n.id as node_id,
@@ -898,6 +910,11 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${rigColumnOrNull("non_interruptive")} as rig_non_interruptive,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
+      ${nodeColumnOrNull("keep_alive")} as keep_alive,
+      ${keepAliveColumn("attempts")} as keep_alive_attempts,
+      ${keepAliveColumn("exhausted_at")} as keep_alive_exhausted_at,
+      ${keepAliveColumn("last_error")} as keep_alive_last_error,
+      ${keepAliveColumn("last_attempt_at")} as keep_alive_last_attempt_at,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -917,6 +934,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       ${sessionCommunityRunnerSelect(db)} as session_community_runner,
       s.intentionally_stopped,
+      ${sessionStopAttemptSelect} as stop_attempt,
       s.startup_status,
       s.resume_type,
       s.resume_token,
@@ -931,6 +949,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
     LEFT JOIN sessions s ON s.node_id = n.id
       AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
     LEFT JOIN bindings b ON b.node_id = n.id
+    ${keepAliveBudget ? "LEFT JOIN node_keep_alive_budget kb ON kb.node_id = n.id" : ""}
     ${whereClause}
     ORDER BY ${orderClause}
   `);
@@ -1055,7 +1074,17 @@ function buildInventoryItem(
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
   const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
     ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
-  const lifecycleState = deriveNodeLifecycleState({
+  // #2940: a keep_alive seat whose recovery ran out waits for a person while it isn't running. A stop (requested or
+  // confirmed) is that person's answer: the incident no longer shows, even before the supervisor ends it.
+  const keepAliveIncident = row.keep_alive === 1 && row.keep_alive_attempts !== null && row.intentionally_stopped !== 1
+    ? { attempts: row.keep_alive_attempts, exhausted: row.keep_alive_exhausted_at !== null,
+      lastError: row.keep_alive_last_error, lastAttemptAt: row.keep_alive_last_attempt_at }
+    : null;
+  // #2940: a stop is confirmed once its request no longer carries the attempt that recorded it (a confirmation clears it;
+  // a row recorded before attempts were kept has none), the session reads exited or superseded, and no binding is left.
+  const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
+    && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
+  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
     restoreOutcome,
@@ -1084,8 +1113,13 @@ function buildInventoryItem(
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
-    intentionallyStopped: row.intentionally_stopped === 1
-      && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null,
+    intentionallyStopped: stopConfirmed,
+    // #2940: a stop recorded but not confirmed yet (the session not yet gone, the daemon lost mid-stop, or a request
+    // recorded on a row already exited or superseded that no probe has proven absent: its attempt is still set).
+    ...(row.intentionally_stopped === 1 && !stopConfirmed ? { stopRequested: true } : {}),
+    // #2940: the seat declares keep_alive (absent = off, so other seats' output is unchanged).
+    ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
+    ...(keepAliveIncident ? { keepAliveIncident } : {}),
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
@@ -1550,6 +1584,8 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     (`hookOrPaneActivity`), which sees a prompt no hook reported. Stale hooks
  *     arrive as `unknown` and contribute nothing — never guessed. The rig total
  *     and the seat row must not disagree about the same seat.
+ *   - a fresh Claude authentication or billing failure (`providerFailureNeedsAttention`, #3571). It keeps the
+ *     hook's `unknown` state, so it is never a `needs_input` request and an arbitrated clear doesn't cancel it.
  *   - a held seat, except an unlaunched hold with no assigned work and no recorded
  *     launch or restore result (`isUnlaunchedHeldWithoutWork`)
  *   - a recorded startup error (`latestError` present)
@@ -1565,6 +1601,7 @@ export function seatNeedsAttention(
     || entry.startupStatus === "attention_required"
     || entry.startupStatus === "failed"
     || (arbitratedNeedsInput ?? activity?.state === "needs_input")
+    || providerFailureNeedsAttention(activity, entry.runtime)
     || (entry.heldReason != null && !isUnlaunchedHeldWithoutWork(entry, assignedWorkCount))
     || entry.latestError != null
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
@@ -1583,6 +1620,54 @@ export function isUnlaunchedHeldWithoutWork(entry: NodeInventoryEntry, assignedW
   return entry.heldReason != null && entry.sessionStatus === null && entry.storedSessionStatus === null
     && entry.attachmentType !== "external_cli" && (entry.canonicalSessionName != null || deriveCanonicalFromEntry(entry) != null)
     && entry.restoreOutcome === "n-a" && assignedWorkCount === 0;
+}
+
+/**
+ * A Claude StopFailure whose typed reason is an authentication or billing failure (#3571), from the seat's own runtime,
+ * still current: fresh, generation-valid and normalized as such (a stale or mismatched row comes back demoted). Only
+ * the documented auth and billing values qualify; a generic or unlisted provider error never asks for a person.
+ */
+export function providerFailureNeedsAttention(activity: AgentActivity | null | undefined, seatRuntime: string | null | undefined): boolean {
+  if (!activity || activity.evidenceSource !== "runtime_hook" || activity.stale === true || activity.fallback === true
+    || activity.state !== "unknown" || !activity.runtime || activity.runtime !== seatRuntime) return false;
+  const reason = claudeProviderFailureReason(activity.runtime, activity.rawEvent, activity.rawSubtype);
+  return (reason === "provider_auth_error" || reason === "provider_billing_error") && activity.reason === reason;
+}
+
+/** #3571: the current occupant's last Claude authentication or billing failure that no newer turn has superseded, for
+ *  a Claude seat whose newest hook isn't a turn. A store that can't read it (a partial double) gives the newest hook,
+ *  which providerFailureActivity still judges as before. */
+export function retainedProviderFailure(
+  store: Partial<Pick<AgentActivityStore, "latestUnsupersededProviderFailure">> | null | undefined,
+  seat: { nodeId?: string | null; sessionName: string | null | undefined; runtime: string | null | undefined; now?: Date },
+  newest: AgentActivity | null | undefined,
+): AgentActivity | null {
+  if (seat.runtime !== "claude-code" || !seat.sessionName || newest?.state === "running" || newest?.state === "needs_input") return null;
+  if (typeof store?.latestUnsupersededProviderFailure !== "function") return newest ?? null;
+  return store.latestUnsupersededProviderFailure({ nodeId: seat.nodeId, sessionName: seat.sessionName, now: seat.now });
+}
+
+/** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
+ *  box is not one. */
+const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+
+/**
+ * The served activity for a seat with a current Claude authentication or billing failure (`retainedProviderFailure`):
+ * that hook, ahead of the cached pane reading, so the row shows the reason it counts for attention. Only a native prompt from a
+ * capture that began strictly after the failure outranks it (a capture's completion can lag the bytes it read, and
+ * without a start time the failure stays); a draft in the input box doesn't. Kept out of `hookOrPaneActivity`, whose
+ * other readers (prompt-clear and reachable wake recovery, the usage-limit watchdog) keep the pane's reading: the
+ * report holds no send or wake.
+ */
+export function providerFailureActivity(
+  hookActivity: AgentActivity | null | undefined,
+  structural: StructuralObservation | null,
+  runtime: string | null | undefined,
+): AgentActivity | null {
+  if (!hookActivity || !providerFailureNeedsAttention(hookActivity, runtime)) return null;
+  if (structural?.state === "attention" && NATIVE_PROMPT_REASONS.has(structural.reason)
+    && Date.parse(structural.captureStartedAt ?? "") > Date.parse(hookActivity.eventAt ?? "")) return null;
+  return hookActivity;
 }
 
 /**
@@ -1659,6 +1744,8 @@ export function attachTerminalActivityAndWork(
             decidedBy: arb.decidedBy,
             seq: arb.seq,
             lastSwap: arb.lastSwap,
+            // A typed usage limit and its stated reset, beside the unknown activity it explains.
+            ...(arb.usageLimit ? { usageLimit: arb.usageLimit } : {}),
           }
         : null;
     }
@@ -1669,9 +1756,12 @@ export function attachTerminalActivityAndWork(
     }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
-    const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
+    const latest = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
       ? deps.agentActivity?.getLatestForNode({ nodeId: entry.nodeId, sessionName: entry.canonicalSessionName, now,
         order: entry.runtime === "claude-code" ? "source" : "arrival" }) ?? null : null;
+    const hook = !sessionMissing && entry.agentActivity == null
+      ? retainedProviderFailure(deps.agentActivity, { nodeId: entry.nodeId, sessionName: entry.canonicalSessionName,
+        runtime: entry.runtime, now }, latest) ?? latest : latest;
     return {
       ...entry,
       terminalActive,
@@ -2010,6 +2100,11 @@ export async function attachAgentActivity(
       && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
       && (!motionRunning || (Number.isFinite(motionMs)
         && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
+
+    // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
+    const providerFailure = providerFailureActivity(retainedProviderFailure(deps.activityStore, { nodeId: entry.nodeId,
+      sessionName: entry.canonicalSessionName, runtime: entry.runtime, now: sampledAt }, hookActivity), structural, entry.runtime);
+    if (providerFailure) return { ...entry, agentActivity: providerFailure };
 
     // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
     // that frame's provenance instead.

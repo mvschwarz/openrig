@@ -272,6 +272,7 @@ back with rig up kernel --existing.
             contextRoot: resolvedConfig.context.root,
             skillsRoot: resolvedConfig.skills.root,
             topologyRoot: resolvedConfig.topology.root,
+            readinessWaitSeconds: resolvedConfig.daemon.startReadinessWaitSeconds,
           }, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {
