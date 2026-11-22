@@ -182,7 +182,7 @@ import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
 import { SeatAttentionReconciler } from "../../src/domain/seat-attention-reconciler.js";
 import { createApp, createAppWithWebSocket } from "../../src/server.js";
 import fs from "node:fs";
-import { seatColdStartsSchema } from "../../src/db/migrations/182_seat_cold_starts.js";
+import { seatColdStartsSchema } from "../../src/db/migrations/185_seat_cold_starts.js";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */

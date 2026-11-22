@@ -29,7 +29,7 @@ import { contextUsageOccupantGenerationSchema } from "./migrations/168_context_u
 import { seatRuntimeHomeRecordsSchema } from "./migrations/169_seat_runtime_home_records.js";
 import { claudeAutoModeSchema } from "./migrations/171_claude_auto_mode.js";
 import { seatHookBridgeSchema } from "./migrations/171_seat_hook_bridge.js";
-import { seatColdStartsSchema } from "./migrations/182_seat_cold_starts.js";
+import { seatColdStartsSchema } from "./migrations/185_seat_cold_starts.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
