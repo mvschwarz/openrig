@@ -286,6 +286,13 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
       releaseReservation();
     }
   }
+  // Owner-only, whatever the ambient umask happens to be: connecting to a Unix socket needs write
+  // permission on the socket file, and the daemon's own init creates $OPENRIG_HOME/run 0755, so a
+  // permissive umask (000/002 is common) would otherwise let another local user drive this TUI
+  // (the socket answers `state`, `commands` and the one navigation/mutation path). The socket is the
+  // veil, not the directory: the path may be an operator override shared with other endpoints, so
+  // nothing above `socketPath` is touched.
+  fs.chmodSync(socketPath, 0o600);
   return {
     path: socketPath,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import net from "node:net";
 import os from "node:os";
@@ -119,5 +120,21 @@ describe("control-socket adapter (spike-adopted; arch boundary constraint)", () 
       else process.env["OPENRIG_HOME"] = prevOpenRigHome;
       if (prevSocket !== undefined) process.env["OPENRIG_TUI_SOCKET"] = prevSocket;
     }
+  });
+});
+
+// The control socket answers `state`, `commands` and the one navigation path; connecting to a Unix
+// socket needs write permission on the socket file. `$OPENRIG_HOME/run` is created 0755 by the
+// daemon's own init, so the socket's mode is what decides whether another local user can drive this
+// TUI. Pin owner-only regardless of the ambient umask. (Windows has no unix-socket mode to check.)
+describe.skipIf(process.platform === "win32")("control-socket file mode", () => {
+  it("publishes the bound socket owner-only, whatever the umask allows", async () => {
+    const sockPath = shortSockPath();
+    open = await createControlSocket({
+      socketPath: sockPath,
+      view: createViewState({ instanceId: "tui-sock", getSnapshot: () => snap }),
+    });
+    const mode = fs.statSync(sockPath).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 });
