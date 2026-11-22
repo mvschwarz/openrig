@@ -846,7 +846,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       const token = await grant("legacy");
       editProfile({ owner: true, workspace: true, peerSeats: ["peer@team"] });
       const call = await connect((await listen()).url, token);
-      expect((await call.client.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+      const tools = call.client.getServerCapabilities()?.tools ? (await call.client.listTools()).tools : [];
+      expect(tools.map(tool => tool.name)).not.toContain("rig_queue_create");
       expect(warnings.mock.calls.flat().join("\n")).toMatch(/peerSeats.*objects map/);
       expect(rows()).toBe(0);
     });
@@ -915,7 +916,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect((await post(served.url, { Authorization: `Bearer ${old}` })).status).toBe(401);
       expect((await post(served.url, { Authorization: `Bearer ${rotated}` })).status).toBe(200);
       const narrowed = await connect(served.url, rotated!);
-      expect((await narrowed.client.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+      const tools = narrowed.client.getServerCapabilities()?.tools ? (await narrowed.client.listTools()).tools : [];
+      expect(tools.map(tool => tool.name)).not.toContain("rig_queue_create");
       expect(warnings.mock.calls.flat().join("\n")).toMatch(/objects.*object-to-operation-list map/);
       expect((await post(served.url, { Authorization: `Bearer ${good}` })).status).toBe(200);
     });
