@@ -118,7 +118,8 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(notice!.body).toContain(`check-ins: unknown (no check-in cadence declared); no check-in since ${at.toISOString()}`);
     expect(notice!.body).toContain("no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat");
     for (const row of rows) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}, from lead@hub: work for ${MEMBER}`);
-    expect(notice!.body).not.toMatch(/dead/i);
+    // Row ids end in random hex, which can spell "dead" (qitem-…-2f7dead9); only the notice's own words are checked.
+    expect(notice!.body.replace(/qitem-[\w-]+/g, "")).not.toMatch(/dead/i);
   });
 
   it("a row recorded before the awaiting-pickup wording, as unroutable, is read the same way", async () => {
