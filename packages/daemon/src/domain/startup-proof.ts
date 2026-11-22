@@ -221,6 +221,21 @@ export function verifyStartupProof(
   return { ok: true, nodeId: resolved.nodeId, rigId: resolved.rigId, challengeId: current.challengeId };
 }
 
+/** A reminder is only useful until this session has proved this launch's challenge. */
+export function hasVerifiedStartupProof(
+  db: Database.Database,
+  input: { nodeId: string; sessionId: string; challengeId: string },
+): boolean {
+  return db.prepare(`
+    SELECT 1 FROM events
+    WHERE node_id = ? AND type = 'node.startup_proof_verified'
+      AND CASE WHEN json_valid(payload) THEN
+        json_extract(payload, '$.sessionId') = ? AND json_extract(payload, '$.challengeId') = ?
+      ELSE 0 END
+    LIMIT 1
+  `).get(input.nodeId, input.sessionId, input.challengeId) !== undefined;
+}
+
 /**
  * Project the oriented signal for a node from the append-only proof events.
  * `verified` requires a verified proof for the CURRENT (latest) challenge;

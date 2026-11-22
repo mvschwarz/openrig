@@ -168,7 +168,9 @@ function terminalDeliveryResult(
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
-    "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
+    "retained": wakeResult === "retained:draft_aware"
+      ? `The wake is held (${wakeResult}): nothing was typed into the pane. It's tried again when the seat next reports idle while it's still in draft-aware mode, within the wake retry cap; if it's still held past that cap or the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`
+      : `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; if it's still held past the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`,
     // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
     "failed": wakeResult?.startsWith("awaiting-pickup:")
       ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`
@@ -348,6 +350,15 @@ async function withClient<T>(
     }
     throw err;
   }
+}
+
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
@@ -2459,6 +2470,9 @@ Examples:
           }
         }
         printResult(useJson, res.data, res.status);
+        // The rows stay on stdout as they were; only a page the daemon says it cut adds a line on stderr.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        if (page?.truncated) console.error(`this page stops at --limit ${page.limit} and more rows match; pass a larger --limit to see the rest`);
       }, remote !== undefined, remote);
     });
 

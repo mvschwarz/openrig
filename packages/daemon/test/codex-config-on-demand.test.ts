@@ -154,6 +154,22 @@ it("a Codex seat launch writes the hooks block and trust before the harness star
   expect(text).toContain("trusted_hash");
 });
 
+it("a resume command built as a preview leaves a config whose managed block differs byte-identical, and is the same command", async () => {
+  const f = fixture(); fs.writeFileSync(f.config, USER_CONFIG);
+  const before = fs.statSync(f.config).mtimeMs;
+  const adapter = launchableAdapter(f, true);
+  const binding = { nodeId: "node", tmuxSession: "seat@rig", cwd: f.cwd } as any;
+  const running = { addDirs: ["/carried/git"], daemonOptOut: false, networkOverride: false, nonLoginShell: false };
+  const preview = await adapter.buildResumeCommand(binding, { name: "seat", resumeToken: "old", running, preview: true });
+  expect(preview.ok).toBe(true);
+  expect(fs.readFileSync(f.config, "utf8")).toBe(USER_CONFIG);
+  expect(fs.statSync(f.config).mtimeMs).toBe(before);
+  // The same build for the restart itself brings the block in, and the command doesn't depend on it.
+  const real = await adapter.buildResumeCommand(binding, { name: "seat", resumeToken: "old", running });
+  expect(fs.readFileSync(f.config, "utf8")).toContain(HOOKS_BLOCK);
+  expect(real).toEqual(preview);
+});
+
 it("a Codex seat resume ensures the config too", async () => {
   const f = fixture();
   const adapter = launchableAdapter(f, true);
