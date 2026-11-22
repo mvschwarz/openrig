@@ -52,6 +52,12 @@ keeps an entry for the workspace root beside the bundle's, under the id from the
 workspace's own `project.yaml` (`default` when it declares none); if that id is the
 bundle's project id, install reports a conflict and writes no catalog.
 
+## Project scope IDs
+
+The optional `scope.idPrefix` in `project.yaml` sets this project's mission and slice ID prefix: two or three uppercase
+letters, defaulting to `OPR`. For a project nested in another's workspace, choose a different prefix so its generated
+IDs don't repeat the enclosing project's. The setting does not guarantee globally unique IDs.
+
 ## Project-world install
 
 `project.yaml` may select project context and managed skills together:
@@ -166,6 +172,8 @@ or by working directory, but never counts as unclaimed in step 5. A rig listed u
 deepest root, leave the choice to `--project`. Step 3 reads the seat's
 `OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
 that chose the project as `position.selectedBy`.
+
+`GET /api/scopes/projects` includes each catalog entry's declared `rigs`, including names of stopped or absent rigs. An entry with no `rigs` declaration has an empty array. A malformed declaration is returned as `rigs: null` with `rigsError`, so it cannot be mistaken for an empty declaration; other projects remain available. An uncatalogued workspace has an empty array.
 
 With no explicit project, `rig scope`, `rig proof add` and daemon-backed
 `rig proof show`/`judge` use the one project whose `workspace.yaml` entry lists
@@ -315,8 +323,17 @@ rig workflow instantiate ./spec.workflow.md \
   `exception:`, `occurrence:` and `recovery-for:` prefixes, a `project:`,
   `mission:` or `slice:` tag that contradicts its flag, or a second value of
   the same key.
-- `rig workflow instantiate-lifecycle` needs no flags: it takes the project and
-  mission from the lifecycle identity it compiles. A compiled step's packets
+- `rig workflow instantiate-lifecycle` derives scope from the lifecycle identity
+  it compiles. Pass the mission path and the required operation key, root
+  objective and creator as shown below.
+
+  ```bash
+  rig workflow instantiate-lifecycle ./mission.yaml \
+    --operation-key capture-lifecycle-1 \
+    --root-objective "Build the capture flow" --created-by orch@my-rig
+  ```
+
+  A compiled step's packets
   carry the `slice:<directory>` of the slice that step was compiled from, even
   when another slice's directory has the same name as its `metadata.id`. A step
   an authored graph names carries `slice:<directory>` when it names an active

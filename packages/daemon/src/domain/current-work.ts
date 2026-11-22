@@ -731,6 +731,17 @@ export interface WorkCandidates {
   /** Mission directories on this host, bounded, so an agent can name one without guessing. */
   missionsOnHost: string[];
   missionsOnHostTruncated: boolean;
+  /** The seat's selected project's missions, under that project's own missions root. The whoami route adds it when it
+   *  selects a healthy catalog project, so a seat whose project lives outside workspace.root can name one there. */
+  projectMissions?: ProjectMissions;
+}
+
+/** One project's mission directories, bounded as missionsOnHost is. */
+export interface ProjectMissions {
+  project: string;
+  missionsRoot: string;
+  names: string[];
+  truncated: boolean;
 }
 
 interface CandidateRow extends TaggedRow {
@@ -824,6 +835,11 @@ function listMissions(missionsRoot: string | null): { names: string[]; truncated
   } catch {
     return { names: [], truncated: false };
   }
+}
+
+/** A project's missions as the work packet lists them, read from the missions root its catalog entry resolves. */
+export function listProjectMissions(project: string, missionsRoot: string): ProjectMissions {
+  return { project, missionsRoot, ...listMissions(missionsRoot) };
 }
 
 export function deriveWorkCandidates(

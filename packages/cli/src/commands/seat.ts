@@ -648,6 +648,12 @@ Between off (always interrupt) and hold (full quiet):
                   as held on the row (the open rows already are the reminder);
                   other notices are held. A cold row wakes nobody: a person or
                   the seat's next turn picks it up.
+
+For a Claude seat you type in, the opt-in hook bridge can deliver ordinary messages
+at a turn boundary without typing into its input box; it takes effect at the next
+launch or restore. See rig seat set-hook-bridge --help and:
+https://github.com/mvschwarz/openrig/blob/main/docs/reference/seat-delivery.md#claude-hook-bridge-opt-in
+
 What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and
@@ -725,6 +731,13 @@ Examples:
     });
   cmd.command("retire-held-message").argument("<seat>").argument("<id>").requiredOption("--reason <text>").option("--json")
     .description("Release one held message's active quota, preserving evidence; does not deliver or close work")
+    .addHelpText("after", `
+This works from an ordinary terminal as well as from a seat's shell. From a
+managed seat's shell (OPENRIG_SESSION_NAME set), retirement is recorded under
+that seat. Without a seat identity, it is recorded as "unattributed (no seat identity)".
+The actor comes only from transport identity, never the request body or target.
+Retirement requires a reason; it does not deliver, claim native consumption or close work.
+`)
     .action(async (seat: string, id: string, opts: {reason: string; json?: boolean}) => {
       await guardRequest("POST", `/api/seat/retire-held-message/${encodeURIComponent(seat)}/${encodeURIComponent(id)}`, { reason: opts.reason }, opts.json);
     });

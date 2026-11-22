@@ -1,10 +1,11 @@
 import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
+import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_LISTEN_FAILED_EXIT_CODE, DAEMON_SHUTDOWN_RECEIPT, occupiedPortGuidance, trackHttpServerResponses } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -38,6 +39,7 @@ import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js"
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
 import { startSeatPollers } from "./domain/seat-activity-service.js";
+import { startIdentityReconciler } from "./domain/seat-identity-reconciler.js";
 import {
   ensureOpenRigInstance,
   formatInstanceInitializationConflicts,
@@ -221,8 +223,10 @@ export function startWakeLadderScheduler(deps: {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
-  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
-  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">
+    & Partial<Pick<import("./domain/seat-activity-service.js").SeatActivityService, "codexPermissionState">>;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">
+    & Partial<Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "findPermissionPromptStart">>;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   gatewaySubsystem?: { status?: () => { state?: unknown }; dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
@@ -253,6 +257,9 @@ export function startWakeLadderScheduler(deps: {
       readPermissionPrompts: makePermissionPromptReader({ db,
         getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
           order: runtime === "claude-code" ? "source" : "arrival" }),
+        getPromptStart: (sessionName, generation) => deps.agentActivityStore?.findPermissionPromptStart?.({ sessionName, generation }),
+        getCodexPermissionState: (nodeId, raisedAt) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt),
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
       }),
       readPromptState: makePromptStateReader({
         db,
@@ -261,6 +268,7 @@ export function startWakeLadderScheduler(deps: {
           sessionName,
           order: runtime === "claude-code" ? "source" : "arrival",
         }),
+        getCodexPermissionState: (nodeId, raisedAt, after) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt, after),
       }),
       readPromptKind: makePromptKindReader({ db, getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId) }),
       ...(deps.providerService
@@ -284,6 +292,23 @@ async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
     if (resolvedIp) return isLoopbackBind(resolvedIp) || isTailscaleBind(resolvedIp);
   }
   return false;
+}
+
+/** A listener that fails to bind ends the process cleanly: one `OPENRIG_LISTEN_FAILED` line and the distinct exit
+ *  code, without the shutdown, so it writes no shutdown receipt and records no stop. In a multi-bind, a listener
+ *  that came up first may have started the monitors; the exit ends them, as the unhandled error did before. Once a
+ *  listener is up, its later server errors keep their usual path. */
+function exitOnListenFailure(server: ServerType, host: string, port: number, portHint: boolean): void {
+  const onError = (error: NodeJS.ErrnoException): void => {
+    const code = error.code ?? "UNKNOWN";
+    const address = host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+    const guidance = code === "EADDRINUSE" && portHint ? occupiedPortGuidance(port) : error.message;
+    // Synchronous: the process exits next, and a supervisor's stderr can be an asynchronous pipe.
+    try { fs.writeSync(2, `OPENRIG_LISTEN_FAILED ${code} ${address} ${guidance}\n`); } catch { /* the exit code still says it */ }
+    process.exit(DAEMON_LISTEN_FAILED_EXIT_CODE);
+  };
+  server.once("error", onError);
+  server.once("listening", () => server.off("error", onError));
 }
 
 export async function startServer(port?: number) {
@@ -381,9 +406,12 @@ export async function startServer(port?: number) {
   if (guestPort !== undefined) {
     const guest = createGuestActivityApp(deps);
     const endGuestBind = beginStartupPhase("bind", "guest");
-    const guestServer = serve({ fetch: guest.fetch, port: guestPort, hostname: process.env.OPENRIG_GUEST_ACTIVITY_HOST ?? "127.0.0.1" }, () => {
+    const guestHost = process.env.OPENRIG_GUEST_ACTIVITY_HOST ?? "127.0.0.1";
+    const guestServer = serve({ fetch: guest.fetch, port: guestPort, hostname: guestHost }, () => {
       recordStartupPhase(deps.slowOpRecorder, endGuestBind());
     });
+    // The --port remedy names the daemon port, not OPENRIG_GUEST_ACTIVITY_PORT: this line carries the errno message.
+    exitOnListenFailure(guestServer, guestHost, guestPort, false);
     trackHttpServerResponses(guestServer);
     servers.push(guestServer);
   }
@@ -421,7 +449,9 @@ export async function startServer(port?: number) {
         // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
         // Persists the per-seat pane PID/command verdict so node-inventory
         // gates the running/active projection on verified process identity.
-        deps.seatIdentityReconciler?.start();
+        // daemon.identity_poll_interval_ms (OPENRIG_IDENTITY_POLL_INTERVAL_MS) slows it down (default 5 s,
+        // unchanged); startup-only: read once here.
+        startIdentityReconciler(deps.seatIdentityReconciler);
         startPeriodicSnapshotScheduler(deps);
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
@@ -445,6 +475,7 @@ export async function startServer(port?: number) {
         }, HEARTBEAT_INTERVAL_MS);
       }
     });
+    exitOnListenFailure(srv, host, p, true);
     injectWebSocket(srv);
     trackHttpServerResponses(srv, deps.requestPhaseObserver?.observeRequest);
     servers.push(srv);

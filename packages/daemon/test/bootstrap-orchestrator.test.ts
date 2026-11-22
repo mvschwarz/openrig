@@ -295,7 +295,9 @@ describe("BootstrapOrchestrator", () => {
           return { ok: true };
         }),
         sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
-        hasSession: async () => false, listPanes: async () => [],
+        hasSession: async () => false,
+        listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+        getPanePid: async () => 4242, getPaneCommand: async () => "claude",
         listSessions: async () => [], listWindows: async () => [],
         unsetSessionEnv: vi.fn(async (session: string, key: string) => {
           if (fault && isDevSession(session)) throw new Error("private unset fault");
@@ -420,11 +422,23 @@ describe("BootstrapOrchestrator", () => {
       });
     });
 
-    it("does not normalize an unrelated mixed legacy create failure", async () => {
+    it("reports a mixed launch failure without losing the failed seat", async () => {
       const { orch } = await realLaunch({ removal: "confirmed", createFailure: true });
       const result = await orch.bootstrap({ mode: "apply", ...await source() });
-      expect(result.status).toBe(podSpec ? "partial" : "completed");
-      if (!podSpec) expect(result.errors).toEqual([]);
+      expect(result.status).toBe("partial");
+      expect(result.errors.join("\n")).toContain("fixture create failure");
+      expect(result.stages.find(s => s.stage === "import_rig")).toMatchObject({
+        status: "failed", detail: { nodes: expect.arrayContaining([
+          expect.objectContaining({ logicalId: failedSeat, status: "failed", error: expect.stringContaining("fixture create failure") }),
+        ]) },
+      });
+    });
+    it("keeps the seat and its failure reason when every launch fails", async () => {
+      const { orch } = await realLaunch({ removal: "confirmed", createFailure: true });
+      const result = await orch.bootstrap({ mode: "apply", ...await source(true) });
+      expect(result.status).toBe("failed");
+      expect(result.errors.join("\n")).toContain(failedSeat);
+      expect(result.errors.join("\n")).toContain("fixture create failure");
     });
 
     it("keeps a launch without an override unchanged", async () => {
@@ -446,6 +460,17 @@ describe("BootstrapOrchestrator", () => {
   });
 
   // T1: Plan mode returns plan, 0 bootstrap_actions rows
+  it("legacy plan reports configured models as unverified without launching", async () => {
+    // Given a legacy spec with a configured model.
+    const specPath = writeSpec(SIMPLE_SPEC_YAML.replace("runtime: claude-code", "runtime: claude-code\n    model: custom/model"));
+    // When planning through the legacy bootstrap path.
+    const result = await buildOrchestrator().bootstrap({ mode: "plan", sourceRef: specPath });
+    // Then the plan warns without changing readiness or creating launch actions.
+    expect(result.status).toBe("planned");
+    expect(result.warnings.some(w => w.includes("custom/model") && w.includes("unverified"))).toBe(true);
+    expect(db.prepare("SELECT * FROM bootstrap_actions WHERE bootstrap_id = ?").all(result.runId)).toHaveLength(0);
+  });
+
   it("plan mode returns plan with zero bootstrap_actions rows", async () => {
     const specPath = writeSpec(SIMPLE_SPEC_YAML);
     const orch = buildOrchestrator();

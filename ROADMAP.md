@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.19
+## Released in 0.7.20
 
-[0.7.19 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.19): OpenRig 0.7.19 improves how a team brings permission prompts to a person, reports interrupted recovery, and starts again after a failed launch. It also adds optional Claude hook delivery, per-seat Linux memory limits, and a versioned interface for apps answering human questions. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
+[0.7.20 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.20): OpenRig 0.7.20 tells a person's own agent the consent rules first and where a handed-over task's result is, holds automatic delivery while a seat's tmux server is gone, and, when a parked row's wake is refused at a Claude seat's usage limit, retries it at the stated reset. It also lets a workflow instance stay on one pod, adds an opt-in Claude status-line throttle, and fixes a run of smaller CLI, TUI, scope and workflow problems. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
 
 ## How to help
 

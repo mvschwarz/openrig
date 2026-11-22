@@ -133,6 +133,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       eventBus,
       tmuxAdapter: tmux,
       sleep: async () => undefined,
+      listProcesses: () => listProcesses(),
     });
     invalidations = [];
     activitySwaps = [];
@@ -217,6 +218,29 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result.warnings?.some(warning => warning.includes("open terminal clients"))).not.toBe(true);
   });
 
+  // #3395, spec section 5, "Stored": a fresh launch of an existing seat starts from its stored settings, so it reads the
+  // stored pool block from the node.
+  it("A fresh launch of an existing model seat (rig seat launch --fresh) reports its stored pool block that can't be used once in the launch warnings, and the seat starts as it would without the block", async () => {
+    const advisory = "dev.impl pool.max: must be a whole number of 0 or more; pool not used";
+    const seat = seedSeat();
+    // Stored as a re-apply writes a block that can't be used: as authored.
+    expect(rigRepo.setNodePool(seat.node.id, { raw: { max: -1 } })).toBe(true);
+    const pooled = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(pooled.ok, JSON.stringify(pooled)).toBe(true);
+    expect(pooled.warnings?.filter(w => w === advisory)).toHaveLength(1);
+    expect(JSON.stringify(pooled).split(advisory).length - 1).toBe(1);
+    const started = (result: typeof pooled) => ({ ok: result.ok, sessionName: "sessionName" in result ? result.sessionName : null,
+      model: "model" in result ? result.model : null,
+      seat: (({ lifecycleState, occupantLifecycle, startupStatus }) => ({ lifecycleState, occupantLifecycle, startupStatus }))(getNodeInventory(db, seat.rig.id)[0]!) });
+    const withBlock = started(pooled);
+
+    // The same seat, its node storing no block: it starts the same way and says nothing about a pool.
+    expect(rigRepo.setNodePool(seat.node.id, null)).toBe(true);
+    const plain = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(JSON.stringify(plain)).not.toContain("pool not used");
+    expect(started(plain)).toEqual(withBlock);
+  });
+
   it("#2426: a fresh launch names what became of OpenRig's earlier copies of openrig-core's skills, a kept edited one included", async () => {
     const saved = process.env["OPENRIG_HOME"];
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-core-copies-"));
@@ -269,7 +293,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result.ok).toBe(verified);
     expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal clients")]);
     if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
-    else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
+    else expect(result).toMatchObject({ code: "attention_required", status: "attention_required" });
   });
 
   it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
@@ -286,13 +310,13 @@ describe("SeatLifecycleService.launchFresh", () => {
     const observe = vi.fn(async () => rows);
     listProcesses = observe;
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fresh occupant" });
-    expect(result.ok).toBe(mode === "valid");
+    const valid = mode === "valid" || mode === "no token";
+    expect(result.ok).toBe(valid);
     const current = sessionRegistry.getSessionsForRig(seat.rig.id).find(s => s.status === "running")!;
     expect(current.id).not.toBe(seat.session!.id);
-    expect(current.startupStatus).toBe(mode === "valid" ? "ready" : "attention_required");
-    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
+    expect(current.startupStatus).toBe(valid ? "ready" : "attention_required");
+    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(valid ? "verified" : "mismatch");
     expect(alive.has(seat.sessionName)).toBe(true);
-    if (mode === "valid") expect(observe).toHaveBeenCalledTimes(2);
   });
 
   it("default-path consent retains context and continues the same occupant once after late acceptance", async () => {

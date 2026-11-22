@@ -24,6 +24,12 @@ const MAX_PAGES = 8;
 const REPORT_LIMIT = 50;
 /** How long one binding's pass may take before its connection is closed, so one slow hub can't hold the others. */
 const PASS_TIMEOUT_MS = 60_000;
+/** A network answers a new connection `grant_authority_unavailable` on purpose until it has set the participant up. A
+ *  binding that has never had contact asks again this soon, instead of backing off, for this long after it was made. */
+const SETUP_RETRY_MS = 5_000;
+const SETUP_WINDOW_MS = 60_000;
+/** What status shows for that answer on a binding that has never had contact: the hub was reached. */
+const SETTING_UP = "The network is still finishing setup for this agent. Try again in a moment.";
 
 /** The local item for a hub item, by what it is. A retry, a restart or a new binding for the same seat, hub and
  *  participant lands on the same item. */
@@ -52,6 +58,8 @@ export interface NetworkPassResult {
   /** Why the pass stopped early, if it did. `revoked` ended the binding; `no_session` left the hub's items pending;
    *  `local` is a failure here, not the hub's. */
   error?: HubError["kind"] | "credential" | "no_session" | "http_not_allowed" | "local";
+  /** The hub answered `grant_authority_unavailable` to a binding that has never had contact: still being set up. */
+  settingUp?: boolean;
 }
 
 /** The seat's current address: the node's latest session, as the queue's other node lookups read it. */
@@ -151,6 +159,7 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
       deps.bindings.recordError(binding.id, `A local error stopped this pass: ${error instanceof Error ? error.message : String(error)}`);
       return { ...result, error: "local" };
     }
+    const settingUp = error.code === "grant_authority_unavailable" && !binding.lastContactAt;
     if (error.kind === "revoked") {
       try {
         deps.bindings.markRevoked(binding.id, error.message);
@@ -161,9 +170,9 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
       }
       deps.log?.(`network ${binding.id}: revoked by the hub; no new work comes in through it`);
     } else {
-      deps.bindings.recordError(binding.id, error.message);
+      deps.bindings.recordError(binding.id, settingUp ? SETTING_UP : error.message);
     }
-    return { ...result, error: error.kind };
+    return { ...result, error: error.kind, ...(settingUp ? { settingUp } : {}) };
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", onStop);
@@ -386,6 +395,11 @@ export class NetworkConnectorService {
         const due = this.due.get(binding.id);
         if (due && due.at > at) continue;
         const pass = await runNetworkBindingPass(this.deps, binding, { signal: this.stopping?.signal });
+        // Soon after connect, a network still setting the participant up isn't a failure to back off from.
+        if (pass.settingUp && at - Date.parse(binding.createdAt) < SETUP_WINDOW_MS) {
+          this.due.set(binding.id, { at: at + Math.min(SETUP_RETRY_MS, this.intervalMs), backoffMs: due?.backoffMs ?? this.intervalMs, last: pass });
+          continue;
+        }
         const failing = pass.error === "unavailable" || pass.error === "refused" || pass.error === "credential" || pass.error === "local";
         const backoffMs = failing ? Math.min(this.maxBackoffMs, (due?.backoffMs ?? this.intervalMs) * 2) : this.intervalMs;
         const jitter = 1 + (this.random() * 0.4 - 0.2);
