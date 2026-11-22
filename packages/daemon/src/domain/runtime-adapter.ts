@@ -305,8 +305,8 @@ export interface RuntimeAdapter {
       resumeType?: string;
       /** Explicit selected-history startup rechecks identity at the adapter's actual input boundary. */
       beforeNativeDispatch?: () => boolean;
-      /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
-      freshInPlace?: boolean },
+      /** A successor launched in a reused pane that still holds the retired occupant's output. */
+      inPlace?: boolean },
   ): Promise<HarnessLaunchResult>;
 
   /** Observe an already launched fork without sending input or starting another process. */
