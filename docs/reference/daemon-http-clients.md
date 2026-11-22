@@ -53,13 +53,26 @@ in the case named:
 The daemon reads two tokens from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
-  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`), and the `/api/rig-mode`
-  binding writes. `rig host pair` hands this token to the paired machine, so a daemon that will be paired with
-  needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
-- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport` and `/api/compaction` route, `POST
+  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`), the `/api/rig-mode`
+  binding writes, the `/api/network` writes (`POST /bindings`, `POST /installations` and `POST /bindings/<id>/disconnect`;
+  `GET /bindings` checks no token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
+  `POST /api/gateway/slack/forwarded`, a shared Slack app's relay. The other `/api/apps/v1` routes take a Core app
+  credential instead; see [Core app](core-app.md). `rig host pair` hands this token to the paired machine, so a daemon
+  that will be paired with needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
+- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport`, `/api/compaction` and `/api/startup` route, `POST
   /api/terminal/follow` and `/viewer/ensure`, and every `GET /api/terminal/<name>` route, the terminal websocket
-  included. When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a
-  tailnet address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+  included. It also checks these seat routes:
+  - `GET /api/rigs/<rigId>/nodes/<logicalId>/preview` and `POST /api/rigs/<rigId>/nodes/<logicalId>/open-cmux`;
+  - under `/api/sessions/<session>`: `GET /preview`, `/generation-record` and `/generation-record-expected`, and `POST
+    /reconcile`, `/repair-missing-pane`, `/clear-attention`, `/resume-token` and `/unclaim`.
+
+  When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a tailnet
+  address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) check no token on any
+bind. On the default binds (loopback, and the tailnet address when Tailscale is active) that's by design: anything that
+can reach the daemon can read them. The `/api/activity` routes that agents' hooks and runners post to check their own
+hook or runner credentials, not these two tokens.
 
 A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
@@ -73,8 +86,10 @@ open it once at `http://<daemon>/#termToken=<terminal token>&mcToken=<auth token
 the address the browser keeps to itself and never sends. The page keeps them in that browser and takes them out of the
 address. With neither token set, the UI needs nothing.
 
-A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
-and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
+A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, `/api/transport`,
+`/api/compaction` and the seat routes above answer `{ "error": "unauthorized", "message", "what_failed",
+"why_it_matters", "what_to_do" }`. `/api/startup` answers `{ "ok": false, "code": "terminal_auth_unavailable",
+"freshAllowed": false, "message" }`.
 The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
 for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
 [Browser access](browser-access.md).
