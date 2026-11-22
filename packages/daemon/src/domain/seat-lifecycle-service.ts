@@ -11,7 +11,7 @@ import type { RigRepository } from "./rig-repository.js";
 import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
+import { probeShowsNoServer, problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
   type SeatProcessLimitsProblem } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
@@ -1777,9 +1777,11 @@ export class SeatLifecycleService {
     // #3395: a fresh launch of an existing seat starts from its stored settings: a stored pool block that can't be used
     // is reported once, from the node.
     const viewWarnings: string[] = [...storedPoolAdvisories(node.logicalId, this.rigRepo.getNodePool(node.id))];
+    const canonicalSeen: { probe?: SessionProbe } = {};
     let canonicalProbe = await this.probeLiveness(
       canonicalSessionName,
       "fresh launch refuses rather than overwrite a possibly-live canonical session",
+      (probe) => { canonicalSeen.probe = probe; },
     );
     // `rig seat stop` persists an exited row after killing its managed session.
     // When that was the last tmux session, tmux exits too, so the next classified
@@ -1801,8 +1803,8 @@ export class SeatLifecycleService {
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
       // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
-      // detached while keeping their bindings. Nothing was stopped on purpose, so "no server running" alone isn't
-      // absence: the server may only have lost its socket. Reopen an empty server for that row only on positive
+      // detached while keeping their bindings. Nothing was stopped on purpose, so a missing socket file alone isn't
+      // absence: a server may still run after losing it. Reopen an empty server for that row only on positive
       // evidence that the seat's recorded process has ended (recordedProcessEnded: a census; hidden pids, evidence older
       // than this session and evidence that changed while the census ran count as unknown); unknown keeps the refusal. Its binding stays for the stale-row clean
       // below, which proves absence again on the reopened server. Limit: only the last recorded process is proven; a
@@ -1820,19 +1822,24 @@ export class SeatLifecycleService {
       const detachedEnded = detachedUnstopped
         && await recordedProcessEnded(this.db, { ...session, createdAt: latest?.created_at }, readCensus);
       const processes = () => table ?? readCensus().then((read) => read ? read.rows : null);
+      // #3435 follow-up: tmux says "no server running on <socket>" when its socket file is there and nothing listens on
+      // it, as after `tmux kill-server`, exit-empty or a killed server. No seat runs on that server, so a fresh launch
+      // reopens it whatever the row's state, unless the seat's recorded process is known to still run. A missing socket
+      // file ("error connecting to <socket> (No such file or directory)") keeps the checks above.
+      const staleSocket = canonicalSeen.probe !== undefined && probeShowsNoServer(canonicalSeen.probe);
       // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
       // server may only have lost its socket: a server started there would read the session absent and launch a second
       // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
-      const stillRuns = table || (detachedUnstopped && !detachedEnded)
+      const stillRuns = table || staleSocket || (detachedUnstopped && !detachedEnded)
         ? await recordedProcessStillRunning(this.db, session, processes) : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
-          guidance: `This seat's ${released ? "released" : "detached"} session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+          guidance: `This seat's ${released ? "released " : detachedManaged ? "detached " : ""}session last ran as process ${stillRuns.pid}, which is still running, so it may be `
             + "on a tmux server this daemon can't reach. End that process, then launch again.",
         };
       }
-      if (detachedUnstopped && !detachedEnded) {
+      if (detachedUnstopped && !detachedEnded && !staleSocket) {
         return {
           ...canonicalProbe,
           guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it since "
@@ -1842,7 +1849,8 @@ export class SeatLifecycleService {
             + "terminal server once the seat is known to be gone, then launch again.",
         };
       }
-      if (stoppedManagedOccupant || detachedEnded) {
+      if (stoppedManagedOccupant || detachedEnded || staleSocket) {
+        let failed: string | undefined;
         try {
           const restored = await this.tmuxAdapter.startServer();
           if (restored.ok) {
@@ -1850,11 +1858,26 @@ export class SeatLifecycleService {
               canonicalSessionName,
               "fresh launch refuses rather than overwrite a possibly-live canonical session",
             );
+          } else {
+            failed = restored.message;
           }
-        } catch {
+        } catch (error) {
           // Keep the original classified refusal when the transport cannot be
           // restored; never translate a failed start into absence.
+          failed = error instanceof Error ? error.message : String(error);
         }
+        if (failed !== undefined && "code" in canonicalProbe) {
+          return { ...canonicalProbe, guidance: `Reopening the terminal server failed (${failed}), so nothing was launched. `
+            + "Check tmux and its socket, then launch again." };
+        }
+      } else {
+        const missingSocket = canonicalSeen.probe?.state === "transport_unavailable"
+          && /\(No such file or directory\)/.test(canonicalSeen.probe.cause);
+        return { ...canonicalProbe, guidance: "A reopen of the terminal server wasn't tried: " + (missingSocket
+          ? "the socket file is missing, and a server may still run after losing it, while this seat's session wasn't "
+            + "stopped, released, or detached with its recorded process proven ended. Start the terminal server once the "
+            + "seat is known to be gone, then launch again."
+          : "tmux's answer doesn't show that its server is gone.") };
       }
     }
     if ("code" in canonicalProbe) return canonicalProbe;
@@ -2658,6 +2681,7 @@ export class SeatLifecycleService {
   private async probeLiveness(
     sessionName: string,
     refusalConsequence: string,
+    seen?: (probe: SessionProbe) => void,
   ): Promise<{ state: "present" | "absent" } | SeatRefusal> {
     let probe: SessionProbe;
     try {
@@ -2669,6 +2693,7 @@ export class SeatLifecycleService {
         message: `tmux liveness probe for "${sessionName}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so ${refusalConsequence}.`,
       };
     }
+    seen?.(probe);
     if (probe.state === "transport_unavailable") {
       return {
         ok: false,
