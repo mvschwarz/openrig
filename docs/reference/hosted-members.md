@@ -209,6 +209,35 @@ is the documented entry.
 This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
 additional adapter callbacks that those options do not implement.
 
+### Add an introduction and static references
+
+Pass `instructions` to `startMcpHttpServer` to add endpoint-owned guidance. Its exported type is
+`McpInstructionExtension`:
+
+```js
+const instructions = {
+  introduction: "The team guide is available at team://reference/guide.",
+  resources: [{
+    uri: "team://reference/guide",
+    name: "team-guide",
+    mimeType: "text/markdown",
+    text: "# Team guide\nUse this team's documented workflow.",
+  }],
+};
+```
+
+Core keeps its existing caller-scoped instructions and appends the introduction. Static resources
+use the SDK's `resources/list` and `resources/read` protocol. The built-in
+`openrig://reference/coordination` resource always serves Core's generic guidance for the current
+caller, including read-only and offered-tool filtering. It is available without an extension and
+with local token-file grants as well as a resolver or grant service. Its URI is reserved for Core.
+
+Configured introduction and resource text belong to the endpoint and are delivered to callers admitted by that
+endpoint; use separate endpoint configurations when the content differs. They do not grant Core tools
+or object access. Resources contain the supplied text, not a file path or a loader callback. Duplicate
+resource URIs follow the SDK's existing registration error behavior. Without an introduction, the
+existing initialization instructions remain unchanged.
+
 ### Supply a caller resolver
 
 An embedding can pass `resolver` and `resolverTimeoutMs` to `startMcpHttpServer`. The supported

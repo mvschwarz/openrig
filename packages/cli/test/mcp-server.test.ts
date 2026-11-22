@@ -2158,3 +2158,53 @@ describe("MCP host routing", () => {
     expect(unknownSender?.followUp).toContain("and host unipc");
   });
 });
+
+
+describe("MCP instruction resources", () => {
+  const coreUri = "openrig://reference/coordination";
+  async function connectInstructions(options: Parameters<typeof createMcpServer>[1] = {}) {
+    const server = createMcpServer(mockClient(), options);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "instruction-consumer", version: "1.0.0" });
+    onTestFinished(async () => { await client.close(); await server.close(); });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  it("serves the generic coordination reference without an instruction extension", async () => {
+    const client = await connectInstructions();
+    expect((await client.listResources()).resources.map(resource => resource.uri)).toEqual([coreUri]);
+    expect(await client.readResource({ uri: coreUri })).toEqual({
+      contents: [{ uri: coreUri, mimeType: "text/plain", text: client.getInstructions() }],
+    });
+  });
+
+  it("composes endpoint introductions without broadening read-only guidance or sharing resources", async () => {
+    const access: McpAccess = {
+      principal: "reader", owner: false, rigs: ["team"], roots: [], readOnly: true,
+      external: { objects: { queue: ["show", "create"] } },
+    };
+    const aUri = "embedding://a/guide";
+    const bUri = "embedding://b/guide";
+    const a = await connectInstructions({ access, instructions: {
+      introduction: "Use A's guide.", resources: [{ uri: aUri, name: "a-guide", mimeType: "text/markdown", text: "# A guide" }],
+    } });
+    const b = await connectInstructions({ access, instructions: {
+      introduction: "Use B's guide.", resources: [{ uri: bUri, name: "b-guide", mimeType: "text/plain", text: "B guide" }],
+    } });
+    const core = await a.readResource({ uri: coreUri });
+    const generic = (core.contents[0] as { text: string }).text;
+    expect(generic).toContain("read operations only");
+    expect(generic).not.toContain("rig_queue_create");
+    expect(a.getInstructions()).toBe(`${generic}\n\nUse A's guide.`);
+    expect(b.getInstructions()).toBe(`${generic}\n\nUse B's guide.`);
+    expect((await a.listTools()).tools.map(tool => tool.name)).toEqual(["rig_queue_show"]);
+    expect((await a.listResources()).resources.map(resource => resource.uri).sort()).toEqual([coreUri, aUri].sort());
+    expect((await b.listResources()).resources.map(resource => resource.uri).sort()).toEqual([coreUri, bUri].sort());
+    expect(await a.readResource({ uri: aUri })).toEqual({ contents: [{ uri: aUri, mimeType: "text/markdown", text: "# A guide" }] });
+    expect(await b.readResource({ uri: bUri })).toEqual({ contents: [{ uri: bUri, mimeType: "text/plain", text: "B guide" }] });
+    await expect(a.readResource({ uri: bUri })).rejects.toThrow();
+    await expect(b.readResource({ uri: aUri })).rejects.toThrow();
+  });
+});

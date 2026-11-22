@@ -17,6 +17,12 @@ import { readRosters, rosterTeamName, teamPhrase, type RosterMember } from "./co
 import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "./queue-artifact.js";
 
+/** Endpoint-owned content, delivered beside Core's caller-scoped coordination guidance. */
+export type McpInstructionExtension = {
+  introduction?: string;
+  resources?: readonly { uri: string; name: string; mimeType: string; text: string }[];
+};
+
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 /** The most text rig_context_get and rig_artifact_read return in one call; a longer file or section is cut, and says so. */
@@ -1098,6 +1104,7 @@ export function mintUnknownSender(): string {
  * @returns McpServer instance (not yet connected to a transport)
  */
 export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; principalSource?: string; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+  instructions?: McpInstructionExtension;
   /** HTTP disconnect/legacy cancellation, combined with the SDK's per-call cancellation for bounded reads. */
   requestSignal?: AbortSignal;
   /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
@@ -1107,10 +1114,20 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   hostBindingsLoader?: () => HostBindingsFile;
   /** For an external grant that names a person: a client acting as that person, used only to record their answers. */
   personClient?: DaemonClient } = {}): McpServer {
+  const coreInstructions = instructionsFor(options.access, options.frontDoor === true);
+  const introduction = options.instructions?.introduction;
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: instructionsFor(options.access, options.frontDoor === true) });
+  }, { instructions: introduction ? `${coreInstructions}\n\n${introduction}` : coreInstructions });
+  server.registerResource("openrig-coordination", "openrig://reference/coordination", { mimeType: "text/plain" }, async uri => ({
+    contents: [{ uri: uri.href, mimeType: "text/plain", text: coreInstructions }],
+  }));
+  for (const { uri, name, mimeType, text } of options.instructions?.resources ?? []) {
+    server.registerResource(name, uri, { mimeType }, async requested => ({
+      contents: [{ uri: requested.href, mimeType, text }],
+    }));
+  }
   const { access } = options;
   const clientFactory = options.clientFactory ?? ((url: string) => new DaemonClient(url));
   const hostRegistryLoader = options.hostRegistryLoader ?? loadHostRegistry;

@@ -127,6 +127,54 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   const grant = (name: string, extra: Partial<{ rigs: string[]; roots: string[]; workspace: boolean; owner: boolean }> = {}) =>
     addGrant(tokenFile, { name, seat: `${name}@team`, rigs: ["team"], roots: [], workspace: false, owner: false, ...extra });
 
+  it("serves caller-scoped coordination resources to a local read-only token without an extension", async () => {
+    seat("team", "reader");
+    const token = await addGrant(tokenFile, { name: "reader", seat: "reader@team", rigs: ["team"], roots: [],
+      workspace: false, owner: false, readOnly: true });
+    const served = await listen();
+    const call = await connect(served.url, token);
+    const uri = "openrig://reference/coordination";
+    expect((await call.client.listResources()).resources.map(resource => resource.uri)).toEqual([uri]);
+    const reference = await call.client.readResource({ uri });
+    expect(reference.contents[0]).toMatchObject({ uri, mimeType: "text/plain", text: call.client.getInstructions() });
+    expect(call.client.getInstructions()).toContain("read operations only");
+    expect(call.client.getInstructions()).not.toContain("rig_queue_create");
+    expect((await call.client.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+  });
+
+  it("passes endpoint-owned instructions through the resolver while the Core reference follows each caller", async () => {
+    setSelfHostId("instruction-resource-fixture");
+    seat("team", "reader"); seat("team", "writer");
+    const guideUri = "embedding://team/guide";
+    const served = await listen({
+      instructions: { introduction: "Read this endpoint's guide.", resources: [
+        { uri: guideUri, name: "team-guide", mimeType: "text/plain", text: "A configured team guide" },
+      ] },
+      resolver: async ({ bearer }) => {
+        if (bearer !== "reader" && bearer !== "writer") return { ok: false, refusal: "unknown" };
+        return { ok: true, seat: `${bearer}@team`, principal: { source: "embedding", id: bearer },
+          access: { principal: bearer, owner: false, rigs: ["team"], roots: [], workspace: false }, readOnly: bearer === "reader" };
+      },
+    });
+    const reader = (await connect(served.url, "reader")).client;
+    const writer = (await connect(served.url, "writer")).client;
+    for (const client of [reader, writer]) {
+      expect(client.getInstructions()).toContain("Read this endpoint's guide.");
+      expect(await client.readResource({ uri: guideUri })).toEqual({
+        contents: [{ uri: guideUri, mimeType: "text/plain", text: "A configured team guide" }],
+      });
+    }
+    const readerCore = (await reader.readResource({ uri: "openrig://reference/coordination" })).contents[0] as { text: string };
+    const writerCore = (await writer.readResource({ uri: "openrig://reference/coordination" })).contents[0] as { text: string };
+    expect(readerCore.text).toContain("read operations only");
+    expect(readerCore.text).not.toContain("rig_queue_create");
+    expect(writerCore.text).not.toContain("read operations only");
+    expect(writerCore.text).not.toBe(readerCore.text);
+    expect(readerCore.text).not.toContain("Read this endpoint's guide.");
+    expect((await reader.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+    expect((await writer.listTools()).tools.map(tool => tool.name)).toContain("rig_queue_create");
+  });
+
   it("with no grants serves loopback as the env's seat, declared and not authenticated, and refuses to bind beyond loopback", async () => {
     seat("elsewhere", "env-seat");
     const served = await listen();
