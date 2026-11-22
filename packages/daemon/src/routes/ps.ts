@@ -33,9 +33,11 @@ psRoutes.get("/", (c) => {
   // lane job (shared with /api/rigs/summary) so a concurrent burst yields the event
   // loop between jobs and /healthz stays responsive. Only query-flag parsing is here.
   return projectionLane.run(() => {
+    const entries = psService.getEntries({ includeArchived, archivedOnly });
     // #3636: the archived count rides beside the list as a header, so `rig ps` can print its count line from the default
-    // (active-only) list instead of folding every archived rig. The bare-array body is unchanged.
+    // (active-only) list instead of folding every archived rig. The bare-array body is unchanged. It's read after the
+    // list, so the list stays the route's first read, and a failure in either is the route's existing 500.
     if (typeof psService.countArchivedRigs === "function") c.header("X-OpenRig-Archived-Count", String(psService.countArchivedRigs()));
-    return c.json(psService.getEntries({ includeArchived, archivedOnly }));
+    return c.json(entries);
   });
 });
