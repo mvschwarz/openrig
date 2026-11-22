@@ -55,6 +55,8 @@ interface ViewShowOptions {
   project?: ProjectRead | null;
   /** With `project`: every current and former id the catalogued projects claim. */
   cataloguedProjectIds?: readonly string[];
+  /** The execution view's caller: an aborted signal skips a queued build and stops a running one at its next window. */
+  signal?: AbortSignal;
 }
 
 export interface CustomView {
@@ -151,8 +153,9 @@ export class ViewProjector {
         );
       }
       const build = () => {
+        opts?.signal?.throwIfAborted();
         const deps = this.executionDeps!;
-        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id,
+        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id, signal: opts?.signal,
           ...(opts?.project ? { projectIds: projectIds(opts.project), cataloguedProjectIds: opts.cataloguedProjectIds, aliasWarnings: opts.project.aliasWarnings } : {}) })
           .then(doc => ({ viewName: "execution" as const, generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 }));
       };

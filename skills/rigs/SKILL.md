@@ -18,7 +18,8 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
   that work raises: each one still goes to them. Never tell the team they approved something, or will answer a prompt,
   unless they said so.
 - **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them, unless
-  they told you outright to decide that kind of prompt (step 2).
+  they told you outright to decide that kind of prompt (step 2). If they want fewer prompts, the operator offers once
+  to allow the commands that keep asking, for their project only (step 2).
 - **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
   the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
   result is in the handed-over task's resolution. Set it before you promise to report back. This chat has no wake of
@@ -27,7 +28,9 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
   operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
-  yourself, with `rig send`, not raw tmux keys into a seat's terminal.
+  yourself, with `rig send`, not raw tmux keys into a seat's terminal. If your own app refuses that send (an auto-mode
+  check, say), tell them what it refused and why, and let them choose: approve it there, or answer in the team's
+  terminals the operator opened. Don't retry it another way.
 
 The full rules are in step 2, "Bring seat permission prompts to the person here".
 
@@ -170,9 +173,11 @@ commands; if the two ever differ, this step is right.
   rig ID (the `rigId` of the `kernel` row in `rig ps --json`) and its `operator` pod:
   `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex|omp> --print-env`.
   `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
-  (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
-  later `rig` command. Check with `rig whoami --json`, and use it or `rig seat status` later for identity and state,
-  not `rig attach --json` output. Don't print `OPENRIG_ACTIVITY_*` values: they're credentials.
+  (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). If it fails, don't retry with other names: continue unjoined, and
+  hand over the goal with `--return-route auto` ("If the person stays with you" below), so the team's questions still
+  come back here. Each command may run in a fresh shell, so put them in front of every later `rig` command. Check with
+  `rig whoami --json`, and use it or `rig seat status` later for identity and state, not `rig attach --json` output.
+  Don't print `OPENRIG_ACTIVITY_*` values: they're credentials.
   If they decline, a message that must still say who it's from can go as a queue item with a declared source,
   `rig queue create --source <their id>@external --destination <seat> --summary "<one line>" --body-file <file>`: the
   seat sees that name, recorded as declared, and can reply to them if they're registered (`rig gateway human list`).
@@ -264,7 +269,9 @@ commands; if the two ever differ, this step is right.
     > clearly pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything,
     > and never pick a "don't ask again" choice they didn't pick. Their answer covers only the prompt it answered: a
     > later prompt, even one like it, is a new question to me. Check the effect, and never send again while it's
-    > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
+    > unknown. To give this work to another seat, hand this item itself on (`rig queue handoff <this id> --to <seat>`), so
+    > my return address goes with it, and don't close it as a duplicate of a new item. If you hand this item on or give
+    > this work to another seat, copy this paragraph into the new item. When
     > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
     > evidence ref.
 
@@ -277,6 +284,16 @@ commands; if the two ever differ, this step is right.
     this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
+  - **Get woken when a task arrives at your address:** right after the handover, start this wait with your shell tool's
+    background option (in Claude Code versions that wake you when a background command ends), with your address in place
+    of `<address>`:
+
+        until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
+
+    It runs only `rig` and `sleep`, so it spends no model tokens while it waits, and it reads the same in bash and zsh.
+    When it ends, claim each pending task at once (claiming isn't answering: it stays open until the person answers),
+    handle what's waiting (below), then start the wait again, so it ends only on new work. A harness with no background
+    wake (Codex, for one) keeps the check whenever the person talks to you.
   - **When a question arrives at your address as a task,** list the pending work with
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they

@@ -2255,6 +2255,10 @@ export interface SendResult {
    *  Enter, or uncertain). The agent isn't expected to read it before the reset. The send's own result, uncertain
    *  delivery included, is unchanged by it, and a send that wrote nothing gets none. */
   usageLimit?: { asOf: string; resetsAt: string; notice: string };
+  /** Context, not a status: when this send started, the seat's main session had a permission or elicitation request,
+   *  made after its latest activity report, that OpenRig hadn't seen settled. It never says a dialog is open (a hook or
+   *  host can decide one with nothing shown), and the send's own result is unchanged by it. */
+  inputRequest?: { observedAt: string; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
@@ -2792,9 +2796,25 @@ export class SessionTransport {
     }
   }
 
+  /** The time of a permission or elicitation request the seat's main session made after its latest activity report and
+   *  that nothing has settled, else null. An unreadable record reads as none: it never changes a send. */
+  private unsettledInputRequestAt(sessionName: string): string | null {
+    try {
+      const nodeId = this.getSessionMeta(sessionName).nodeId;
+      const at = nodeId ? this.agentActivityStore?.getUnsettledInputRequestForNode?.(nodeId, sessionName) ?? null : null;
+      if (!at) return null;
+      const latest = this.agentActivityStore?.getLatestForNode({ sessionName, now: this.now(), order: "source" });
+      return latest?.eventAt && Date.parse(at) <= Date.parse(latest.eventAt) ? null : at;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
-   * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
+   * send, had an unsettled permission or elicitation request newer than its latest activity report, or was at its
+   * recorded usage limit while the text reached its input, add a notice saying so. Each notice is context beside the
+   * send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
@@ -2808,11 +2828,15 @@ export class SessionTransport {
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
-    // A prompt answer or a bare Enter isn't a message for the agent to read.
-    const limit = opts?.dangerouslyInteract || opts?.submitOnly ? null : this.currentUsageLimit(sessionName);
+    // A prompt answer or a bare Enter is aimed at the prompt itself, not a message for the agent to read.
+    const interacting = opts?.dangerouslyInteract || opts?.submitOnly;
+    const limit = interacting ? null : this.currentUsageLimit(sessionName);
+    const requestAt = interacting ? null : this.unsettledInputRequestAt(sessionName);
     const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts, limit);
-    const result = limit && reachedInput(sent) ? { ...sent, usageLimit: { ...limit,
+    const limited = limit && reachedInput(sent) ? { ...sent, usageLimit: { ...limit,
       notice: `${sessionName} was at its usage limit when this send started (OpenRig recorded it at ${limit.asOf}; it resets at ${limit.resetsAt}). The message reached its input, or may have; the agent isn't expected to read it before then.` } } : sent;
+    const result = requestAt ? { ...limited, inputRequest: { observedAt: requestAt,
+      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : limited;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";

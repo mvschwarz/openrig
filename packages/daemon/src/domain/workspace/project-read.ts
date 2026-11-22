@@ -3,11 +3,11 @@ import * as path from "node:path";
 import { parse, YAMLParseError } from "yaml";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
-import { readProjectCatalog, readCatalogAliasReport, selectCatalogProject, workspaceAliases, yamlObject, ProjectReadError, type IgnoredAlias } from "./project-catalog.js";
+import { readProjectCatalogWithRigs, readCatalogAliasReport, selectCatalogProject, workspaceAliases, yamlObject, ProjectReadError, type IgnoredAlias } from "./project-catalog.js";
 
 /** `aliases` are the former ids the project declares in its project.yaml; rows tagged with one are still this project's.
  *  `aliasWarnings` name the ones it declares that can't apply, and why (#3261). */
-export interface ProjectRead { id: string; root: string; name: string; sourcePath: string | null; missionsRoot: string; aliases?: string[]; aliasWarnings?: string[]; error?: string }
+export interface ProjectRead { id: string; root: string; name: string; sourcePath: string | null; missionsRoot: string; rigs?: string[] | null; rigsError?: string; aliases?: string[]; aliasWarnings?: string[]; error?: string }
 /** Every id a project's rows can carry: its current id, then its declared former ids. */
 export function projectIds(p: Pick<ProjectRead, "id" | "aliases">): string[] { return [p.id, ...(p.aliases ?? [])]; }
 /** Whether an id is a project's current id or one of its declared former ids. */
@@ -77,16 +77,16 @@ function aliasWarningsOf(ignored: IgnoredAlias[], id: string): string[] {
 }
 export function listProjects(c: Pick<ReadContext, "get">): { catalogPath: string; projects: ProjectRead[] } {
   const { workspace, catalog } = projectCatalogPaths(c);
-  const entries = readProjectCatalog(catalog);
+  const entries = readProjectCatalogWithRigs(catalog);
   if (entries) {
     const report = readCatalogAliasReport(catalog);
-    return { catalogPath: catalog, projects: entries.map(e => projectEntry(e.id, path.resolve(path.dirname(catalog), e.root), aliasesOf(report.aliases, e.id), aliasWarningsOf(report.ignored, e.id))) };
+    return { catalogPath: catalog, projects: entries.map(e => ({ ...projectEntry(e.id, path.resolve(path.dirname(catalog), e.root), aliasesOf(report.aliases, e.id), aliasWarningsOf(report.ignored, e.id)), rigs: e.rigs, ...(e.rigsError ? { rigsError: e.rigsError } : {}) })) };
   }
   // Uncatalogued workspaces keep their existing single-project authority.
   const manifest = path.join(workspace, "project.yaml");
   const value = fs.existsSync(manifest) ? yamlObject(manifest) : {};
   const id = value.id ?? value.metadata?.id ?? "workspace";
-  return { catalogPath: catalog, projects: [projectEntry(id, workspace, workspaceAliases(workspace, id))] };
+  return { catalogPath: catalog, projects: [{ ...projectEntry(id, workspace, workspaceAliases(workspace, id)), rigs: [] }] };
 }
 function lookupProject(c: Pick<ReadContext, "get">, id: string): ProjectRead {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) throw new ProjectReadError("invalid_project", "Invalid project ID");

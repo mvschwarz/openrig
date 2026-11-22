@@ -181,6 +181,29 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result.warnings?.some(warning => warning.includes("open terminal clients"))).not.toBe(true);
   });
 
+  // #3395, spec section 5, "Stored": a fresh launch of an existing seat starts from its stored settings, so it reads the
+  // stored pool block from the node.
+  it("A fresh launch of an existing model seat (rig seat launch --fresh) reports its stored pool block that can't be used once in the launch warnings, and the seat starts as it would without the block", async () => {
+    const advisory = "dev.impl pool.max: must be a whole number of 0 or more; pool not used";
+    const seat = seedSeat();
+    // Stored as a re-apply writes a block that can't be used: as authored.
+    expect(rigRepo.setNodePool(seat.node.id, { raw: { max: -1 } })).toBe(true);
+    const pooled = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(pooled.ok, JSON.stringify(pooled)).toBe(true);
+    expect(pooled.warnings?.filter(w => w === advisory)).toHaveLength(1);
+    expect(JSON.stringify(pooled).split(advisory).length - 1).toBe(1);
+    const started = (result: typeof pooled) => ({ ok: result.ok, sessionName: "sessionName" in result ? result.sessionName : null,
+      model: "model" in result ? result.model : null,
+      seat: (({ lifecycleState, occupantLifecycle, startupStatus }) => ({ lifecycleState, occupantLifecycle, startupStatus }))(getNodeInventory(db, seat.rig.id)[0]!) });
+    const withBlock = started(pooled);
+
+    // The same seat, its node storing no block: it starts the same way and says nothing about a pool.
+    expect(rigRepo.setNodePool(seat.node.id, null)).toBe(true);
+    const plain = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(JSON.stringify(plain)).not.toContain("pool not used");
+    expect(started(plain)).toEqual(withBlock);
+  });
+
   it("#2426: a fresh launch names what became of OpenRig's earlier copies of openrig-core's skills, a kept edited one included", async () => {
     const saved = process.env["OPENRIG_HOME"];
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-core-copies-"));

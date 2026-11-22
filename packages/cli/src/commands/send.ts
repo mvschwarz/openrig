@@ -562,8 +562,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         throw err;
       }
 
-      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran, or at its usage limit.
-      const notices = [res.data["managedCompaction"], res.data["usageLimit"]]
+      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran, at its usage
+      // limit, or had an unsettled permission or elicitation request.
+      const notices = [res.data["managedCompaction"], res.data["usageLimit"], res.data["inputRequest"]]
         .map(context => (context as { notice?: unknown } | undefined)?.notice).filter((notice): notice is string => typeof notice === "string");
       const printContextNotices = (write: (line: string) => void) => { for (const notice of notices) write(`Notice: ${notice}`); };
       if (!opts.json) printDestinationStatus(res.data, console.error);
@@ -1206,13 +1207,14 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; runnerReceipt?: NativeSendReceipt; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; usageLimit?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; runnerReceipt?: NativeSendReceipt; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; usageLimit?: { notice?: unknown }; inputRequest?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
   // Context beside a recipient's own result: its own advisory (such as unreadable input), and whether
   // it was in a managed compaction or restore when the send ran.
   const printNotice = (r: (typeof results)[number]) => {
     if (r.warning) console.log(`${r.sessionName}: Advisory: ${r.warning}`);
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
     if (typeof r.usageLimit?.notice === "string") console.log(`Notice: ${r.usageLimit.notice}`);
+    if (typeof r.inputRequest?.notice === "string") console.log(`Notice: ${r.inputRequest.notice}`);
   };
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
   // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —

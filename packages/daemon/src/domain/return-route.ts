@@ -9,9 +9,10 @@ import { getSelfHostId } from "./hosts/fanout-contract.js";
  *  - `issued`: OpenRig issued it for this create, and the caller's own identity is still the row's source;
  *  - `issued-actor`: OpenRig issued it for a caller with no identity, so it's also the row's declared source (claimed:v1);
  *  - `caller`: the caller's own identity (`self`);
- *  - `named`: an address the caller named. */
-export type ReturnRouteBasis = "issued" | "issued-actor" | "caller" | "named";
-export const RETURN_ROUTE_BASES: readonly ReturnRouteBasis[] = ["issued", "issued-actor", "caller", "named"];
+ *  - `named`: an address the caller named;
+ *  - `inherited`: the route of the one routed row the creating seat holds (`inheritedReturnRoute`). */
+export type ReturnRouteBasis = "issued" | "issued-actor" | "caller" | "named" | "inherited";
+export const RETURN_ROUTE_BASES: readonly ReturnRouteBasis[] = ["issued", "issued-actor", "caller", "named", "inherited"];
 
 /** The rig an issued conversation address names: the kernel's, as the rigs skill's agreed addresses do. Nothing is launched
  *  or written for it; the queue takes tasks for any canonical address. */
@@ -96,6 +97,23 @@ export type RouteResolution =
   | { kind: "route"; route: string; anchors: string[] }
   | { kind: "conflict"; routes: string[]; anchors: string[] }
   | { kind: "none" };
+
+/** The route for work a seat creates without naming one: the route of the one routed row it holds (open, addressed to it),
+ *  so a goal's work keeps reaching the person's conversation when the seat gives it out as a new row rather than handing the
+ *  goal on. Two distinct routes are a conflict and give none, as the resolver below treats them. A row addressed to the
+ *  route itself (a question to that conversation, on this host) gets none, so its own escalation can't relay back to it; a
+ *  route naming another host is kept as stored, even when its address matches a local one. */
+export function inheritedReturnRoute(db: Database.Database, holder: string, destination: string): string | null {
+  try {
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('queue_items') WHERE name = 'return_route'").get()) return null;
+    const routes = db.prepare(`SELECT DISTINCT return_route FROM queue_items WHERE destination_session = ?
+        AND state IN ('pending','in-progress','blocked') AND return_route IS NOT NULL`).all(holder) as Array<{ return_route: string }>;
+    if (routes.length !== 1) return null;
+    const route = routes[0]!.return_route;
+    const local = routeOnThisHost(route);
+    return local !== null && local === (routeOnThisHost(destination) ?? destination) ? null : route;
+  } catch { return null; }
+}
 
 /** The open rows blocked on one row that carry a route: the work that waits on it. */
 const WAITERS_SQL = "SELECT qitem_id, return_route FROM queue_items WHERE blocked_on = ? AND state = 'blocked' AND return_route IS NOT NULL";

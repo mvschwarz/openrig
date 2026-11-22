@@ -204,6 +204,10 @@ describe("Send CLI", () => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: "limited-seat", outcome: "delivered",
               usageLimit: { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z", notice: "limited-seat was at its usage limit when this send started." } }));
+          } else if (parsed.session === "request-seat") {
+            const inputRequest = { observedAt: "2026-11-20T03:30:00.000Z", notice: "request-seat's main session made a permission or elicitation request (as recorded). That doesn't establish that a dialog is open." };
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, inputRequest }));
           } else if (parsed.session === "unknown-advisory") {
             // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -821,6 +825,11 @@ describe("Send CLI", () => {
 
   // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
   // human output (not only in --json).
+  it("prints the input-request notice beside the send's own result", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "request-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to request-seat\nNotice: request-seat's main session made a permission or elicitation request (as recorded). That doesn't establish that a dialog is open.");
+  });
+
   it("prints the managed compaction notice beside the send's own result, sent or failed", async () => {
     const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-seat", "hello"]); });
     expect(sent.logs.join("\n")).toContain("Sent to restoring-seat\nNotice: restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished.");
