@@ -752,6 +752,35 @@ it.each([
   expect(h.panes).toHaveLength(tiles * workspaces);
 });
 
+// A writable tile is a tmux client of its seat: each local seat a Herdr view opens is pinned at its own size first
+// (seat-size-pin.test.ts runs the pin on real tmux).
+it("open all pins each local seat's window before Herdr lays out its tiles", async () => {
+  const h = makeInMemoryHerdr({ reuseLive: true });
+  const reads: string[] = [];
+  let herdrCallsAtFirstPin = -1;
+  const tmuxExec = vi.fn(async (args: string[]) => {
+    if (args[0] !== "display-message") return "";
+    if (herdrCallsAtFirstPin < 0) herdrCallsAtFirstPin = h.calls.length;
+    reads.push(args[3]!);
+    return `$${reads.length} @${reads.length} 160x50 latest \n`;
+  });
+  const svc = new TerminalService({ ...privateTerminalTmuxDeps(), tmuxExec, resolveLocalTmux: async () => "/usr/bin/tmux",
+    resolveProvider: () => h.adapter, viewsStore: { get: () => null, list: () => [] }, listRigNames: () => ["alpha"],
+    listRigs: () => [{ id: "alpha-id", name: "alpha" }],
+    listRigSeats: () => [makeRigSeat("alpha", "lead"), makeRigSeat("alpha", "impl")], listPodSeats: () => null,
+    hasSession: () => true, resolveHost: () => null,
+  });
+  const result = await svc.openAll({ provider: "herdr" });
+  expect(result.rigs.map(row => row.outcome)).toEqual(["opened"]);
+  expect(reads.sort()).toEqual(["=impl@alpha:", "=lead@alpha:"]);
+  expect(tmuxExec.mock.calls.filter(([args]) => args.includes("window-size") && args.includes("manual"))).toHaveLength(2);
+  expect(tmuxExec.mock.calls.filter(([args]) => args[0] === "set-hook")).toHaveLength(6);
+  // Pinned before Herdr laid out any tile.
+  expect(herdrCallsAtFirstPin).toBeGreaterThanOrEqual(0);
+  expect(h.calls.slice(0, herdrCallsAtFirstPin).some(call => call.method === "layout.apply")).toBe(false);
+  expect(h.calls.slice(herdrCallsAtFirstPin).some(call => call.method === "layout.apply")).toBe(true);
+});
+
 it("combined exact ID wins over another rig name and complete ownership has no incomplete warning", async () => {
   const h = makeInMemoryHerdr();
   const seats = vi.fn((id: string) => [makeRigSeat(id === "collision" ? "wanted" : "collision", "op")]);

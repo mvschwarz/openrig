@@ -45,6 +45,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { buildGridRoot, HerdrAdapter } from "./herdr-adapter.js";
+import { pinSeatsForHerdr } from "./seat-size-pin.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
 import { execArgvCommand } from "../../adapters/tmux-exec.js";
 import {
@@ -567,6 +568,11 @@ export class TerminalService {
   ): Promise<{ result: OpenViewResult; workspaceId?: string; extraNotes: string[] }> {
     const extraNotes: string[] = [];
     const openOpts = reuseLive ? { reuseLive: true } : undefined;
+    if (provider instanceof HerdrAdapter) {
+      // Before any tile attaches: a writable local tile is a tmux client of its seat and would size the agent's window.
+      const seats = composed.opened.filter(pane => !pane.readOnly && !pane.host).map(pane => pane.seat);
+      if (seats.length > 0) extraNotes.push(...await pinSeatsForHerdr((args) => this.runDaemonTmux(args), (await this.resolveLocalTmux()) ?? "tmux", seats));
+    }
     if (collectCreated && provider instanceof HerdrAdapter) {
       const tracked = await provider.openViewTracked({ ...composed, planId }, openOpts, true);
       if (tracked.created && "workspaceId" in tracked.created && !tracked.result.reusedWorkspace) {

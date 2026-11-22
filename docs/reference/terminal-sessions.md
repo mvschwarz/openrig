@@ -82,7 +82,14 @@ doesn't follow a replaced session or a restarted tmux server; reopen the view.
 
 Writable tiles attach immediately, as in 0.7.10. Their visible terminal sizes
 the agent's PTY under tmux's normal client sizing policy, and resizing the
-terminal reflows new output. Read-only tiles remain observers: they neither
+terminal reflows new output. A Herdr view (`--provider herdr`, and
+`rig terminal open --all`) first pins each local seat it shows at the seat's own
+size, so watching never resizes an agent: a tile sizes the agent only while it
+has keyboard focus (Herdr passes focus in and out to the tile), and the agent
+goes back to its own size when the focus or the tile leaves. Focus reaches tmux
+only with its server option `focus-events` on (`tmux set -s focus-events on`,
+which OpenRig doesn't change); without it the agent simply keeps its size, and a
+tile smaller than it shows the part around the cursor. Read-only tiles remain observers: they neither
 resize nor type into another seat. An ordinary tmux detach ends the writable
 tile without stopping the agent. A replacement with a different managed seat
 identity is not followed. If no replacement returns in time, or a
@@ -103,6 +110,12 @@ A deliberate `window-size manual` setting remains an explicit fixed-size choice.
 drops the window's own setting (`tmux set-window-option -t <window> -u window-size`
 with the daemon's server flags, to run on the daemon's host), for when you want it
 to follow its inherited sizing again.
+A Herdr view's pin is OpenRig's own: the window is `manual` with the seat's size
+recorded in its `@openrig_pin` option, and hooks on the seat's session fit it to
+a focused client. It stays after the view closes, since a Herdr restart brings
+tiles back without a new open; drop it with
+`tmux set-window-option -t <window> -u window-size` and `-u @openrig_pin`.
+A Herdr view leaves a window someone else made `manual` as it is.
 OpenRig's temporary layout and readable-capture pins release by unsetting the
 window's local `window-size` option; they do not restore an old local override.
 With the last pin released, the window inherits the global policy again.
@@ -492,7 +505,8 @@ writable tile attaches with plain tmux when it opens (see
 [Replacing a seat's session](#replacing-a-seats-session)): keys and paste go
 through tmux as in any attached client, tmux's prefix works (prefix then `[` to
 scroll back, for example), and the tile sizes the window while it's the active
-client. If the seat's tmux server restarts, a tile shows the seat again only
+client (in a Herdr view, while it has keyboard focus; see
+[Replacing a seat's session](#replacing-a-seats-session)). If the seat's tmux server restarts, a tile shows the seat again only
 when the same managed seat returns. The printed manual attach commands are
 `tmux attach -t` for a writable tile and `tmux attach -r -t` for a read-only
 one, with a local seat's tmux server (`-L <name>` or `-S <path>`) when it
