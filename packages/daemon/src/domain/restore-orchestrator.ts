@@ -2914,8 +2914,14 @@ export class RestoreOrchestrator {
       const continuationTail = claudeLaunch ? [...wrapperTail, ...Array(Math.max(0, 11 - wrapperTail.length)).fill(undefined), claudeLaunch] : wrapperTail;
       const wrappedTail = claudeAutoMode !== undefined ? [...continuationTail, ...Array(Math.max(0, 12 - continuationTail.length)).fill(undefined), claudeAutoMode] : continuationTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      // Keep the reserved generation in its final positional slot even when optional restore inputs are absent.
+      const resumeTail = launchGeneration === undefined ? wrappedTail : [
+        ...wrappedTail,
+        ...Array(Math.max(0, 13 - wrappedTail.length)).fill(undefined),
+        launchGeneration,
+      ];
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch, claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice]));
+        ...(resumeTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch, claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice, occupantGeneration?: string]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;

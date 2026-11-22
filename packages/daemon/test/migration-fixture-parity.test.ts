@@ -116,6 +116,12 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     expect(migrationsForFullTestDbExclusions).not.toHaveProperty("178_seat_pool.sql");
   });
 
+  it("The Remote Control observation migration is listed in the migration fixture parity test.", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "179_remote_control_observations.sql")).toBe(true);
+    expect(migrationsForFullTestDb.some((m) => m.name === "179_remote_control_observations.sql")).toBe(true);
+    expect(migrationsForFullTestDbExclusions).not.toHaveProperty("179_remote_control_observations.sql");
+  });
+
   it("178_seat_pool adds a nullable pool column and the slot table, and guards pre-178 databases", () => {
     const db = new Database(":memory:");
     try {

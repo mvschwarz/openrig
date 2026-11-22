@@ -2069,7 +2069,11 @@ export class ClaudeCompactionEnforcer {
     watch.notifying = true;
     const unknown: RestoreUptakeUnknown = { sessionName: session, attemptId: watch.attemptId, mapPath: watch.mapPath,
       doneAt: new Date(watch.doneAt).toISOString(), waitedMinutes: Math.round(this.restoreUptakeWaitMs / 60_000) };
-    void Promise.resolve().then(() => this.onRestoreUptakeUnknown?.(unknown)).then(() => {
+    void Promise.resolve().then(() => {
+      // A cancel or a new attempt that ran before this turn replaced the check, so its notice is no longer owed.
+      if (this.restoreUptake.get(session) !== watch) return;
+      return this.onRestoreUptakeUnknown?.(unknown);
+    }).then(() => {
       if (this.restoreUptake.get(session) === watch) this.restoreUptake.delete(session);
     }, error => {
       delete watch.notifying;

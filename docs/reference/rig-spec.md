@@ -255,6 +255,15 @@ also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings
 arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
 not establish support by every Claude version.
 
+After composition, launches and resumes keep settings of at most 64 KiB inline, byte-identical.
+Larger JSON values go through Claude's native `--settings` file form: a content-addressed 0600
+file under OpenRig's seat-specific `state/claude-settings/` storage. OpenRig publishes the complete
+file atomically and prunes older files only when their bytes still match their digest. It keeps
+the current files and files named by captured live arguments. Continuations
+can rewrite OpenRig's own unchanged files to apply the selected auto-mode block; foreign files stay
+opaque. A failed write falls back inline with a warning naming the size and failure, never a size
+refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.
+
 The initial spec records the rules on the stable seat. For an existing seat, put the
 complete replacement in a JSON file and use the existing audited permission command:
 
@@ -1606,9 +1615,10 @@ A seat that is still not interactive then ends `attention_required` with its
 launch and resume token kept, and the later readiness wait is skipped for it.
 That holds at every setting: at 1–3 seconds there are no extra polls, but an
 unresolved boot is still kept rather than failed. A pane that shows a Codex or
-another conversation's Claude is not waited for. `rig up` and
-`rig launch` wait 120 seconds for the daemon, so a restore of several stuck
-seats can pass that (in one measurement, about 31 seconds a seat at the
+another conversation's Claude is not waited for. `rig up` waits 120 seconds
+for the daemon by default. Use `rig up --timeout <seconds>` to change that
+wait. `rig launch` waits 120 seconds. A restore of several stuck
+seats can exceed the client wait (in one measurement, about 31 seconds a seat at the
 default, 95 for three). A client timeout and exit code 1 do not mean the
 restore was rolled back or that it should be run again; check the real state
 first with `rig ps`. Apart from this, the setting does not change the time

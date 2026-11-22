@@ -1634,15 +1634,16 @@ rig specs rename <name-or-id> <new-name> [--json]
 ```bash
 rig mcp serve [--port <daemon-port>]        # stdio: a local app starts the server itself
 rig mcp serve --http [--bind <host:port>]   # Streamable HTTP at /mcp (default 127.0.0.1:7437)
-rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner]
+rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner] [--person <entity_id>]
 rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
 The 39 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
 offered. An HTTP grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only
-with `--owner`, which offers every tool but the person tools. Only a grant service's grant that names its person offers
-the person tools.
+with `--owner`, which offers every tool but the person tools. Only a grant bound to a person offers the person tools: a
+grant service's grant that names its person, or a token-file grant added with `--person`. A local caller and an unbound
+grant never get them.
 - **Work (20):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
@@ -1674,8 +1675,9 @@ the person tools.
   of event metadata), and:
   - `rig_restore`, which starts a restore and returns its attempt;
   - `rig_restore_status`, that attempt's receipt.
-- **Person (2):** `rig_question_list` and `rig_question_answer`, offered only on a grant service's grant that names the
-  person who owns the connection (`person.entity_id`, with the `question` pair). They list the team's questions waiting on
+- **Person (2):** `rig_question_list` and `rig_question_answer`, offered only on a grant bound to the person who owns
+  the connection: a grant service's grant that names them (`person.entity_id`, with the `question` pair), or a token-file
+  grant added with `--person <entity_id>`. They list the team's questions waiting on
   that person, as Steering shows them, and record that person's own answer, given through the connection: `answer` for an
   ask, which returns their words to the asker, and `resolve` for a park. `docs/reference/hosted-members.md` has the
   contract.

@@ -9,7 +9,7 @@ import type { Migration } from "../migrate.js";
  *  says which). `binding_id` is the binding that reads it now, and a new binding for the same seat, hub and participant
  *  takes it over. */
 export const networkRequestsSchema: Migration = {
-  name: "179_network_requests.sql",
+  name: "184_network_requests.sql",
   sql: `
     CREATE TABLE IF NOT EXISTS network_requests (
       local_qitem_id TEXT PRIMARY KEY,
