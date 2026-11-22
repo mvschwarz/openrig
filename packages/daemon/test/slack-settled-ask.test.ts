@@ -131,6 +131,23 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(postCount).toBe(1);
   });
 
+  it("bounds settled context text after escaping a closure note", async () => {
+    const item = await postAsk();
+    const note = "🧪 " + "&&<".repeat(300);
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done",
+      closureReason: "no-follow-on", transitionNote: note });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const edited = updates[0]!;
+    const blocks = edited.blocks as Array<{ block_id?: string; type?: string; elements?: Array<{ text: string }> }>;
+    const status = blocks.find((block) => block.block_id === "or-settled")!.elements![0]!.text;
+    expect(status.length).toBeLessThanOrEqual(3000);
+    expect(status).toMatch(/^Done · .* · by author@rig · 🧪 /);
+    expect(status).toMatch(/(?:&amp;|&lt;)…$/);
+    expect(String(edited.text).split("\n")[0]).toBe(status);
+    expect(blocks.some((block) => block.type === "actions")).toBe(false);
+    expect(repo.listTransitions(item.qitemId).some((transition) => transition.transitionNote === note)).toBe(true);
+  });
+
   it("labels a done denial as Denied while retaining its stored closure reason", async () => {
     const item = await postAsk();
     repo.update({ qitemId: item.qitemId, actorSession: human, state: "done", closureReason: "denied" });
@@ -230,6 +247,20 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(repo.resolveDirectHumanReply({ qitemId: ordinary.qitemId, actorSession: human, decision: "Ship now?: Hold" })).toBe(true);
     await vi.waitFor(() => expect(updates).toHaveLength(2));
     expect(statusOf(updates[1]!)).toEqual({ text: "Answered: Hold", block: "Answered: Hold" });
+  });
+
+  it("shows a chosen label's *, _ and ~ literally on the settled status line", async () => {
+    const label = "Blue *B20* _fast_ ~old~";
+    const item = await postAsk(undefined, label);
+    expect(repo.recordHumanAnswer({ qitemId: item.qitemId, actorSession: human, questionId: "ship", optionId: "yes" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: `Ship now?: ${label}` })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const [status] = updates[0]!.blocks as Array<{ block_id?: string; elements?: Array<{ type?: string; text?: string }> }>;
+    expect(status?.block_id).toBe("or-settled");
+    expect(status?.elements).toHaveLength(1);
+    expect(status?.elements?.[0]?.type).toBe("plain_text");
+    expect(String(status?.elements?.[0]?.text).split(" · ")[0]).toBe(`Answered: ${label}`);
   });
 
   // C8 on a re-park: each park is its own question, and the item keeps one set of answers, so a card names only what its

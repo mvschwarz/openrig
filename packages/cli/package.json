@@ -35,7 +35,9 @@
     "daemon",
     "ui",
     "tui",
-    "scripts"
+    "scripts",
+    "mcp.js",
+    "mcp.d.ts"
   ],
   "scripts": {
     "build": "tsc && node ../../scripts/prepare-workspace-build.mjs cli",
@@ -55,10 +57,11 @@
     "better-sqlite3": "^13.0.3",
     "commander": "^13.0.0",
     "hono": "^4.7.0",
+    "https-proxy-agent": "^7.0.6",
     "jsonc-parser": "^3.3.1",
     "smol-toml": "^1.8.0",
     "string-width": "^8.3.0",
-    "tar": "^7.5.13",
+    "tar": "^7.5.21",
     "ulid": "^2.3.0",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"

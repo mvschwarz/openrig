@@ -118,7 +118,21 @@ status output in a transcript or file. Evidence shares the observation's
 five-minute lifetime and existing seat/actor limits, is discarded lazily on the
 next observation/status read after expiry, and is lost on restart. No rule,
 permission/configuration write, hook decision, edited input, prompt submission
-or new attention/delivery behavior is produced.
+or new attention or delivery behavior is produced. Its one other use follows.
+
+**Send context.** When a direct send starts and the seat's main session has a
+request newer than its latest activity hook, not yet settled by that session's
+later tool batch, the send's result carries an `inputRequest` notice saying so,
+and `rig send` and `rig broadcast` print it. The send goes exactly as it would
+without the request: the notice changes no readiness, refusal or timing, and a
+prompt answer (`--dangerously-interact`) gets none. The request isn't evidence
+that a dialog is open: a hook or host can decide a permission request, or
+answer an MCP elicitation, with nothing displayed, and the notice says so. A
+subagent's request, a settled or expired observation and a replaced occupant
+give no notice. Claude's `Elicitation` hook works the same way, settled by
+`ElicitationResult` or a later tool batch. Neither event changes activity or
+attention, and only the actor and time are kept: no server message, form field
+or response.
 
 Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
 is treated as main, a valid ID identifies a subagent or in-process teammate, and
@@ -127,10 +141,11 @@ no live PermissionRequest capture qualifies that convention on an installed nati
 version. A hook denial without a source-bound guard receipt has unknown origin.
 This diagnostic adds no guard collector, permission decision or attention policy.
 
-The new PermissionRequest diagnostic is optional for activity-hook readiness.
+The PermissionRequest diagnostic and the `Elicitation`/`ElicitationResult` pair
+are optional for activity-hook readiness.
 Every preexisting required event, relay asset and explicit hook-disable check
 still applies. An older installed plugin at the same manifest version retains
-its bytes and may not send this event: plugin-only delivery needs a future normal
+its bytes and may not send these events: plugin-only delivery needs a future normal
 maintainer release refresh, and managed delivery needs normal reprojection. A
 manifest or green readiness check does not prove live hook execution. Raw tool
 arguments and provider reason text are withheld; diagnostic evidence is bounded,
@@ -220,8 +235,11 @@ seat's shell. The daemon takes the recorded actor from transport identity only:
   `unattributed (no seat identity)`.
 
 Neither case takes an actor from the request body or from the target seat's name.
-`rig seat retire-held-message` still records the seat that retired a message, so
-run it from a seat's shell.
+`rig seat retire-held-message` uses the same transport-derived attribution: a
+managed seat's identity, or `unattributed (no seat identity)` from an ordinary
+terminal. Its actor never comes from the request body or the target's name.
+A reason is required. Retirement only frees active quota and preserves evidence;
+it does not deliver the message, claim native consumption or close work.
 
 ~~~sh
 rig seat set-typing-guard dev-impl@my-rig --mode draft-aware \
@@ -292,7 +310,8 @@ drop everyone else's messages. A sender's newest held message retires its earlie
 ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
 <id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
 held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
-record stays readable with `--id`. Held messages are never replayed, so this changes
+record stays readable with `--id`. Held messages are never replayed (a `draft-aware`
+queue wake's bounded retry, below, delivers only an entry still held), so this changes
 no delivery. A `draft-aware` attempt takes its sender's place only once it settles
 as held; one that is then delivered leaves the held messages as they are. A queue
 wake to a `draft-aware` seat counts its sender's held message there as room, by the
@@ -400,7 +419,20 @@ and remain unchanged before Enter. Labels alone do not prove arbitrary content.
 Migration `100_typing_guard_modes` extends the existing guard/audit rows and
 adds receipt metadata to the original outbox rows; it creates no tables, retry
 indexes or executable requests. Combined wakes retain each original ID and body.
-A held queue wake stays on the existing queue recovery path. Interrupted historical
+A held queue wake stays on the existing queue recovery path. A row created straight to
+a `draft-aware` seat is tried again when the seat next reports idle while it's still in
+`draft-aware` mode, through the same guarded delivery and within `queue.wake_retry_cap`.
+Switching modes alone replays nothing; a retry already admitted while the seat was
+`draft-aware` goes once. Still held past that cap or
+`queue.wake_unconfirmed_window_minutes`, or held in `hold` mode past the window, the row
+gets the wake ladder's one escalation to its owner and one notice to its sender, once
+per held episode. Nothing is typed into the held seat. The sender's notice is recorded in
+the outbox (`held-sender-notice-<qitem>-<episode>`) before the owner's escalation is
+marked. If the daemon stops before sending it, or the send definitely wrote nothing, it
+stays owed, and the ladder sends it on a later tick: a failed one after the retry
+interval, up to the retry cap. One that may have reached the sender isn't sent again, and
+one being sent when the daemon stopped reads unknown at the next start. A notice whose
+row is no longer held is retired, not sent. Interrupted historical
 writes become indeterminate at startup. That history never suppresses a current
 explicit request and is not consulted to determine its result.
 

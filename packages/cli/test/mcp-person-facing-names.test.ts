@@ -29,7 +29,7 @@ function rosters(name: string | null, members: unknown[] = []) {
   return folder;
 }
 
-async function connect(folder: string, opts: { external?: boolean; seat?: string; queueRows?: unknown[] } = {}) {
+async function connect(folder: string, opts: { external?: boolean; seat?: string; queueRows?: unknown[]; queueHeaders?: Headers } = {}) {
   const get = vi.fn(async (p: string): Promise<DaemonResponse> => {
     if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "team" }] };
     if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "team" }, nodes: [{ id: "n1", logicalId: "dev.review" },
@@ -42,7 +42,7 @@ async function connect(folder: string, opts: { external?: boolean; seat?: string
       { logicalId: "dev.idle", canonicalSessionName: null, hostSelfId: "host-a" },
     ] };
     if (p === "/api/queue/hosted-members") return { status: 200, data: { members: [] } };
-    if (p.startsWith("/api/queue/list?")) return { status: 200, data: opts.queueRows ?? [] };
+    if (p.startsWith("/api/queue/list?")) return { status: 200, data: opts.queueRows ?? [], ...(opts.queueHeaders ? { headers: opts.queueHeaders } : {}) };
     return { status: 404, data: {} };
   });
   const client = new DaemonClient("http://127.0.0.1:9999");
@@ -262,6 +262,26 @@ describe("rig_queue_list: an empty inbox", () => {
       // A narrowed list that comes back empty isn't an empty inbox.
       expect((await named.list({ owned: true, state: "done" })).structuredContent).toEqual({ items: [] });
     } finally { await named.close(); await unnamed.close(); await none.close(); }
+  });
+
+  it("carries the daemon's page marker, and a cut page never says the inbox is empty (#3572)", async () => {
+    const cut = new Headers({ "X-OpenRig-Limit": "1", "X-OpenRig-Truncated": "1" });
+    const row = { qitemId: "q-1", sourceSession: "dev-impl@team", destinationSession: CALLER, state: "pending" };
+    const line = "This page stops at the limit of 1 and more items match; pass a larger limit to see the rest.";
+    const busy = await connect(rosters("Sam's team"), { external: true, queueRows: [row], queueHeaders: cut });
+    // The one row the daemon returned is from a seat outside the caller's team, so the caller's view of the page is empty.
+    const hidden = await connect(rosters("Sam's team"), { external: true, queueHeaders: cut,
+      queueRows: [{ qitemId: "q-2", sourceSession: "dev-impl@elsewhere", destinationSession: CALLER, state: "pending" }] });
+    try {
+      const listed = await busy.list({ owned: true });
+      expect(listed.structuredContent).toMatchObject({ limit: 1, truncated: true });
+      expect(listed.structuredContent.items).toHaveLength(1);
+      expect(listed.content.map((c) => c.text).slice(1)).toEqual([line]);
+
+      const empty = await hidden.list({ owned: true });
+      expect(empty.structuredContent).toEqual({ items: [], limit: 1, truncated: true });
+      expect(empty.content.map((c) => c.text)).toEqual(["[]", line]);
+    } finally { await busy.close(); await hidden.close(); }
   });
 
   it("isn't added when there are items, or for an internal caller", async () => {

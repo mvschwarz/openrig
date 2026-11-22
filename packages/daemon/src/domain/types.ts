@@ -224,7 +224,7 @@ export type RigEvent =
   // failed/attention_required restoreOutcome to operator_recovered after
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
-  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: import("./runtime-recovery.js").RecoveryEvidence | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
   | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
@@ -976,6 +976,8 @@ export interface NodeInventoryEntry {
     decidedBy: string | null;
     seq: number;
     lastSwap: { generation: string; at: string } | null;
+    /** A typed usage limit ended the last turn (the activity reads unknown): when it was seen and its stated reset. */
+    usageLimit?: { rung: string; observedAt: string; resetsAt: string | null };
   } | null;
   /**
    * ARCH RULING 3a947fb1 (FR-7 additive) — the seat's RAW `lastActivityAt`

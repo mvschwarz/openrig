@@ -1,0 +1,28 @@
+# The fallback to the runner preset (agy.yaml): agy's own terminal UI, read from the screen.
+# Install as $OPENRIG_HOME/community-harnesses/agy-plain.yaml, with openrig-agy-launch on the seat's PATH.
+# The seat's pane gets only the daemon's minimal environment, so the setup goes in `command`. Replace each path:
+#   --agy-home  the seat's own agy home (a HOME-style folder); its .gemini/antigravity-cli/settings.json sets
+#               "modelProvider": "gemini"
+#   --agy       the agy executable
+#   --key-file  a file holding the Gemini API key; the launcher reads it into agy's environment as GEMINI_API_KEY, as the
+#               runner does
+#   --model     the model agy runs (agy's default on a key is Gemini 3.1 Pro (Low))
+#   --rig-path  the folder holding the `rig` executable, so the agent can run `rig` as the seat
+# On an agy sign-in instead of a key, leave out --key-file and --model, and don't set modelProvider.
+# Keep each limits item quoted: an unquoted item with a colon in it isn't read as text.
+format: 1
+name: agy-plain
+command: openrig-agy-launch --agy-home /path/to/seat-agy-home --agy /path/to/agy --key-file /path/to/gemini-api-key --model gemini-4-neon-high --rig-path /path/to/folder-with-rig
+maintainer: Your name or team
+limits:
+  - "checked with Antigravity CLI 1.5.13 and Gemini 4 Neon, once on an agy sign-in and once on a Gemini API key; not a Google-supported integration"
+  - "a fresh launch spends one small headless model turn (about 9k input tokens on a key) to learn the conversation id, because agy allocates none before its first prompt; a resume doesn't"
+  - "allowing command(rig) in agy's own settings.json covers only a lone rig command; anything with ;, &&, | or a redirect still prompts, and OpenRig relays no approvals"
+  - "no guidance, skills or startup files are placed, and OpenRig reports the seat's model as unknown"
+  - "activity and prompts are read from the screen only; in both checks the seat read working at rest and at agy's prompt"
+  - "does not use agy acp; one agy home per seat"
+launch_result: true
+resume: true
+startup_assisted: false
+first_input: false
+passes_model: false

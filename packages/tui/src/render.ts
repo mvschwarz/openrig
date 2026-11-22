@@ -1,4 +1,5 @@
 import { helpScreen } from "./commands/help.js";
+import { replaceControlCharacters, stripTerminalEscapes, terminalSafeText } from "./terminal-safe-text.js";
 import { commandFocusVisible } from "./motion.js";
 import { attentionLines } from "./attention/attention-model.js";
 import { fileLines, externalLines, fileTargetForPath, referenceLines, referenceAction } from "./reading.js";
@@ -1907,17 +1908,46 @@ export function drawableSize(columns: number | undefined, rows: number | undefin
   return size.cols > 0 && size.rows > 0 ? size : null;
 }
 
+/** Credentials out of text headed for the screen: URL userinfo and Bearer tokens. */
+function redactCredentials(text: string): string {
+  return text
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+}
+
+/**
+ * Detail text that is both cleaned and redacted, in the order that keeps the redaction effective.
+ *
+ * Escape sequences go first, before any redaction. Redacting a URL inside an OSC payload can delete the
+ * sequence's own introducer — the credential pattern happily matches across `\x9d`, or across the bytes
+ * that follow `\x1b]` — and then the stripper no longer recognises the sequence and its tail survives as
+ * literal text. Consuming the sequence whole is what makes its payload leave with it.
+ *
+ * Then redaction, then control replacement, then redaction again. Redacting after the escapes are gone
+ * catches a credential a sequence was interrupting (`https:<CSI>//user:...`) and a Bearer token the
+ * sequence split. The pass after control replacement catches one a control byte split, since that byte
+ * becomes a space the credential pattern cannot cross.
+ */
+function redactedDetailText(text: string): string {
+  return redactCredentials(
+    replaceControlCharacters(redactCredentials(stripTerminalEscapes(text))),
+  );
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const screen = state.palette
     ? helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32)
     : renderBody(state, snap, options, inputLine);
   if (options.controlSocketPath && screen.lines.length) {
     const row = screen.lines.length - 1;
-    const socketPath = options.controlSocketPath.replace(/[\x00-\x1f\x7f]/g, " ");
+    // The row shows the path with terminal control cleaned out, and the copy action keeps the bound
+    // path itself: main.ts recognises this action by `value === socket.path`, so rewriting the value
+    // here would hand the click to whichever screen is underneath. The copy sink cleans the bytes it
+    // prints, so the shown text and the copied text still agree.
+    const shownPath = terminalSafeText(options.controlSocketPath);
     const label = "socket: [copy]";
     const cols = options.cols ?? 120;
-    screen.lines[row] = pad(`${label} ${socketPath} · ${screen.lines[row]!.trimEnd()}`, cols);
-    // The status stays compact; its copy target retains the actual bound path.
+    screen.lines[row] = pad(`${label} ${shownPath} · ${screen.lines[row]!.trimEnd()}`, cols);
     screen.hitMap.unshift({ y: row + 1, x1: 1, x2: Math.min(cols, label.length), action: { type: "print-for-copy", label: "Control socket", value: options.controlSocketPath } });
     if (screen.segRows) delete screen.segRows[row + 1];
   } else if (options.controlSocketUnavailable && screen.lines.length) {
@@ -1948,8 +1978,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   if (options.startup?.open) {
     const startup = options.startup;
     const content = wrapContentLines(startupLines(startup).map((line) => ({ ...line,
-      text: line.text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f]/g, " ")
-        .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@").replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]"),
+      text: redactedDetailText(line.text),
     })), Math.max(1, cols - explW - 2));
     const selected = content.findIndex((line) => line.action?.type === "startup" && line.action.key === `select:${startup.local?.selected ?? startup.selected}`);
     const scroll = startup.local && !startup.local.result.entries ? startup.local.scroll : startup.expanded ? startup.scroll : Math.max(0, selected - Math.max(1, rows - 12));
@@ -1974,11 +2003,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     });
   }
   if (options.unavailable) {
-    const detail = options.unavailable
-      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-      .replace(/[\x00-\x1f\x7f]/g, " ")
-      .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-      .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+    const detail = redactedDetailText(options.unavailable);
     const summary = /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|better-sqlite3/i.test(detail)
       ? "The installed native module cannot load in this runtime. Repair the installation prerequisite, then retry."
       : "Startup state could not be read. Retry after resolving the reported prerequisite.";

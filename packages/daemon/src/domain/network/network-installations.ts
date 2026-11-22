@@ -111,7 +111,7 @@ export class NetworkInstallationStore {
     const site = validSite(input.site, input.allowHttp === true);
     const existing = this.db.prepare("SELECT * FROM network_installations WHERE site = ?").get(site) as Row | undefined;
     if (existing && input.replace !== true) {
-      throw new NetworkBindingError("already_enrolled", `This daemon is already enrolled at ${site} (${existing.id}). To enroll again with a new code, add --replace.`, 409);
+      throw new NetworkBindingError("already_enrolled", `This daemon is already enrolled at ${site} (${existing.id}). Already connected; carry on with rig network connect.`, 409);
     }
     const instance = this.instance();
     const until = this.deadline();
@@ -151,7 +151,7 @@ export class NetworkInstallationStore {
     if (answer.status !== 200) {
       const error = errorCode(answer.body);
       if (answer.status === 400 || answer.status === 409) {
-        throw new NetworkBindingError(error ?? "enroll_refused", `The account refused the code (${error ?? answer.status}). Get a new one from the account page; each is single-use and short-lived.`, answer.status);
+        throw new NetworkBindingError(error ?? "enroll_refused", `The account refused the code (${error ?? answer.status}). Get a new code from your account page.`, answer.status);
       }
       throw new NetworkBindingError("account_unavailable", `The account couldn't answer (${answer.status}). If the code is still current, try again with it; otherwise get a new one.`, 503);
     }
