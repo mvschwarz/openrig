@@ -947,8 +947,8 @@ function instructionsFor(access: McpAccess | undefined, frontDoor = false): stri
  *  seat the caller can't address never decides or shadows one it can. No topology relationship, name convention for a
  *  lead, caller identity or task history supplies a seat. Throws when the rig isn't one active rig here or its node list
  *  can't be read. */
-async function namedSeats(client: DaemonClient, rigName: string, name: string, addressable: (session: string) => boolean): Promise<string[]> {
-  return seatsNamed(await addressableSeats(client, rigName, addressable), name);
+async function namedSeats(client: DaemonClient, rigName: string, name: string, addressable: (session: string) => boolean, exactPeers = false): Promise<string[]> {
+  return seatsNamed(await addressableSeats(client, rigName, addressable, exactPeers), name);
 }
 
 /** A seat of a rig that the caller may address: its in-scope canonical or logical address, its name before `@`, its pod-member form,
@@ -957,7 +957,7 @@ type AddressableSeat = { session: string; own: string; podMember: string | null;
 
 /** The seats of `rigName` the caller may address, as namedSeats reads them from one read of the node list. Throws when the
  *  rig isn't one active rig here or its node list can't be read. */
-async function addressableSeats(client: DaemonClient, rigName: string, addressable: (session: string) => boolean): Promise<AddressableSeat[]> {
+async function addressableSeats(client: DaemonClient, rigName: string, addressable: (session: string) => boolean, exactPeers = false): Promise<AddressableSeat[]> {
   const rig = await resolveRigHandle(client, rigName, { strict: true });
   if (rig.kind !== "resolved") throw new Error(`rig ${rigName} isn't one active rig here`);
   const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
@@ -975,7 +975,10 @@ async function addressableSeats(client: DaemonClient, rigName: string, addressab
     if (dot === -1 && !recorded) continue;
     const podMember = dot === -1 ? null : `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
     const logical = podMember === null ? null : `${podMember}@${rigName}`;
-    const session = [recorded, logical].find((name): name is string => name !== null && addressable(name));
+    // Only an explicit peer profile can select a logical alias beside an out-of-scope canonical session.
+    // Legacy rig-scoped grants keep their canonical-session filtering.
+    const session = (recorded && !exactPeers ? [recorded] : [recorded, logical])
+      .find((name): name is string => name !== null && addressable(name));
     if (!session) continue;
     seats.push({ session, own: session.slice(0, -(rigName.length + 1)), podMember, member: dot === -1 ? null : logicalId.slice(dot + 1) });
   }
@@ -1815,7 +1818,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const at = destination.lastIndexOf("@");
         let seats: string[];
         try {
-          seats = await namedSeats(client, destination.slice(at + 1), destination.slice(0, at), (seat) => scope?.destination(seat) === true);
+          seats = await namedSeats(client, destination.slice(at + 1), destination.slice(0, at), (seat) => scope?.destination(seat) === true, access.external.peerSeats !== undefined);
         } catch { return unavailable(); }
         if (seats.length !== 1) return unavailable();
         destination = seats[0]!;
@@ -1837,7 +1840,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         let near: string[] = [];
         try {
           if (named !== "") {
-            const seats = await addressableSeats(client, rigName, (seat) => scope?.destination(seat) === true);
+            const seats = await addressableSeats(client, rigName, (seat) => scope?.destination(seat) === true, access.external.peerSeats !== undefined);
             reachable = seatsNamed(seats, named);
             if (reachable.length === 0) near = seatsWithMemberName(seats, named);
           }

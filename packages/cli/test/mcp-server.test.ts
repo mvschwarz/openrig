@@ -1933,7 +1933,7 @@ describe("MCP host routing", () => {
     local.get = vi.fn(async () => ({ status: 404, data: {} }));
     const result = await run(local, {
       seat: "impl@team",
-      access: { principal: "local", owner: false, rigs: ["team"], roots: [], newWorkRetryAfterMs: 9000 },
+      access: { principal: "local", owner: true, rigs: ["team"], roots: [], newWorkRetryAfterMs: 9000 },
       clientFactory: () => box.client,
       hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
       hostBindingsLoader: () => noBindings,
