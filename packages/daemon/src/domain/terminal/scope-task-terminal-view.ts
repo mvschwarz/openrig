@@ -4,11 +4,15 @@ import type Database from "better-sqlite3";
 import { parseFrontmatter, type SliceIndexer } from "../slices/slice-indexer.js";
 import { parseScopeTags } from "../slices/qitem-membership.js";
 import { belongsToProject } from "../workspace/project-catalog.js";
+import type { CatalogMissionsRoots } from "../workspace/project-read.js";
 import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
 import { projectTaskOwners, type TaskSeat, type TaskTerminalView } from "./task-terminal-view.js";
 
 export interface ScopeViewError { code: "scope_unsupported" | "scope_not_found" | "scope_ambiguous" | "scope_unavailable"; error: string }
-type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds" | "catalogMissionsRoots">>;
+type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds" | "catalogMissionsRoots" | "catalogRoots">>;
+/** One catalog read: the indexer's walkable and unreadable roots, or a plain context's walkable roots. */
+const catalogOf = (index: IndexContext): CatalogMissionsRoots =>
+  index.catalogRoots?.() ?? { roots: index.catalogMissionsRoots ?? [], unavailable: [] };
 interface Scope { name: string; id?: string; title: string; source: string; mission?: string; missionSource?: string }
 interface Mission { name: string; source: string; manifest?: string }
 interface ScopeIndex { slices: Scope[]; missions: Mission[]; claims: Map<string, Set<string>>; missionIssues: string[]; skippedCatalogRoots: string[] }
@@ -20,9 +24,10 @@ const unavailable = (error: string): ScopeViewError => ({ code: "scope_unavailab
 /** Strict bounded identity read over the configured index roots. The review
  * listing's first-match and unreadable-as-empty fallbacks are not authority
  * for retiring viewers. No inferred project, substring match or remote I/O. */
-function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
+function readScopeIndex(index: IndexContext, catalog = catalogOf(index)): ScopeIndex | ScopeViewError {
   let entries = 0, bytes = 0;
-  const scopes: Scope[] = [], missions: Mission[] = [], missionIssues: string[] = [], skippedCatalogRoots: string[] = [];
+  // A catalogued project whose own read failed is named here and never walked, like a root that fails mid-walk.
+  const scopes: Scope[] = [], missions: Mission[] = [], missionIssues: string[] = [], skippedCatalogRoots: string[] = [...catalog.unavailable];
   const seenRoots = new Set<string>(), scopeBySource = new Map<string, Scope>(), missionBySource = new Map<string, Mission>();
   const list = (dir: string, visit: (name: string) => void) => {
     const handle = fs.opendirSync(dir);
@@ -69,7 +74,7 @@ function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
   };
   try {
     // Catalogued projects' missions roots (#3553) are walked after the configured roots, so a mission or slice that lives under a catalogued project's root resolves even when `workspace.slices_root` is empty. Missing catalog roots are skipped like any other optional root.
-    for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots, ...(index.catalogMissionsRoots ?? [])].entries()) {
+    for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots, ...catalog.roots].entries()) {
       const catalogued = position >= 1 + index.additionalSliceRoots.length;
       const snapshot = catalogued ? {
         scopes: [...scopes], missions: [...missions],
@@ -274,11 +279,13 @@ export function createScopedTaskResolver(db: Database.Database, index: IndexCont
     invalidate() { cached = undefined; },
     resolve(view: string): TaskTerminalView | ScopeViewError {
       let reusable = false;
+      const catalog = catalogOf(index);
       try {
         const primary = fs.realpathSync(index.slicesRoot);
         // A catalog root outside the primary root's namespace is unwatched like any other optional root: reuse no cached generation across it.
-        const extraRoots = [...index.additionalSliceRoots, ...(index.catalogMissionsRoots ?? [])];
-        reusable = observed() && extraRoots.every(root => {
+        // Nor while a catalogued project is unreadable, so its repair is seen on the next resolve.
+        const extraRoots = [...index.additionalSliceRoots, ...catalog.roots];
+        reusable = observed() && catalog.unavailable.length === 0 && extraRoots.every(root => {
           try { const real = fs.realpathSync(root); return real === primary || real.startsWith(primary + path.sep); }
           catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
         });
@@ -287,7 +294,7 @@ export function createScopedTaskResolver(db: Database.Database, index: IndexCont
       try {
         const result = readScopedTaskTerminalView(db, view, index, resolveSeat, () => {
           if (cached) return cached;
-          const next = readScopeIndex(index);
+          const next = readScopeIndex(index, catalog);
           if (reusable && !("code" in next)) cached = next;
           return next;
         });

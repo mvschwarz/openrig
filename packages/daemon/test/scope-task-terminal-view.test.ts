@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as scopeReader from "../src/domain/terminal/scope-task-terminal-view.js";
 import { readScopedTaskTerminalView } from "../src/domain/terminal/scope-task-terminal-view.js";
 import type { TaskSeat } from "../src/domain/terminal/task-terminal-view.js";
+import { catalogMissionsRoots } from "../src/domain/workspace/project-read.js";
+import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
@@ -402,5 +404,68 @@ describe("catalogued project missions roots (#3553)", () => {
     const dir = path.join(f.projA, "alpha", "slices", "01-first", "SPEC.md");
     writeFileSync(dir, `---\nid: CHANGED\n---\n`);
     expect(resolver.resolve("slice:OPR.A1")).toMatchObject({ code: "scope_not_found" });
+  });
+});
+
+describe("a catalogued project whose own read fails (#3553)", () => {
+  // Wired as startup wires it: the indexer re-reads the workspace catalog through catalogMissionsRoots on every access.
+  function projectsFixture(slicesRoot?: (root: string) => string) {
+    const root = mkdtempSync(path.join(tmpdir(), "scope-terminals-projects-"));
+    const db = new Database(":memory:");
+    cleanup.push(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+    db.exec("CREATE TABLE queue_items(qitem_id TEXT PRIMARY KEY,destination_session TEXT,state TEXT,tags TEXT,chain_of_record TEXT); CREATE INDEX idx_queue_items_state ON queue_items(state)");
+    const project = (id: string, slice: { mission: string; name: string; id: string }, manifest?: string, spec = `# ${id}\n`) => {
+      const dir = path.join(root, id), sliceDir = path.join(dir, "missions", slice.mission, "slices", slice.name);
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(path.join(dir, "SPEC.md"), spec);
+      if (manifest !== undefined) writeFileSync(path.join(dir, "project.yaml"), manifest);
+      writeFileSync(path.join(sliceDir, "SPEC.md"), `---\nid: ${slice.id}\n---\n# ${slice.name}\n`);
+      return dir;
+    };
+    const healthy = project("proj-a", { mission: "alpha", name: "01-first", id: "OPR.A1" });
+    const broken = project("proj-b", { mission: "beta", name: "02-second", id: "OPR.B2" }, "id: [unclosed\n");
+    const badSource = project("proj-c", { mission: "gamma", name: "03-third", id: "OPR.C3" }, undefined, "---\nid: [unclosed\n---\n");
+    project("proj-out", { mission: "delta", name: "04-fourth", id: "OPR.D4" }, "missions:\n  root: ../proj-a/missions\n");
+    const catalogPath = path.join(root, "workspace.yaml");
+    writeFileSync(catalogPath, `projects:\n${["proj-a", "proj-b", "proj-c", "proj-out", "proj-gone"]
+      .map(id => `  - id: ${id}\n    root: ./${id}\n`).join("")}`);
+    const emptyRoot = path.join(root, "empty-missions");
+    mkdirSync(emptyRoot);
+    const indexer = new SliceIndexer({ slicesRoot: slicesRoot?.(root) ?? emptyRoot, additionalSliceRoots: [],
+      catalogMissionsRoots: () => catalogMissionsRoots(catalogPath), dogfoodEvidenceRoot: null, db });
+    const seats = new Map<string, TaskSeat>([["a", { hostId: "local", nodeId: "a", seat: "a", tmuxSession: "a", attachmentType: "tmux", stopped: false }]]);
+    const read = (selector: string) => readScopedTaskTerminalView(db, selector, indexer, address => seats.get(address) ?? null);
+    return { root, db, indexer, seats, read, healthy, broken: realpathSync(broken), badSource: realpathSync(badSource) };
+  }
+
+  it("reads a scope that may live in a project with a bad project.yaml or work source as unavailable, naming it, while healthy projects resolve", () => {
+    const f = projectsFixture();
+    expect(f.read("slice:OPR.A1")).toMatchObject({ task: { kind: "slice", id: "OPR.A1", complete: true } });
+    for (const selector of ["slice:OPR.B2", "mission:beta", "slice:OPR.C3", "slice:NOT-ANYWHERE"]) {
+      const result = f.read(selector);
+      expect(result).toMatchObject({ code: "scope_unavailable" });
+      expect((result as { error: string }).error).toContain(f.broken);
+      expect((result as { error: string }).error).toContain(f.badSource);
+    }
+  });
+
+  it("keeps scope_not_found once nothing is unreadable: a missing project root or an escaping missions root holds no scopes", () => {
+    const f = projectsFixture();
+    writeFileSync(path.join(f.broken, "project.yaml"), "metadata:\n  name: B\n");
+    writeFileSync(path.join(f.badSource, "SPEC.md"), "# proj-c\n");
+    expect(f.read("slice:OPR.B2")).toMatchObject({ task: { kind: "slice", id: "OPR.B2", complete: true } });
+    expect(f.read("slice:OPR.C3")).toMatchObject({ task: { kind: "slice", id: "OPR.C3", complete: true } });
+    expect(f.read("slice:OPR.D4")).toMatchObject({ code: "scope_not_found" });
+    expect(f.read("slice:NOT-ANYWHERE")).toMatchObject({ code: "scope_not_found" });
+  });
+
+  it("takes a fresh read while a catalogued project is unavailable, so its repair is seen on the next resolve", () => {
+    // The catalogued roots sit inside the watched primary root, so only the unavailable project stops identity reuse.
+    const f = projectsFixture(root => root);
+    const resolver = scopeReader.createScopedTaskResolver(f.db, f.indexer, address => f.seats.get(address) ?? null, () => true);
+    expect(resolver.resolve("slice:OPR.A1")).toMatchObject({ task: { id: "OPR.A1", complete: true } });
+    writeFileSync(path.join(f.broken, "project.yaml"), "metadata:\n  name: B\n");
+    writeFileSync(path.join(f.badSource, "SPEC.md"), "# proj-c\n");
+    expect(resolver.resolve("slice:OPR.B2")).toMatchObject({ task: { id: "OPR.B2", complete: true } });
   });
 });

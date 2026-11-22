@@ -1,4 +1,5 @@
 import { belongsToProject } from "../workspace/project-catalog.js";
+import type { CatalogMissionsRoots } from "../workspace/project-read.js";
 // Slice Story View v0 — slice indexer.
 //
 // Reads slice folders from a configured filesystem root. The default
@@ -201,8 +202,9 @@ export interface SliceIndexerOpts {
   /** Additional compatible roots to scan after the primary root. */
   additionalSliceRoots?: string[];
   /** Catalogued projects' missions roots (#3553). Carried for terminal mission/slice view index contexts only; the indexer's own listing keeps using `slicesRoot` + `additionalSliceRoots`.
-   * When a getter is given, the roots are re-read on every access, so a project added after daemon start joins terminal scope resolution without a restart. */
-  catalogMissionsRoots?: readonly string[] | (() => readonly string[]);
+   * When a getter is given, the roots are re-read on every access, so a project added after daemon start joins terminal scope resolution without a restart.
+   * The getter also names the roots it couldn't read, so a scope that may live there reads as unavailable, not gone. */
+  catalogMissionsRoots?: readonly string[] | (() => CatalogMissionsRoots);
   /** Root directory containing dogfood-evidence directories. */
   dogfoodEvidenceRoot: string | null;
   /** SQLite handle for read-only joins to queue_items + transitions + actions. */
@@ -441,7 +443,7 @@ export class SliceIndexer {
    *  the db handle elsewhere. Internal callers continue to use it
    *  the same way; read-only consumer outside the class. */
   readonly db: Database.Database;
-  private readonly catalogMissionsRootsSource: readonly string[] | (() => readonly string[]);
+  private readonly catalogMissionsRootsSource: readonly string[] | (() => CatalogMissionsRoots);
   private readonly cacheTtlMs: number;
   private listingCache: CachedListing | null = null;
   private detailCache: Map<string, CachedSlice> = new Map();
@@ -475,11 +477,17 @@ export class SliceIndexer {
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   }
 
-  /** Returns an array source unchanged, or calls a getter on every access. Any throw degrades to an empty list, so catalog discovery failure keeps today's fallback of no catalog roots. */
+  /** The walkable catalog roots (catalogRoots().roots). */
   get catalogMissionsRoots(): readonly string[] {
-    if (typeof this.catalogMissionsRootsSource !== "function") return this.catalogMissionsRootsSource;
+    return this.catalogRoots().roots;
+  }
+
+  /** The catalog's walkable and unreadable roots from one read: an array source unchanged with none unreadable, or a
+   *  getter called on every access. Any throw degrades to none, so catalog discovery failure keeps today's fallback. */
+  catalogRoots(): CatalogMissionsRoots {
+    if (typeof this.catalogMissionsRootsSource !== "function") return { roots: this.catalogMissionsRootsSource, unavailable: [] };
     try { return this.catalogMissionsRootsSource(); }
-    catch { return []; }
+    catch { return { roots: [], unavailable: [] }; }
   }
 
   /** Returns true when any configured slice root exists on disk. */
