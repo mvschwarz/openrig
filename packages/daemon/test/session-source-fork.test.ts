@@ -378,6 +378,8 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
       tmux,
       fsOps: mockClaudeFs(),
       sessionIdFactory: () => "fresh-uuid-aaa",
+      // The resume of a blank pane under Claude's process runs the longer wait; this cell is about the paths, not timing.
+      sleep: async () => {},
     });
     const fresh = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig" });
     expect(fresh.ok).toBe(true);
