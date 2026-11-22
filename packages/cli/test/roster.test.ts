@@ -20,6 +20,22 @@ it("reads v1 extensions without importing authored live facts", () => {
   expect(value.members).toEqual([member]);
   expect(() => parseRoster({ ...authored, version: 2 })).toThrow("version 1");
 });
+it.each(["absent", "empty"])("unnamed roster: parses an %s name without losing its members", (kind) => {
+  const { name: _name, ...unnamed } = authored;
+  const value = kind === "empty" ? { ...unnamed, name: "" } : unnamed;
+  expect(parseRoster(value)).toEqual({ ...authored, name: "" });
+  const root = folder();
+  writeFileSync(join(root, "production.json"), JSON.stringify(value));
+  expect(readRosters(root)).toMatchObject({ rosters: [{ ...authored, name: "" }], warnings: [], unreadable: [] });
+});
+it("unnamed roster: named rosters and other validation stay unchanged", () => {
+  expect(parseRoster(authored)).toEqual(authored);
+  for (const name of [undefined, ""]) {
+    expect(() => parseRoster({ ...authored, name, purpose: "" })).toThrow("version 1");
+    expect(() => parseRoster({ ...authored, name, members: [{ ...member, host: "" }] })).toThrow("Each member");
+  }
+  for (const name of [null, 42, {}, "   "]) expect(() => parseRoster({ ...authored, name })).toThrow("version 1");
+});
 it("shows a hosted member's last call only for a roster row on this host; another host's same-named seat is unknown", () => {
   const home = mkdtempSync(join(tmpdir(), "roster-presence-"));
   folders.push(home);

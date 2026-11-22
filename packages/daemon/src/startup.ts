@@ -114,7 +114,7 @@ import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { restoredRunnerHookEvidence, restoredUsageLimitEvidence } from "./routes/activity.js";
-import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
+import { readClaudeSelfReportEvidence, verifiedSelfReportPid } from "./adapters/claude-code-adapter.js";
 import { replaceFile } from "./adapters/replace-file.js";
 import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
@@ -160,6 +160,7 @@ import {
   WatchdogPolicyEngine,
 } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
+import { KeepAliveSupervisor } from "./domain/keep-alive-supervisor.js";
 import {
   ContinuityPolicyMaterializer,
   createContinuityCutoverBaton,
@@ -692,6 +693,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // AgentSpec.profile.activity is currently inert (the poller uses the
   // global default; per-seat windows are not wired to the live poll).
   const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
+  const selfReportIdentities = new SeatIdentityStore(db);
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
     structuralActivity: seatStructuralActivityService,
@@ -720,7 +722,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     selfReportReader: (sessionName, seatNodeId) => {
       // The seat's own Claude config dir when it declares one, where its Claude writes pid.json.
       const sessionsDir = nodePath.join(claudeConfigRootFor(db, seatNodeId), "sessions");
-      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId });
+      // The verified native process's own pid.json is the seat's after a /rename; the name match stays the fallback.
+      const pid = verifiedSelfReportPid(selfReportIdentities.getForNode(seatNodeId), sessionName);
+      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId, pid });
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
     restoreHookEvidence: (seat, runtime) => restoredRunnerHookEvidence(agentActivityStore, seat, runtime),
@@ -1424,7 +1428,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // tracker emits a single `kernel.agent.degraded` event for
   // observability. The kernel rig is still the only rig the daemon
   // auto-boots; other rigs require explicit operator-initiated
-  // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
+  // `rig up` / `rig restore` per amended IMPL-PRD §16.2. Once the daemon
+  // runs, a seat of any rig that declares keep_alive also comes back when
+  // it falls (the keep-alive supervisor below, #2940); one stopped on
+  // purpose stays down.
   const runtimeAdaptersMap = withCommunityHarnessResolver({
     "claude-code": claudeAdapter,
     "codex": codexAdapter,
@@ -1470,6 +1477,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       console.warn(`kernel-boot: skipped due to error: ${err instanceof Error ? err.message : String(err)}`);
     } catch { /* logging must never throw */ }
   }
+
+  // #2940: a seat that declares keep_alive is relaunched when it falls while the daemon runs. Built after the boot
+  // reconcile and the kernel boot, which keeps boot-time recovery (a kernel's restore registered here makes the
+  // supervisor leave that rig alone); it acts only on its own ticks, from when index.ts starts it after the listener
+  // binds, and it stops first at shutdown. Its launch is the one-seat launch `rig seat start` uses, with the same adapters.
+  const keepAliveSupervisor = new KeepAliveSupervisor({
+    db, eventBus, reconciler, restoreOrchestrator, adapters: runtimeAdaptersMap,
+    fsOps: { exists: (p: string) => fs.existsSync(p) },
+  });
 
   // Discovery services
   const tmuxScanner = new TmuxDiscoveryScanner({ tmuxAdapter });
@@ -1705,6 +1721,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
     }),
     restoreOrchestrator,
+    keepAliveSupervisor,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize
     rigSpecExporter,
     rigSpecPreflight,
@@ -2241,8 +2258,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           nodePath.join(resolvedWorkspaceRoot, "slices"),
         ].filter((root) => root !== slicesRoot)
       : [];
-    // #3553 — terminal mission/slice views resolve through the same project catalog as the Projects view, which re-reads the catalog on every call. The roots are re-read through the getter whenever a scope index is built. A missing or unreadable catalog degrades to today's configured roots.
-    let catalogMissionsRoots: readonly string[] | (() => readonly string[]) = [];
+    // #3553 — terminal mission/slice views resolve through the same project catalog as the Projects view, which re-reads the catalog on every call. The roots are re-read through the getter whenever a scope index is built. A missing catalog degrades to today's configured roots; an unreadable catalog or catalogued project is named as unavailable, and the readable roots still serve.
+    let catalogMissionsRoots: readonly string[] | (() => import("./domain/workspace/project-read.js").CatalogMissionsRoots) = [];
     if (resolvedCatalogPath) {
       try {
         const { catalogMissionsRoots: catalogRoots } = await import("./domain/workspace/project-read.js");

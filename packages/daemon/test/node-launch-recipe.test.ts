@@ -61,6 +61,26 @@ describe("persisted pod-aware launch recipes", () => {
     }));
   });
 
+  // #2940: a restore that follows the sessions it launches (daemon start's, for a keep_alive incident) hears the recipe's
+  // fresh launch register its session too, for a terminal seat as for an agent one.
+  it("tells the caller the session a fresh launch from the recipe registers", async () => {
+    db = createFullTestDb();
+    const setup = createTestApp(db);
+    const rig = setup.rigRepo.createRig("recipe-term-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-term", rig.id, "dev", "Development");
+    const rigRoot = process.cwd();
+    const rigSpec: RigSpec = { version: "0.2", name: "recipe-term-rig", edges: [], pods: [{ id: "dev", label: "Development",
+      members: [{ id: "shell", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." }], edges: [] }] };
+    const node = setup.rigRepo.addNode(rig.id, "dev.shell", { runtime: "terminal", podId: "pod-term", cwd: rigRoot,
+      launchRecipe: { version: 1, rigRoot, rigSpec } });
+    const registered: string[] = [];
+    const result = await setup.podInstantiator.launchPersistedFresh(rig.id, node.id, { onSessionRegistered: (id) => registered.push(id) });
+    expect(result.status).toBe("launched");
+    const sessions = setup.sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
+    expect(sessions).toHaveLength(1);
+    expect(registered).toEqual([sessions[0]!.id]);
+  });
+
   it("keeps saved seat choices authoritative over the recipe defaults", async () => {
     db = createFullTestDb();
     const launchHarness = vi.fn(async () => ({ ok: true as const }));

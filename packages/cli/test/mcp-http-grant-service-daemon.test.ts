@@ -205,6 +205,16 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect((await ask("rig_artifact_read", { root: "proof", path: "first-result.md" })).structured.code).toBe("out_of_scope");
   });
 
+  it("describes rig_team as the network for an authenticated grant-service caller", async () => {
+    answer = () => [200, active({ objects: { team: ["list"] } })];
+    const { url } = await listen();
+    const ask = await connect(url);
+    const tool = (await ask.catalog()).tools.find(tool => tool.name === "rig_team");
+    expect(tool?.title).toBe("Show my network");
+    expect(tool?.annotations?.title).toBe("Show my network");
+    expect(tool?.description).toContain("on your network");
+  });
+
   it("also serves an address-free first task to a client pinned to protocol 2026-07-28", async () => {
     seat("team-a", "lead");
     const { url } = await listen(undefined, "pod-lead@team-a");

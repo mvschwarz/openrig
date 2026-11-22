@@ -175,6 +175,14 @@ export function probeShowsNoServer(probe: { state: string; cause?: string }): bo
   return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
 }
 
+/** Only a reported missing server permits starting an empty one (a reboot's /tmp cleanup removes the socket); other
+ *  unreadable/permission results do not. Shared by `rig down` and the keep_alive reconcile (#2940). */
+export function isMissingTmuxServer(probe: SessionProbe): boolean {
+  if (probe.state !== "transport_unavailable" || /permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause)) return false;
+  return /no server running/i.test(probe.cause)
+    || /(?:error connecting to|tmux-\d+)[^\n]*(?:No such file or directory|Connection refused)/i.test(probe.cause);
+}
+
 /** The first line of tmux's own diagnostic for a lost server, for a log line or a status field. */
 function serverDiagnostic(error: unknown): string {
   const reported = tmuxReportedError(error);
@@ -2431,10 +2439,12 @@ export class TmuxAdapter {
         if (this.freshProbes.get(name) === pane && !this.deliveryGuard!.maybeTarget(name) && !this.deliveryGuard!.maybeTarget(pane)) return kill();
         return this.deliveryGuard!.input(this.freshManaged.get(name)?.nodeId ?? name, kill);
       }, true);
-      return beforeEffect ? { ...result, stopPhase } : result;
+      // #2940: a failure always says how far the stop got, so "no effect" can be proven without a checked stop.
+      return beforeEffect || !result.ok ? { ...result, stopPhase } : result;
     }
     if (beforeEffect) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard.", stopPhase };
-    return this.killSessionUnchecked(name);
+    const result = await this.killSessionUnchecked(name, undefined, phase => { stopPhase = phase; });
+    return result.ok ? result : { ...result, stopPhase };
   }
 
   /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's
