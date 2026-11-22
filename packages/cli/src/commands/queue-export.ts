@@ -42,6 +42,7 @@ export function queueExportCommand(): Command {
       try {
         const { exportLocalQueue } = await import("@openrig/daemon/queue-transfer-export");
         const { archive, ...summary } = exportLocalQueue({ home: getOpenRigHome(), dbPath: process.env.OPENRIG_DB ?? process.env.RIGGED_DB }, selection, opts.maxBytes);
+        for (const skipped of summary.skippedSelectors ?? []) process.stderr.write(`Warning: --rig ${JSON.stringify(skipped)} is host-qualified and was not resolved or exported; use --qitems for exact rows or --whole-host for the broader export\n`);
         if (!summary.rows.length && !summary.erasedIds.length && !summary.erasedRigs.length) {
           const scope = selection.kind === "host" ? "--whole-host" : `--${selection.kind} ${selection.names.map(name => JSON.stringify(name)).join(" ")}`;
           process.stderr.write(`Warning: ${scope} matched nothing\n`);

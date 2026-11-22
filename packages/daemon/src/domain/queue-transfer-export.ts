@@ -58,9 +58,12 @@ export function readQueueTransfer(db: Database.Database, selection: QueueExportS
   if (selection.kind !== "host" && (!names.length || names.some(name => !name || name.trim() !== name))) {
     throw new QueueTransferError("selection_invalid", "name a non-empty set of exact scope values");
   }
-  if (selection.kind === "rig" && names.some(name => name.includes("@"))) {
-    throw new QueueTransferError("selection_invalid", "use unqualified local rig names (no @) for --rig");
-  }
+  // A host-qualified --rig value names a foreign endpoint, not a local rig: skip it with a
+  // warning instead of refusing, keep the valid part of a mixed list, and let an
+  // all-skipped selection flow into the valid empty archive. Never strip the host
+  // suffix or guess the rig — point at --qitems for exact rows, --whole-host for breadth.
+  const skippedSelectors = selection.kind === "rig" ? names.filter(name => name.includes("@")) : [];
+  const selected = names.filter(name => !skippedSelectors.includes(name));
   const createdAt = new Date().toISOString();
   return db.transaction(() => {
     const host = new SelfHostIdentityStore(db).get();
@@ -75,7 +78,7 @@ export function readQueueTransfer(db: Database.Database, selection: QueueExportS
       mission: "EXISTS (SELECT 1 FROM json_each(tags) WHERE value IN (SELECT 'mission:' || value FROM json_each(@names)))",
       slice: "EXISTS (SELECT 1 FROM json_each(tags) WHERE value IN (SELECT 'slice:' || value FROM json_each(@names)))",
     }[selection.kind];
-    const params = { names: JSON.stringify(names), host: host.hostId };
+    const params = { names: JSON.stringify(selected), host: host.hostId };
     const statement = (sql: string) => db.prepare<unknown[], SqlRow>(sql);
     let bytes = 0;
     const read = (row: SqlRow) => {
@@ -153,10 +156,14 @@ export function readQueueTransfer(db: Database.Database, selection: QueueExportS
 }
 
 export function buildQueueTransfer(db: Database.Database, selection: QueueExportSelection, maxBytes = QUEUE_TRANSFER_MAX_BYTES) {
+  // The sealed envelope keeps the fixed §7 shape; skipped selectors surface only in the
+  // CLI summary (and as a stderr warning from the command).
+  const skippedSelectors = selection.kind === "rig"
+    ? [...new Set(selection.names)].sort().filter(name => name.includes("@")) : [];
   const snapshot = readQueueTransfer(db, selection, maxBytes);
   const archive = sealQueueTransfer(snapshot, maxBytes);
   return { archive, scope: snapshot.scope, origin: snapshot.origin,
     rows: snapshot.rows.map(row => ({ qitemId: row.qitemId, state: row.state, transitions: row.transitions.length,
       wakeEvidence: row.wakeEvidence.length, missionControlActions: row.missionControlActions.length })),
-    erasedIds: snapshot.erasedIds, erasedRigs: snapshot.erasedRigs };
+    erasedIds: snapshot.erasedIds, erasedRigs: snapshot.erasedRigs, skippedSelectors };
 }

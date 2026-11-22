@@ -98,3 +98,11 @@ it("selects the local queue with --whole-host, not --host", () => {
   expect(run("--host", "--preview").stderr).toContain("unknown option '--host'");
   expect(run("--help").stdout).toContain("--whole-host");
 });
+
+it("warns on a host-qualified rig selector and keeps the valid part", () => {
+  const result = run("--rig", "demo@elsewhere", "--rig", "demo", "--preview");
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ scope: { rigs: ["demo", "demo@elsewhere"] } });
+  expect(result.stderr).toContain('"demo@elsewhere" is host-qualified and was not resolved or exported');
+  expect(result.stderr).toContain("--qitems for exact rows");
+});

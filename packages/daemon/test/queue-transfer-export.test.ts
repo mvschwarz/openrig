@@ -87,10 +87,24 @@ it.each([{ kind: "mission", name: "demo" }, { kind: "slice", name: "one" }] as c
   },
 );
 
-it("refuses host-qualified rig selectors instead of selecting foreign work", () => {
+it("warns and skips host-qualified rig selectors, keeping the valid part", () => {
   seed();
   db.exec("UPDATE queue_items SET source_session = 'a@demo@elsewhere' WHERE qitem_id = 'qitem-b'");
-  expect(() => readQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere"] })).toThrow(/selection_invalid:.*unqualified/);
+  // A mixed list keeps its valid part and names the skipped selector; the selection is
+  // shown as given.
+  // The sealed envelope keeps the fixed shape; the summary carries skippedSelectors.
+  const plain = buildQueueTransfer(db, { kind: "rig", names: ["demo"] });
+  const mixed = buildQueueTransfer(db, { kind: "rig", names: ["demo", "demo@elsewhere"] });
+  expect(mixed.skippedSelectors).toEqual(["demo@elsewhere"]);
+  expect(mixed.scope.rigs).toEqual(["demo", "demo@elsewhere"]);
+  // The same rows a plain --rig demo export selects: the foreign endpoint's own work stays
+  // out, while a local row may mention the endpoint verbatim in its fields.
+  expect(mixed.rows).toEqual(plain.rows);
+  // All-@ input: the empty archive stays valid, with both selectors named as skipped.
+  const empty = buildQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere", "other@x"] });
+  expect(empty.rows).toEqual([]);
+  expect(empty.skippedSelectors).toEqual(["demo@elsewhere", "other@x"]);
+  expect(empty.scope.rigs).toEqual(["demo@elsewhere", "other@x"]);
 });
 
 it("leaves claims, unrelated work and late reports untouched across disjoint exports", () => {
