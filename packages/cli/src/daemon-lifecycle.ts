@@ -6,7 +6,7 @@ import { daemonFetch, SandboxProxyError } from "./daemon-transport.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
-import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
+import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, occupiedPortGuidance, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 // Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
@@ -267,7 +267,8 @@ export interface LifecycleDeps {
   // /healthz body (event-loop evidence). Optional so existing mocks that
   // return `{ ok }` are unchanged; production (realDeps) supplies it.
   fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
-  /** Exclusive bind check used only after a no-state health probe times out. */
+  /** Exclusive bind check of the launch address: after a no-state health probe times out, and before spawning
+   *  over a daemon.json whose PID is dead or not an OpenRig daemon. */
   isPortOccupied?: (host: string, port: number) => Promise<boolean>;
   kill: (pid: number, signal: string) => boolean;
   readFile: (path: string) => string | null;
@@ -710,10 +711,6 @@ export async function verifyRequiredListeners(input: {
   return { ok: true, verified };
 }
 
-function occupiedPortGuidance(port: number): string {
-  return `Address already in use (EADDRINUSE) on port ${port}. Inspect the listener before stopping it, or run 'rig daemon start --port <unused-port>'.`;
-}
-
 class StartupIdentityError extends Error {}
 class StartupChildPendingError extends Error {}
 
@@ -758,7 +755,11 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     if (pidState === "unresponsive") {
       throw new Error(`Existing daemon process (pid ${existing.pid} on port ${existing.port}) is unresponsive — recover it before starting a new daemon.`);
     }
-    // "dead" or "not_rigged" → stale state, safe to proceed
+    // "dead" or "not_openrig": the recorded PID is not a live OpenRig daemon, but another listener may still hold the
+    // launch port: a pending start's child (it never writes daemon.json) whose reservation was archived by hand, a
+    // daemon started outside this launcher, or a foreign process. Don't spawn a child onto it: its initialization
+    // would run before the bind fails.
+    if (await deps.isPortOccupied?.(probeHost, port)) throw new Error(occupiedPortGuidance(port));
   } else {
     let recoveredRunning = false;
     try {
@@ -832,7 +833,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       ? deps.readFileFrom(LOG_FILE, logOffset) ?? ""
       : Buffer.from(deps.readFile(LOG_FILE) ?? "").subarray(logOffset).toString();
     const dbConflict = startupLog.match(/^(?:Error: )?(OPENRIG_DB_CONFLICT:[^\r\n]*)/m)?.[1];
-    const guidance = dbConflict ? ` ${dbConflict}` : /\bEADDRINUSE\b/.test(startupLog)
+    // The daemon's own listen-failure line already carries the port guidance for EADDRINUSE.
+    const listenFailed = startupLog.match(/^(OPENRIG_LISTEN_FAILED [^\r\n]*)/m)?.[1];
+    const guidance = dbConflict ? ` ${dbConflict}` : listenFailed ? ` ${listenFailed}` : /\bEADDRINUSE\b/.test(startupLog)
       ? ` ${occupiedPortGuidance(port)}`
       : ` See ${LOG_FILE} for details.`;
     childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);

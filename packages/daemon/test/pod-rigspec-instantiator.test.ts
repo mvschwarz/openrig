@@ -19,6 +19,10 @@ import { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
 import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import Database from "better-sqlite3";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { reconcileSeatPoolNode } from "../src/domain/seat-pool-registration.js";
@@ -1921,6 +1925,52 @@ state: 2-named
     }
     db.close();
   });
+
+  // A first start held at a trust dialog or another attention state leaves a live session the person clears later. It gets
+  // the seat's continuity notice as a ready start does, and arming it again keeps that job. A failed start gets none.
+  it.each([["ready", 1], ["attention_required", 1], ["failed", 0]] as const)(
+    "a first start that ends %s arms the seat's managed-compaction notice %i time(s)", async (outcome, armed) => {
+      const managedAgent = `
+version: "0.2"
+name: impl
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: managed-compaction
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: []
+`.trim();
+      // The watchdog store on its own fully migrated database, as the daemon has it: the instantiator's fixture lacks 074's columns.
+      const jobsDb = new Database(":memory:");
+      migrate(jobsDb, ALL_MIGRATIONS);
+      const jobs = new WatchdogJobsRepository(jobsDb);
+      const materializer = new ContinuityPolicyMaterializer(jobs, () => null);
+      const arm = vi.spyOn(materializer, "arm");
+      const startNode = async () => ({ ok: false as const, startupStatus: outcome, errors: [`startup ended ${outcome}`] });
+      const { db, inst } = setup({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: managedAgent }, undefined, undefined, undefined, materializer,
+        outcome === "ready" ? undefined : { startupOrchestrator: { startNode } });
+
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+      expect(result.ok).toBe(outcome === "ready");
+      const notices = () => jobs.listActive().filter((job) => job.specYaml.includes("continuity_mode: managed-compaction"));
+      expect(notices()).toHaveLength(armed);
+      if (armed) {
+        // The notice watches the session this start left running.
+        const seat = db.prepare("SELECT session_name FROM sessions").all() as Array<{ session_name: string }>;
+        expect(seat).toHaveLength(1);
+        expect(notices()[0]!.targetSession).toBe(seat[0]!.session_name);
+        const first = notices().map((job) => job.jobId);
+        expect(materializer.arm(arm.mock.calls[0]![0]).map((job) => job.jobId)).toEqual(first);
+        expect(notices().map((job) => job.jobId)).toEqual(first);
+      }
+      db.close();
+      jobsDb.close();
+    });
 
   it("HG-3 attention_required result carries the attentionNodes list (operator approve→resume path)", async () => {
     const { db, rigRepo, sessionRegistry, eventBus, podRepo, adapter, codexAdapter, tmux } = setup({
