@@ -6,7 +6,7 @@ import { createServer, type Server } from "node:http";
 import Database from "better-sqlite3";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
@@ -32,7 +32,7 @@ import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js
 import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-plugin-env.js";
 import {
-  persistedPluginPaths, pluginPathsOf, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
+  persistedPluginPaths, pluginPathsOf, seatCorePluginDir, seatCorePluginSelection, vendoredCorePluginDir, withCorePlugin,
 } from "../src/domain/claude-core-plugin-env.js";
 import { ensureSeatSkillPlugin, recordSeatSkillFollowing, recordSeatSkillWrite, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
@@ -63,6 +63,15 @@ function vendoredPlugins(root: string): { pluginsDir: string; vendored: string }
   mkdirSync(join(vendored, ".claude-plugin"), { recursive: true });
   writeFileSync(join(vendored, ".claude-plugin", "plugin.json"), "{}");
   return { pluginsDir, vendored };
+}
+
+/** #3245: runs with launch.claude_sideload off, through its env override, as `rig config set launch.claude_sideload false`. */
+async function sideloadOff<T>(fn: () => Promise<T> | T): Promise<T> {
+  const saved = process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"];
+  process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "false";
+  try { return await fn(); } finally {
+    if (saved === undefined) delete process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"]; else process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = saved;
+  }
 }
 
 function fakeTmux(created: Array<{ name: string; env: Record<string, string> | undefined }>, sessionEnvCalls: string[] = []): TmuxAdapterType {
@@ -97,6 +106,19 @@ describe("which Claude seats load the vendored plugin", () => {
     } finally {
       db.close();
     }
+  });
+
+  it("#3245: is left out with launch.claude_sideload off, while the seat's selection still reads as selected", async () => {
+    const { pluginsDir, vendored } = vendoredPlugins(root);
+    const db = new Database(":memory:");
+    try {
+      const node = { id: "n", runtime: "claude-code" };
+      await sideloadOff(() => {
+        expect(seatCorePluginDir(node, db, [vendored], pluginsDir)).toBeUndefined();
+        expect(seatCorePluginSelection(node, db, [vendored], pluginsDir)).toBe(vendored);
+      });
+      expect(seatCorePluginDir(node, db, [vendored], pluginsDir)).toBe(vendored);
+    } finally { db.close(); }
   });
 
   it("is left out when the plugin is not vendored", () => {
@@ -301,6 +323,63 @@ profiles:
   });
 });
 
+describe("#3245 rig up with launch.claude_sideload off", () => {
+  let root: string;
+  let savedHome: string | undefined;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "claude-core-rigup-off-"));
+    // The OpenRig home holds the vendored plugin, as on a real install, so every reader finds the same copy.
+    savedHome = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = root;
+  });
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("starts a seat that selected openrig-core without plugin folders, sends it a list naming the plugin's skills, and names its hooks", async () => {
+    const RIG_ROOT = "/project/rigs/my-rig";
+    const { pluginsDir, vendored } = vendoredPlugins(root);
+    mkdirSync(join(vendored, "skills", "refocusing"), { recursive: true });
+    writeFileSync(join(vendored, "skills", "refocusing", "SKILL.md"), "---\nname: refocusing\ndescription: Use when a seat may have lost the outcome.\n---\n\nRefocus.\n");
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/lead/agent.yaml`]: `name: lead\nversion: "1.0"\nresources:\n  skills: []\n  plugins:\n    - id: openrig-core\n      source:\n        kind: local\n        path: ${vendored}\nprofiles:\n  default:\n    uses:\n      skills: []\n      plugins: [openrig-core]\n`,
+    };
+    const spec = { version: "0.2", name: "off-rig", pods: [{ id: "dev", label: "Dev", edges: [],
+      members: [{ id: "lead", agentRef: "local:agents/lead", profile: "default", runtime: "claude-code", cwd: "." }] }], edges: [] } as RigSpec;
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const created: Array<{ name: string; env: Record<string, string> | undefined }> = [];
+      const tmux = fakeTmux(created);
+      const sessionRegistry = new SessionRegistry(db);
+      const eventBus = new EventBus(db);
+      const adapter: RuntimeAdapter = {
+        runtime: "claude-code", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true })),
+      };
+      const inst = new PodRigInstantiator({
+        db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus,
+        nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, pluginsDir }),
+        startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} }),
+        fsOps: { readFile: (p: string) => { if (p in files) return files[p]!; throw new Error(`Not found: ${p}`); }, exists: (p: string) => p in files },
+        adapters: { "claude-code": adapter }, tmuxAdapter: tmux,
+      });
+      const result = await sideloadOff(() => inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT));
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(created[0]!.env).not.toHaveProperty(PLUGIN_ENV);
+      expect(JSON.stringify(result)).toContain("claude_sideload_off: openrig-core isn't loaded (launch.claude_sideload is off)");
+      const sentFiles = vi.mocked(adapter.deliverStartup).mock.calls.flatMap(([f]) => f);
+      const list = sentFiles.find((f) => f.path === "openrig-seat-skills.md");
+      expect(list, JSON.stringify(sentFiles.map((f) => f.path))).toBeDefined();
+      expect(readFileSync(list!.absolutePath, "utf8")).toContain(`Read before you use it: \`${join(vendored, "skills", "refocusing", "SKILL.md")}\``);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("a Claude seat's launch env, on the launch paths that don't re-resolve the spec", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   let root: string;
@@ -320,6 +399,33 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     for (const id of Object.keys(sel)) expect((await launcher.launchNode(rig.id, id, { pluginPaths: sel[id] })).ok).toBe(true);
     expect(created[0]!.env).toMatchObject({ [PLUGIN_ENV]: vendored, [SEAT_ENV_KEYS_VAR]: PLUGIN_ENV });
     for (const c of created.slice(1)) expect(c.env).not.toHaveProperty(PLUGIN_ENV);
+  });
+
+  it("#3245 fresh launch with launch.claude_sideload off: no plugin folder at all, and the seat's own list is left out", async () => {
+    const { pluginsDir, vendored } = vendoredPlugins(root);
+    const db = createFullTestDb(); dbs.push(db);
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("plugin-off");
+    rigRepo.addNode(rig.id, "selects", { runtime: "claude-code", cwd: "/work/seat" });
+    rigRepo.addNode(rig.id, "own", { runtime: "claude-code", env: { [PLUGIN_ENV]: OWN_LIST } });
+    rigRepo.addNode(rig.id, "codex", { runtime: "codex", env: { [PLUGIN_ENV]: OWN_LIST } });
+    const seat = seatSkillPaths({ rigId: rig.id, logicalId: "selects", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const created: Array<{ name: string; env: Record<string, string> | undefined }> = [];
+    const launcher = new NodeLauncher({ db, rigRepo, sessionRegistry: new SessionRegistry(db), eventBus: new EventBus(db),
+      tmuxAdapter: fakeTmux(created), sessionEnv: { OPENRIG_HOME: "/state" }, pluginsDir });
+    try {
+      await sideloadOff(async () => {
+        for (const id of ["selects", "own", "codex"]) expect((await launcher.launchNode(rig.id, id, { pluginPaths: [vendored] })).ok).toBe(true);
+      });
+      const [selects, own, codex] = created.map((c) => c.env ?? {});
+      expect(selects).not.toHaveProperty(PLUGIN_ENV);
+      expect(selects).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+      expect(selects).not.toHaveProperty(SEAT_NODE_ENV);
+      expect(own).not.toHaveProperty(PLUGIN_ENV);
+      // Another runtime's env is its own: the setting is about Claude seats.
+      expect(codex).toMatchObject({ [PLUGIN_ENV]: OWN_LIST });
+    } finally { rmSync(seat.root, { recursive: true, force: true }); }
   });
 
   it("fresh launch: a seat that loads the plugin is told its launch project, and one that doesn't is not", async () => {
@@ -440,6 +546,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
       created,
       rigId: rig.id,
       projected,
+      tmux,
       async run() {
         const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
         expect(down.errors).toEqual([]);
@@ -472,6 +579,14 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     const own = restoreHarness([{ category: "plugin", absolutePath: vendored }], { [PLUGIN_ENV]: OWN_LIST });
     await own.run();
     expect(own.created[0]).toMatchObject({ [PLUGIN_ENV]: `${OWN_LIST}:${vendored}` });
+  });
+
+  it("#3245 restore with launch.claude_sideload off: neither the plugin nor the seat's own list", async () => {
+    const { vendored } = vendoredPlugins(root);
+    const own = restoreHarness([{ category: "plugin", absolutePath: vendored }], { [PLUGIN_ENV]: OWN_LIST });
+    await sideloadOff(() => own.run());
+    expect(own.created).toHaveLength(1);
+    expect(own.created[0]).not.toHaveProperty(PLUGIN_ENV);
   });
 
   it("restore (native resume): a seat with kept skills gets its seat plugin, from storage keyed by its rig and logical seat", async () => {
@@ -579,6 +694,50 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
     expect(JSON.stringify((result as { result: { nodes: unknown[] } }).result.nodes)).not.toContain('"error"');
     expect(JSON.stringify(result)).toContain(`kept ${target}`);
+  }, 30_000);
+
+  it("#3245 fresh restore, end to end, with launch.claude_sideload off: the seat is sent its skill list, and no plugin folder", async () => {
+    const h = restoreHarness([], undefined, { fresh: true, realFs: true });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const body = "---\nname: review\ndescription: Use to review a change.\n---\n\nReview it.\n";
+    const src = join(root, "src-review", "review", "SKILL.md"), file = join(seat.skillsRoot, "review", "SKILL.md");
+    for (const path of [src, file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, body); }
+    recordSeatSkillWrite(seat.skillsRoot, file, src, body);
+    const result = await sideloadOff(() => h.run());
+    expect(result).toMatchObject({ ok: true, result: { nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
+    expect(h.created[0]).not.toHaveProperty(PLUGIN_ENV);
+    const sent = JSON.stringify([...vi.mocked(h.tmux.sendText).mock.calls, ...vi.mocked(h.tmux.sendShellCommand).mock.calls]);
+    expect(sent).toContain("These are files to read, not Claude Code skills");
+    expect(sent).toContain(join(seat.skillsRoot, "review", "SKILL.md"));
+  }, 30_000);
+
+  it("#3245 restore (native resume) with launch.claude_sideload off types nothing into the conversation, and names where the list is", async () => {
+    const h = restoreHarness([], undefined, { realFs: true });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const body = "---\nname: review\ndescription: Use to review a change.\n---\n\nReview it.\n";
+    const src = join(root, "src-review", "review", "SKILL.md"), file = join(seat.skillsRoot, "review", "SKILL.md");
+    for (const path of [src, file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, body); }
+    recordSeatSkillWrite(seat.skillsRoot, file, src, body);
+    const result = await sideloadOff(() => h.run());
+    expect(JSON.stringify(result)).toContain(`claude_sideload_off: the resumed conversation isn't sent this seat's skill list; it's in ${seat.catalogPath}`);
+    expect(readFileSync(seat.catalogPath, "utf8")).toContain("These are files to read, not Claude Code skills");
+    expect(JSON.stringify(vi.mocked(h.tmux.sendText).mock.calls)).not.toContain("files to read");
+  }, 30_000);
+
+  it("#3245 fresh restore with the setting on sends no skill list: the seat loads its skills from its plugin", async () => {
+    const h = restoreHarness([], undefined, { fresh: true, realFs: true });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const body = "---\nname: review\ndescription: Use to review a change.\n---\n\nReview it.\n";
+    const src = join(root, "src-review", "review", "SKILL.md"), file = join(seat.skillsRoot, "review", "SKILL.md");
+    for (const path of [src, file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, body); }
+    recordSeatSkillWrite(seat.skillsRoot, file, src, body);
+    await h.run();
+    expect(h.created[0]).toMatchObject({ [PLUGIN_ENV]: seat.pluginDir });
+    const sent = JSON.stringify([...vi.mocked(h.tmux.sendText).mock.calls, ...vi.mocked(h.tmux.sendShellCommand).mock.calls]);
+    expect(sent).not.toContain("this seat's skills");
   }, 30_000);
 
   it("fresh restore, end to end: a file whose recorded source changed comes back as the copy the seat had, never today's bytes", async () => {
@@ -690,7 +849,9 @@ describe("handover successor, on a real tmux server", () => {
     return out;
   }
 
-  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false): Promise<Record<string, string>> {
+  let lastHandover: { result: Awaited<ReturnType<SeatHandoverService["handover"]>>; pane: string; catalogPath: string } | undefined;
+  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false,
+    handover: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn()): Promise<Record<string, string>> {
     const { pluginsDir, vendored } = vendoredPlugins(scratch);
     const seat = `dev-impl@${rigName}`;
     seats.push(seat);
@@ -700,7 +861,8 @@ describe("handover successor, on a real tmux server", () => {
       const discoveryRepo = new DiscoveryRepository(db), eventBus = new EventBus(db);
       const rig = rigRepo.createRig(rigName);
       const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: scratch });
-      if (seatSkills) ensureSeatSkillPlugin(seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" }));
+      const skillPaths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      if (seatSkills) ensureSeatSkillPlugin(skillPaths);
       db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
         .run(node.id, JSON.stringify(saved.map((p) => p === "vendored" ? { category: "plugin", absolutePath: vendored } : p)));
       const adapter = new TmuxAdapter(exec);
@@ -724,9 +886,13 @@ describe("handover successor, on a real tmux server", () => {
         predecessorRecapResolver: () => ({ recap: [], recordPath: join(scratch, "none.jsonl") }),
         readinessTimeoutMs: 3000, sleep,
       });
-      const result = await service.handover({ seatRef: seat, reason: "context ~85%", source: "fresh", operator: "orch@seat" });
+      const result = await handover(() => service.handover({ seatRef: seat, reason: "context ~85%", source: "fresh", operator: "orch@seat" }));
       expect(result.ok).toBe(true);
       await sleep(300);
+      lastHandover = { result, pane: await tmux(`capture-pane -p -J -S -200 -t ${q(seat)}`), catalogPath: skillPaths.catalogPath };
+      // The successor's first turn was typed into this test's shell; clear any line it left open before reading the env.
+      await tmux(`send-keys -t ${q(seat)} C-c`);
+      await sleep(200);
       return await paneEnviron(seat, rigName);
     } finally {
       db.close();
@@ -741,6 +907,37 @@ describe("handover successor, on a real tmux server", () => {
     const other = await successorEnviron("coreplug-no", [{ category: "plugin", absolutePath: "/elsewhere" }]);
     expect(other).not.toHaveProperty(PLUGIN_ENV);
     expect(other).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+  }, 90_000);
+
+  it.runIf(available)("#3245: has no plugin folder when launch.claude_sideload is turned off after the predecessor started with it on", async () => {
+    // The predecessor's launch left the variable in the seat's tmux session environment, which the respawned pane starts from.
+    const env = await successorEnviron("coreplug-flip", ["vendored"], false, sideloadOff);
+    expect((await tmux(`show-environment -t ${q("dev-impl@coreplug-flip")} ${PLUGIN_ENV}`)).trim()).toBe(`-${PLUGIN_ENV}`);
+    expect(env).not.toHaveProperty(PLUGIN_ENV);
+  }, 90_000);
+
+  it.runIf(available)("#3245: has no plugin folder with launch.claude_sideload off, though the seat selected the plugin and keeps skills", async () => {
+    const { vendored } = vendoredPlugins(scratch);
+    const coreSkill = join(vendored, "skills", "refocusing", "SKILL.md");
+    mkdirSync(dirname(coreSkill), { recursive: true });
+    writeFileSync(coreSkill, "---\nname: refocusing\ndescription: Use when a long-running agent may have lost the outcome.\n---\n\nRefocus.\n");
+    try {
+      const env = await sideloadOff(() => successorEnviron("coreplug-off", ["vendored"], true));
+      expect(env).not.toHaveProperty(PLUGIN_ENV);
+      expect(env).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+      const { result, pane, catalogPath } = lastHandover!;
+      // The handover names what the successor doesn't get, as a launch does: core's hooks, and no activity relay at all,
+      // since the seat's saved selection has no claude_activity_hooks.
+      expect(result.ok && result.result.launchAdditionNotes).toEqual(expect.arrayContaining([
+        expect.stringContaining("claude_sideload_off: openrig-core isn't loaded"),
+        expect.stringContaining("claude_sideload_off: this seat's profile doesn't select claude_activity_hooks"),
+      ]));
+      // Its first turn points to the skill list, which names core's skill where the vendored plugin keeps it.
+      expect(readFileSync(catalogPath, "utf8")).toContain(`Read before you use it: \`${coreSkill}\``);
+      expect(pane).toContain(catalogPath);
+    } finally {
+      rmSync(join(vendored, "skills"), { recursive: true, force: true });
+    }
   }, 90_000);
 
   it.runIf(available)("has the seat's own skill plugin, the same storage as its predecessor's", async () => {
@@ -809,6 +1006,12 @@ printf '{"PLUGIN_DIRS":"%s","LEAKED":"%s","PROJECT":"%s","NODE":"%s"}' "\${CLAUD
     const f = fixture({ sessionKeys: PLUGIN_ENV });
     const seen = await f.run(await launch(f), { ...vars, LEAKED: "should-not-pass" });
     expect(seen).toEqual({ PLUGIN_DIRS: vendored, LEAKED: "absent", PROJECT: "absent", NODE: "absent" });
+  });
+
+  it("#3245: forwards no plugin folder with launch.claude_sideload off, whatever the pane holds", async () => {
+    const f = fixture({ memberEnv: { [PLUGIN_ENV]: OWN_LIST }, sessionKeys: PLUGIN_ENV, saved: ["vendored"], seatSkills: true });
+    const seen = await sideloadOff(async () => f.run(await launch(f), { [PLUGIN_ENV]: `${OWN_LIST}:${f.vendored}` }));
+    expect(seen).toEqual({ PLUGIN_DIRS: "absent", LEAKED: "absent", PROJECT: "absent", NODE: "absent" });
   });
 
   it("gives a seat that declared its own list the composed list, once", async () => {

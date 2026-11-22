@@ -68,6 +68,18 @@ describe("rig skill loadout --seat", () => {
     expect(logs).toContain(lineLine);
   });
 
+  it("#3245: says the router is a file to read when the seat loads no plugin", async () => {
+    process.env["OPENRIG_SESSION_NAME"] = "dev-impl@team";
+    const router = { id: "openrig-seat-router", path: "/s/r/SKILL.md", written: true };
+    const { deps } = makeDeps({ status: 200, data: { ...inspection, router: { ...router, readAsFile: true }, bootstrapLine: null } });
+    await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self"]);
+    const line = "            a file to read, not an installed skill: launch.claude_sideload is off, so this seat loads no plugin";
+    expect(logs).toContain(line);
+    logs.length = 0;
+    await skillCommand(makeDeps({ status: 200, data: { ...inspection, router, bootstrapLine: null } }).deps).parseAsync(["node", "rig", "loadout", "--seat", "self"]);
+    expect(logs).not.toContain(line);
+  });
+
   it("OPR.0.7.0.9: prints what the seat's launch passes of its own additions, and any copy missing or refused", async () => {
     process.env["OPENRIG_SESSION_NAME"] = "dev-impl@team";
     const launchAdditions = { agent: "openrig:reviewer", agentPromptReplacesDefault: true, appendSystemPromptFile: "/s/additions/system-prompt.md", pluginDirs: ["/s/additions/plugins/review"],

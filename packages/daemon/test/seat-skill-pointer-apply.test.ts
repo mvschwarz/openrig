@@ -84,17 +84,17 @@ function catalogWith(ids: Record<string, string>): { root: string; catalog: stri
 }
 
 describe("B: `rig skill loadout --seat` reconciles a seat's own selection and tells its occupant once, by the transport's evidence", () => {
-  function seatFixture() {
+  function seatFixture(runtime: SeatRef["runtime"] = "codex") {
     const ids: Record<string, string> = { "queue-handoff": "Use when handing work to another seat." };
     const cat = catalogWith(ids);
     const home = scratch("seat-apply-home-");
-    const seat: SeatRef = { nodeId: "node-1", rigId: `rig-${Math.random().toString(36).slice(2)}`, logicalId: "dev.impl", runtime: "codex", sessionName: "dev-impl@team", cwd: join(home, "project") };
+    const seat: SeatRef = { nodeId: "node-1", rigId: `rig-${Math.random().toString(36).slice(2)}`, logicalId: "dev.impl", runtime, sessionName: "dev-impl@team", cwd: join(home, "project") };
     mkdirSync(seat.cwd, { recursive: true });
-    const paths = seatSkillPaths({ rigId: seat.rigId, logicalId: seat.logicalId, runtime: "codex" });
+    const paths = seatSkillPaths({ rigId: seat.rigId, logicalId: seat.logicalId, runtime });
     // The seat's launch: its selection recorded in its own storage.
     const resolved = resolveSkillLoadout({ catalogRoot: cat.catalog, topologySkills: ["queue-handoff"] });
     if (!resolved.ok) throw new Error(JSON.stringify(resolved.errors));
-    expect(reconcileSkillLoadout({ loadout: resolved.loadout, runtime: "codex", cwd: seat.cwd, apply: true, topologyOwner: seat.sessionName, location: seatSkillLocation(paths, "codex") }).ok).toBe(true);
+    expect(reconcileSkillLoadout({ loadout: resolved.loadout, runtime, cwd: seat.cwd, apply: true, topologyOwner: seat.sessionName, location: seatSkillLocation(paths, runtime) }).ok).toBe(true);
     const sent: Array<{ text: string; deliveryId: string }> = [];
     const sender = (outcome: string, extra: Partial<{ ok: boolean; error: string }> = {}): SeatSkillSender => ({
       send: async (_s, text, opts) => { sent.push({ text, deliveryId: opts.deliveryId }); return { ok: outcome !== "failed", outcome: outcome as never, ...extra }; },
@@ -167,6 +167,40 @@ describe("B: `rig skill loadout --seat` reconciles a seat's own selection and te
     const claude = { ...f.seat, runtime: "claude-code" as const, rigId: `${f.seat.rigId}-c` };
     expect((await applySeatSkills({ db: f.db, seat: claude, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") })).delivery.state).toBe("not-sent");
     expect(f.sent).toHaveLength(0);
+  });
+
+  it("#3245: sends a Claude seat its list as files to read with launch.claude_sideload off, once, and nothing with it on", async () => {
+    const f = seatFixture("claude-code");
+    const saved = process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"];
+    try {
+      delete process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"];
+      expect((await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") })).delivery)
+        .toEqual({ state: "not-sent", reason: "a Claude seat reads its skills from its own plugin; nothing is sent to the running session" });
+      process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "false";
+      const first = await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") });
+      expect(first.delivery).toMatchObject({ state: "sent", record: { occupant: "gen-1", outcome: "delivered" } });
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]!.text).toContain("- **queue-handoff**: Use when handing work to another seat.");
+      expect(f.sent[0]!.text).toContain("These are files to read, not Claude Code skills");
+      const again = await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") });
+      expect(again.delivery).toMatchObject({ state: "already-delivered" });
+      expect(f.sent).toHaveLength(1);
+      // The seat stops keeping its skills: the occupant is sent the empty list in place of the one it has, once.
+      const none = resolveSkillLoadout({ catalogRoot: f.cat.catalog, topologySkills: [] });
+      expect(reconcileSkillLoadout({ loadout: none.loadout, runtime: "claude-code", cwd: f.seat.cwd, apply: true, topologyOwner: f.seat.sessionName,
+        location: seatSkillLocation(f.paths, "claude-code") }).ok).toBe(true);
+      const emptied = await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") });
+      expect(emptied.delivery).toMatchObject({ state: "sent", record: { occupant: "gen-1", outcome: "delivered" } });
+      expect(f.sent).toHaveLength(2);
+      expect(f.sent[1]!.text).toContain("This list replaces any earlier OpenRig skill list in this conversation.");
+      expect(f.sent[1]!.text).toContain("No OpenRig skills are kept for this seat.");
+      expect(existsSync(f.paths.catalogPath)).toBe(false);
+      expect((await applySeatSkills({ db: f.db, seat: f.seat, occupant: "gen-1", catalogRoot: f.cat.catalog, sender: f.sender("delivered") })).delivery)
+        .toMatchObject({ state: "already-delivered" });
+      expect(f.sent).toHaveLength(2);
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"]; else process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = saved;
+    }
   });
 });
 

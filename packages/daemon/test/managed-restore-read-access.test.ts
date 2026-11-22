@@ -220,3 +220,75 @@ it.each([false, true])("legacy resume composes member deny rules with managed re
   expect(result.permissions.allow).toEqual(expect.arrayContaining(["Read(./work/**)", `Read(/${f.marker})`]));
   expect(result.permissions.deny).toEqual(["Read(./private/**)"]);
 });
+
+// #3245: a seat launched with launch.claude_sideload off reads its skill list and skills by path, so the launch's one
+// --settings value allows those reads beside the restore reads, on a fresh launch and a resume. Native deny/ask still win.
+it.each(["fresh", "resume"])("%s: adds the sideload-off skill reads the launch is given, and nothing without them", async (kind) => {
+  const f = fixture();
+  const seatRoot = path.join(f.home, "state", "seats", "rig", "dev.impl", "claude-code");
+  const reads = { files: [path.join(seatRoot, "catalog.md")], trees: [path.join(seatRoot, "plugin", "skills"), path.join(f.home, "plugins", "openrig-core", "skills")] };
+  const tmux = f.tmux;
+  const launch = async (sideloadOffReads?: (nodeId: string) => { files: string[]; trees: string[] }) => {
+    f.commands.length = 0;
+    if (kind === "resume") {
+      const adapter = new ClaudeResumeAdapter(tmux, { openrigHome: f.home, ...(sideloadOffReads ? { sideloadOffReads } : {}) });
+      vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+      await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, undefined, "node", undefined, undefined, false, true);
+    } else {
+      const adapter = new ClaudeCodeAdapter({ tmux, stateDir: f.home, sessionIdFactory: () => CHILD, ...(sideloadOffReads ? { sideloadOffReads } : {}),
+        fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+      vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+      expect((await adapter.launchHarness(f.binding, { name: "owner@rig" })).ok).toBe(true);
+    }
+    return settings(f.commands[0]!).permissions.allow as string[];
+  };
+  const asked: string[] = [];
+  const allow = await launch((nodeId) => { asked.push(nodeId); return reads; });
+  expect(asked).toEqual(["node"]);
+  for (const home of spellings(f.home)) {
+    const seat = path.join(home, "state", "seats", "rig", "dev.impl", "claude-code");
+    expect(allow).toContain(`Read(/${seat}/catalog.md)`);
+    expect(allow).toContain(`Read(/${seat}/plugin/skills/**)`);
+    expect(allow).toContain(`Read(/${home}/plugins/openrig-core/skills/**)`);
+  }
+  // Another seat's storage isn't named.
+  expect(allow.some((rule) => rule.includes("/state/seats/") && !rule.includes("/rig/dev.impl/"))).toBe(false);
+  const without = await launch();
+  expect(without.some((rule) => rule.includes("/state/seats/") || rule.endsWith("/skills/**)"))).toBe(false);
+});
+
+// #3245: a restart that keeps the running Claude's options resumes with its captured --settings, which can predate
+// launch.claude_sideload off; the seat's skill reads are added to them, keeping its other rules.
+it.each(["launch", "resume"])("%s of kept options adds the sideload-off skill reads to the captured settings, keeping deny rules", async (kind) => {
+  const f = fixture(true);
+  const reads = { files: [path.join(f.home, "seat", "catalog.md")], trees: [path.join(f.home, "seat", "skills")] };
+  const continuation = { args: ["--permission-mode", "acceptEdits", "--settings", JSON.stringify({ permissions: { allow: ["Bash(ls)"], deny: ["Read(./private/**)"] } })], warnings: [] };
+  if (kind === "resume") {
+    const adapter = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, claudeManagedLaunch: f.claudeManagedLaunch, sideloadOffReads: () => reads });
+    vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+    await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, "acceptEdits", "node", undefined, undefined, false, true,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, continuation);
+  } else {
+    const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, claudeManagedLaunch: f.claudeManagedLaunch,
+      sideloadOffReads: () => reads, fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+    vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    expect((await adapter.launchHarness({ ...f.binding, claudeLaunch: continuation }, { name: "owner@rig", resumeToken: CHILD })).ok).toBe(true);
+  }
+  const sent = settings(f.commands.at(-1)!);
+  expect(sent.permissions.deny).toEqual(["Read(./private/**)"]);
+  expect(sent.permissions.allow).toEqual(expect.arrayContaining(["Bash(ls)",
+    ...spellings(f.home).flatMap(home => [`Read(/${home}/seat/catalog.md)`, `Read(/${home}/seat/skills/**)`])]));
+});
+
+it("a kept launch whose --settings is a file OpenRig didn't write is left as it is, and that is named", async () => {
+  const f = fixture(true);
+  const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, claudeManagedLaunch: f.claudeManagedLaunch,
+    sideloadOffReads: () => ({ files: [path.join(f.home, "seat", "catalog.md")], trees: [] }),
+    fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+  vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+  const result = await adapter.launchHarness({ ...f.binding, claudeLaunch: { args: ["--settings", "/elsewhere/settings.json"], warnings: [] } },
+    { name: "owner@rig", resumeToken: CHILD });
+  expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("claude_sideload_off: the kept launch's --settings is a file OpenRig didn't write")]) });
+  expect(f.commands.at(-1)).toContain("/elsewhere/settings.json");
+  expect(f.commands.at(-1)).not.toContain("catalog.md");
+});

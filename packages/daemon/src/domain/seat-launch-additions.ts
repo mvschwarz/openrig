@@ -5,6 +5,7 @@ import { SEAT_SKILL_PLUGIN_NAME, ensureSeatSkillPlugin, insideSeatStorage, insid
 import { claudePathBounds } from "./native-process-lineage.js";
 import { seatAdditionPluginFolder } from "./rigspec-schema.js";
 import { isClaudePluginChannel } from "./claude-plugin-channels.js";
+import { claudeSideloadEnabled } from "./claude-core-plugin-env.js";
 
 // OPR.0.7.0.9 — a Claude seat's own launch additions: an agent, an appended system prompt file and plugin folders.
 // Their files are copied into the seat's own storage (slice 13's seat root), never into the shared project, and a
@@ -255,9 +256,34 @@ export function seatLaunchAdditionPathsForNode(db: { prepare(sql: string): { get
 export function seatLaunchAdditionsForLaunch(
   db: { prepare(sql: string): { get(...params: unknown[]): unknown } },
   nodeId: string,
+  /** #3245: whether this launch may pass what loads through a plugin folder (`launch.claude_sideload`); an export,
+   *  which carries what the seat asked for, passes true. */
+  sideload: boolean = claudeSideloadEnabled(),
 ): { additions?: SeatLaunchAdditions; missing: string[]; refused: string[] } {
   const paths = seatLaunchAdditionPathsForNode(db, nodeId);
-  return paths ? seatLaunchAdditionsAt(paths) : { missing: [], refused: [] };
+  const found = paths ? seatLaunchAdditionsAt(paths) : { missing: [], refused: [] };
+  return sideload ? found : withoutSideloadedAdditions(found);
+}
+
+/**
+ * #3245: with `launch.claude_sideload` off, the additions that load through a plugin folder are left off the launch and
+ * named with the seat's other refused additions: the agent (registered only through the seat's generated plugin) and
+ * plugin folders. The prompt file is a plain launch argument, and plugin channels name `plugin:<name>@<marketplace>`
+ * entries an administrator's approved marketplace can supply, so both stay.
+ */
+function withoutSideloadedAdditions(found: { additions?: SeatLaunchAdditions; missing: string[]; refused: string[] }):
+  { additions?: SeatLaunchAdditions; missing: string[]; refused: string[] } {
+  const additions = found.additions;
+  if (!additions) return found;
+  const why = "launch.claude_sideload is off, and it loads through a plugin folder (CLAUDE_CODE_PLUGIN_DIRS)";
+  const refused = [...found.refused];
+  if (additions.agent) refused.push(`the agent ${additions.agent}: ${why}`);
+  for (const dir of additions.pluginDirs) refused.push(`the plugin folder ${dir}: ${why}`);
+  const kept: SeatLaunchAdditions = { pluginDirs: [],
+    ...(additions.appendSystemPromptFile ? { appendSystemPromptFile: additions.appendSystemPromptFile } : {}),
+    ...(additions.pluginChannels?.length ? { pluginChannels: additions.pluginChannels } : {}) };
+  const any = kept.appendSystemPromptFile || kept.pluginChannels;
+  return { ...(any ? { additions: kept } : {}), missing: found.missing, refused };
 }
 
 /** What a seat's launch passes, as the plan and the seat view report it: null when it has no additions. */
@@ -270,7 +296,9 @@ export interface SeatLaunchAdditionsReport extends SeatLaunchAdditions {
 }
 export function seatLaunchAdditionsReport(paths: SeatSkillPaths): SeatLaunchAdditionsReport | null {
   if (!readManifest(paths) && !manifestLinked(paths) && !manifestUnreadable(paths)) return null;
-  const { additions, missing, refused } = seatLaunchAdditionsAt(paths);
+  // #3245: what the launch passes under this machine's launch.claude_sideload, so a seat's view names what it leaves off.
+  const found = seatLaunchAdditionsAt(paths);
+  const { additions, missing, refused } = claudeSideloadEnabled() ? found : withoutSideloadedAdditions(found);
   const report: SeatLaunchAdditionsReport = { ...(additions ?? { pluginDirs: [] }), missing, refused };
   if (additions?.agent) {
     const copy = nodePath.join(paths.pluginDir, "agents", `${additions.agent.slice(additions.agent.indexOf(":") + 1)}.md`);

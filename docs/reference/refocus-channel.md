@@ -48,6 +48,20 @@ column above then applies only to a Codex seat whose plugin selection includes o
 exits 0 before running anything unless OpenRig gave that seat `OPENRIG_SEAT_PROJECT_DIR` and an explicit
 `OPENRIG_NODE`.
 
+**Under managed `disableSideloadFlags`.** Claude Code refuses `CLAUDE_CODE_PLUGIN_DIRS` at startup when its managed settings
+set `disableSideloadFlags`, so no Claude seat starts. `rig config set launch.claude_sideload false` (default `true`) launches
+Claude seats without the variable on every path above. Such a seat doesn't load `openrig-core`, so these hooks don't run
+there, and its activity reports come only from the `claude_activity_hooks` copy in its `settings.local.json`. Its skills,
+`openrig-core`'s included, are sent once it's ready as a list of files to read, as a Codex seat's are; no list is sent at
+launch when it keeps none, and a native resume sends none (its result names where the list is). Its router lists the same
+files and says it is a file to read, not an installed skill. `rig skill loadout --seat <seat> --apply` sends a changed list
+to the running seat, an empty one included. Each launch's `--settings` allows reading that list, the seat's own skills and
+`openrig-core`'s, beside the restore reads, and nothing else. A plugin-backed `agent_file`, `plugin_dirs` and a
+`CLAUDE_CODE_PLUGIN_DIRS` in the seat's `env:` are left out. Each launch names what the seat asked for and didn't get. When
+Claude's refusal is on the pane and the machine's managed settings file (`/etc/claude-code/managed-settings.json`, or
+`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS) sets `disableSideloadFlags`, the launch's reason
+suggests the setting. OpenRig changes nothing else, and retries nothing.
+
 Claude's additional firing signal is **transcript growth** — not turns (one turn
 can burn 200k tokens across fifty tool calls) and not wall-clock (the failure is
 sustained work, not elapsed time). Its default threshold is ~2.6MB of JSONL

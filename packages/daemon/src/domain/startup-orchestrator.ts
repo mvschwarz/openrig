@@ -33,6 +33,7 @@ import { PiCommunityRuntimeAdapter } from "../adapters/pi-community-runtime-adap
 import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
+import { claudeSideloadEnabled, claudeSideloadOffNotes, persistedActivityHooksSelected, pluginPathsOf, seatCorePluginSelection } from "./claude-core-plugin-env.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
 import { keptGuidanceSeatLine } from "./restore-guidance.js";
@@ -571,9 +572,16 @@ export class StartupOrchestrator {
     // OPR.0.7.0.13 (router): the seat's one generated router skill, after every pre-launch skill writer, so it lists
     // every skill the seat starts with. A router that can't be written is this seat's named result; the launch goes on.
     const routerSeatSkills = input.adapter.runtime === "claude-code" ? seatSkillPathsForNode(this.db, input.nodeId) : codexSeatSkills;
+    // #3245: a Claude seat launched with launch.claude_sideload off reads its router and catalog as files, and both list
+    // openrig-core's skills where the vendored plugin keeps them. A fresh launch hasn't saved its startup context yet, so
+    // its own plan says what it selected; a launch that projects nothing (native resume) reads the saved one.
+    const sideloadOff = input.adapter.runtime === "claude-code" && !claudeSideloadEnabled();
+    const coreDir = sideloadOff ? seatCorePluginSelection({ id: input.nodeId, runtime: "claude-code" }, this.db,
+      input.plan.entries.length > 0 ? pluginPathsOf(input.plan.entries) : undefined) : undefined;
+    const extraSkillsRoots = coreDir ? [join(coreDir, "skills")] : [];
     if (routerSeatSkills) {
       try {
-        const router = writeSeatSkillRouter(routerSeatSkills);
+        const router = writeSeatSkillRouter(routerSeatSkills, sideloadOff ? { claudeWithoutPlugin: true, extraSkillsRoots } : undefined);
         if (router.kept) warnings.push(seatRouterKeptNote(router));
       } catch (err) { warnings.push(`seat_router_not_written: ${(err as Error).message}`); }
     }
@@ -585,6 +593,38 @@ export class StartupOrchestrator {
         const catalog = writeSeatSkillCatalog(codexSeatSkills);
         if (catalog.kept) warnings.push(`${seatCatalogKeptNote(catalog)}${catalog.reason === "edited" ? ", and that file is what the seat's startup text sends" : ""}`);
       } catch (err) { warnings.push(`seat skill catalog not written: ${(err as Error).message}`); }
+    }
+
+    // #3245: a Claude seat launched with launch.claude_sideload off loads no plugin folder, so it gets its skills the way a
+    // Codex seat does: the catalog of what's in its storage, sent once it's ready, on a fresh start or a fresh-primed
+    // restore. It isn't saved with the startup context, so each start follows the setting it reads; with no skills,
+    // nothing is sent. What the seat asked for and doesn't get is named.
+    if (sideloadOff) {
+      warnings.push(...claudeSideloadOffNotes({
+        runtime: "claude-code",
+        coreSelected: coreDir !== undefined,
+        seatEnv: rigRepo.getEffectiveSeatEnv(input.nodeId),
+        // A launch that projects decides it (projection strips the relay when the plan drops it); a native resume projects
+        // nothing, so the selection it was last launched with stands.
+        activityHooksSelected: input.plan.entries.length > 0
+          ? input.plan.entries.some((e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks")
+          : persistedActivityHooksSelected(this.db, input.nodeId),
+      }));
+      const claudeSeatSkills = seatSkillPathsForNode(this.db, input.nodeId);
+      if (claudeSeatSkills) {
+        try {
+          const catalog = writeSeatSkillCatalog(claudeSeatSkills, { claudeWithoutPlugin: true, extraSkillsRoots });
+          if (catalog.kept) warnings.push(`${seatCatalogKeptNote(catalog)}${catalog.reason === "edited" ? ", and that file is what the seat's startup text sends" : ""}`);
+          const sends = catalog.count > 0 || catalog.reason === "edited";
+          // A resume types nothing into the resumed conversation, which may predate the setting: it's named instead.
+          if (sends && input.resumeToken) {
+            warnings.push(`claude_sideload_off: the resumed conversation isn't sent this seat's skill list; it's in ${catalog.path}`);
+          } else if (sends) {
+            postLaunchFiles.push({ path: "openrig-seat-skills.md", absolutePath: catalog.path, ownerRoot: claudeSeatSkills.root,
+              deliveryHint: "send_text", required: false, appliesOn: [context] });
+          }
+        } catch (err) { warnings.push(`seat skill catalog not written: ${(err as Error).message}`); }
+      }
     }
 
     // 7. Persist startup context for restore replay

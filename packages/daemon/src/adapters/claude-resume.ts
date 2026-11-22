@@ -1,4 +1,4 @@
-import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, withContinuationSkillReads, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
@@ -42,6 +42,8 @@ interface ClaudeResumeOptions {
   openrigHome?: string;
   /** The compaction settings the restore reads from, so the launch grants those files too. */
   restoreReadPolicy?: () => RestoreReadPolicy | null;
+  /** #3245: what a seat with launch.claude_sideload off reads by path, granted with the restore reads. */
+  sideloadOffReads?: (nodeId: string) => { files: string[]; trees: string[] };
   /** Slice 13: whether this restore adds a seat's hook bridge (opted in, on a Claude with asyncRewake). */
   hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
   /** #3416 (3): the seat's status line throttle in seconds, or null when it has none; read at each restore. */
@@ -153,6 +155,7 @@ export class ClaudeResumeAdapter {
     let launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
       ...(this.options.restoreReadPolicy?.() ?? {}),
+      ...(nodeId && this.options.sideloadOffReads ? { skillReads: this.options.sideloadOffReads(nodeId) } : {}),
     });
     let wrapperPrefix = "";
     if (!managed && executable && launchWrapper?.length) {
@@ -161,7 +164,8 @@ export class ClaudeResumeAdapter {
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
     let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat);
-    if (managed || (continuation?.args && executable)) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
+    if (managed || (continuation?.args && executable)) nativeArgs = transportClaudeSettings(withContinuationSkillReads(nativeArgs, continuation,
+      nodeId ? this.options.sideloadOffReads?.(nodeId) : undefined, settingsSeat, tokenWarnings), settingsSeat, tokenWarnings, continuation?.args);
     else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, continuation?.args);
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(nativeArgs, claudeResumeLaunchEnv(resumeToken!))

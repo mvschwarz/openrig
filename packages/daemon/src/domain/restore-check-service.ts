@@ -1,4 +1,4 @@
-import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.js";
+import { claudeSideloadEnabled, selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { deriveRelayEvents, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
@@ -1321,6 +1321,8 @@ export class RestoreCheckService {
   }
 
   private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {
+    // #3245: with launch.claude_sideload off a restore doesn't load the plugin, so it isn't one of the seat's hook channels.
+    if (!claudeSideloadEnabled()) return null;
     // A plugin selected under the OpenRig home is read in this instance's home, as restore will launch it.
     const dir = selectedCorePluginDir(pluginPathsOf(entries.map(entry => ({
       category: entry.category ?? "", absolutePath: entry.absolutePath, resourcePath: entry.resourcePath, sourcePath: entry.sourcePath,

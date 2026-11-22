@@ -354,6 +354,7 @@ import type {
 } from "./continuity-policy-materializer.js";
 import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
 import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths, type SeatSkillSelection, packagedSeatSkills } from "./seat-skill-storage.js";
+import { claudeSideloadEnabled } from "./claude-core-plugin-env.js";
 import { carrySeatLaunchAdditions, prepareSeatLaunchAdditions, type SeatLaunchAdditionsCarry } from "./seat-launch-additions.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
@@ -2802,7 +2803,8 @@ export class PodRigInstantiator {
     // replay nothing. The startup orchestrator rebuilds the file after this launch's projection.
     // OPR.0.7.0.13: the compatibility limit, named rather than silent, whichever writer puts a skill in a Claude seat's
     // storage (its loadout, a profile skill, a startup skill file). Nothing falls back to the project.
-    const versionNote = claudeSeatSkillsRoot
+    // #3245: with launch.claude_sideload off the skills don't go through that variable (the start sends their catalog).
+    const versionNote = claudeSeatSkillsRoot && claudeSideloadEnabled()
       ? claudeSeatSkillsNote({ loadoutReceipts, planEntries: planResult.plan.entries, startupFiles: protectedFiltered }) : undefined;
     if (versionNote) (launchResult.warnings ??= []).push(`${canonicalSessionName}: ${versionNote}`);
     // OPR.0.7.0.13 (router, R1.1): the one-line seat-skills bootstrap is part of a seat's saved startup files whenever it

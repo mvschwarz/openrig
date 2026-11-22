@@ -693,6 +693,32 @@ describe("live seat runtime switch", () => {
     }
   });
 
+  it("#3245: with launch.claude_sideload off, a Claude successor starts without plugin folders, is listed openrig-core's skills where the plugin keeps them, and the switch names what it doesn't get", async () => {
+    const saved = { home: process.env["OPENRIG_HOME"], sideload: process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] };
+    process.env["OPENRIG_HOME"] = home;
+    process.env["OPENRIG_LAUNCH_CLAUDE_SIDELOAD"] = "false";
+    try {
+      const { paths, svc } = coreCopies(SEAT, ["alpha"], "codex");
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit" });
+      expect(result).toMatchObject({ ok: true, to: "claude-code", warnings: expect.arrayContaining([
+        "claude_sideload_off: openrig-core isn't loaded (launch.claude_sideload is off), so its refocus and compaction-restore hooks don't run; its skills are in this seat's skill list instead",
+      ]) });
+      // The seat doesn't load the plugin, so its list names the plugin's own copy of the skill to read.
+      expect(fs.readFileSync(paths.catalogPath, "utf8")).toContain(`Read before you use it: \`${path.join(home, "plugins", "openrig-core", "skills", "alpha", "SKILL.md")}\``);
+      // Its router, a file it reads too, lists the same copy and says it isn't an installed skill.
+      const router = fs.readFileSync(path.join(paths.skillsRoot, "openrig-seat-router", "SKILL.md"), "utf8");
+      expect(router).toContain(`Read before you use it: \`${path.join(home, "plugins", "openrig-core", "skills", "alpha", "SKILL.md")}\``);
+      expect(router).toContain("files to read, not Claude Code skills");
+      const stagedEnv = fakeTmux.createSession.mock.calls.at(-1)![2]!;
+      expect(stagedEnv).not.toHaveProperty("CLAUDE_CODE_PLUGIN_DIRS");
+      expect(stagedEnv).not.toHaveProperty("OPENRIG_SEAT_PROJECT_DIR");
+    } finally {
+      for (const [key, value] of [["OPENRIG_HOME", saved.home], ["OPENRIG_LAUNCH_CLAUDE_SIDELOAD", saved.sideload]] as const) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
   it("#2426: a Claude-to-Claude account move leaves the copies to the next ordinary launch, since the live predecessor shares their storage", async () => {
     const saved = process.env["OPENRIG_HOME"];
     process.env["OPENRIG_HOME"] = home;

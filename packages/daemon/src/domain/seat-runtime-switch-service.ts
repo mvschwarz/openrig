@@ -37,7 +37,7 @@ import { SnapshotRepository } from "./snapshot-repository.js";
 import { CheckpointStore } from "./checkpoint-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
-import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
+import { claudeSideloadOffNotes, seatCodexCorePluginDir, seatCorePluginDir, seatCorePluginSelection, seatPluginEnv } from "./claude-core-plugin-env.js";
 import { retireSeatCoreSkillCopies } from "./seat-skill-storage.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
@@ -455,8 +455,8 @@ export class SeatRuntimeSwitchService {
         claudePermissions: override.claudePermissions, claudeAutoMode: override.claudeAutoMode, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
         ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
-        seatEnv: withPluginDirs({ ...rigRepo.getEffectiveSeatEnv(node.id, changesPiRuntime || ctx.input.accountHome === undefined),
-          ...(ctx.input.accountHome !== undefined ? { [RUNTIME_HOME_VAR[target]]: ctx.input.accountHome } : {}) }, [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
+        seatEnv: seatPluginEnv({ ...rigRepo.getEffectiveSeatEnv(node.id, changesPiRuntime || ctx.input.accountHome === undefined),
+          ...(ctx.input.accountHome !== undefined ? { [RUNTIME_HOME_VAR[target]]: ctx.input.accountHome } : {}) }, [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined], target),
         ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       onPaneCreated: (pane) => {
         successorPane = pane;
@@ -483,7 +483,12 @@ export class SeatRuntimeSwitchService {
         // what becomes of them, as it did before, and names a plugin copy it keeps.
         const coreCopyNotes = corePluginDir && node.runtime !== target
           ? retireSeatCoreSkillCopies(materials.seatSkills, corePluginDir, { namesKept: false }) : [];
-        return materials.prepare(binding, adapter).then((notes) => [...coreCopyNotes, ...notes]);
+        // #3245: what the Claude target asked for that it doesn't get with launch.claude_sideload off.
+        const sideloadNotes = claudeSideloadOffNotes({ runtime: target,
+          coreSelected: seatCorePluginSelection(targetNode, db, materials.pluginPaths, this.deps.pluginsDir) !== undefined,
+          seatEnv: rigRepo.getEffectiveSeatEnv(node.id, changesPiRuntime || ctx.input.accountHome === undefined),
+          activityHooksSelected: materials.plan.entries.some((e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks") });
+        return materials.prepare(binding, adapter).then((notes) => [...coreCopyNotes, ...sideloadNotes, ...notes]);
       },
         binding: { ...materials.bindingAdditions(),
           // Explicit nulls make adapters resolve target defaults without reading a legacy source token.

@@ -162,6 +162,10 @@ Keys:
                          functions or aliases may be absent. On omits that override; it doesn't force login shells,
                          and a login file that sets PATH outright can then hide rig. Applies at each seat's next
                          launch; a restart in place keeps the running choice.
+  launch.claude_sideload  Claude seats load OpenRig's plugin folders through CLAUDE_CODE_PLUGIN_DIRS (default on).
+                         Turn it off for a Claude login whose managed settings set disableSideloadFlags: seats then
+                         start without those folders, get their skills as a list of files to read, sent at startup,
+                         and each launch names what it couldn't deliver. Applies at each seat's next launch.
   terminal.inherit_tmux_environment  inherit stored tmux global values for new agents and successors (default off)
                          POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
                          Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.

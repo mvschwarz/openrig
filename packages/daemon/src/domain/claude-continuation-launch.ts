@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { readNativeProcessLaunch } from "./native-process-arguments.js";
 import type { ClaudeAutoMode } from "./claude-auto-mode.js";
 import { ownClaudeSettings, type ClaudeSettingsSeat } from "../adapters/claude-settings-transport.js";
+import { skillReadRules } from "./managed-restore-read-access.js";
 
 /** Transient argv/config selector only; no general environment values or positional startup input. */
 export interface ClaudeContinuationLaunch { args?: string[]; configDir?: string | null; warnings: string[] }
@@ -80,6 +81,31 @@ function withAutoMode(args: string[], block: ClaudeAutoMode | null, seat?: Claud
     if (entry.inline) result[entry.at] = `--settings=${json}`; else result[entry.at + 1] = json;
   });
   return result;
+}
+
+/** #3245: adds allow rules to captured arguments' last settings value (or a new --settings), keeping every other key and
+ *  rule, deny and ask included. Undefined for a foreign or changed settings file, which OpenRig can't see or change. */
+export function withAllowRules(args: string[], rules: readonly string[], seat?: ClaudeSettingsSeat): string[] | undefined {
+  if (!rules.length) return args;
+  const found = settingsValues(args, seat);
+  if (found.some(entry => !entry.value)) return undefined;
+  const last = found.at(-1);
+  if (!last) return [...args, "--settings", JSON.stringify({ permissions: { allow: [...rules] } })];
+  const permissions = (last.value!["permissions"] ?? {}) as { allow?: string[] };
+  const json = JSON.stringify({ ...last.value, permissions: { ...permissions, allow: [...new Set([...(permissions.allow ?? []), ...rules])] } });
+  const result = [...args];
+  if (last.inline) result[last.at] = `--settings=${json}`; else result[last.at + 1] = json;
+  return result;
+}
+
+/** #3245: a continuation of captured arguments keeps the running Claude's settings, which can predate launch.claude_sideload
+ *  off, so the seat's skill reads are added to them. A settings file OpenRig didn't write can't take them; that is named. */
+export function withContinuationSkillReads(args: string[], launch: ClaudeContinuationLaunch | undefined,
+  skillReads: { files: string[]; trees: string[] } | undefined, seat: ClaudeSettingsSeat | undefined, warnings: string[]): string[] {
+  if (!launch?.args || !skillReads) return args;
+  const merged = withAllowRules(args, skillReadRules(skillReads), seat);
+  if (!merged) warnings.push("claude_sideload_off: the kept launch's --settings is a file OpenRig didn't write, so it doesn't allow reading this seat's skill list and skills");
+  return merged ?? args;
 }
 
 /** The autoMode block these final arguments send: null for none, undefined when a settings file makes it unknown. */

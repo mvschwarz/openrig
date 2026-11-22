@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment, resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
-import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
+import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, claudeSideloadEnabled, seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
@@ -118,6 +118,8 @@ export class ClaudeManagedLaunch {
         }
       } catch { /* No one-off names. */ }
     }
+    // #3245: with launch.claude_sideload off the variable is never forwarded, whatever put it in the pane.
+    if (!claudeSideloadEnabled()) keys.delete(CLAUDE_PLUGIN_DIRS_ENV);
     return [...keys].filter(key => validateSeatEnvName(key) === null && !MANAGED_LAUNCH_KEYS.includes(key));
   }
 
