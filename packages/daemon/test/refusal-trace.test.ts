@@ -119,6 +119,17 @@ describe("#3728 (1) a refusal the daemon sees leaves one event, and the response
     expect(f.events("transport.send_refused")).toMatchObject([{ session: "ghost@nowhere", reason: "destination_not_found_unrecorded", status: 503 }]);
   });
 
+  it("a send whose record was kept but could not be marked failed is not recorded as unrecorded", async () => {
+    const f = fixture({ advisory: { code: "destination_status", status: "missing", destinationSession: "ghost@nowhere", availableDestinations: [], message: "No live seat." } });
+    vi.spyOn(f.outbox, "markFailed").mockImplementation(() => { throw new Error("disk full"); });
+    const res = await f.post("/api/transport/send", { session: "ghost@nowhere", text: "keep this" });
+    const body = await res.json() as { outboxIds: string[] };
+    expect(res.status).toBe(503);
+    expect(body.outboxIds).toHaveLength(1);
+    expect(f.outbox.getById(body.outboxIds[0]!)).toMatchObject({ senderSession: "sender@src-rig" });
+    expect(f.events("transport.send_refused")).toEqual([]);
+  });
+
   it("an event log that cannot be written does not change the refusal", async () => {
     const f = fixture({ brokenBus: true });
     const res = await f.post("/api/queue/create", { destinationSession: "dev@dst-rig" });
