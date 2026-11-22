@@ -171,6 +171,8 @@ import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destina
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
+import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -2548,6 +2550,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
       return since == null ? null : new Date(since).toISOString();
     });
+    // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
+    // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
+    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
+    const seatPoolSlots = new SeatPoolSlotsRepository(db);
+    const seatPoolPolicy = makeSeatPoolPolicy({
+      readBlock: (modelNodeId) => rigRepo.getNodePool(modelNodeId),
+      readSlots: (modelNodeId) => seatPoolSlots.forModel(modelNodeId),
+    });
+    void seatPoolPolicy;
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
       jobsRepo: watchdogJobsRepoInstance,

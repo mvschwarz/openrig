@@ -24,6 +24,8 @@ import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { reconcileSeatPoolNode } from "../src/domain/seat-pool-registration.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { stringify as stringifyYaml } from "yaml";
@@ -2686,6 +2688,38 @@ profiles:
         const relaunched = await inst.launchPersistedFresh(rigId, nodeId);
         expect(relaunched.status, JSON.stringify(relaunched)).toBe("launched");
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 7 }));
+      } finally {
+        db.close();
+      }
+    });
+
+    it("A rig launched and then re-applied with a valid `pool` block registers no seat-pool job while the job is unarmed.", async () => {
+      const { db, rigRepo, inst, clearOccupancy } = poolSetup();
+      try {
+        const seatPoolJobs = () => (db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs WHERE policy = 'seat-pool'").get() as { n: number }).n;
+        const mat = await inst.materialize(yamlSpec({ max: 3, min: 1 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ min: 1 }));
+        expect(seatPoolJobs()).toBe(0);
+
+        clearOccupancy(rigId);
+        const again = await inst.launchMaterialized(yamlSpec({ max: 5, min: 2 }), RIG_ROOT, rigId);
+        expect(again, JSON.stringify(again)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
+        expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 5, min: 2 }));
+        expect(seatPoolJobs()).toBe(0);
+
+        // `rig up` (import) goes through instantiate: no job there either
+        const up = await inst.instantiate(yamlSpec({ max: 2 }, "up-rig"), RIG_ROOT);
+        expect(up.ok, JSON.stringify(up)).toBe(true);
+        expect(seatPoolJobs()).toBe(0);
+
+        // the node is one the registration would arm: the 0 above comes from the unarmed job, not from the node
+        const jobsRepo = new WatchdogJobsRepository(db);
+        expect(reconcileSeatPoolNode({ db, rigRepo, jobsRepo }, nodeId)).toMatchObject({ outcome: "registered", job: { targetSession: "dev-impl@test-rig" } });
+        expect(seatPoolJobs()).toBe(1);
       } finally {
         db.close();
       }
