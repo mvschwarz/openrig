@@ -1,12 +1,12 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonConnectionError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget } from "../host-registry.js";
 import { emitCrossHostError, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
-import { runRemoteHttpOp } from "../remote-host-ops.js";
+import { requestMayHaveArrived, runRemoteHttpOp } from "../remote-host-ops.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 import { heldSuffix, refuseEmptyMessage } from "./send.js";
@@ -18,6 +18,13 @@ import { heldSuffix, refuseEmptyMessage } from "./send.js";
  * needs more than the 5s read-class default.
  */
 const BROADCAST_REMOTE_TIMEOUT_MS = 30_000;
+
+/**
+ * The local broadcast deadline. The daemon answers after its sequential per-recipient fan-out, which
+ * takes about 0.5 to 2 s per seat, so the 5 s read-class default cut a 91-seat rig after 2 to 5 seats.
+ * This covers about 150 seats at 2 s each; --timeout <seconds> sets it per run (local and --host).
+ */
+const BROADCAST_LOCAL_TIMEOUT_MS = 300_000;
 
 export interface BroadcastDeps extends StatusDeps {
   /** Test seam: inject a registry loader so no real ~/.openrig is touched. */
@@ -38,6 +45,7 @@ export function broadcastCommand(depsOverride?: BroadcastDeps): Command {
     .option("--force", "Send even if targets appear mid-task")
     .option("--host <id>", "Broadcast on a remote host declared in ~/.openrig/hosts.yaml (http hosts only — CLI-direct to the remote daemon's fan-out)")
     .option("--context <ref>", "Broadcast a context pack by its path-like ref (e.g. packs/fleet-update). Resolved content is fanned out; an oversized ref is flagged 'walk-sized'.")
+    .option("--timeout <seconds>", `How long to wait for the per-recipient results (default: ${BROADCAST_LOCAL_TIMEOUT_MS / 1000} s locally, ${BROADCAST_REMOTE_TIMEOUT_MS / 1000} s with --host)`)
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -57,8 +65,14 @@ transport-requirement error). The REMOTE daemon resolves --rig/--pod on ITS
 topology and its per-target results print verbatim — a partial fan-out exits
 non-zero exactly as a local one does. The positional is message text (never
 parsed as a target), so broadcast takes --host or the persisted host
-selection, not the agent@rig@host sugar.`)
-    .action(async (text: string | undefined, opts: { rig?: string; pod?: string; force?: boolean; host?: string; context?: string; json?: boolean }) => {
+selection, not the agent@rig@host sugar.
+
+The daemon answers once it has tried every recipient. If this command stops
+waiting first, the daemon keeps going through the recipients (an older daemon
+stops the ones it had not started): check each recipient's outcome with
+rig queue outbox-list <your seat> before any retry, since retrying the whole
+broadcast can duplicate the message.`)
+    .action(async (text: string | undefined, opts: { rig?: string; pod?: string; force?: boolean; host?: string; context?: string; timeout?: string; json?: boolean }) => {
       // OPR.0.4.6.MH4 C3 — explicit --host > persisted selection. Broadcast
       // has NO session-target operand (the positional is message text, which
       // must never be sugar-parsed), so the §4 sugar does not apply here.
@@ -78,6 +92,12 @@ selection, not the agent@rig@host sugar.`)
         return;
       }
       if (!opts.context && refuseEmptyMessage(text!, "broadcast", Boolean(opts.json))) return;
+      const timeoutMs = parseTimeoutMs(opts.timeout);
+      if (timeoutMs === null) {
+        console.error(`--timeout must be a positive number of seconds, at most ${MAX_TIMEOUT_S} (got '${opts.timeout}'). Nothing was sent.`);
+        process.exitCode = 1;
+        return;
+      }
 
       // P18 DELIVER-AND-LABEL — the seat boundary no longer refuses. Resolve the broadcasting seat from the
       // seat env; when it is unresolvable the broadcast STILL proceeds carrying the honest `<unknown sender>`
@@ -92,7 +112,7 @@ selection, not the agent@rig@host sugar.`)
       if (opts.host) {
         // text is validated-defined here: --context is rejected with --host, and
         // the (no text && no context) guard above requires it on the host path.
-        await runCrossHostBroadcast(opts.host, text!, opts, deps, seatSender);
+        await runCrossHostBroadcast(opts.host, text!, opts, deps, seatSender, timeoutMs);
         return;
       }
 
@@ -132,7 +152,16 @@ selection, not the agent@rig@host sugar.`)
       // header). An env-less broadcast delivers-and-labels rather than refusing.
       body.envelopeSender = seatSender ?? SENDER_FALLBACK;
 
-      const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body);
+      let res;
+      try {
+        res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body, { timeoutMs: timeoutMs ?? BROADCAST_LOCAL_TIMEOUT_MS });
+      } catch (err) {
+        // A timeout, or a connection lost after the request may have arrived: the fan-out may be running.
+        if (!(err instanceof DaemonConnectionError && requestMayHaveArrived(err))) throw err;
+        renderLocalBroadcastTimeout(err, seatSender, Boolean(opts.json));
+        process.exitCode = 1;
+        return;
+      }
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -170,6 +199,7 @@ async function runCrossHostBroadcast(
   opts: { rig?: string; pod?: string; force?: boolean; json?: boolean },
   deps: BroadcastDeps,
   seatSender: string | undefined = undefined,
+  timeoutMs: number | undefined = undefined,
 ): Promise<void> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const registry = loader();
@@ -196,7 +226,7 @@ async function runCrossHostBroadcast(
   body.envelopeSender = seatSender ?? SENDER_FALLBACK;
 
   const result = await runRemoteHttpOp(hostId, "POST", "/api/transport/broadcast", body, deps, {
-    timeoutMs: BROADCAST_REMOTE_TIMEOUT_MS,
+    timeoutMs: timeoutMs ?? BROADCAST_REMOTE_TIMEOUT_MS,
   });
 
   if (opts.json) {
@@ -210,12 +240,45 @@ async function runCrossHostBroadcast(
   }
 
   if (!result.ok) {
-    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false);
+    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, result.outcomeUnknown
+      ? `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. A missing receipt is not proof of non-delivery: check each recipient's outcome on that host (its outbox) before resending only to the ones recorded as failed.`
+      : undefined);
     return;
   }
 
   console.log(`[via host=${host.id} (${hostDisplayTarget(host)})]`);
   renderBroadcastResults((result.data ?? {}) as Record<string, unknown>);
+}
+
+/** The largest --timeout a timer holds (setTimeout's 2^31 - 1 ms); a larger delay would fire at once. */
+const MAX_TIMEOUT_S = Math.floor(2_147_483_647 / 1000);
+
+function parseTimeoutMs(value: string | undefined): number | undefined | null {
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_TIMEOUT_S) return null;
+  return Math.ceil(seconds * 1000);
+}
+
+/**
+ * A local broadcast this command stopped waiting for. `rig broadcast` sends no waitForIdleMs, so the
+ * daemon's fan-out keeps running after the request goes away and, for a broadcast with a sender, records
+ * each recipient's outcome in the sender's outbox when it ends. Point there instead of a bare "outcome
+ * UNKNOWN": resending the whole broadcast duplicates it at the recipients that already have it.
+ */
+function renderLocalBroadcastTimeout(err: DaemonConnectionError, seatSender: string | undefined, json: boolean): void {
+  const consequence = "The broadcast may still be running: the daemon keeps going through the recipients after this command stops waiting.";
+  const outboxCommand = seatSender ? `rig queue outbox-list ${seatSender} --limit 1000` : undefined;
+  const action = outboxCommand
+    ? `Don't retry the whole broadcast: that can duplicate the message. Read each recipient's outcome with '${outboxCommand}' (this broadcast's rows are the newest, written when its fan-out ends); a missing receipt is not proof of non-delivery. Resend only to the recipients recorded as failed (rig send --to <a>,<b>); a retained one is held for its seat and is typed later (rig seat held-messages), and check any other with rig capture first. Raise --timeout for a large fan-out.`
+    : "Don't retry the whole broadcast: that can duplicate the message. This broadcast had no sender identity, so the daemon keeps no per-recipient record of it: check the recipients with rig capture before resending to any. Raise --timeout for a large fan-out.";
+  if (json) {
+    console.log(JSON.stringify({ error: { fact: err.message, consequence, action, ...(outboxCommand ? { outboxCommand } : {}) } }));
+    return;
+  }
+  console.error(err.message);
+  console.error(`  ${consequence}`);
+  console.error(`  ${action}`);
 }
 
 /** One renderer, two callers — the remote route returns the same shape the

@@ -754,6 +754,22 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     expect(h.calls[0]!.options?.timeoutMs).toBe(30_000);
   });
 
+  it("a --host broadcast that timed out says it may still be running there and not to retry it whole", async () => {
+    const h = mockClient(() => new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time: Request to http://vps-b:7433/api/transport/broadcast timed out after 30000ms"));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
+    const err = captured.stderrLines.join("\n");
+    expect(err).toContain("may still be running on vps-b");
+    expect(err).toContain("Don't retry the whole broadcast");
+    expect(err).toContain("A missing receipt is not proof of non-delivery");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("--timeout <seconds> replaces the 30 s cross-host wait", async () => {
+    const h = mockClient(() => ({ status: 200, data: { results: [], sent: 0, total: 0, failed: 0 } }));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--timeout", "120", "msg"], { from: "user" });
+    expect(h.calls[0]!.options?.timeoutMs).toBe(120_000);
+  });
+
   it("the text positional is NEVER sugar-parsed: a message containing a@b@vps-b broadcasts locally intact when no host is set", async () => {
     // No --host, no selection: the local path runs. lifecycleDeps is a stub,
     // so the local path fails on daemon status — the assertion is that the
