@@ -213,9 +213,6 @@ export type RigEvent =
   | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
   | { type: "seat.keep_alive.recovered"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status: string }
   | { type: "seat.keep_alive.exhausted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status?: string; lastError?: string }
-  | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
-  | { type: "seat.keep_alive.recovered"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status: string }
-  | { type: "seat.keep_alive.exhausted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status?: string; lastError?: string }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
