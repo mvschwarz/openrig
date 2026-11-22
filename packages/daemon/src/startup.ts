@@ -160,6 +160,7 @@ import {
   WatchdogPolicyEngine,
 } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
+import { KeepAliveSupervisor } from "./domain/keep-alive-supervisor.js";
 import {
   ContinuityPolicyMaterializer,
   createContinuityCutoverBaton,
@@ -171,6 +172,8 @@ import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destina
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
+import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -1421,7 +1424,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // tracker emits a single `kernel.agent.degraded` event for
   // observability. The kernel rig is still the only rig the daemon
   // auto-boots; other rigs require explicit operator-initiated
-  // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
+  // `rig up` / `rig restore` per amended IMPL-PRD §16.2. Once the daemon
+  // runs, a seat of any rig that declares keep_alive also comes back when
+  // it falls (the keep-alive supervisor below, #2940); one stopped on
+  // purpose stays down.
   const runtimeAdaptersMap = withCommunityHarnessResolver({
     "claude-code": claudeAdapter,
     "codex": codexAdapter,
@@ -1467,6 +1473,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       console.warn(`kernel-boot: skipped due to error: ${err instanceof Error ? err.message : String(err)}`);
     } catch { /* logging must never throw */ }
   }
+
+  // #2940: a seat that declares keep_alive is relaunched when it falls while the daemon runs. Built after the boot
+  // reconcile and the kernel boot, which keeps boot-time recovery (a kernel's restore registered here makes the
+  // supervisor leave that rig alone); it acts only on its own ticks, from when index.ts starts it after the listener
+  // binds, and it stops first at shutdown. Its launch is the one-seat launch `rig seat start` uses, with the same adapters.
+  const keepAliveSupervisor = new KeepAliveSupervisor({
+    db, eventBus, reconciler, restoreOrchestrator, adapters: runtimeAdaptersMap,
+    fsOps: { exists: (p: string) => fs.existsSync(p) },
+  });
 
   // Discovery services
   const tmuxScanner = new TmuxDiscoveryScanner({ tmuxAdapter });
@@ -1702,6 +1717,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
     }),
     restoreOrchestrator,
+    keepAliveSupervisor,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize
     rigSpecExporter,
     rigSpecPreflight,
@@ -2238,8 +2254,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           nodePath.join(resolvedWorkspaceRoot, "slices"),
         ].filter((root) => root !== slicesRoot)
       : [];
-    // #3553 — terminal mission/slice views resolve through the same project catalog as the Projects view, which re-reads the catalog on every call. The roots are re-read through the getter whenever a scope index is built. A missing or unreadable catalog degrades to today's configured roots.
-    let catalogMissionsRoots: readonly string[] | (() => readonly string[]) = [];
+    // #3553 — terminal mission/slice views resolve through the same project catalog as the Projects view, which re-reads the catalog on every call. The roots are re-read through the getter whenever a scope index is built. A missing catalog degrades to today's configured roots; an unreadable catalog or catalogued project is named as unavailable, and the readable roots still serve.
+    let catalogMissionsRoots: readonly string[] | (() => import("./domain/workspace/project-read.js").CatalogMissionsRoots) = [];
     if (resolvedCatalogPath) {
       try {
         const { catalogMissionsRoots: catalogRoots } = await import("./domain/workspace/project-read.js");
@@ -2548,6 +2564,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
       return since == null ? null : new Date(since).toISOString();
     });
+    // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
+    // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
+    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
+    const seatPoolSlots = new SeatPoolSlotsRepository(db);
+    const seatPoolPolicy = makeSeatPoolPolicy({
+      readBlock: (modelNodeId) => rigRepo.getNodePool(modelNodeId),
+      readSlots: (modelNodeId) => seatPoolSlots.forModel(modelNodeId),
+    });
+    void seatPoolPolicy;
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
       jobsRepo: watchdogJobsRepoInstance,

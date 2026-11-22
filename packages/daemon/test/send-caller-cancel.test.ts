@@ -22,7 +22,8 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 
 const settle = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function fixture(opts: { guarded?: boolean } = {}) {
+/** `seats` adds that many more terminal seats, `s<i>@test` on pane `%<100 + i>`, recorded in writes as `s<i>`. */
+function fixture(opts: { guarded?: boolean; seats?: number } = {}) {
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
@@ -30,6 +31,12 @@ function fixture(opts: { guarded?: boolean } = {}) {
     INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('ba','a','worker@test','%1'),('bb','b','sibling@test','%2');
     INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','worker@test','running'),('sb','b','sibling@test','running');
     INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh'),('gb','b',1,'g2','fresh');`);
+  for (let i = 0; i < (opts.seats ?? 0); i++) {
+    db.exec(`INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('n${i}','rig','s${i}','terminal');
+      INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('bn${i}','n${i}','s${i}@test','%${100 + i}');
+      INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sn${i}','n${i}','s${i}@test','running');
+      INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('gn${i}','n${i}',1,'gn${i}','fresh');`);
+  }
   const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name));
   guard.recoverActivation();
   /** Every pane write, in order: `paste:<node>:<text>` and `keys:<node>:<keys>`. */
@@ -37,7 +44,8 @@ function fixture(opts: { guarded?: boolean } = {}) {
   const hooks: { load?: () => void; paste?: () => void } = {};
   let staged = "";
   const tmux = new TmuxAdapter(async (command) => {
-    const node = command.includes("%2") || command.includes("sibling@test") ? "b" : "a";
+    const seat = /%(\d{3,})\b|\bs(\d+)@test/.exec(command);
+    const node = seat ? `s${seat[1] !== undefined ? Number(seat[1]) - 100 : seat[2]}` : command.includes("%2") || command.includes("sibling@test") ? "b" : "a";
     if (command.includes("load-buffer")) hooks.load?.();
     if (command.includes("paste-buffer")) { hooks.paste?.(); writes.push(`paste:${node}:${staged}`); }
     if (command.includes("send-keys")) writes.push(`keys:${node}:${command.includes("Enter") ? "Enter" : command}`);
@@ -45,7 +53,10 @@ function fixture(opts: { guarded?: boolean } = {}) {
   }, { writeFile: async (_path, text) => { staged = text; }, unlink: async () => {}, tmpName: () => "/fixture/input", bufferName: () => "input" });
   if (opts.guarded !== false) tmux.deliveryGuard = guard;
   vi.spyOn(tmux, "probeSession").mockResolvedValue({ state: "present" });
-  vi.spyOn(tmux, "listPanes").mockImplementation(async (name) => [{ id: name.startsWith("sibling") || name === "%2" ? "%2" : "%1" } as never]);
+  vi.spyOn(tmux, "listPanes").mockImplementation(async (name) => {
+    const seat = /^s(\d+)@test$/.exec(name);
+    return [{ id: seat ? `%${100 + Number(seat[1])}` : /^%\d{3,}$/.test(name) ? name : name.startsWith("sibling") || name === "%2" ? "%2" : "%1" } as never];
+  });
   vi.spyOn(tmux, "getPaneCommand").mockResolvedValue("bash");
   const outbox = new OutboxHandler(db);
   const transport = new SessionTransport({ db, tmuxAdapter: tmux, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db),
@@ -155,6 +166,45 @@ describe("a cancelled caller's send never types later", () => {
     const body = await res.json() as { results: Array<{ sessionName: string; ok: boolean; reason?: string }> };
     expect(body.results.find((r) => r.sessionName === "worker@test")).toMatchObject({ ok: true });
     expect(body.results.find((r) => r.sessionName === "sibling@test")).toMatchObject({ ok: false, reason: "caller_cancelled", inputPhase: "not_reached" });
+  });
+});
+
+describe("a broadcast without a wait outlives its caller (#3726)", () => {
+  const SEATS = 91;
+  const names = Array.from({ length: SEATS }, (_, i) => `s${i}@test`);
+  const pasted = (f: ReturnType<typeof fixture>) => f.writes.filter((w) => w.startsWith("paste:"));
+
+  it("a caller that goes away after the third recipient still reaches all 91, each once, with one outbox row each", async () => {
+    const f = fixture({ seats: SEATS });
+    const caller = new AbortController();
+    f.hooks.paste = () => { if (pasted(f).length === 2) caller.abort(); }; // runs before this paste is recorded: the third
+    const res = await f.post("/broadcast", { sessions: names, text: "ALL" }, caller.signal);
+    expect(caller.signal.aborted).toBe(true);
+    expect(pasted(f)).toEqual(names.map((_, i) => `paste:s${i}:ALL`));
+    const body = await res.json() as { sent: number; total: number; results: Array<{ ok: boolean }> };
+    expect(body).toMatchObject({ sent: SEATS, total: SEATS });
+    expect(body.results.every((r) => r.ok)).toBe(true);
+    const rows = f.db.prepare("SELECT destination_session AS d, delivery_state AS s FROM outbox_entries").all() as Array<{ d: string; s: string }>;
+    expect(rows.map((r) => r.d).sort()).toEqual([...names].sort());
+    expect(new Set(rows.map((r) => r.s))).toEqual(new Set(["delivered"]));
+  });
+
+  it("a broadcast whose connection closes mid fan-out keeps typing to every recipient", async () => {
+    const f = fixture({ seats: SEATS });
+    const server = serve({ fetch: f.app.fetch, port: 0, hostname: "127.0.0.1" });
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    await new Promise((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    const body = JSON.stringify({ sessions: names, text: "ALL" });
+    const req = httpRequest({ host: "127.0.0.1", port, path: "/api/transport/broadcast", method: "POST",
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), "x-openrig-session": "human@test" } });
+    req.on("error", () => {});
+    f.hooks.paste = () => { if (pasted(f).length === 0) req.destroy(); }; // the caller goes away as the first recipient is typed
+    req.end(body);
+    await vi.waitFor(() => expect(pasted(f)).toHaveLength(SEATS), { timeout: 5_000 });
+    expect(pasted(f)).toEqual(names.map((_, i) => `paste:s${i}:ALL`));
+    // the route finishes after the caller left: its 91 outbox rows land before the fixture's database closes
+    await vi.waitFor(() => expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({ n: SEATS }), { timeout: 5_000 });
   });
 });
 

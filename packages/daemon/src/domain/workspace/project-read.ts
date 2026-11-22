@@ -47,7 +47,7 @@ export function workSource(root: string, dir: string, validate = true): string {
   }
   return source;
 }
-function projectEntry(id: string, root: string, aliases: string[] = [], aliasWarnings: string[] = []): ProjectRead {
+function projectEntry(id: string, root: string, aliases: string[] = [], aliasWarnings: string[] = [], onError?: (err: unknown) => void): ProjectRead {
   let p: ProjectRead = { id, root, name: id, sourcePath: null, missionsRoot: path.join(root, "missions"), aliases, ...(aliasWarnings.length ? { aliasWarnings } : {}) };
   try {
     p.root = fs.realpathSync(root);
@@ -61,7 +61,7 @@ function projectEntry(id: string, root: string, aliases: string[] = [], aliasWar
     p.missionsRoot = path.resolve(p.root, missions);
     p.sourcePath = workSource(p.root, p.root);
     if (fs.existsSync(p.missionsRoot)) insideProject(p.root, p.missionsRoot);
-  } catch (err) { p.error = (err as Error).message; }
+  } catch (err) { p.error = (err as Error).message; onError?.(err); }
   return p;
 }
 function aliasesOf(aliases: Map<string, string>, id: string): string[] {
@@ -75,23 +75,36 @@ function aliasWarningsOf(ignored: IgnoredAlias[], id: string): string[] {
     return `aliases: '${i.alias}' is ignored: ${others.join(", ")} also declare${others.length === 1 ? "s" : ""} it, so rows tagged project:${i.alias} belong to no project`;
   });
 }
-/** Healthy catalogued projects' missions roots, for readers that resolve scopes through the project catalog (terminal mission/slice views, #3553). A project whose identity or missions root cannot be read is skipped, like a missing optional index root; a missing or unreadable catalog yields no roots. */
-export function catalogMissionsRoots(catalogPath: string): string[] {
+/** `roots`: healthy catalogued projects' missions roots. `unavailable`: what couldn't be read, so a scope that may live
+ *  there reads as unavailable rather than gone: an existing catalog that can't be read, or a project whose own read
+ *  fails (an unreadable root, a bad project.yaml, a failing work source). */
+export interface CatalogMissionsRoots { roots: readonly string[]; unavailable: readonly string[] }
+/** A project read failure that holds no scope OpenRig would read: a missing root, or a missions root or source that
+ *  escapes the project. Those stay out of both lists, as a missing optional index root does. */
+function holdsNoScopes(err: unknown): boolean {
+  if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return true;
+  return err instanceof ProjectReadError && (err.code === "missions_root_escape" || err.code === "project_path_escape");
+}
+/** The catalog's roots for readers that resolve scopes through the project catalog (terminal mission/slice views, #3553).
+ *  An unavailable project is named, never walked. No catalog yields no roots. */
+export function catalogMissionsRoots(catalogPath: string): CatalogMissionsRoots {
   let entries: Array<{ id: string; root: string }> | null;
   try {
     entries = readProjectCatalog(catalogPath);
   } catch {
-    return [];
+    return { roots: [], unavailable: [catalogPath] };
   }
-  if (!entries) return [];
+  if (!entries) return { roots: [], unavailable: [] };
   const report = readCatalogAliasReport(catalogPath);
-  const roots: string[] = [];
+  const roots: string[] = [], unavailable: string[] = [];
   for (const entry of entries) {
+    let failure: unknown;
     const project = projectEntry(entry.id, path.resolve(path.dirname(catalogPath), entry.root),
-      aliasesOf(report.aliases, entry.id), aliasWarningsOf(report.ignored, entry.id));
+      aliasesOf(report.aliases, entry.id), aliasWarningsOf(report.ignored, entry.id), err => { failure = err; });
     if (!project.error) roots.push(project.missionsRoot);
+    else if (!holdsNoScopes(failure)) unavailable.push(project.root);
   }
-  return roots;
+  return { roots, unavailable };
 }
 export function listProjects(c: Pick<ReadContext, "get">): { catalogPath: string; projects: ProjectRead[] } {
   const { workspace, catalog } = projectCatalogPaths(c);
