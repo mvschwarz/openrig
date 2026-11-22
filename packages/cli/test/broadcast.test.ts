@@ -3,7 +3,7 @@ import http from "node:http";
 import { Command } from "commander";
 import { allowFetchTarget } from "./fetch-guard.js";
 import { broadcastCommand } from "../src/commands/broadcast.js";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -493,6 +493,25 @@ describe("Broadcast CLI", () => {
       expect(output).toContain("may still be running");
       expect(output).toContain("rig queue outbox-list broadcaster@my-rig --limit 1000");
       expect(exitCode).toBe(1);
+    });
+
+    it("an unreadable answer, which comes after the fan-out ended, points to the same per-recipient record", async () => {
+      const garbled = () => ({ post: async () => { throw new DaemonResponseError(200, "{not json"); } }) as unknown as DaemonClient;
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: garbled }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("its answer could not be read");
+      expect(output).not.toContain("may still be running");
+      expect(output).toContain("rig queue outbox-list broadcaster@my-rig --limit 1000");
+      expect(output).toContain("Don't retry the whole broadcast");
+      expect(exitCode).toBe(1);
+    });
+
+    it("an unreadable non-2xx answer, which can come from a fan-out that stopped partway, is not rendered as an ended one", async () => {
+      const failed = () => ({ post: async () => { throw new DaemonResponseError(500, "Internal Server Error"); } }) as unknown as DaemonClient;
+      await expect(makeCmd({ ...runningDeps(port), clientFactory: failed }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]))
+        .rejects.toThrow("The daemon returned an unreadable response (HTTP 500).");
     });
 
     it("a connection that never reached the daemon is not rendered as a running broadcast", async () => {

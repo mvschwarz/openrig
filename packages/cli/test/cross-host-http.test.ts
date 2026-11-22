@@ -764,6 +764,17 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it("a senderless --host broadcast that timed out points to rig capture, not to an outbox it never got", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    const h = mockClient(() => new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time: Request to http://vps-b:7433/api/transport/broadcast timed out after 30000ms"));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
+    const err = captured.stderrLines.join("\n");
+    expect(err).toContain("may still be running on vps-b");
+    expect(err).toContain("rig capture");
+    expect(err).not.toContain("outbox");
+    expect(process.exitCode).toBe(1);
+  });
+
   it("--timeout <seconds> replaces the 30 s cross-host wait", async () => {
     const h = mockClient(() => ({ status: 200, data: { results: [], sent: 0, total: 0, failed: 0 } }));
     await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--timeout", "120", "msg"], { from: "user" });

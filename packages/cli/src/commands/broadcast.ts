@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
-import { DaemonClient, DaemonConnectionError } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -156,9 +156,12 @@ broadcast can duplicate the message.`)
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body, { timeoutMs: timeoutMs ?? BROADCAST_LOCAL_TIMEOUT_MS });
       } catch (err) {
-        // A timeout, or a connection lost after the request may have arrived: the fan-out may be running.
-        if (!(err instanceof DaemonConnectionError && requestMayHaveArrived(err))) throw err;
-        renderLocalBroadcastTimeout(err, seatSender, Boolean(opts.json));
+        // A timeout, or a connection lost after the request may have arrived: the fan-out may be running. A 2xx
+        // answer that could not be read came after the fan-out ended (the route answers 2xx only then). A non-2xx
+        // one (the daemon's plain-text 500 when the route throws, possibly partway through) keeps the generic error.
+        const ended = err instanceof DaemonResponseError && err.status >= 200 && err.status < 300;
+        if (!ended && !(err instanceof DaemonConnectionError && requestMayHaveArrived(err))) throw err;
+        renderLocalBroadcastTimeout(err as Error, seatSender, Boolean(opts.json), ended);
         process.exitCode = 1;
         return;
       }
@@ -240,9 +243,9 @@ async function runCrossHostBroadcast(
   }
 
   if (!result.ok) {
-    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, result.outcomeUnknown
+    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, !result.outcomeUnknown ? undefined : seatSender
       ? `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. A missing receipt is not proof of non-delivery: check each recipient's outcome on that host (its outbox) before resending only to the ones recorded as failed.`
-      : undefined);
+      : `the broadcast may still be running on ${host.id}. Don't retry the whole broadcast: that can duplicate the message. It had no sender identity, so that host keeps no per-recipient record of it: check the recipients there with rig capture before resending to any.`);
     return;
   }
 
@@ -266,12 +269,14 @@ function parseTimeoutMs(value: string | undefined): number | undefined | null {
  * each recipient's outcome in the sender's outbox when it ends. Point there instead of a bare "outcome
  * UNKNOWN": resending the whole broadcast duplicates it at the recipients that already have it.
  */
-function renderLocalBroadcastTimeout(err: DaemonConnectionError, seatSender: string | undefined, json: boolean): void {
-  const consequence = "The broadcast may still be running: the daemon keeps going through the recipients after this command stops waiting.";
+function renderLocalBroadcastTimeout(err: Error, seatSender: string | undefined, json: boolean, ended = false): void {
+  const consequence = ended
+    ? "The daemon went through the recipients, but its answer could not be read."
+    : "The broadcast may still be running: the daemon keeps going through the recipients after this command stops waiting.";
   const outboxCommand = seatSender ? `rig queue outbox-list ${seatSender} --limit 1000` : undefined;
   const action = outboxCommand
-    ? `Don't retry the whole broadcast: that can duplicate the message. Read each recipient's outcome with '${outboxCommand}' (this broadcast's rows are the newest, written when its fan-out ends); a missing receipt is not proof of non-delivery. Resend only to the recipients recorded as failed (rig send --to <a>,<b>); a retained one is held for its seat and is typed later (rig seat held-messages), and check any other with rig capture first. Raise --timeout for a large fan-out.`
-    : "Don't retry the whole broadcast: that can duplicate the message. This broadcast had no sender identity, so the daemon keeps no per-recipient record of it: check the recipients with rig capture before resending to any. Raise --timeout for a large fan-out.";
+    ? `Don't retry the whole broadcast: that can duplicate the message. Read each recipient's outcome with '${outboxCommand}' (this broadcast's rows are the newest, written when its fan-out ends); a missing receipt is not proof of non-delivery. Resend only to the recipients recorded as failed (rig send --to <a>,<b>); a retained one is held for its seat and is typed later (rig seat held-messages), and check any other with rig capture first.${ended ? "" : " Raise --timeout for a large fan-out."}`
+    : `Don't retry the whole broadcast: that can duplicate the message. This broadcast had no sender identity, so the daemon keeps no per-recipient record of it: check the recipients with rig capture before resending to any.${ended ? "" : " Raise --timeout for a large fan-out."}`;
   if (json) {
     console.log(JSON.stringify({ error: { fact: err.message, consequence, action, ...(outboxCommand ? { outboxCommand } : {}) } }));
     return;
