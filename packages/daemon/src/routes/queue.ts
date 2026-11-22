@@ -75,6 +75,12 @@ const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
+/** GET /list's page marker (#3572): the limit it applied, and "1" when more rows matched than it returned ("0" when not).
+ *  Headers, so the body stays a bare array for readers that don't look. */
+const LIST_LIMIT_HEADER = "X-OpenRig-Limit";
+const LIST_TRUNCATED_HEADER = "X-OpenRig-Truncated";
+/** QueueRepository's default for list and listAttention, applied here so the route can read one row past it. */
+const LIST_DEFAULT_LIMIT = 100;
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -203,6 +209,22 @@ export function handoffSuccessorsMany(repo: QueueRepository, items: ReadonlyArra
     });
   }
   return faces;
+}
+
+/** The read limit for GET /list: one row past the page, so a full page can tell a cut from an exact fit. A negative limit
+ *  doesn't bound the read in SQLite, so it's passed as is. */
+function listReadLimit(limit: number): number {
+  return limit >= 0 ? limit + 1 : limit;
+}
+
+/** Cut GET /list's read back to the page and mark it. A full page alone never says more rows exist: only the extra row
+ *  read past the limit does. */
+function cutListPage<T>(c: Context, limit: number, rows: T[]): T[] {
+  if (limit < 0) return rows;
+  const truncated = rows.length > limit;
+  c.header(LIST_LIMIT_HEADER, String(limit));
+  c.header(LIST_TRUNCATED_HEADER, truncated ? "1" : "0");
+  return truncated ? rows.slice(0, limit) : rows;
 }
 
 export function queueRoutes(): Hono {
@@ -1640,7 +1662,7 @@ export function queueRoutes(): Hono {
     const targetRepo = c.req.query("targetRepo") || undefined;
     const parsedLimit = queryLimit(c);
     if (!parsedLimit.ok) return parsedLimit.response;
-    const userLimit = parsedLimit.limit;
+    const pageLimit = parsedLimit.limit ?? LIST_DEFAULT_LIMIT;
     const asSession = c.req.query("as") || undefined;
     const compact = c.req.query("compact") === "1";
     const rig = c.req.query("rig") || undefined;
@@ -1666,13 +1688,13 @@ export function queueRoutes(): Hono {
 
     if (!attention) {
       const repo = getRepo(c);
-      const items = repo.list({
+      const items = cutListPage(c, pageLimit, repo.list({
         tag: tags.length > 0 ? tags : undefined,
         destinationSession,
         sourceSession,
         state,
         targetRepo,
-        limit: userLimit,
+        limit: listReadLimit(pageLimit),
         asSession,
         compact,
         rig,
@@ -1680,7 +1702,7 @@ export function queueRoutes(): Hono {
         handedOffFrom,
         updatedSince,
         sortByUpdated: c.req.query("sort") === "updated",
-      });
+      }));
       // A seat that lists its own active inbox is checking in; the stuck sweep reads that for hosted members that pick up
       // work by polling. Another actor's read, a read with no sender, a read that can't return pending rows, a read of
       // only what the seat sent (`as` and `sourceSession` both the seat, no destination) and the attention view aren't.
@@ -1716,7 +1738,7 @@ export function queueRoutes(): Hono {
     // attention=1&destinationSession=...) return ONLY the matching
     // attention items.
     const items = getRepo(c).listAttention({
-      limit: userLimit,
+      limit: listReadLimit(pageLimit),
       state,
       tag: tags.length > 0 ? tags : undefined,
       destinationSession,
@@ -1727,10 +1749,14 @@ export function queueRoutes(): Hono {
     });
     // Defense-in-depth: refine with the JS predicate so the SQL
     // LIKE superset cannot leak a malformed destination through. An ask to a registered person addressed as a seat or
-    // an alias is a member by its classification, as listAttention selected it.
+    // an alias is a member by its classification, as listAttention selected it. The page is cut and marked after the
+    // refinement, so a row it drops never reads as more rows.
     const repo = getRepo(c);
     const filtered = items.filter((item) => isAttentionItem(item) || repo.isCurrentHumanAsk(item.qitemId));
-    return c.json(filtered);
+    // A full read that the refinement thinned to the limit or fewer can't tell whether accepted rows lie past it, so the
+    // page carries no marker rather than claim either way.
+    if (pageLimit >= 0 && items.length > pageLimit && filtered.length <= pageLimit) return c.json(filtered);
+    return c.json(cutListPage(c, pageLimit, filtered));
   });
 
   // GET /overdue — surfaces in-progress qitems past closure_required_at.
