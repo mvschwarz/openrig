@@ -461,11 +461,11 @@ describe("ClaudeResumeAdapter", () => {
         .toMatchObject({ ok: false, code: "retry_fresh" });
     });
 
-    it("waits for Claude to become the foreground command before succeeding", async () => {
+    it("waits for Claude to become the foreground command, and accepts a foreground Claude with nothing drawn only at its final read", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()
         .mockResolvedValueOnce("zsh")
-        .mockResolvedValueOnce("claude");
+        .mockResolvedValue("claude");
       const capturePaneContent = vi.fn(async () => "");
       const adapter = new ClaudeResumeAdapter(
         mockTmux({ getPaneCommand, capturePaneContent }),
@@ -475,7 +475,36 @@ describe("ClaudeResumeAdapter", () => {
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
-      expect(getPaneCommand).toHaveBeenCalledTimes(2);
+      // Two polls in the window, then the final read.
+      expect(getPaneCommand).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps polling past a foreground Claude, so the missing conversation it then reports is retry_fresh, not success", async () => {
+      // A resume of a conversation that doesn't exist: Claude is the foreground process with nothing drawn, then
+      // prints "No conversation found" and the pane is back at its shell.
+      const getPaneCommand = vi
+        .fn<(_: string) => Promise<string | null>>()
+        .mockResolvedValueOnce("claude")
+        .mockResolvedValueOnce("claude")
+        .mockResolvedValue("zsh");
+      const capturePaneContent = vi
+        .fn<(_: string, __?: number) => Promise<string | null>>()
+        .mockResolvedValueOnce("")
+        .mockResolvedValueOnce("")
+        .mockResolvedValue("No conversation found with session ID: missing-session\nuser@example.test %");
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 3, sleep: async () => {} }
+      );
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "missing-session", "/repo");
+
+      expect(result).toEqual({
+        ok: false,
+        code: "retry_fresh",
+        message: "Claude resume failed: no conversation found for the requested session",
+      });
+      expect(getPaneCommand).toHaveBeenCalledTimes(3);
     });
 
     it("treats a live Claude TUI as success even when tmux reports a version-string foreground command", async () => {

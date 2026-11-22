@@ -142,6 +142,7 @@ import { healthRoutes } from "./routes/health.js";
 import { gatewayRoutes } from "./routes/gateway.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import { createSlowOpRequestMiddleware, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import { createMutationTraceMiddleware, type MutationTraceSink } from "./domain/mutation-trace.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
@@ -233,6 +234,8 @@ export interface AppDeps {
   streamStore?: StreamStore;
   streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
+  /** Edge trace of state-changing requests through the diagnostics path; absent = off. */
+  mutationTrace?: MutationTraceSink;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
@@ -734,6 +737,12 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
+  // Mutation trace: same registration seam and isolation contract as the request-timing
+  // observer above — registered only when the trace is turned on (opt-in), and it rides
+  // the recorder's bounded diagnostics path rather than writing on the request thread.
+  if (deps.mutationTrace) {
+    app.use("*", createMutationTraceMiddleware(deps.mutationTrace));
+  }
 
   // Browser boundary: target name and browser Origin, checked once per /api request
   // (WebSocket upgrades included), before the remote read-through and every route.
@@ -1003,12 +1012,9 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
-    const indexHtml = fs.readFileSync(uiIndexPath, "utf-8");
-    const tokenScript = deps.terminalBearerToken
-      ? `<script>if(!window.localStorage.getItem("openrig.terminalBearerToken"))window.localStorage.setItem("openrig.terminalBearerToken",${JSON.stringify(deps.terminalBearerToken)})</script>`
-      : "";
-    const injected = tokenScript ? indexHtml.replace("</head>", `${tokenScript}</head>`) : indexHtml;
-    return c.html(injected);
+    // The page is served as built. The UI takes its tokens from its address's fragment (#termToken=…&mcToken=…), given
+    // once by the person who holds them, and keeps them in that browser.
+    return c.html(fs.readFileSync(uiIndexPath, "utf-8"));
   });
 
   return app;

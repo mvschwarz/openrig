@@ -6,7 +6,7 @@ import type { Migration } from "../migrate.js";
  *  NULL while it runs or when the daemon stopped before writing it. It lives with the seat and is never reset by a daemon restart: an attempt is counted
  *  before its launch starts. */
 export const nodeKeepAliveSchema: Migration = {
-  name: "177_node_keep_alive.sql",
+  name: "181_node_keep_alive.sql",
   sql: `
     ALTER TABLE nodes ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0 CHECK (keep_alive IN (0, 1));
 

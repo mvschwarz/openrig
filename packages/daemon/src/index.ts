@@ -259,6 +259,7 @@ export function startWakeLadderScheduler(deps: {
           order: runtime === "claude-code" ? "source" : "arrival" }),
         getPromptStart: (sessionName, generation) => deps.agentActivityStore?.findPermissionPromptStart?.({ sessionName, generation }),
         getCodexPermissionState: (nodeId, raisedAt) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt),
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
       }),
       readPromptState: makePromptStateReader({
         db,

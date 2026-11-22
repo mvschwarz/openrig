@@ -9,7 +9,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown } from "./domain/compaction-restore-notice.js";
+import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -113,7 +113,7 @@ import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bun
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
-import { restoredRunnerHookEvidence } from "./routes/activity.js";
+import { restoredRunnerHookEvidence, restoredUsageLimitEvidence } from "./routes/activity.js";
 import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
 import { replaceFile } from "./adapters/replace-file.js";
 import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
@@ -248,6 +248,9 @@ interface DaemonOptions {
   rexRun?: import("./domain/terminal/rex-transport.js").RexRun;
   tmuxOptionPlatform?: NodeJS.Platform;
   slowOpRecorder?: SlowOperationInstrumentation;
+  /** Test seam: mutation-trace sink; production turns the trace on with
+   *  `OPENRIG_MUTATION_TRACE=1`, riding the daemon's diagnostics path. */
+  mutationTrace?: import("./domain/mutation-trace.js").MutationTraceSink;
   /**
    * PL-005 Phase B: bearer token for Mission Control write verbs.
    * When null, the auth-bearer-token middleware passes through (the
@@ -426,6 +429,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // The migration interval ends before recorder setup; submit it only once the
   // normal nonblocking sink exists. A failed pre-recorder boot has no record.
   recordStartupPhase(slowOpRecorder, migrationsTiming);
+  // The mutation trace is opt-in: a record of state-changing requests reaching
+  // the daemon is a trace you turn on, not a standing audit log. When on, it
+  // rides the recorder's bounded diagnostics path (recordDiagnostic and its
+  // worker) instead of writing on the request thread.
+  const mutationTrace = opts?.mutationTrace
+    ?? (process.env.OPENRIG_MUTATION_TRACE === "1" ? slowOpRecorder : undefined);
   configureSyncSiteRecorder(slowOpRecorder);
   // Instrumentation wiring is observe-only: neither a throwing registration
   // call nor a throwing callback body (streamStore.emit) may abort createDaemon
@@ -711,6 +720,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
     restoreHookEvidence: (seat, runtime) => restoredRunnerHookEvidence(agentActivityStore, seat, runtime),
+    // After a restart, a seat's typed usage limit still in force holds again (Claude's hook, Codex's banner).
+    restoreUsageLimitEvidence: (seat, runtime) => restoredUsageLimitEvidence(agentActivityStore, seat, runtime),
   });
   // 5b82324b — the STRUCTURAL activity cache (sibling of SeatActivityService). Captures pane TEXT once
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
@@ -1608,14 +1619,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // structural sweep reports what the seat itself shows. Attached late (rather
   // than constructed with) so service construction order is untouched.
   {
-    const { recordCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
+    const { observeCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
     seatStructuralActivityService.attachCodexLimitBanner((sessionName, banner, observedAt) => {
-      recordCodexLimitBanner({
+      // Recorded for the tap and the wake as before, and held by the activity oracle, so the wall reads the limit.
+      observeCodexLimitBanner({
         store: agentActivityStore,
         resolveGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+        oracle: seatActivityService,
         sessionName,
         banner,
-        now: () => observedAt,
+        observedAt,
       });
     });
   }
@@ -1804,6 +1817,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       destination: () => String(new ContextPackSettingsStore().resolveOne("stream.intake").value),
     }),
     slowOpRecorder,
+    mutationTrace,
     queueRepo: queueRepoInstance,
     inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),
     outboxHandler: outboxHandlerInstance,
@@ -2987,6 +3001,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
           onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
           onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
+          onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
@@ -3027,6 +3043,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
+  // #3688: a removed seat's open compaction notices close; nothing is left to deliver to or take up their steps.
+  wireCompactionNoticeSeatRemoval(eventBus, queueRepoInstance, seatNameCarried(db));
   const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
   const { PiCompactionRequestStore } = await import("./domain/pi-compaction-request-store.js");
   if (sessionTransport) deps.piCompactionService = new PiCompactionService({

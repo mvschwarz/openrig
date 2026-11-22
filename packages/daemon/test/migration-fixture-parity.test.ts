@@ -116,6 +116,12 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     expect(migrationsForFullTestDbExclusions).not.toHaveProperty("178_seat_pool.sql");
   });
 
+  it("The Remote Control observation migration is listed in the migration fixture parity test.", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "179_remote_control_observations.sql")).toBe(true);
+    expect(migrationsForFullTestDb.some((m) => m.name === "179_remote_control_observations.sql")).toBe(true);
+    expect(migrationsForFullTestDbExclusions).not.toHaveProperty("179_remote_control_observations.sql");
+  });
+
   it("178_seat_pool adds a nullable pool column and the slot table, and guards pre-178 databases", () => {
     const db = new Database(":memory:");
     try {
@@ -194,14 +200,14 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     }
   });
 
-  it("177_node_keep_alive adds an off-by-default keep_alive column and the per-seat budget, and guards pre-177 databases", () => {
-    expect(ALL_MIGRATIONS.some((m) => m.name === "177_node_keep_alive.sql")).toBe(true);
+  it("181_node_keep_alive adds an off-by-default keep_alive column and the per-seat budget, and guards pre-181 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "181_node_keep_alive.sql")).toBe(true);
     const db = new Database(":memory:");
     try {
       db.pragma("foreign_keys = ON");
-      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "177_node_keep_alive.sql"));
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "181_node_keep_alive.sql"));
       const repo = new RigRepository(db);
-      const rig = repo.createRig("pre-177");
+      const rig = repo.createRig("pre-181");
       const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "codex" });
       expect("keepAlive" in legacyNode).toBe(false);
       expect(repo.setNodeKeepAlive(legacyNode.id, false)).toBe(false);

@@ -146,6 +146,34 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
   const create = (sourceSession: string, destinationSession: string, body: string) =>
     repo.create({ sourceSession, destinationSession, body, nudge: false } as never);
 
+  it.each(["cus_VVMAexample01", "acct_0123456789ABCDEF"])("accepts the issuing service's principal %s without changing its identity", async (principal) => {
+    thisHostsDaemon();
+    seat("team-a", "lead");
+    const caller = principal.startsWith("cus_") ? CALLER : "issuer-helper@team-a";
+    if (caller !== CALLER) seat("team-a", "issuer-helper");
+    const key = `${"8977f2dc0000aaaa1111bbbb"}.${principal}.${"ab".repeat(24)}`;
+    answer = () => [200, active({ principal: { id: principal }, seat: caller })];
+    const ask = await connect((await listen()).url, key);
+    const result = await ask("rig_queue_create", { destination: "lead@team-a", body: "Read this caller's task" });
+    expect(result.isError).toBe(false);
+    const row = db.prepare("SELECT source_session AS source FROM queue_items WHERE qitem_id = ?")
+      .get(result.structured.qitemId) as { source: string };
+    expect(row.source).toBe(caller);
+    const transition = db.prepare("SELECT identity_principal AS principal FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id LIMIT 1")
+      .get(result.structured.qitemId) as { principal: string };
+    expect(JSON.parse(transition.principal)).toMatchObject({ source: "grant-service", id: principal });
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every(request => request.headers.authorization === `Bearer ${key}`)).toBe(true);
+    expect(asked.every(request => JSON.parse(request.body).instance === INSTANCE)).toBe(true);
+  });
+
+  it("keeps malformed key fields outside the grant-service request", async () => {
+    const served = await listen();
+    const malformed = [KEY + "x", KEY.replace("cus_VVMAexample01", "acct_short"), KEY.replace("8977f2dc0000aaaa1111bbbb", "not-a-connection")];
+    for (const key of malformed) expect((await post(served.url, { Authorization: `Bearer ${key}` })).status).toBe(401);
+    expect(asked).toHaveLength(0);
+  });
+
   it("routes an address-free first task to the operator's receiver with caller attribution, retry identity and revision lineage", async () => {
     seat("team-a", "lead"); // pod.lead exists without any delegates_to edge.
     const { url } = await listen(undefined, "pod-lead@team-a");
@@ -864,6 +892,136 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(changed.structured).toMatchObject({ ok: false, code: "not_waiting_on_person", state: "done", answered: { layout: "b" } });
       expect(replies(row.qitemId)).toBe(1);
       expect(audit(row.qitemId)).toHaveLength(1);
+    });
+
+    /** #3512: a token-file grant bound to a person with --person, served with no grant service. */
+    const fileGrant = async (opts: { person?: string; owner?: boolean } = {}) => {
+      if (!db.prepare("SELECT 1 FROM sessions WHERE session_name = 'assistant@team-a'").get()) seat("team-a", "assistant");
+      const tokenFile = path.join(home, "mcp-http-tokens.json");
+      const token = await addGrant(tokenFile, { name: "phone-assistant", seat: "assistant@team-a", rigs: ["team-a"], roots: [],
+        workspace: false, owner: opts.owner === true, ...(opts.person ? { person: opts.person } : {}) });
+      const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+      closers.push(() => served.close());
+      return { url: served.url, token, tokenFile };
+    };
+
+    it("#3512: a token-file grant gets the person tools only with --person, never from the seat or the owner flag", async () => {
+      register(PERSON, true);
+      const bound = await fileGrant({ person: PERSON });
+      const asPerson = await connect(bound.url, bound.token);
+      expect(await asPerson.tools()).toEqual(expect.arrayContaining(["rig_question_list", "rig_question_answer", "rig_queue_create"]));
+      expect(asPerson.instructions() ?? "").toContain("bound to a person");
+      fs.rmSync(bound.tokenFile);
+      const plain = await fileGrant();
+      expect((await (await connect(plain.url, plain.token)).tools()).filter((tool) => tool.startsWith("rig_question_"))).toEqual([]);
+      fs.rmSync(plain.tokenFile);
+      const owner = await fileGrant({ owner: true });
+      const asOwner = await connect(owner.url, owner.token);
+      expect((await asOwner.tools()).filter((tool) => tool.startsWith("rig_question_"))).toEqual([]);
+      expect(await asOwner.tools()).toEqual(expect.arrayContaining(["rig_up", "rig_queue_create"]));
+    });
+
+    it("#3512: records the bound person's answer through the same path, with the file-grant route, and keeps the controls", async () => {
+      register(PERSON, true);
+      register("someone-else", false);
+      const bound = await fileGrant({ person: PERSON });
+      const asPerson = await connect(bound.url, bound.token);
+      const mine = await ask(`${PERSON}@external`);
+      const theirs = await ask("someone-else@external");
+      const listed = await asPerson("rig_question_list");
+      expect(listed.isError).toBe(false);
+      expect(listed.structured.items.map((entry: any) => entry.qitemId)).toContain(mine.qitemId);
+      expect(listed.structured.items.map((entry: any) => entry.qitemId)).not.toContain(theirs.qitemId);
+      const item = listed.structured.items.find((entry: any) => entry.qitemId === mine.qitemId);
+
+      // A stale revision is refused, never applied over the current question.
+      const stale = await asPerson("rig_question_answer", { qitemId: mine.qitemId, revision: "dr1-0000000000000000", choices: [{ questionId: "layout", optionId: "a" }] });
+      expect(stale.structured).toMatchObject({ ok: false });
+      expect(repo.getById(mine.qitemId)).toMatchObject({ state: "pending" });
+
+      const answered = await asPerson("rig_question_answer", { qitemId: mine.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] });
+      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered" });
+      expect(repo.getById(mine.qitemId)).toMatchObject({ state: "done", humanAnswers: { layout: "b" } });
+      expect(replies(mine.qitemId)).toBe(1);
+      const [record] = audit(mine.qitemId);
+      expect(record).toMatchObject({ actor: `${PERSON}@external`, notes: expect.objectContaining({ route: "file-grant",
+        assistantSeat: "assistant@team-a", principal: "phone-assistant", person: `${PERSON}@external` }) });
+      expect(record!.notes).not.toHaveProperty("grant");
+      // An identical retry is answered from the record; another person's question is never answered.
+      expect((await asPerson("rig_question_answer", { qitemId: mine.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] })).structured)
+        .toMatchObject({ ok: true, outcome: "already-recorded" });
+      const other = await asPerson("rig_question_answer", { qitemId: theirs.qitemId, revision: "dr1-0000000000000000", choices: [{ questionId: "layout", optionId: "a" }] });
+      expect(other.structured).toMatchObject({ ok: false, code: "not_waiting_on_person" });
+      expect(repo.getById(theirs.qitemId)).toMatchObject({ state: "pending" });
+      expect(audit(mine.qitemId)).toHaveLength(1);
+
+      // Revoking the grant refuses its next request.
+      const revoked = await new Promise<number>((resolve) => {
+        const run = mcpCommand();
+        run.exitOverride();
+        void run.parseAsync(["node", "mcp", "token", "revoke", "phone-assistant"]).then(() => resolve(0), () => resolve(1));
+      });
+      expect(revoked).toBe(0);
+      const res = await fetch(bound.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream",
+        authorization: `Bearer ${bound.token}` }, body: JSON.stringify(INITIALIZE) });
+      expect(res.status).toBe(401);
+    });
+
+    it("#3512: token add rejects a malformed --person", async () => {
+      const tokenFile = path.join(home, "mcp-http-tokens.json");
+      await expect(addGrant(tokenFile, { name: "bad", seat: "assistant@team-a", rigs: [], roots: [], workspace: false, owner: false, person: "Not An Id" }))
+        .rejects.toThrow(/--person/);
+    });
+
+    async function mixedFileGrants(corruptBeforeStart: boolean, invalidPerson: unknown) {
+      seat("team-a", "assistant");
+      seat("team-a", "other-assistant");
+      const tokenFile = path.join(home, "mcp-http-tokens.json");
+      const grant = { rigs: ["team-a"], roots: ["proof"], workspace: true, owner: false, person: PERSON };
+      const affected = await addGrant(tokenFile, { ...grant, name: "affected", seat: "assistant@team-a" });
+      const other = await addGrant(tokenFile, { ...grant, name: "other", seat: "other-assistant@team-a" });
+      const damageBinding = () => {
+        const file = JSON.parse(fs.readFileSync(tokenFile, "utf8")) as { principals: Array<Record<string, unknown>> };
+        file.principals.find(entry => entry.name === "affected")!.person = invalidPerson;
+        fs.writeFileSync(tokenFile, JSON.stringify(file));
+      };
+      if (corruptBeforeStart) damageBinding();
+      const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+      closers.push(() => served.close());
+      if (!corruptBeforeStart) damageBinding();
+      return { url: served.url, affected, other };
+    }
+
+    it("#3512: starts with an unusable person binding and keeps the affected grant's ordinary access", async () => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { url, affected } = await mixedFileGrants(true, "Invalid Person");
+        const asSeat = await connect(url, affected);
+        const tools = await asSeat.tools();
+        expect(tools).toEqual(expect.arrayContaining(["rig_queue_create", "rig_artifact_read", "rig_context_get"]));
+        expect(tools.filter(tool => tool.startsWith("rig_question_"))).toEqual([]);
+        seat("team-a", "lead");
+        const sent = await asSeat("rig_queue_create", { qitemId: "qitem-malformed-person-file",
+          destination: "lead@team-a", body: "Keep using the grant" });
+        expect(sent.isError).toBe(false);
+        expect(repo.getById("qitem-malformed-person-file")).toMatchObject({ sourceSession: "assistant@team-a" });
+        fs.writeFileSync(path.join(shared, "result.md"), "fixture artifact");
+        expect((await asSeat("rig_artifact_read", { root: "proof", path: "result.md" })).text).toContain("fixture artifact");
+        expect(log).toHaveBeenCalledWith(expect.stringMatching(/affected.*unusable person.*rig_question_/));
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("#3512: a bad person field on a live reload leaves the other grant and its person tools available", async () => {
+      register(PERSON, true);
+      const { url, other } = await mixedFileGrants(false, { invalid: true });
+      const asOther = await connect(url, other);
+      expect(await asOther.tools()).toEqual(expect.arrayContaining(["rig_question_list", "rig_question_answer", "rig_queue_create"]));
+      const item = await ask(`${PERSON}@external`);
+      expect((await asOther("rig_question_list")).structured.items).toEqual(
+        expect.arrayContaining([expect.objectContaining({ qitemId: item.qitemId })]),
+      );
     });
 
     it("answers several questions in one call, and records the person's own words exactly", async () => {

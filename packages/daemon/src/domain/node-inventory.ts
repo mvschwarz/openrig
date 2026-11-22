@@ -1693,6 +1693,8 @@ export function attachTerminalActivityAndWork(
             decidedBy: arb.decidedBy,
             seq: arb.seq,
             lastSwap: arb.lastSwap,
+            // A typed usage limit and its stated reset, beside the unknown activity it explains.
+            ...(arb.usageLimit ? { usageLimit: arb.usageLimit } : {}),
           }
         : null;
     }

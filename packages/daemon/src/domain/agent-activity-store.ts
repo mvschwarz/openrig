@@ -531,6 +531,72 @@ export class AgentActivityStore {
     };
   }
 
+  /** The typed usage limit (Claude's StopFailure/rate_limit, Codex's at_limit) this occupant still held when the daemon
+   *  stopped, read once per seat on a restart, or null. Walks the session's recent records newest first by the emitter's
+   *  order: a newer turn of this occupant (a running record) or Codex's usage_limit_cleared ends the limit first. Each
+   *  record is judged by the occupant rules getLatestForNode uses (`occupantOf`, #2796): a record of another occupant is
+   *  skipped, never deciding this one's hold. Throws when the store can't be read, or when a limit may still be in force
+   *  but a record that would decide it can't be shown to be this occupant's; the caller reads the seat as unknown then. */
+  latestHeldUsageLimit(input: { nodeId: string; sessionName: string; runtime: string }): AgentActivity | null {
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE json_extract(payload, '$.sessionName') = ?
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).all(input.nodeId, input.sessionName) as EventPayloadRow[];
+    let live: string | null = null;
+    try { live = this.resolveOccupantGeneration?.(input.nodeId) ?? null; } catch { /* unknown: no record can be shown to be this occupant's */ }
+    let uncertain = false;
+    // A clear ends a limit only when it's strictly later, as live: a limit recorded at the clear's own instant still holds,
+    // whichever of the two the emitter's sequence or the arrival put first.
+    let clearedAt: number | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity) continue;
+      const clears = activity.state === "running" || (activity.rawEvent === "Notification" && activity.rawSubtype === "usage_limit_cleared");
+      const typed = input.runtime === "codex" ? activity.rawEvent === "at_limit"
+        : isClaudeRateLimitHook(input.runtime, activity.rawEvent, activity.rawSubtype);
+      if (!clears && !typed) continue;
+      if (clearedAt !== null && Date.parse(activity.eventAt ?? "") !== clearedAt) return null;
+      const occupant = this.occupantOf(input.nodeId, activity.generation, live);
+      if (occupant === "foreign") continue;
+      // A clear whose occupant can't be shown may or may not have ended this occupant's limit: keep looking, and if a
+      // limit of this occupant is found below it, say unknown rather than claim either way.
+      if (occupant === "unknown") { if (typed) throw new Error("usage limit of an unresolved occupant"); uncertain = true; continue; }
+      if (clears) {
+        const at = Date.parse(activity.eventAt ?? "");
+        if (!Number.isFinite(at)) return null;
+        clearedAt ??= at;
+        continue;
+      }
+      if (uncertain) throw new Error("usage limit behind a clear of an unresolved occupant");
+      return activity;
+    }
+    return null;
+  }
+
+  /** latestHeldUsageLimit for a session name alone (the Codex banner sweep's input), resolved to its node as hook records are. */
+  heldUsageLimitForSession(sessionName: string, runtime: string): AgentActivity | null {
+    const session = this._resolveSession({ sessionName });
+    return session ? this.latestHeldUsageLimit({ nodeId: session.node_id, sessionName: session.session_name, runtime }) : null;
+  }
+
+  /** Which occupant a recorded generation belongs to, by getLatestForNode's rules: "current" for the live generation or one
+   *  continued only by no-launch adoptions (#2796), "foreign" for a registered tenure a launch replaced, and "unknown"
+   *  when either side can't be read or the recorded one isn't registered. */
+  private occupantOf(nodeId: string, recorded: string | null | undefined, live: string | null): "current" | "foreign" | "unknown" {
+    if (live === null || !recorded) return "unknown";
+    try {
+      if (this.isRegisteredOccupantGeneration && !this.isRegisteredOccupantGeneration(nodeId, recorded)) return "unknown";
+      if (recorded === live) return "current";
+      return this.isOccupantContinuedByAdoption?.(nodeId, recorded) === true ? "current" : "foreign";
+    } catch {
+      return "unknown";
+    }
+  }
+
   /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
    *  Not by arrival: a runner's posts aren't awaited, so older ones can land after a newer one. Only the node's newest
    *  SOURCE_ORDER_WINDOW records to arrive are ordered, and the session is chosen from those: a runner's heartbeat grows

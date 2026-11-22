@@ -156,13 +156,18 @@ it("enrolling trades the code for a key kept privately; a used code is refused w
   expect(listed).not.toContain(KEY);
 
   const calls = account.calls;
-  expect(await enroll()).toMatchObject({ status: 409, data: { error: "already_enrolled" } });
+  // Already enrolled is fine as it is: carry on connecting. It doesn't point at --replace.
+  const again = await enroll();
+  expect(again).toMatchObject({ status: 409, data: { error: "already_enrolled" } });
+  expect(again.data.message).toBe(`This daemon is already enrolled at https://account.example/ (${enrolled.data.id}). Already connected; carry on with rig network connect.`);
   expect(account.calls).toBe(calls);
   expect(await post("/installations", { code: "ec1.good", site: "http://other.example", allowHttp: false })).toMatchObject({ status: 400, data: { error: "http_not_allowed" } });
   expect(account.calls).toBe(calls);
 
-  // The same code at another site: the account says it's spent.
-  expect(await post("/installations", { code: "ec1.good", site: "https://second.example" })).toMatchObject({ status: 409, data: { error: "code_not_current" } });
+  // The same code at another site: the account says it's spent. The words don't claim how long a code lasts or how often it works.
+  const spent = await post("/installations", { code: "ec1.good", site: "https://second.example" });
+  expect(spent).toMatchObject({ status: 409, data: { error: "code_not_current" } });
+  expect(spent.data.message).toBe("The account refused the code (code_not_current). Get a new code from your account page.");
 });
 
 it("connecting by name lists it with the account and binds to the account's MCP front with its bearer; a second seat keeps the first listed", async () => {

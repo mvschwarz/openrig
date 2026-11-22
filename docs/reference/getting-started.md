@@ -955,7 +955,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
 | A restored seat still counts as needing attention after its prompt was answered | After a full restore of a Claude or Codex seat, the daemon clears this by itself once the seat reads running or idle and passes its check. If it still counts, check its `restoreOutcome` in `rig ps --nodes --json` (the RESTORE column): when it is `attention_required`, run `rig seat clear-attention <seat>`, which says which check failed; answering the prompt again or running `rig seat continue` doesn't change it. For a partial restore, submit any startup text left in the input box without sending it again, and wait for the agent to respond before clearing attention. See [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
-| "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
+| "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. For a long restore, choose a caller budget for the whole operation, for example `rig up <rig> --existing --timeout 900` (positive whole seconds; default 120). This also works with `--host` and `--plan`, and changes neither per-seat readiness nor retry behavior. If the caller's wait expires, that is not a rollback: check `rig ps` before running it again. `rig launch` still uses a 120 s caller wait. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | `rig status`, `rig terminal open` or `rig daemon start --wait-for-kernel` says a seat "needs attention" or "is waiting on a person" | The daemon flags that seat, and the line gives its recorded reason: a startup that failed or stopped at a sign-in, trust or other gate, a held message, a missing required file, or a question. "Is waiting on a person" means the daemon sees a live question you can answer in that seat's terminal. Look at it with `rig capture <seat>` or in its tile, then follow the row above that matches its message. "Couldn't check" means the check itself failed; it says nothing either way. |
 | A Codex seat, including the kernel's operator, answers every turn with a model error such as "… not supported when using Codex with a ChatGPT account" | Its Codex sign-in works, but that account can't run the model; the kernel picks its runtimes from the providers chosen at setup and their sign-ins, not from which models an account can run. If Claude Code is signed in, move just that seat: `rig seat set-runtime <seat> --runtime claude-code --reason "<model> isn't available to this Codex account"` (`--dry-run` first). Otherwise give it a model the account can run with `rig seat set-model <seat> --model <id> --reason "…"`, then start it again with `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. |
@@ -1436,6 +1436,23 @@ inspect or unset inherited overrides when changing homes.
 Separate instances should use separate databases; the check is a startup observation,
 not a lock against later concurrent starts. Changing the setting applies on the next
 daemon start.
+
+## Daemon start wait
+
+`rig daemon start` waits up to 180 seconds for the child it started to answer on its
+listeners. `rig config set daemon.start_readiness_wait_seconds <seconds>` (an integer from
+1 up to 2147464, the longest a Node timer can hold for the TUI's call) or
+`OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS` sets that wait for later starts:
+`rig daemon start`, `rig start`, the auto-start of `rig up` and `rig context add`, and the
+TUI's start, which allows its own call that wait plus the probe, cleanup and a margin
+(when it can't read the setting, it allows the longest accepted wait).
+A running daemon isn't affected.
+When the wait runs out and the child is still alive, the start ends pending as before:
+the child is left running and the start reservation is kept, so inspect before retrying.
+A wait shorter than the host needs only makes the start end pending sooner; it doesn't
+stop the child.
+Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow
+start faster.
 
 ## Custom settings and precedence
 
