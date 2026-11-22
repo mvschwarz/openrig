@@ -616,20 +616,20 @@ describe("local startup reservation", () => {
       // The start decided from the text it read; the stop's mark, appended to the same inode since, keeps the refusal.
       const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS });
       const text = fs.readFileSync(file, "utf8");
-      let marked: string | undefined;
+      let marked: ReturnType<typeof markReservationRetained> | undefined;
       const afterInspect = () => { marked = markReservationRetained(file, text, "stopping"); };
       expect(() => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS, afterInspect })).toThrow(/already reserved/);
-      expect(marked).toBeDefined();
+      expect(marked).toHaveProperty("written");
       expect(fs.readdirSync(home)).toEqual(["daemon-start.lock"]);
-      expect(fs.readFileSync(file, "utf8")).toBe(marked);
+      expect(fs.readFileSync(file, "utf8")).toBe((marked as { written: string }).written);
     }));
     it("writes no stop mark between this start's content check on its claim and its move", () => withHome((home) => {
       // The stop tries to mark it after the start's claim passed the content check: the claim keeps the mark out, so
-      // the stop gets nothing written (and refuses before its signal) instead of a mark on a reservation that moves.
+      // nothing is written on a reservation that moves, and the stop is told the claim is there.
       const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file);
       const text = fs.readFileSync(file, "utf8");
       const link = fs.linkSync;
-      let marked: string | undefined = "not tried";
+      let marked: ReturnType<typeof markReservationRetained> | "not tried" = "not tried";
       const spy = vi.spyOn(fs, "linkSync").mockImplementation((from, to) => {
         if (String(to) === archive) marked = markReservationRetained(file, text, "stopping");
         return link(from, to);
@@ -637,7 +637,7 @@ describe("local startup reservation", () => {
       try {
         const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS });
         expect(lock.archived).toBe(archive);
-        expect(marked).toBeUndefined();
+        expect(marked).toEqual({ unwritten: expect.stringContaining(`the claim file ${file}.claim-`) });
         expect(fs.readFileSync(archive, "utf8")).not.toContain('"retainedBy"');
         lock.release();
       } finally {

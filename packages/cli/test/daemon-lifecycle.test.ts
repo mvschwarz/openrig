@@ -2651,6 +2651,83 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     expect(fs.existsSync(lockFile())).toBe(true);
   });
 
+  describe("the stopping mark that couldn't be written", () => {
+    const startNow = () => acquireDaemonStartLock(home, { bootId: "boot-A", bootedAtMs: Date.parse(STARTED_AT) - 60_000, processLiveness: () => "dead", pidNamespace: "host" });
+    const warned = () => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
+
+    it("an ordinary write failure doesn't refuse: the stop goes on, says why, and no start archives it while it verifies", async () => {
+      const deps = reservedDeps();
+      const write = fs.writeSync;
+      const failing = vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, data: unknown, ...rest: unknown[]) => {
+        if (typeof data === "string" && data.includes('"retainedBy"')) throw Object.assign(new Error("EIO: i/o error, write"), { code: "EIO" });
+        return (write as (...args: unknown[]) => number)(fd, data, ...rest);
+      }) as typeof fs.writeSync);
+      // The child is gone and the launcher is dead, and no mark is there: a start tried at the signal and while stop
+      // checks the listener, before it has verified anything.
+      const during: unknown[] = [];
+      const tryStart = () => { try { startNow().release(); during.push("started"); } catch (error) { during.push(error); } };
+      const kill = deps.kill, fetch = deps.fetch;
+      let signalled = false;
+      deps.kill = vi.fn((pid: number, signal: string) => { const sent = kill(pid, signal); signalled = true; tryStart(); return sent; });
+      deps.fetch = vi.fn(async (...args: Parameters<LifecycleDeps["fetch"]>) => {
+        if (signalled) tryStart();
+        return fetch(...args);
+      }) as LifecycleDeps["fetch"];
+      try {
+        expect(await stop(deps)).toBe("stopped");
+      } finally {
+        failing.mockRestore();
+      }
+      expect(deps.kill).toHaveBeenCalledTimes(1);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+      expect(during.length).toBeGreaterThanOrEqual(2);
+      for (const outcome of during) expect((outcome as Error).message).toMatch(/already reserved/);
+      expect(warned()).toContainEqual(expect.stringMatching(/the "stopping" mark was not written: the write failed \(EIO\); stop checked the child again and goes on/));
+      expect(fs.existsSync(lockFile())).toBe(false);
+      expect(fs.readdirSync(home).filter((name) => name.includes(".claim-"))).toEqual([]);
+    });
+
+    it("a reservation that really changed before the mark still refuses, and says how; no signal", async () => {
+      const deps = reservedDeps();
+      const retain = deps.retainStartReservation!;
+      deps.retainStartReservation = vi.fn((file: string, raw: string, reason: string) => {
+        // The path now names another child.
+        fs.writeFileSync(`${file}.next`, header() + childRecord({ childPid: CHILD + 1 }));
+        fs.renameSync(`${file}.next`, file);
+        return retain(file, raw, reason);
+      });
+      await expectRefused(deps, /the reservation changed while stop was checking it: its content changed; no signal sent\.$/);
+      expect(fs.readFileSync(lockFile(), "utf8")).toBe(header() + childRecord({ childPid: CHILD + 1 }));
+      expect(fs.readdirSync(home).filter((name) => name.includes(".claim-"))).toEqual([]);
+    });
+
+    it("a claim left by an interrupted operation doesn't refuse the stop for good: it goes on and names the claim", async () => {
+      const deps = reservedDeps();
+      const claim = `${lockFile()}.claim-${fs.statSync(lockFile()).ino}`;
+      fs.linkSync(lockFile(), claim);
+      expect(await stop(deps)).toBe("stopped");
+      expect(deps.kill).toHaveBeenCalledTimes(1);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+      expect(warned()).toContainEqual(expect.stringContaining(`the "stopping" mark was not written: the claim file ${claim} is present`));
+      // The claim isn't this stop's to remove: it stays, so the reservation does too, and stop says it wasn't released.
+      expect(fs.existsSync(claim)).toBe(true);
+      expect(warned()).toContainEqual(expect.stringMatching(/was not released/));
+    });
+
+    it("a claim held by a removal in progress, which only follows a dead child, refuses on the second look: no signal", async () => {
+      const liveness: Record<number, "alive" | "dead" | "unknown"> = {};
+      const deps = reservedDeps({ liveness });
+      fs.linkSync(lockFile(), `${lockFile()}.claim-${fs.statSync(lockFile()).ino}`);
+      const retain = deps.retainStartReservation!;
+      deps.retainStartReservation = vi.fn((file: string, raw: string, reason: string) => {
+        const mark = retain(file, raw, reason);
+        liveness[CHILD] = "dead"; // the remover saw the child gone
+        return mark;
+      });
+      await expectRefused(deps, /child PID \d+ is absent after the stopping mark; no signal sent\.$/);
+    });
+  });
+
   it("a later stop still reads a reservation an earlier stop retained, and releases it after a clean shutdown", async () => {
     fs.writeFileSync(lockFile(), validLock() + JSON.stringify({ retainedBy: "stop", reason: "no-receipt", at: NOW.toISOString() }) + "\n");
     const deps = reservedDeps({ lock: null });

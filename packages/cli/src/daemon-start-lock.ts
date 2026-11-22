@@ -221,39 +221,104 @@ function claimAndArchive(file: string, inspected: fs.Stats, text: string, target
   }
 }
 
+/** #3637 — what `markReservationRetained` did. `written`: the reservation's new text. `changed`: it is gone, is another
+ *  file than the one read, or holds other text than `expected`; nothing was written, and the stop must refuse.
+ *  `refuse`: nothing was written and the stop must refuse for another reason (why): the reservation couldn't be read
+ *  to confirm it is the one read, or no claim could be taken and none is there to keep a start from archiving it.
+ *  `unwritten`: it is still the reservation the stop read, but the mark couldn't be written (why); when this call took
+ *  the removers' claim on it, it still holds it, so no remover moves the reservation until `release` is called, and
+ *  `retry` writes a later record under that same claim (the claim stays held until `release`). */
+export type ReservationMark =
+  | { written: string }
+  | { changed: string }
+  | { refuse: string }
+  | { unwritten: string; release?: () => void; retry?: (reason: string) => ReservationMark };
+
 /** #3637 — `rig daemon stop` keeps a reservation after a shutdown it couldn't verify (the child didn't exit, the
  *  listener isn't confirmed closed, no matching receipt, or an incomplete one), and marks it before its signal
  *  ("stopping") so no start archives it while the shutdown is being verified. It records that here, only while the
  *  file still holds exactly `expected`, so a later start doesn't take that unknown state for an abandoned launch.
  *  It holds the removers' claim on the inode (`claimAndArchive`) across that check and the write, so no remover moves
- *  the reservation between them: while a remover holds the claim, nothing is written and the stop refuses.
- *  Returns the reservation's new text, or undefined when nothing was written. */
-export function markReservationRetained(file: string, expected: string, reason: string): string | undefined {
-  let fd: number;
+ *  the reservation between them. A write that fails (an I/O error) or a claim already present (left by an interrupted
+ *  operation, or another removal in progress) is `unwritten`, never `changed`, as long as the reservation was read
+ *  again and is still the one read: a mark that can't be written doesn't, by itself, make it a different one. */
+export function markReservationRetained(file: string, expected: string, reason: string): ReservationMark {
+  let inspected: fs.Stats;
   try {
-    fd = fs.openSync(file, "r+");
-  } catch {
-    return undefined;
+    inspected = fs.statSync(file);
+  } catch (error) {
+    return code(error) === "ENOENT" ? { changed: "it is gone" } : { refuse: `it couldn't be inspected to confirm it (${describe(error)})` };
   }
-  let claim: string | undefined;
+  const claim = `${file}.claim-${inspected.ino}`;
   try {
-    const opened = fs.fstatSync(fd);
-    const name = `${file}.claim-${opened.ino}`;
-    fs.linkSync(file, name);
-    claim = name;
-    const claimed = fs.statSync(claim);
-    if (claimed.dev !== opened.dev || claimed.ino !== opened.ino) return undefined;
-    const text = fs.readFileSync(fd, "utf8");
-    if (text !== expected) return undefined;
-    const record = JSON.stringify({ retainedBy: "stop", reason, at: new Date().toISOString() }) + "\n";
-    fs.writeSync(fd, record, Buffer.byteLength(text));
-    return text + record;
-  } catch {
-    return undefined;
-  } finally {
-    if (claim) { try { fs.unlinkSync(claim); } catch { /* already gone */ } }
-    fs.closeSync(fd);
+    fs.linkSync(file, claim);
+  } catch (error) {
+    if (code(error) === "ENOENT") return { changed: "it is gone" };
+    // No claim taken: the reservation is checked as it stands, and only a reservation that is still the one read goes on.
+    let text: string;
+    try {
+      const now = fs.statSync(file);
+      if (now.dev !== inspected.dev || now.ino !== inspected.ino) return { changed: "it was replaced" };
+      text = fs.readFileSync(file, "utf8");
+    } catch (reread) {
+      return code(reread) === "ENOENT" ? { changed: "it is gone" } : { refuse: `it couldn't be read again to confirm it (${describe(reread)})` };
+    }
+    if (text !== expected) return { changed: "its content changed" };
+    // A claim already there keeps every remover out while it exists; with none there, nothing would keep a start
+    // from archiving the reservation while the stop verifies the shutdown.
+    if (code(error) !== "EEXIST") return { refuse: `the "stopping" mark was not written and no claim could be taken on it (${describe(error)}), so nothing keeps a start from archiving it while stop verifies` };
+    return { unwritten: `the claim file ${claim} is present (left by an interrupted operation, or another removal in progress)` };
   }
+  let held = true;
+  const release = (): void => {
+    if (!held) return;
+    held = false;
+    try { fs.unlinkSync(claim); } catch { /* already gone */ }
+  };
+  // One write of a record under the claim this call holds; `retry` writes a later record under that same claim.
+  const attempt = (why: string): ReservationMark => {
+    const unwritten = (because: string): ReservationMark => ({ unwritten: because, release, retry: attempt });
+    let text: string;
+    try {
+      const claimed = fs.statSync(claim);
+      if (claimed.dev !== inspected.dev || claimed.ino !== inspected.ino) { release(); return { changed: "it was replaced" }; }
+      text = fs.readFileSync(claim, "utf8");
+    } catch (error) {
+      release();
+      return { refuse: `it couldn't be read under the claim to confirm it (${describe(error)})` };
+    }
+    if (text !== expected) { release(); return { changed: "its content changed" }; }
+    const record = JSON.stringify({ retainedBy: "stop", reason: why, at: new Date().toISOString() }) + "\n";
+    let fd: number;
+    try {
+      fd = fs.openSync(claim, "r+");
+    } catch (error) {
+      return unwritten(`it couldn't be opened for writing (${describe(error)})`);
+    }
+    try {
+      const length = Buffer.byteLength(record);
+      const wrote = fs.writeSync(fd, record, Buffer.byteLength(text));
+      if (wrote === length) return { written: text + record };
+      // A short write left part of a record: take it back, or the reservation is no longer the one read.
+      try { fs.ftruncateSync(fd, Buffer.byteLength(text)); } catch { release(); return { changed: "a partial record was left on it" }; }
+      return unwritten(`the write was short (${wrote} of ${length} bytes)`);
+    } catch (error) {
+      return unwritten(`the write failed (${describe(error)})`);
+    } finally {
+      try { fs.closeSync(fd); } catch { /* the outcome above stands; the claim is still released by its holder */ }
+    }
+  };
+  const first = attempt(reason);
+  if ("written" in first) release();
+  return first;
+}
+
+function code(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | null)?.code;
+}
+
+function describe(error: unknown): string {
+  return code(error) ?? (error instanceof Error ? error.message : String(error));
 }
 
 /** #3315 — a token that names one process for as long as it lives: on Linux its start time in clock ticks since boot
