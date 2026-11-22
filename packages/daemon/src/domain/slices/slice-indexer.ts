@@ -22,7 +22,6 @@ import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
 import { cooperativeReadFile, readRowsCooperatively } from "../execution-candidate-reader.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 import { runSyncSite } from "../sync-site-wrap.js";
-import { cooperativeReadFile, readRowsCooperatively } from "../execution-candidate-reader.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
 
