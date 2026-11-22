@@ -264,6 +264,22 @@ it("finds every family's closed boundaries with one lineage-tag read per evaluat
   expect(tagReads).toHaveLength(1);
 });
 
+it("reads the lineage tags through migration 183's partial index, not a scan of every queue row", async () => {
+  const t = await setup();
+  addFamilies(t, [22]);
+  const original = t.queue.db.prepare;
+  const tagReads: string[] = [];
+  t.queue.db.prepare = function(sql: string) {
+    if (sql.includes("health-lineage")) tagReads.push(sql);
+    return original.call(this, sql);
+  } as typeof t.queue.db.prepare;
+  try { expect(t.projection.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(["family-000", "root"]); } finally { t.queue.db.prepare = original; }
+  expect(tagReads).toHaveLength(1);
+  const plan = (t.queue.db.prepare(`EXPLAIN QUERY PLAN ${tagReads[0]}`).all() as Array<{ detail: string }>).map((row) => row.detail);
+  expect(plan.join(" | ")).toContain("idx_queue_items_health_lineage");
+  expect(plan).not.toContain("SCAN queue_items");
+});
+
 it("past the family limit evaluates exactly the busiest families and reports the rest as omitted, not healthy", async () => {
   const t = await setup();
   // root has 30 transitions; 198 families have 22; three tie at 21. The limit keeps root,
