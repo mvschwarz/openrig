@@ -1024,6 +1024,9 @@ async function runHttpHostSend(
   }
   console.log(`Sent to ${session}`);
   if (data["envelopeOmitted"]) console.log(exactTextNote(session));
+  // The remote seat's usage limit, as a local send prints it: the agent isn't expected to read this before its reset.
+  const usageLimit = data["usageLimit"] as { notice?: unknown } | undefined;
+  if (typeof usageLimit?.notice === "string") console.log(`Notice: ${usageLimit.notice}`);
   const advisory = data["warning"] as string | undefined;
   if (advisory) {
     console.log(`Advisory: ${advisory}`);
