@@ -57,8 +57,9 @@ agent's latest session, its activity, its open rows and its held messages, and t
   block as it is then.
 - **Rows left with a drained agent.** A pending row addressed to a `drained` pool agent, under any of its names, is
   moved to a free pool agent the same way, whatever its tags.
-- **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` can wait up to one more
-  interval of the job before it is moved.
+- **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
+  evaluation, up to one more interval later. That is not a dispatch deadline: a row moves only to an agent that is
+  free when it is checked, so with more waiting rows than free agents, the rest stay pending for later evaluations.
 - **Holds.** The whole pool is held, and nothing is moved, while:
   - the job is not `active` (stopped by an operator, or ended);
   - the stored block can't be read (the notes carry an advisory; nothing is removed);
@@ -67,7 +68,12 @@ agent's latest session, its activity, its open rows and its held messages, and t
     `rig launch --seats` do not end it; the next `rig up` that completes does. After `rig launch --seats`, run
     `rig down`, then `rig up`.
 
-  Each evaluation records the cause in the job's notes, for example `held: rig stopped (event 42)`.
+  Each evaluation of an active job records the cause in the job's notes, for example `held: rig stopped (event 42)`,
+  unless the watchdog engine defers it (`rig_delivery_drain`): that evaluation records nothing, even if rows have
+  already moved. A stopped job records no note either: the scheduler evaluates only active jobs, and the watchdog
+  engine returns `job_not_active`, with no history, when the job is no longer active before the policy runs or after
+  it returns. So a job stopped during an evaluation records nothing; the executor's own check only stops the moves
+  left in that evaluation.
 
 ### When the model node is deleted
 
