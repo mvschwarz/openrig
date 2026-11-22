@@ -44,9 +44,13 @@ export async function pinSeatsForHerdr(run: TmuxRunner, tmux: string, sessions: 
       const [sessionId, windowId, size, windowSize, pin] = (await run(["display-message", "-p", "-t", `=${session}:`,
         `#{session_id} #{window_id} #{window_width}x#{window_height} #{window-size} #{${SEAT_PIN_OPTION}}`])).trim().split(" ");
       if (!sessionId?.startsWith("$") || !windowId?.startsWith("@") || !size || !windowSize) throw new Error("its window couldn't be read");
-      if (!pin) {
-        // Someone else's manual size is theirs to keep.
-        if (windowSize === "manual") { notes.push(`${session} has a fixed window size someone set; Herdr views leave it as it is.`); continue; }
+      if (windowSize === "manual") {
+        // A manual window without OpenRig's pin is someone else's fixed size (a person's, or a web terminal's or
+        // readable capture's while it holds one): theirs to keep.
+        if (!pin) { notes.push(`${session} has a fixed window size set by someone else; Herdr views leave it as it is.`); continue; }
+      } else {
+        // Not pinned now, including a pin whose window-size was dropped since (as a readable capture's note says how
+        // to): pin at the size the seat has as this view opens.
         await run(["set-option", "-w", "-t", windowId, SEAT_PIN_OPTION, size]);
         await run(["set-option", "-w", "-t", windowId, "window-size", "manual"]);
       }

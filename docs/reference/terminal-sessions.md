@@ -113,9 +113,10 @@ to follow its inherited sizing again.
 A Herdr view's pin is OpenRig's own: the window is `manual` with the seat's size
 recorded in its `@openrig_pin` option, and hooks on the seat's session fit it to
 a focused client. It stays after the view closes, since a Herdr restart brings
-tiles back without a new open; drop it with
-`tmux set-window-option -t <window> -u window-size` and `-u @openrig_pin`.
-A Herdr view leaves a window someone else made `manual` as it is.
+tiles back without a new open. `tmux set-window-option -t <window> -u window-size`
+lets the seat follow its clients again until the next Herdr view of it, which pins
+it again at its size then. A Herdr view leaves a window someone else made
+`manual` (no `@openrig_pin`) as it is.
 OpenRig's temporary layout and readable-capture pins release by unsetting the
 window's local `window-size` option; they do not restore an old local override.
 With the last pin released, the window inherits the global policy again.

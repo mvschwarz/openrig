@@ -54,7 +54,7 @@ describe("pinSeatsForHerdr: a Herdr view keeps each agent at its own size", () =
     const seat = seatOn(seatServer);
     tmux(seatServer, ["set-option", "-w", "-t", `=${seat.session}:`, "window-size", "manual"]);
     const notes = await pinSeatsForHerdr(seat.run, "tmux", [seat.session]);
-    expect(notes).toEqual([`${seat.session} has a fixed window size someone set; Herdr views leave it as it is.`]);
+    expect(notes).toEqual([`${seat.session} has a fixed window size set by someone else; Herdr views leave it as it is.`]);
     expect(tmux(seatServer, ["show-options", "-wqv", "-t", `=${seat.session}:`, SEAT_PIN_OPTION]).trim()).toBe("");
     expect(tmux(seatServer, ["show-hooks", "-t", seat.session])).not.toContain("resize-window");
   });
@@ -68,6 +68,19 @@ describe("pinSeatsForHerdr: a Herdr view keeps each agent at its own size", () =
     expect(tmux(seatServer, ["show-options", "-wv", "-t", `=${seat.session}:`, SEAT_PIN_OPTION]).trim()).toBe("160x50");
     const hooks = tmux(seatServer, ["show-hooks", "-t", seat.session]).split("\n").filter(line => line.includes("resize-window"));
     expect(hooks.map(line => line.split(" ")[0])).toEqual(["client-detached[93]", "client-focus-in[93]", "client-focus-out[93]"]);
+  });
+
+  it("pins again on the next open when the pin's window-size was dropped", async () => {
+    const seatServer = server("dropped");
+    const seat = seatOn(seatServer);
+    await pinSeatsForHerdr(seat.run, "tmux", [seat.session]);
+    // A client resized it, then (as a readable capture's note says how to) it follows its inherited sizing again.
+    // resize-window itself sets window-size manual, so the drop comes after it.
+    tmux(seatServer, ["resize-window", "-t", `=${seat.session}:`, "-x", "140", "-y", "45"]);
+    tmux(seatServer, ["set-option", "-w", "-u", "-t", `=${seat.session}:`, "window-size"]);
+    expect(await pinSeatsForHerdr(seat.run, "tmux", [seat.session])).toEqual([]);
+    expect(tmux(seatServer, ["show-options", "-wv", "-t", `=${seat.session}:`, "window-size"]).trim()).toBe("manual");
+    expect(tmux(seatServer, ["show-options", "-wv", "-t", `=${seat.session}:`, SEAT_PIN_OPTION]).trim()).toBe("140x45");
   });
 
   it("names a seat it couldn't pin and carries on with the rest", async () => {
