@@ -1,6 +1,7 @@
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
 import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
+import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -28,7 +29,7 @@ import { contextUsageOccupantGenerationSchema } from "./migrations/168_context_u
 import { seatRuntimeHomeRecordsSchema } from "./migrations/169_seat_runtime_home_records.js";
 import { claudeAutoModeSchema } from "./migrations/171_claude_auto_mode.js";
 import { seatHookBridgeSchema } from "./migrations/171_seat_hook_bridge.js";
-import { seatColdStartsSchema } from "./migrations/179_seat_cold_starts.js";
+import { seatColdStartsSchema } from "./migrations/182_seat_cold_starts.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -364,5 +365,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeStatuslineThrottleSchema,
   workflowBoundPodSchema,
   seatPoolSchema,
+  remoteControlObservationsSchema,
   seatColdStartsSchema,
 ];

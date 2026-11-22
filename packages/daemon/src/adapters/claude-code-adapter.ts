@@ -803,7 +803,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
+      // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen or its
+      // "No conversation found" through the window (and a longer wait, below), and accept it at the final read if that's
+      // still all there is.
+      if (probe.status === "resumed" && !probe.foregroundOnly) {
         return { ok: true };
       }
 
@@ -855,7 +858,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // Only a boot in progress (no verdict, no gate, a label that proves nothing) is worth waiting for; a real
       // gate (login, trust or MCP approval, auto-mode identity) won't clear itself.
       const booting = probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
-      if (slowStart && !booting) {
+      // A foreground Claude alone keeps the longer wait going too, to its end, as in the quick window: a resume of a
+      // missing conversation is one until it reports that and exits. It isn't a boot for the checks below, so its process
+      // label never reads as a ready screen there.
+      if (slowStart && !booting && !probe.foregroundOnly) {
         slowStart = false;
         break;
       }

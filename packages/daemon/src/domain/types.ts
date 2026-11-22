@@ -976,6 +976,8 @@ export interface NodeInventoryEntry {
     decidedBy: string | null;
     seq: number;
     lastSwap: { generation: string; at: string } | null;
+    /** A typed usage limit ended the last turn (the activity reads unknown): when it was seen and its stated reset. */
+    usageLimit?: { rung: string; observedAt: string; resetsAt: string | null };
   } | null;
   /**
    * ARCH RULING 3a947fb1 (FR-7 additive) — the seat's RAW `lastActivityAt`

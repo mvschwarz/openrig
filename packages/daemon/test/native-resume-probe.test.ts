@@ -471,6 +471,7 @@ describe("native resume probe", () => {
       status: "resumed",
       code: "active_runtime",
       detail: "Claude is the active foreground process in the probe pane.",
+      foregroundOnly: true,
     });
   });
 

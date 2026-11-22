@@ -14,7 +14,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { NetworkBindingStore, networkCredentialFile } from "../src/domain/network/network-bindings.js";
 import { Hono } from "hono";
-import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { connectMcpHub, HubError, hubFailure, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { networkRoutes } from "../src/routes/network.js";
 import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 
@@ -25,6 +26,7 @@ class FakeHub {
   readonly tokens: string[] = [];
   revoked = false;
   down = false;
+  settingUp = false;
   /** The next claim or close of these ids takes effect, then its answer is lost. */
   readonly loseClaimAnswer = new Set<string>();
   readonly loseCloseAnswer = new Set<string>();
@@ -46,6 +48,8 @@ class FakeHub {
     this.tokens.push(token);
     if (this.revoked) throw new HubError("revoked", "The hub refused this participant's credential.");
     if (this.down) throw new HubError("unavailable", "The hub couldn't be reached: connect ECONNREFUSED");
+    // The hub's own 503 answer while its grant authority can't serve the participant yet, as the SDK reports it.
+    if (this.settingUp) throw hubFailure(new StreamableHTTPError(503, `Error POSTing to endpoint: ${JSON.stringify({ error: "grant_authority_unavailable", message: "The grant authority can't answer now, so this request isn't served. Try again later." })}`));
     const get = (id: string) => {
       const item = this.items.get(id);
       if (!item) throw new HubError("refused", `qitem_not_found ${id}`);
@@ -234,6 +238,65 @@ describe("network connector", () => {
     await service.round();
     expect(service.snapshot().bindings[0]!.backoffMs).toBe(30_000);
     expect(bindings.get(b.id)!.lastError).toBeNull();
+  });
+
+  const SETTING_UP = "The network is still finishing setup for this agent. Try again in a moment.";
+  const after = (b: { id: string }, ms: number) => new Date(Date.parse(bindings.get(b.id)!.createdAt) + ms);
+
+  it("only the hub's 503 grant_authority_unavailable answer counts as the network still setting up", () => {
+    const body = JSON.stringify({ error: "grant_authority_unavailable", message: "Try again later." });
+    expect(hubFailure(new StreamableHTTPError(503, `Error POSTing to endpoint: ${body}`))).toMatchObject({ kind: "unavailable", code: "grant_authority_unavailable" });
+    expect(hubFailure(new StreamableHTTPError(500, `Error POSTing to endpoint: ${body}`)).code).toBeUndefined();
+    expect(hubFailure(new StreamableHTTPError(503, "Error POSTing to endpoint: Service Unavailable")).code).toBeUndefined();
+    expect(hubFailure(new Error("connect ECONNREFUSED")).code).toBeUndefined();
+  });
+
+  it("a new connection the network is still setting up says so, is asked again in 5 s, and then makes contact", async () => {
+    const b = bind();
+    hub.settingUp = true;
+    let now = after(b, 1_000);
+    const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+    await service.round();
+    expect(bindings.get(b.id)).toMatchObject({ state: "active", lastContactAt: null, lastError: SETTING_UP });
+    expect(service.snapshot().bindings[0]).toMatchObject({ nextPassAt: new Date(now.getTime() + 5_000).toISOString(), backoffMs: 30_000,
+      lastPass: expect.objectContaining({ error: "unavailable", settingUp: true }) });
+    const attempts = hub.tokens.length;
+    now = new Date(now.getTime() + 4_999);
+    await service.round();
+    expect(hub.tokens.length).toBe(attempts);
+    now = new Date(now.getTime() + 1);
+    await service.round();
+    expect(hub.tokens.length).toBe(attempts + 1);
+    hub.settingUp = false;
+    hub.add("hub-setup");
+    now = new Date(now.getTime() + 5_000);
+    await service.round();
+    expect(bindings.get(b.id)!.lastError).toBeNull();
+    expect(bindings.get(b.id)!.lastContactAt).not.toBeNull();
+    expect(runs("hub-setup")).toHaveLength(1);
+    expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 30_000, nextPassAt: new Date(now.getTime() + 30_000).toISOString() });
+  });
+
+  it("a minute after connect, the same answer backs off as before, and still says setup is finishing", async () => {
+    const b = bind();
+    hub.settingUp = true;
+    const now = after(b, 60_000);
+    const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+    await service.round();
+    expect(bindings.get(b.id)!.lastError).toBe(SETTING_UP);
+    expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 60_000, nextPassAt: new Date(now.getTime() + 60_000).toISOString() });
+  });
+
+  it("a binding that has had contact keeps the hub's own words and its backoff for the same answer", async () => {
+    const b = bind();
+    await pass(b.id);
+    hub.settingUp = true;
+    const now = after(b, 1_000);
+    const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+    await service.round();
+    expect(bindings.get(b.id)!.lastError).toMatch(/^The hub couldn't be reached: .*grant_authority_unavailable/);
+    expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 60_000 });
+    expect(service.snapshot().bindings[0]!.lastPass!.settingUp).toBeUndefined();
   });
 
   it("a local item whose record is gone reads unknown on the hub and is never run again", async () => {
