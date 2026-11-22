@@ -2070,6 +2070,76 @@ describe("queue routes", () => {
     expect(await blank.json()).toMatchObject({ error: "tag_invalid" });
   });
 
+  it("GET /api/queue/list says in headers when it cut the page, and keeps the bare array, the order and the default limit (#3572)", async () => {
+    const ids: string[] = [];
+    for (const [i, day] of ["01", "02", "03"].entries()) {
+      const { qitemId } = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: `row ${i}`, nudge: false });
+      db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(`2026-01-${day}T00:00:00.000Z`, qitemId);
+      ids.unshift(qitemId);
+    }
+    const read = async (query: string) => {
+      const res = await app.request(`/api/queue/list?destinationSession=b@r&activeOnly=1&compact=1${query}`);
+      const body = (await res.json()) as unknown;
+      return {
+        status: res.status,
+        ids: Array.isArray(body) ? body.map((row) => (row as { qitemId: string }).qitemId) : body,
+        limit: res.headers.get("X-OpenRig-Limit"),
+        truncated: res.headers.get("X-OpenRig-Truncated"),
+      };
+    };
+
+    // More rows match than the limit: the newest come back as before, and the headers say the page was cut.
+    expect(await read("&limit=2")).toEqual({ status: 200, ids: ids.slice(0, 2), limit: "2", truncated: "1" });
+    // Exactly the limit matches: a full page alone doesn't claim more rows.
+    expect(await read("&limit=3")).toEqual({ status: 200, ids, limit: "3", truncated: "0" });
+    // The default limit is still 100, and it's the one reported.
+    expect(await read("")).toEqual({ status: 200, ids, limit: "100", truncated: "0" });
+    // A zero limit still returns no rows, and now says whether any matched.
+    expect(await read("&limit=0")).toEqual({ status: 200, ids: [], limit: "0", truncated: "1" });
+    // A negative limit doesn't bound the read in SQLite, so nothing is cut and nothing is claimed.
+    expect(await read("&limit=-1")).toEqual({ status: 200, ids, limit: null, truncated: null });
+
+    // Without a limit the read still goes one row past the default: 101 matches come back as 100, marked cut.
+    for (let i = 0; i < 98; i++) {
+      await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: `more ${i}`, nudge: false });
+    }
+    const page = await read("");
+    expect({ rows: (page.ids as string[]).length, limit: page.limit, truncated: page.truncated }).toEqual({ rows: 100, limit: "100", truncated: "1" });
+    expect((page.ids as string[]).includes(ids[2]!)).toBe(false);
+  });
+
+  it("GET /api/queue/list?attention=1 marks its cut the same way (#3572)", async () => {
+    const ids: string[] = [];
+    for (const [i, day] of ["01", "02"].entries()) {
+      const { qitemId } = await queueRepo.create({ sourceSession: "a@r", destinationSession: "human-founder@external", body: `ask ${i}`, nudge: false });
+      db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(`2026-01-${day}T00:00:00.000Z`, qitemId);
+      ids.unshift(qitemId);
+    }
+    const read = async (limit: number) => {
+      const res = await app.request(`/api/queue/list?attention=1&limit=${limit}`);
+      return {
+        ids: ((await res.json()) as Array<{ qitemId: string }>).map((row) => row.qitemId),
+        limit: res.headers.get("X-OpenRig-Limit"),
+        truncated: res.headers.get("X-OpenRig-Truncated"),
+      };
+    };
+    expect(await read(1)).toEqual({ ids: ids.slice(0, 1), limit: "1", truncated: "1" });
+    expect(await read(2)).toEqual({ ids, limit: "2", truncated: "0" });
+
+    // A row the route's own attention check drops isn't counted as more rows. When it leaves the full read at the limit
+    // or fewer, accepted rows may still lie past the read, so the page carries no marker rather than claim either way.
+    const [newest, older] = queueRepo.listAttention({ limit: 2 });
+    const dropped = { ...older!, qitemId: "qitem-not-stored", destinationSession: "human-@kernel" };
+    const spy = vi.spyOn(queueRepo, "listAttention")
+      .mockReturnValueOnce([newest!, dropped])
+      .mockReturnValueOnce([newest!, dropped]);
+    expect(await read(1)).toEqual({ ids: [newest!.qitemId], limit: null, truncated: null });
+    expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 2 }));
+    // A read that came back short holds every match, so a row the check drops from it leaves an honest 0.
+    expect(await read(2)).toEqual({ ids: [newest!.qitemId], limit: "2", truncated: "0" });
+    spy.mockRestore();
+  });
+
   it("issue2728 keeps repeated tags composed with the attention list path", async () => {
     const matching = await queueRepo.create({
       sourceSession: "a@r", destinationSession: "human-founder@external", body: "older human ask",
@@ -2931,6 +3001,51 @@ describe("queue routes", () => {
       // An unreadable catalog selects nothing, and says why instead of going quiet.
       fs.writeFileSync(catalog, "projects: alpha\n");
       expect(await workProject("bob@r")).toEqual({ error: `${catalog} projects must each declare string id and root values` });
+    });
+
+    it("lists the selected project's missions under its declared missions root, beside workspace.root's", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-project-missions-")));
+      const catalog = path.join(temporaryWorkspace, "workspace.yaml");
+      const configured = path.join(temporaryWorkspace, "missions");
+      const alpha = path.join(temporaryWorkspace, "alpha");
+      fs.mkdirSync(path.join(configured, "local"), { recursive: true });
+      fs.writeFileSync(path.join(configured, "local", "SPEC.md"), "---\nintent: a workspace mission\n---\n");
+      // The project declares its own missions root; a folder with no SPEC.md isn't a mission.
+      for (const mission of ["m2", "m1"]) {
+        fs.mkdirSync(path.join(alpha, "work-items", mission), { recursive: true });
+        fs.writeFileSync(path.join(alpha, "work-items", mission, "SPEC.md"), `---\nintent: ${mission}\n---\n`);
+      }
+      fs.mkdirSync(path.join(alpha, "work-items", "notes"), { recursive: true });
+      fs.writeFileSync(path.join(alpha, "project.yaml"), "id: alpha\nmissions:\n  root: work-items\n");
+      // A healthy catalog project has its own source file (SPEC.md or README.md); without one its missions root reads as unavailable.
+      fs.writeFileSync(path.join(alpha, "SPEC.md"), "---\nid: alpha\n---\n# Alpha\n");
+      app = buildApp({
+        eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog
+          : key === "workspace.slices_root" ? configured : temporaryWorkspace }) },
+      });
+      const candidatesFor = async () => ((await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as {
+        workProject?: unknown;
+        workCandidates: { missionsRoot: string | null; missionsOnHost: string[]; projectMissions?: unknown };
+      });
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n");
+      const selected = await candidatesFor();
+      expect(selected.workProject).toEqual({ id: "alpha", root: alpha, selectedBy: "single" });
+      // The configured listing is unchanged; the selected project's own missions ride beside it for the refocus trace.
+      expect(selected.workCandidates.missionsRoot).toBe(configured);
+      expect(selected.workCandidates.missionsOnHost).toEqual(["local"]);
+      expect(selected.workCandidates.projectMissions).toEqual({
+        project: "alpha", missionsRoot: path.join(alpha, "work-items"), names: ["m1", "m2"], truncated: false,
+      });
+
+      // No single project selected: nothing is added, and the configured listing stands alone.
+      fs.mkdirSync(path.join(temporaryWorkspace, "beta"));
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      const unselected = await candidatesFor();
+      expect(unselected.workProject).toEqual({ error: expect.stringContaining("multiple projects are declared") });
+      expect(unselected.workCandidates.missionsOnHost).toEqual(["local"]);
+      expect(unselected.workCandidates).not.toHaveProperty("projectMissions");
     });
 
     it("selects the seat's project from its recorded working folder (#3320)", async () => {

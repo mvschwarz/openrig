@@ -146,6 +146,34 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
   const create = (sourceSession: string, destinationSession: string, body: string) =>
     repo.create({ sourceSession, destinationSession, body, nudge: false } as never);
 
+  it.each(["cus_VVMAexample01", "acct_0123456789ABCDEF"])("accepts the issuing service's principal %s without changing its identity", async (principal) => {
+    thisHostsDaemon();
+    seat("team-a", "lead");
+    const caller = principal.startsWith("cus_") ? CALLER : "issuer-helper@team-a";
+    if (caller !== CALLER) seat("team-a", "issuer-helper");
+    const key = `${"8977f2dc0000aaaa1111bbbb"}.${principal}.${"ab".repeat(24)}`;
+    answer = () => [200, active({ principal: { id: principal }, seat: caller })];
+    const ask = await connect((await listen()).url, key);
+    const result = await ask("rig_queue_create", { destination: "lead@team-a", body: "Read this caller's task" });
+    expect(result.isError).toBe(false);
+    const row = db.prepare("SELECT source_session AS source FROM queue_items WHERE qitem_id = ?")
+      .get(result.structured.qitemId) as { source: string };
+    expect(row.source).toBe(caller);
+    const transition = db.prepare("SELECT identity_principal AS principal FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id LIMIT 1")
+      .get(result.structured.qitemId) as { principal: string };
+    expect(JSON.parse(transition.principal)).toMatchObject({ source: "grant-service", id: principal });
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every(request => request.headers.authorization === `Bearer ${key}`)).toBe(true);
+    expect(asked.every(request => JSON.parse(request.body).instance === INSTANCE)).toBe(true);
+  });
+
+  it("keeps malformed key fields outside the grant-service request", async () => {
+    const served = await listen();
+    const malformed = [KEY + "x", KEY.replace("cus_VVMAexample01", "acct_short"), KEY.replace("8977f2dc0000aaaa1111bbbb", "not-a-connection")];
+    for (const key of malformed) expect((await post(served.url, { Authorization: `Bearer ${key}` })).status).toBe(401);
+    expect(asked).toHaveLength(0);
+  });
+
   it("routes an address-free first task to the operator's receiver with caller attribution, retry identity and revision lineage", async () => {
     seat("team-a", "lead"); // pod.lead exists without any delegates_to edge.
     const { url } = await listen(undefined, "pod-lead@team-a");
@@ -175,6 +203,16 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run(path.join(shared, "first-result.md"), args.qitemId);
     expect((await ask("rig_artifact_read", { qitemId: args.qitemId })).text).toContain("Team's returned file");
     expect((await ask("rig_artifact_read", { root: "proof", path: "first-result.md" })).structured.code).toBe("out_of_scope");
+  });
+
+  it("describes rig_team as the network for an authenticated grant-service caller", async () => {
+    answer = () => [200, active({ objects: { team: ["list"] } })];
+    const { url } = await listen();
+    const ask = await connect(url);
+    const tool = (await ask.catalog()).tools.find(tool => tool.name === "rig_team");
+    expect(tool?.title).toBe("Show my network");
+    expect(tool?.annotations?.title).toBe("Show my network");
+    expect(tool?.description).toContain("on your network");
   });
 
   it("also serves an address-free first task to a client pinned to protocol 2026-07-28", async () => {

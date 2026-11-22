@@ -8,7 +8,7 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
-import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
+import { WRAPPED_CLAUDE_LOOKUP_REFUSAL, type SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -106,6 +106,23 @@ function claudeSideloadRefusalReason(line: string): string {
   return `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on `
     + "disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load "
     + "this seat's skills and plugins, so this seat can't start while that setting applies.";
+}
+
+/** #3746: the wrapped classic launch's refusal when `claude` in the pane's shell is a function or alias, from the last lines
+ *  of a pane back at its shell. Read from a joined capture where needed, so a wrapped line stays whole. */
+const WRAPPED_LOOKUP_REFUSALS = [WRAPPED_CLAUDE_LOOKUP_REFUSAL("function"), WRAPPED_CLAUDE_LOOKUP_REFUSAL("alias")];
+const mayShowWrappedLookupRefusal = (paneContent: string): boolean => paneContent.replace(/\n/g, "").includes("a launch_wrapper needs claude");
+function claudeWrappedLookupLine(paneContent: string): string | null {
+  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse()
+    .find((line) => WRAPPED_LOOKUP_REFUSALS.includes(line)) ?? null;
+}
+
+function claudeWrappedLookupReason(line: string): string {
+  const kind = line.includes("shell alias") ? "alias" : "function";
+  return `the pane shows OpenRig's launch refusal (${line}) A launch_wrapper starts Claude's executable file, and OpenRig doesn't `
+    + `look past a shell ${kind} named claude, which may set this seat's account, endpoint or hooks. Make claude an executable file `
+    + `on PATH (for example a script that applies the same settings and then execs Claude), or remove the ${kind} from the shell `
+    + "OpenRig's panes start, then relaunch this seat.";
 }
 
 /**
@@ -584,6 +601,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const notFound = probe.code === "returned_to_shell"
       ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
     if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell" };
+    // So does the wrapped launch's refusal of a claude function or alias (#3746).
+    const lookup = probe.code === "returned_to_shell" && mayShowWrappedLookupRefusal(paneContent)
+      ? claudeWrappedLookupLine((await this.tmux.capturePaneContent(binding.tmuxSession, 40, { joinWrappedLines: true })) ?? paneContent)
+      : null;
+    if (lookup) return { ready: false, reason: claudeWrappedLookupReason(lookup), code: "returned_to_shell" };
     // Claude's sideload refusal says why too, read from a joined capture so a wrapped refusal line stays whole. It stays
     // a wait for the same reason.
     const refusal = probe.code === "returned_to_shell" && mayShowSideloadRefusal(paneContent)
@@ -930,12 +952,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     if (await this.paneReturnedToShell(binding, finalCommand)) {
       const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
-      const refusal = notFound || !mayShowSideloadRefusal(finalContent) ? null
+      const lookup = notFound || !mayShowWrappedLookupRefusal(finalContent) ? null
+        : claudeWrappedLookupLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
+      const refusal = notFound || lookup || !mayShowSideloadRefusal(finalContent) ? null
         : claudeSideloadRefusalLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
       return {
         ok: false,
         probe: probeEvidence,
-        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound)
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : lookup ? claudeWrappedLookupReason(lookup)
           : refusal ? claudeSideloadRefusalReason(refusal) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };

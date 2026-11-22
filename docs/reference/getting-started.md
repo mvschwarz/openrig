@@ -362,6 +362,9 @@ reboot. It does not detect a reboot as such. It uses the same restore as
 until the seats are ready. A kernel stopped with `rig down kernel`, including
 one whose seats were already detached, stays down on later starts; start it again
 with `rig up kernel --existing`. A seat you stopped or unclaimed also stays down.
+Other rigs aren't restored at daemon start; only their seats that declare
+`keep_alive` and are gone come back, one seat at a time, once the daemon runs
+([Keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive)).
 While the kernel's other seats are running, `rig up kernel --existing` refuses
 (it restores only a kernel with no live session), so start one stopped seat with
 `rig launch kernel <logical id>` (`--plan` first). It restores that seat from the
@@ -376,10 +379,12 @@ waiting for a decision, not as started.
 with no continuity source: use it only when you want a fresh occupant, since the
 seat's earlier conversation isn't carried.
 When the tmux server is gone, an explicit `rig down` of any rig can start an
-empty server and probe again. It records the stop and clears eligible bindings
+empty server and probe again. It records the stop request on each selected seat
+before it stops anything, and confirms the stop and clears eligible bindings
 only after confirming the sessions are absent. This can leave an empty tmux
 server running; it never launches an agent or provider session. Unreadable or
-permission results and changed occupants leave the stop bookkeeping unchanged.
+permission results and changed occupants leave the stop unconfirmed; the
+request recorded on the session `rig down` selected stays.
 
 While that automatic restore runs, `rig start` continues to your other rigs and
 says the kernel is still restoring (`kernelRestore.state: "restoring"` with
@@ -929,6 +934,12 @@ after its own session ends. Check each result before calling the shutdown done.
 
 `rig daemon stop` stops only the background service and preserves agent tmux
 sessions. If you also want that service stopped, run it after stopping the rigs.
+A daemon stop isn't a stop of the seats: it changes no seat's desired state, so a
+seat that declares `keep_alive` and is gone when the daemon starts again is
+relaunched. To keep a seat or rig down, stop it with `rig seat stop` or
+`rig down`; each records the stop before it stops anything, so the seat stays
+down even if the daemon dies midway
+([Keep a seat running](rig-spec.md#keep-a-seat-running-keep_alive)).
 If the operator is handling this full shutdown and kernel is included, it gives you this
 last step before running `rig down kernel`: once kernel is down, run
 `rig daemon stop` in your own shell and check the result. The operator's session
@@ -952,7 +963,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | Shared terminal is absent | Check the kernel's `operator.human` terminal separately from its agents; recover only that seat as described below. Standalone `rig tui` remains available while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
-| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when that start finds all of its seats lost; a kernel that was already down before the reboot stays down, and `rig start` names `rig up kernel --existing`. Check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when that start finds all of its seats lost; a kernel that was already down before the reboot stays down, and `rig start` names `rig up kernel --existing`. Check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. Seats that declare `keep_alive` and weren't stopped on purpose come back by themselves once the daemon runs; one whose attempts ran out reads `attention_required`. |
 | OpenRig's home moved (a new `HOME`, account or machine), and restoring an existing rig reports that no rig was found | A shell that exports `OPENRIG_HOME` (legacy `RIGGED_HOME`) or `OPENRIG_DB` still points `rig` and any daemon it starts at the old home, and a daemon started there makes an empty home at that path. Run `rig daemon stop` from that shell first. Then point `OPENRIG_HOME` at the new home folder and `OPENRIG_DB` at the database file in it, or unset them (an unset `OPENRIG_HOME` follows `HOME`), and start the daemon again. A seat whose saved folder isn't on this machine starts in another folder, which the restore names when it can read the seat's terminal; to choose the folder, run `rig up <rig> --existing --cwd <dir>`. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
@@ -1091,6 +1102,50 @@ to return (tmux defaults to Ctrl-b, then d). Decide native trust/auth prompts
 there. If a fresh start paused before context delivery, **c** finishes that
 delivery to the same occupant (from a shell, `rig seat continue <seat>` does the
 same). **r** reads actual state again; **d** expands details.
+
+## Run the daemon under a supervisor
+
+A supervisor such as launchd or systemd keeps the daemon running. These are the
+facts it needs.
+
+- **Start it through the CLI** (`rig daemon start`), not by running the daemon
+  entry directly: the start reservation, the port checks and the readiness check
+  of the child run only in the CLI's start. `rig daemon start` returns once the
+  daemon is ready and leaves it running detached, so watch the daemon's PID or
+  `rig status --json`, not the exit of that command.
+- **Give the start time.** `rig daemon start` waits up to
+  `daemon.start_readiness_wait_seconds` (default 180) for its child. Allow the
+  supervisor's own timeout for that command at least that wait plus 19 seconds.
+  When the wait runs out and the child is still alive, the start ends pending: the
+  child keeps running and the reservation is kept. Don't start again; check the
+  state first.
+- **Check liveness with `rig status --json`.** Its exit code doesn't say whether the
+  daemon is up (it is 1 only when the rig summary can't be read), so read its
+  `daemon` object. `state: "running"` is up, also with `healthy: false`, which means
+  busy. `reachable: null` isn't proof that it is down. `stopped` and `stale` mean
+  no daemon answers for `daemon.json`, but a start that is still pending can read
+  `stale` too, since it doesn't write `daemon.json` until it's ready: a new
+  `rig daemon start` then refuses with `Daemon startup is already reserved`, which
+  is that start, not a failure to retry. Don't use a short `/healthz` timeout of
+  your own as a death check: a busy daemon can take longer to answer.
+- **Restart after the process has exited.** After `rig daemon stop` or a SIGTERM,
+  wait until the PID is gone and the port refuses connections, not for a fixed
+  delay. The shutdown budget is 10 seconds, and `rig daemon stop` waits 12.
+- **Don't relaunch on a held port.** A start that finds the port in use stops with
+  the `EADDRINUSE` guidance before it spawns a child. A daemon whose listener can't
+  bind writes one `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>` line and
+  exits with status 69, and `rig daemon start` puts that line in its error. Either
+  way `rig daemon start` exits non-zero with the port named: have the wrapper stop
+  relaunching on that error and find what holds the port first, rather than retrying
+  in a loop. `rig daemon start` exits 1 on every failure, so its exit code doesn't
+  tell failures apart; only the daemon's own bind failure has a status of its own,
+  69, and only a supervisor that runs the daemon process itself sees it (for
+  example, `RestartPreventExitStatus=69` in a systemd unit).
+- **Don't let the supervisor clear `daemon-start.lock`.** A reservation from an
+  earlier boot is archived by the next start, and so is one whose recorded launcher
+  and child are both gone in the same pid namespace, unless `rig daemon stop`
+  retained it. Any other reservation stays; a person reads the start error, which
+  says what to inspect and when the reservation can be archived.
 
 ## Kernel framing (what `rig setup` does and does not do)
 
@@ -1425,6 +1480,23 @@ inspect or unset inherited overrides when changing homes.
 Separate instances should use separate databases; the check is a startup observation,
 not a lock against later concurrent starts. Changing the setting applies on the next
 daemon start.
+
+## Daemon start wait
+
+`rig daemon start` waits up to 180 seconds for the child it started to answer on its
+listeners. `rig config set daemon.start_readiness_wait_seconds <seconds>` (an integer from
+1 up to 2147464, the longest a Node timer can hold for the TUI's call) or
+`OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS` sets that wait for later starts:
+`rig daemon start`, `rig start`, the auto-start of `rig up` and `rig context add`, and the
+TUI's start, which allows its own call that wait plus the probe, cleanup and a margin
+(when it can't read the setting, it allows the longest accepted wait).
+A running daemon isn't affected.
+When the wait runs out and the child is still alive, the start ends pending as before:
+the child is left running and the start reservation is kept, so inspect before retrying.
+A wait shorter than the host needs only makes the start end pending sooner; it doesn't
+stop the child.
+Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow
+start faster.
 
 ## Custom settings and precedence
 
