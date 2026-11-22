@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { migrationsForFullTestDb } from "./helpers/test-app.js";
-import { providerAssignmentAppliedLabelSchema } from "../src/db/migrations/181_provider_assignment_applied_label.js";
+import { providerAssignmentAppliedLabelSchema } from "../src/db/migrations/182_provider_assignment_applied_label.js";
 import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
 
-// #3625: a results table from migration 180 gains the applied label and account, and a result that already carries an
+// #3625: a results table from migration 181 gains the applied label and account, and a result that already carries an
 // applied reference takes the label of the switch that gave it, and the account's reference where its own shows it.
-describe("migration 181: the applied label and account", () => {
+describe("migration 182: the applied label and account", () => {
   it("backfills an applied switch's label and account, and leaves a result that applied nothing without them", () => {
     const db = createDb();
     migrate(db, migrationsForFullTestDb.filter((m) => m !== providerAssignmentAppliedLabelSchema));

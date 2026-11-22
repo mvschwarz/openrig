@@ -6,7 +6,7 @@ import type { Migration } from "../migrate.js";
  * it. A reference only, never credential bytes. A label is unique per provider.
  */
 export const providerAccountRefsSchema: Migration = {
-  name: "179_provider_account_refs.sql",
+  name: "180_provider_account_refs.sql",
   sql: `
     CREATE TABLE provider_account_refs (
       provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),

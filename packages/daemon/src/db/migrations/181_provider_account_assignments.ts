@@ -7,7 +7,7 @@ import type { Migration } from "../migrate.js";
  * reference only, never credential bytes. Both go with their rig, and a result with its seat.
  */
 export const providerAccountAssignmentsSchema: Migration = {
-  name: "180_provider_account_assignments.sql",
+  name: "181_provider_account_assignments.sql",
   sql: `
     CREATE TABLE provider_account_assignments (
       rig_id TEXT NOT NULL REFERENCES rigs(id) ON DELETE CASCADE,

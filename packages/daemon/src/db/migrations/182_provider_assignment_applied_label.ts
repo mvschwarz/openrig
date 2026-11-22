@@ -9,7 +9,7 @@ import type { Migration } from "../migrate.js";
  * Codex login switched in place); a seat moved to a prepared home has none and is moved again by the next apply.
  */
 export const providerAssignmentAppliedLabelSchema: Migration = {
-  name: "181_provider_assignment_applied_label.sql",
+  name: "182_provider_assignment_applied_label.sql",
   sql: `
     ALTER TABLE provider_assignment_results ADD COLUMN applied_label TEXT;
     ALTER TABLE provider_assignment_results ADD COLUMN applied_account TEXT;
