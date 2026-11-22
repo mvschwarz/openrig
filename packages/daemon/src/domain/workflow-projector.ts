@@ -599,7 +599,21 @@ export class WorkflowProjector {
           resolvedNextOwner = input.actorSession;
           continuation = true;
         } else {
-          const owner = resolveDefaultOwner(spec, nextStep, (s) => this.nodeRuntimeOf(s), roleCtx);
+          let owner: string | null;
+          try {
+            owner = resolveDefaultOwner(spec, nextStep, (s) => this.nodeRuntimeOf(s), roleCtx);
+          } catch (err) {
+            // The bound-rig resolver names its own repairs and is shared with gates, where --next-owner does not
+            // apply; on this path an explicit owner is one more way out, so name it here.
+            if (err instanceof WorkflowProjectorError && err.code === "next_owner_unresolved") {
+              throw new WorkflowProjectorError(
+                err.code,
+                `${err.message} Or supply nextOwnerSession explicitly (rig workflow project --next-owner <session>).`,
+                err.details,
+              );
+            }
+            throw err;
+          }
           if (!owner) {
             throw new WorkflowProjectorError(
               "next_owner_unresolved",
