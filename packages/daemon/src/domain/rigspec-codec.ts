@@ -184,6 +184,7 @@ export class RigSpecCodec {
         if (m.pluginChannels?.length) member["plugin_channels"] = m.pluginChannels;
         if (m.env) member["env"] = { ...m.env };
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
+        if (m.keepAlive !== undefined) member["keep_alive"] = m.keepAlive;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
         // OPR.0.5.6.20 field, OPR.0.5.6.23 fix: parse carries it (schema
         // normalize), so serialize must too — same silent-erasure class.

@@ -5,6 +5,7 @@ import os from "node:os";
 import nodePath from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
+import { WRAPPED_CLAUDE_LOOKUP_REFUSAL } from "../src/domain/seat-launch-environment.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -579,6 +580,43 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  // #3746: a wrapped classic launch refuses a claude that is a shell function or alias, since a launch_wrapper needs claude's
+  // executable file and the function may carry the person's settings. The ready check names that refusal and its remedy.
+  const lookupReason = (line: string, kind: string) => `the pane shows OpenRig's launch refusal (${line}) A launch_wrapper starts Claude's executable file, and OpenRig doesn't look past a shell ${kind} named claude, which may set this seat's account, endpoint or hooks. Make claude an executable file on PATH (for example a script that applies the same settings and then execs Claude), or remove the ${kind} from the shell OpenRig's panes start, then relaunch this seat.`;
+
+  it.each(["function", "alias"] as const)("checkReady names the wrapped launch's refusal of a claude %s and its remedy (#3746)", async (kind) => {
+    const line = WRAPPED_CLAUDE_LOOKUP_REFUSAL(kind);
+    expect(await idleShellAfter(line)).toEqual({ ready: false, reason: lookupReason(line, kind), code: "returned_to_shell" });
+  });
+
+  it("checkReady keeps a wrapped launch refusal whole by reading the joined capture (#3746)", async () => {
+    const line = WRAPPED_CLAUDE_LOOKUP_REFUSAL("function");
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, _n?: number, opts?: { joinWrappedLines?: boolean }) =>
+      `${opts?.joinWrappedLines ? line : `${line.slice(0, 70)}\n${line.slice(70)}`}\n% `);
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh", pgid: 900, tpgid: 900, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: false, reason: lookupReason(line, "function"), code: "returned_to_shell" });
+  });
+
+  it.each([
+    ["the generic wrapper refusal", "OpenRig: launch_wrapper unavailable; no agent started."],
+    ["a line that only quotes the refusal", `# why: ${WRAPPED_CLAUDE_LOOKUP_REFUSAL("function")}`],
+  ])("checkReady keeps the plain returned-to-shell reason for %s (#3746)", async (_label, line) => {
+    expect(await idleShellAfter(line)).toEqual({
+      ready: false,
+      reason: "The probe pane returned to a shell instead of staying inside the runtime.",
+      code: "returned_to_shell",
+    });
+  });
+
   it("checkReady stays ready when a working Claude conversation quotes the sideload refusal (#3245)", async () => {
     const tmux = mockTmux();
     (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -1123,6 +1161,18 @@ describe("Claude Code runtime adapter", () => {
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
 
     expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${sideloadReason(sideloadRefusalCore)}`, recovery: "retry_fresh" });
+  });
+
+  it("launchHarness names the wrapped launch's refusal of a claude function when a resume's pane is back at its shell (#3746)", async () => {
+    const line = WRAPPED_CLAUDE_LOOKUP_REFUSAL("function");
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`${line}\n% `);
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: ["dev-impl", "test-rig"].join("@"), resumeToken: "abc-123" });
+
+    expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${lookupReason(line, "function")}`, recovery: "retry_fresh" });
   });
 
   describe("a resume still starting is watched, not failed (pane command is sh for every OpenRig launch)", () => {

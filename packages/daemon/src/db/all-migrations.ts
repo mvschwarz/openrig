@@ -1,8 +1,10 @@
+import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
+import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
 import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
-import { rigSeatSliceSchema } from "./migrations/180_rig_seat_slice.js";
+import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -366,5 +368,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   workflowBoundPodSchema,
   seatPoolSchema,
   remoteControlObservationsSchema,
+  sessionStopAttemptSchema,
+  nodeKeepAliveSchema,
   rigSeatSliceSchema,
 ];

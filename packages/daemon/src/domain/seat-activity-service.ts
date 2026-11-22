@@ -196,6 +196,8 @@ export class SeatActivityService {
     if (lastActivityEpochSeconds === null) {
       const seatNodeId = this.sessionToSeat.get(paneId);
       const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+      // The self-report is read, and retired, on every sweep, including one whose pane activity couldn't be read.
+      if (seat) this.consultSelfReport(paneId, seatNodeId!, seat);
       if (seat) this.arbitrate(seat);
       return null;
     }
@@ -271,12 +273,23 @@ export class SeatActivityService {
           this.arbitrate(seat);
         }
       }
-      if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
-        const evd = this.selfReportReader(paneId, seatNodeId);
-        if (evd) this.reportEvidence(evd); // null = unreadable ⇒ the rung simply stales
-      }
+      if (seat) this.consultSelfReport(paneId, seatNodeId, seat);
     }
     return record;
+  }
+
+  /** The self-report rung, for a seat whose inventory staffs it. Unread on two sweeps running (no file for this seat,
+   *  unknown status), its last report retires, so the rungs below decide. One unread sweep, such as a file read
+   *  mid-write, keeps it. */
+  private consultSelfReport(paneId: string, seatNodeId: string, seat: SeatLadderState): void {
+    if (!this.selfReportReader || !seat.inventory?.rungs.some((r) => r.rung === "self-report")) return;
+    const evd = this.selfReportReader(paneId, seatNodeId);
+    seat.selfReportUnread = evd ? 0 : (seat.selfReportUnread ?? 0) + 1;
+    // A report read from another file (the verified PID's own file after a name match, say) replaces the earlier file's:
+    // its timestamps don't continue that file's, so an older one must still be admitted. One file's own order still holds.
+    if (evd && seat.sources.get(CLAUDE_SELF_REPORT_SOURCE)?.latest.sourceFile !== evd.sourceFile) seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE);
+    if (evd) this.reportEvidence(evd);
+    else if (seat.selfReportUnread >= 2 && seat.sources.delete(CLAUDE_SELF_REPORT_SOURCE)) this.arbitrate(seat);
   }
 
   private async pollPermissionPrompt(sessionName: string, canCapture = true): Promise<void> {
@@ -1198,6 +1211,8 @@ interface NeedsInputShape {
 }
 
 const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
+/** The Claude self-report rung's one source (`pid.json`, read by the sweep). */
+const CLAUDE_SELF_REPORT_SOURCE = "claude:pid-json";
 
 /** What a qualified Codex structural frame says about a prompt: a choice or permission prompt on screen (1), or a
  *  complete empty composer (0), observed at the capture's start. Null for anything else. */
@@ -1241,6 +1256,8 @@ interface SeatLadderState {
   occupant?: { paneId: string | null; pid: number | null };
   /** What keeps the copied Codex prompt evidence valid where it's read: its frame's freshness, capture start and pane. */
   structuralPrompt?: { freshMs: number; startedMs: number; pane: { id: string; pid: number } };
+  /** Sweeps in a row whose self-report read returned nothing. */
+  selfReportUnread?: number;
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;
