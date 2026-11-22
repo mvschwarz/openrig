@@ -223,15 +223,12 @@ function claimAndArchive(file: string, inspected: fs.Stats, text: string, target
 
 /** #3637 — what `markReservationRetained` did. `written`: the reservation's new text. `changed`: it is gone, is another
  *  file than the one read, or holds other text than `expected`; nothing was written, and the stop must refuse.
- *  `refuse`: nothing was written and the stop must refuse for another reason (why): the reservation couldn't be read
- *  to confirm it is the one read, or no claim could be taken and none is there to keep a start from archiving it.
- *  `unwritten`: it is still the reservation the stop read, but the mark couldn't be written (why); when this call took
+ *  `unwritten`: the mark couldn't be written (why): an I/O failure, not a change to the reservation; when this call took
  *  the removers' claim on it, it still holds it, so no remover moves the reservation until `release` is called, and
  *  `retry` writes a later record under that same claim (the claim stays held until `release`). */
 export type ReservationMark =
   | { written: string }
   | { changed: string }
-  | { refuse: string }
   | { unwritten: string; release?: () => void; retry?: (reason: string) => ReservationMark };
 
 /** #3637 — `rig daemon stop` keeps a reservation after a shutdown it couldn't verify (the child didn't exit, the
@@ -240,14 +237,14 @@ export type ReservationMark =
  *  file still holds exactly `expected`, so a later start doesn't take that unknown state for an abandoned launch.
  *  It holds the removers' claim on the inode (`claimAndArchive`) across that check and the write, so no remover moves
  *  the reservation between them. A write that fails (an I/O error) or a claim already present (left by an interrupted
- *  operation, or another removal in progress) is `unwritten`, never `changed`, as long as the reservation was read
- *  again and is still the one read: a mark that can't be written doesn't, by itself, make it a different one. */
+ *  operation, or another removal in progress), and an inspection or a read that fails, are `unwritten`, never
+ *  `changed`: an I/O failure is not a change to the reservation. */
 export function markReservationRetained(file: string, expected: string, reason: string): ReservationMark {
   let inspected: fs.Stats;
   try {
     inspected = fs.statSync(file);
   } catch (error) {
-    return code(error) === "ENOENT" ? { changed: "it is gone" } : { refuse: `it couldn't be inspected to confirm it (${describe(error)})` };
+    return code(error) === "ENOENT" ? { changed: "it is gone" } : { unwritten: `it couldn't be inspected (${describe(error)})` };
   }
   const claim = `${file}.claim-${inspected.ino}`;
   try {
@@ -261,13 +258,14 @@ export function markReservationRetained(file: string, expected: string, reason: 
       if (now.dev !== inspected.dev || now.ino !== inspected.ino) return { changed: "it was replaced" };
       text = fs.readFileSync(file, "utf8");
     } catch (reread) {
-      return code(reread) === "ENOENT" ? { changed: "it is gone" } : { refuse: `it couldn't be read again to confirm it (${describe(reread)})` };
+      return code(reread) === "ENOENT" ? { changed: "it is gone" } : { unwritten: `it couldn't be read again (${describe(reread)})` };
     }
     if (text !== expected) return { changed: "its content changed" };
-    // A claim already there keeps every remover out while it exists; with none there, nothing would keep a start
-    // from archiving the reservation while the stop verifies the shutdown.
-    if (code(error) !== "EEXIST") return { refuse: `the "stopping" mark was not written and no claim could be taken on it (${describe(error)}), so nothing keeps a start from archiving it while stop verifies` };
-    return { unwritten: `the claim file ${claim} is present (left by an interrupted operation, or another removal in progress)` };
+    return {
+      unwritten: code(error) === "EEXIST"
+        ? `the claim file ${claim} is present (left by an interrupted operation, or another removal in progress)`
+        : `the claim on it couldn't be taken (${describe(error)})`,
+    };
   }
   let held = true;
   const release = (): void => {
@@ -284,8 +282,7 @@ export function markReservationRetained(file: string, expected: string, reason: 
       if (claimed.dev !== inspected.dev || claimed.ino !== inspected.ino) { release(); return { changed: "it was replaced" }; }
       text = fs.readFileSync(claim, "utf8");
     } catch (error) {
-      release();
-      return { refuse: `it couldn't be read under the claim to confirm it (${describe(error)})` };
+      return unwritten(`it couldn't be read under the claim (${describe(error)})`);
     }
     if (text !== expected) { release(); return { changed: "its content changed" }; }
     const record = JSON.stringify({ retainedBy: "stop", reason: why, at: new Date().toISOString() }) + "\n";

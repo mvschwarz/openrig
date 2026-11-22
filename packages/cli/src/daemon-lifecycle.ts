@@ -1176,7 +1176,6 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   if (deps.retainStartReservation) {
     const mark = deps.retainStartReservation(file, current, "stopping");
     if ("changed" in mark) return refuse(`the reservation changed while stop was checking it: ${mark.changed}`);
-    if ("refuse" in mark) return refuse(mark.refuse);
     if ("written" in mark) current = mark.written;
     else {
       // A claim that is not this stop's may be a removal in progress, which only follows a dead child: check it again.
@@ -1205,7 +1204,6 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
       const mark = holding?.retry ? holding.retry(reason) : deps.retainStartReservation(file, current, reason);
       verified();
       if ("changed" in mark) return `start reservation changed while stop was verifying: ${mark.changed} (inspect ${file})`;
-      if ("refuse" in mark) return `start reservation kept, but its retention record was not written: ${mark.refuse} (inspect ${file})`;
       if ("unwritten" in mark) {
         mark.release?.();
         const unmarked = current === r.raw ? "; a later start may take it for abandoned" : "";

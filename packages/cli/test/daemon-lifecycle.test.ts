@@ -2714,6 +2714,23 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
       expect(warned()).toContainEqual(expect.stringMatching(/was not released/));
     });
 
+    it("a claim that can't be taken (a link error other than EEXIST) is an I/O failure: the stop goes on and says what failed", async () => {
+      const deps = reservedDeps();
+      const link = fs.linkSync;
+      const failing = vi.spyOn(fs, "linkSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+        if (String(to).includes(".claim-")) throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+        return link(from, to);
+      }) as typeof fs.linkSync);
+      try {
+        expect(await stop(deps)).toBe("stopped");
+      } finally {
+        failing.mockRestore();
+      }
+      expect(deps.kill).toHaveBeenCalledTimes(1);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+      expect(warned()).toContainEqual(expect.stringMatching(/the "stopping" mark was not written: the claim on it couldn't be taken \(EPERM\); stop checked the child again and goes on/));
+    });
+
     it("a claim held by a removal in progress, which only follows a dead child, refuses on the second look: no signal", async () => {
       const liveness: Record<number, "alive" | "dead" | "unknown"> = {};
       const deps = reservedDeps({ liveness });
