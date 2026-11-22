@@ -5018,21 +5018,18 @@ export class QueueRepository {
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
-  /** Bounded recorded relations for an opened request/result. No inference from seats, summaries or timestamps.
-   *  A row keeps its blocker only while blocked (update()'s clear-on-exit, since 0.5.1-53), so the blocked-on arm reads
-   *  the blocked rows and each arm uses an index: no read scans every row, and a graph read makes up to 100 of them.
-   *  A row from before that clearing that left blocked still naming a blocker isn't a blocked-on relation. */
+  /** Bounded recorded relations for an opened request/result. No inference from seats, summaries or timestamps. */
   relatedTo(qitemId: string, limit = 101): Array<{ item: QueueItem; relation: "reply-to" | "handed-off-from" | "blocked-on" }> {
-    const rows = runSyncSite("queue.related_to", () => this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on, state FROM queue_items
-      WHERE reply_to = ? OR handed_off_from = ? OR (state = 'blocked' AND blocked_on = ?) ORDER BY rowid LIMIT ?`)
-      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null; state: string }>);
+    const rows = runSyncSite("queue.related_to", () => this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
+      WHERE reply_to = ? OR handed_off_from = ? OR blocked_on = ? ORDER BY rowid LIMIT ?`)
+      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>);
     return rows.flatMap(row => {
       const item = this.getById(row.qitem_id);
       if (!item) return [];
       const relations: Array<"reply-to" | "handed-off-from" | "blocked-on"> = [];
       if (row.reply_to === qitemId) relations.push("reply-to");
       if (row.handed_off_from === qitemId) relations.push("handed-off-from");
-      if (row.state === "blocked" && row.blocked_on === qitemId) relations.push("blocked-on");
+      if (row.blocked_on === qitemId) relations.push("blocked-on");
       return relations.map(relation => ({ item, relation }));
     });
   }
