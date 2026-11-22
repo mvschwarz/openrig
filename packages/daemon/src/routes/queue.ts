@@ -33,6 +33,7 @@ import {
   deriveCurrentWorkChoice,
   deriveRole,
   deriveWorkCandidates,
+  listProjectMissions,
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
@@ -1584,9 +1585,15 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
+      // The selected project's own missions, by its catalog entry's missions root, which may sit outside workspace.root:
+      // the trace lists these when it orients from that project. An unhealthy entry adds none and keeps today's listing.
+      const selectedMissionsRoot = workProject && "root" in workProject ? projectMissionsRoots.get(workProject.id)?.root : null;
+      const projectMissions = workProject && "root" in workProject && selectedMissionsRoot
+        ? listProjectMissions(workProject.id, selectedMissionsRoot) : null;
       return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}),
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
-        workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
+        workCandidates: { ...workCandidates, ...(projectMissions ? { projectMissions } : {}),
+          heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
     return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
