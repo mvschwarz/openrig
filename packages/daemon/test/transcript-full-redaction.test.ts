@@ -39,6 +39,8 @@ describe("transcript redaction keeps identifiers", () => {
     const started = performance.now();
     redactTranscriptContent("-----BEGIN " + "PRIVATE KEY-----" + ("-----BEGIN " + "PRIVATE KEY-----a").repeat(20_000));
     redactTranscriptContent("aws_secret_access_key" + " ".repeat(200_000) + "x");
+    redactTranscriptContent("-----BEGIN " + "PRIVATE KEY-----" + "\t".repeat(200_000) + "!");
+    redactTranscriptContent("-----BEGIN " + "PRIVATE KEY-----\nProc-Type:" + "\t".repeat(200_000) + "!");
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 

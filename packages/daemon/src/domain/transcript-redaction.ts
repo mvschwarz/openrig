@@ -31,10 +31,11 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   // JSON Web Tokens, starting only where a run of token characters starts. Starting after any "-" inside a run
   // would rescan the rest of the run from each one, which is quadratic on a long run with no dot.
   /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
-  // Private keys: the BEGIN line, an encrypted key's Proc-Type and DEK-Info lines, the base64 body and the END line
-  // when it's there (a body cut off before its END line still goes). Escaped line breaks count as body, so a key
-  // inside a JSON string goes too. The body class has no "-", so a match can't run on into another key or the END line.
-  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?:\s|\\[rn])*(?:Proc-Type|DEK-Info):[^\n\\]*)*[A-Za-z0-9+/=\s\\]*(?:-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
+  // Private keys: the BEGIN line, the body and the END line when it's there (a body cut off before its END line still
+  // goes). The body is runs of base64, or an encrypted key's Proc-Type and DEK-Info lines, each after whitespace or an
+  // escaped line break, so a key inside a JSON string goes too. No run can match the characters that end it, which
+  // keeps the scan linear, and a base64 run can't match "-", so a match stops at the END line or another key.
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:[A-Za-z0-9+/=]|\\\/)*(?:(?:\s|\\[rn])+(?:(?:Proc-Type|DEK-Info):[ \t]*[^\s\\]+|(?:[A-Za-z0-9+/=]|\\\/)+))*(?:(?:\s|\\[rn])*-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
   /(\bhttps?:\/\/)[^\s/?#@:]*:[^\s/?#@]+(?=@)/g, // a password in a URL, with or without a user
 ];
 
