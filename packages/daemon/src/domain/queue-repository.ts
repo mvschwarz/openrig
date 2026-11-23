@@ -1789,6 +1789,14 @@ export class QueueRepository {
     });
   }
 
+  get hasWakeIntentStore(): boolean {
+    return this.outbox !== undefined;
+  }
+
+  deliverWakeIntentsAfterCommit(ids: readonly string[]): void {
+    for (const id of ids) this.deliverWakeIntentAfterCommit(id);
+  }
+
   private deliverWakeIntentAfterCommit(outboxId: string): void {
     queueMicrotask(() => {
       void this.deliverWakeIntent(outboxId).catch((err) => {

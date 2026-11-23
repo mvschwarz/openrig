@@ -57,7 +57,7 @@ function parseRow(value: unknown) {
   const text = (entry: QueueTransferJson | undefined) => typeof entry === "string" ? entry : null;
   const chain = value.chainOfRecord == null ? [] : parseJson(text(value.chainOfRecord) ?? "");
   if (!names(chain)) throw invalid();
-  return { qitemId: value.qitemId, state: value.state, erased: value.contentErasedAt != null,
+  return { wire: value, transitions, wakes, actions, qitemId: value.qitemId, state: value.state, erased: value.contentErasedAt != null,
     sourceSession: value.sourceSession, destinationSession: value.destinationSession, returnRoute: text(value.returnRoute),
     closureTarget: text(value.closureTarget), evidenceRef: text(value.evidenceRef), blockedOn: text(value.blockedOn),
     references: [text(value.replyTo), text(value.handedOffFrom), text(value.handedOffTo), ...chain],
@@ -97,15 +97,23 @@ export function parseQueueTransfer(text: string, maxBytes = QUEUE_TRANSFER_MAX_B
   }
   const rows = archive.rows.map(parseRow);
   const erasedIds: string[] = [];
+  const erasedIdRows: QueueTransferObject[] = [];
+  const erasedRigRows: QueueTransferObject[] = [];
   if (archive.erasedIds !== undefined) {
     if (!Array.isArray(archive.erasedIds)) throw invalid();
     for (const entry of archive.erasedIds) {
       if (!projection(entry, QUEUE_TRANSFER_COLUMNS.queue_erased_ids) || !name(entry.qitemId)) throw invalid();
       erasedIds.push(entry.qitemId);
+      erasedIdRows.push(entry);
     }
   }
-  if (archive.erasedRigs !== undefined && (!Array.isArray(archive.erasedRigs) ||
-      archive.erasedRigs.some(entry => !projection(entry, QUEUE_TRANSFER_COLUMNS.queue_erased_rigs)))) throw invalid();
+  if (archive.erasedRigs !== undefined) {
+    if (!Array.isArray(archive.erasedRigs)) throw invalid();
+    for (const entry of archive.erasedRigs) {
+      if (!projection(entry, QUEUE_TRANSFER_COLUMNS.queue_erased_rigs)) throw invalid();
+      erasedRigRows.push(entry);
+    }
+  }
   const selected = new Set([...rows.map(row => row.qitemId), ...erasedIds]);
   if (selected.size !== rows.length + erasedIds.length) throw invalid();
   if (scope.qitemIds.length !== selected.size || new Set(scope.qitemIds).size !== selected.size ||
@@ -114,7 +122,7 @@ export function parseQueueTransfer(text: string, maxBytes = QUEUE_TRANSFER_MAX_B
   }
   const { kind, rigs, missions, slices, qitemIds, includeClosed, selectionShownAt } = scope;
   return { transferId: archive.transferId, origin: { hostId: origin.hostId, mintedAt: origin.mintedAt }, digest: digest.value,
-    selection: { kind, rigs, missions, slices, qitemIds, includeClosed, selectionShownAt }, rows, erasedIds };
+    selection: { kind, rigs, missions, slices, qitemIds, includeClosed, selectionShownAt }, rows, erasedIds, erasedIdRows, erasedRigRows };
 }
 
 export type ParsedQueueTransfer = ReturnType<typeof parseQueueTransfer>;
