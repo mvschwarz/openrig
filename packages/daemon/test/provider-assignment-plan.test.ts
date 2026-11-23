@@ -244,6 +244,50 @@ describe("the daemon's assignment plan", () => {
     expect(report.otherRigPeers).toEqual([{ seat: "b1@fleet", rig: "fleet", home: codexHome, command: "rig seat restart b1@fleet --keep-conversation" }]);
   });
 
+  it("two rigs with the same name and member on one Codex home: that session name's seat isn't read, switched, moved or restarted", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    // Rig A has a1, a2 and a3; rig B, also named fleet, has an a2 too: two seats are a2@fleet.
+    for (const [rigId, node, session] of [["rig-a", "a1", "a1@fleet"], ["rig-a", "a2", "a2@fleet"], ["rig-a", "a3", "a3@fleet"], ["rig-b", "x2", "a2@fleet"]] as const) {
+      db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, 'fleet')").run(rigId);
+      db.prepare("INSERT OR IGNORE INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, 'codex', '/w', ?)").run(node, rigId, `dev.${session.split("@")[0]}`, `pod-${rigId}`);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, 'running', 'ready')").run(`sess-${node}`, node, session);
+    }
+    const seatActivity = vi.fn((_s: string) => ({ state: "running" }) as never);
+    const svc = new ProviderServiceImpl({ db, listRigs: () => (db.prepare("SELECT id FROM rigs ORDER BY id").all() as Array<{ id: string }>),
+      env: { HOME: dir, CODEX_HOME: codexHome }, platform: "linux", seatActivity,
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const restartPlan = vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never);
+    const planned = await svc.assignmentPlan({ rig: "rig-a", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" }, { plan: restartPlan, run: vi.fn() });
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.rows.map((r) => [r.seat, r.effect, r.activity, r.precheck?.reasons])).toEqual([
+      ["a1@fleet", "change", "running", []], ["a2@fleet", "change", "unknown", ["seat_name_shared"]], ["a3@fleet", "change", "running", []]]);
+    // Nothing read that seat by its name: not its activity, not the restart's plan.
+    expect(seatActivity.mock.calls.map(([s]) => s)).not.toContain("a2@fleet");
+    expect(restartPlan.mock.calls.map(([s]) => s)).toEqual(["a1@fleet", "a3@fleet"]);
+
+    // The apply: a1 switches the home, a3 restarts on it, and a2@fleet is neither switched nor restarted. Its home changed
+    // under it, so it's unknown, with its restart command.
+    const switchSeat = vi.fn(async () => ({ outcome: "succeeded" as const, message: "switched" }));
+    const restartPeer = vi.fn(async () => ({ ok: true as const, outcome: "restarted_account_unverified", message: "restarted" }));
+    const report = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat, restartPeer, activityOf: () => "idle", save: () => {}, now: () => "t" });
+    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["a1@fleet", "switched"], ["a2@fleet", "unknown"], ["a3@fleet", "switched"]]);
+    expect([switchSeat.mock.calls.map(([s]) => s), restartPeer.mock.calls.map(([s]) => s)]).toEqual([["a1@fleet"], ["a3@fleet"]]);
+
+    // With --account-home, the successor's dry run isn't asked about it either, and its move is never attempted.
+    const prepared = path.join(dir, "prepared");
+    fs.mkdirSync(prepared);
+    const dryRun = vi.fn(async (_seat: string, _home: string) => ({ safe: true }) as const);
+    const moving = await svc.assignmentPlan({ rig: "rig-a", provider: "codex", label: "team", includeOverrides: false, accountHome: prepared, daemon: "host-a" }, undefined, undefined, dryRun);
+    if (!moving.ok) throw new Error(moving.message);
+    expect(dryRun.mock.calls.map(([s]) => s)).toEqual(["a1@fleet", "a3@fleet"]);
+    const successor = vi.fn(async () => ({ ok: true as const, changed: true }));
+    const moved = await applyAssignment(moving.plan, refs.get("codex", "team")!, { switchSeat, restartPeer, successor, activityOf: () => "idle", save: () => {}, now: () => "t" });
+    expect(moved.results.map((r) => [r.seat, r.kind])).toEqual([["a1@fleet", "pending_successor"], ["a2@fleet", "failed_before_effect"], ["a3@fleet", "pending_successor"]]);
+    expect(successor.mock.calls.map(([s]) => s)).toEqual(["a1@fleet", "a3@fleet"]);
+  });
+
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);

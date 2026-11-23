@@ -288,8 +288,7 @@ export class ProviderServiceImpl implements ProviderService {
     | { ok: false; code: "unknown_rig"; message: string } | { ok: false; code: "rig_ambiguous"; message: string; candidates: string[] } {
     const byId = this.deps.db.prepare("SELECT id, name FROM rigs WHERE id = ?").get(handle) as { id: string; name: string } | undefined;
     if (byId) return { ok: true, ...byId };
-    const hasArchive = (this.deps.db.prepare("PRAGMA table_info(rigs)").all() as Array<{ name: string }>).some((c) => c.name === "archived_at");
-    const named = this.deps.db.prepare(`SELECT id, name FROM rigs WHERE name = ?${hasArchive ? " AND archived_at IS NULL" : ""} ORDER BY created_at`)
+    const named = this.deps.db.prepare("SELECT id, name FROM rigs WHERE name = ? AND archived_at IS NULL ORDER BY created_at")
       .all(handle) as Array<{ id: string; name: string }>;
     if (named.length === 1) return { ok: true, ...named[0]! };
     if (named.length > 1) {
@@ -477,20 +476,32 @@ export class ProviderServiceImpl implements ProviderService {
     const nodeOf = new Map<string, { nodeId: string; runtime: string }>();
     for (const { nodeId, rigId: seatRig, seat } of entries) if (seatRig === rigId) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
     const facts = this.assignmentFacts(entries, configured, (nodeId) => results.get(nodeId));
-    const seats = entries.map(({ seat }, index): PlanSeatFacts => ({
-      ...facts[index]!,
-      running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
-      activity: this.activityOf(seat.seatSession),
-    }));
+    // Two rigs with the same name and member give two seats one session name. Every tool that reads or changes a seat finds
+    // it by that name (its running state and activity, the Claude switch, the Codex restart, the successor and its dry run,
+    // a peer's restart), which could be the other rig's seat. Such a seat's state isn't read, and its check refuses it, so
+    // the apply never reaches any of them for it.
+    const others = (session: string) => entries.filter((e) => e.seat.seatSession === session && e.rigId !== rigId).map((e) => e.rigId);
+    const seats = entries.map(({ seat }, index): PlanSeatFacts => {
+      const unreadable = entries.filter((e) => e.seat.seatSession === seat.seatSession).length > 1;
+      return { ...facts[index]!,
+        running: seat.runtime === "claude-code" && !unreadable ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
+        activity: unreadable ? "unknown" : this.activityOf(seat.seatSession) };
+    });
+    const sharedName = (session: string): PlanCheck | null => {
+      const ids = others(session);
+      return ids.length === 0 ? null : { safe: false, reasons: ["seat_name_shared"],
+        message: `${session} is also a seat in rig ${ids.join(", ")}, and a switch or restart reaches a seat by that name, so it could change that one. `
+          + "Nothing changes for this seat here; rename one of the rigs to move it." };
+    };
     const plan = await planAssignment({ daemon: input.daemon, rig: rig.name, rigId, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
       resolveHome: resolvedHome,
       intent: assignments.intent(rigId, input.provider) },
-    // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
-    (seat) => input.accountHome && account.provider === "codex"
+    async (seat) => sharedName(seat.session) ?? (input.accountHome && account.provider === "codex"
+      // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
       ? successorCheck ? successorCheck(seat.session, input.accountHome)
         : Promise.resolve({ safe: false, reasons: ["successor_not_checked"], message: "The account-home dry run isn't available here, so the move wasn't checked." })
-      : this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat));
+      : this.precheck(precheckFor(seat.session, account), seatRestart, claudeSeat)));
     return { ok: true, plan, account, rigId, nodeOf };
   }
 

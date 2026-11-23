@@ -39,7 +39,8 @@ function token(name: string): string {
   return p;
 }
 
-/** Claude's relaunch for stopped seats: the token reference is read and written for real; nothing is relaunched. */
+/** Claude's relaunch for stopped seats: the token reference is read and written for real; nothing is relaunched. A seat
+ *  is found by its session name as the route finds it (routes/provider.ts claudeSeatOf): the newest session row. */
 function stoppedClaude(gate: Promise<void> = Promise.resolve()): ClaudeSeatRelaunch & { relaunchInPane: ReturnType<typeof vi.fn>; entered: () => boolean } {
   const repo = new RigRepository(db);
   let entered = false;
@@ -47,7 +48,7 @@ function stoppedClaude(gate: Promise<void> = Promise.resolve()): ClaudeSeatRelau
     entered: () => entered,
     seat: (s) => {
       const row = db.prepare(`SELECT n.id, n.rig_id, r.name, n.logical_id FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
-        WHERE s.session_name = ? AND n.runtime = 'claude-code'`).get(s) as { id: string; rig_id: string; name: string; logical_id: string } | undefined;
+        WHERE s.session_name = ? AND n.runtime = 'claude-code' ORDER BY s.id DESC LIMIT 1`).get(s) as { id: string; rig_id: string; name: string; logical_id: string } | undefined;
       return row ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: row.logical_id, running: false, pane: null } : null;
     },
     tokenRef: (nodeId) => readClaudeSeatTokenRef(db, nodeId),
@@ -175,6 +176,32 @@ describe("applying an assignment on the daemon", () => {
     const assignments = new ProviderAccountAssignmentsRepository(db);
     expect([assignments.intent("rig-a", "claude"), assignments.results("rig-a", "claude")]).toEqual([null, []]);
     expect([assignments.intent("rig-b", "claude")?.label, assignments.results("rig-b", "claude").map((r) => r.seat)]).toEqual(["max-2", ["b@fleet"]]);
+  });
+
+  it("two rigs with the same name and member: the seat whose session name the other rig's seat shares is refused before any effect", async () => {
+    // Rig A (older) has members a and b; rig B, also named fleet, has a member a too: two seats are a@fleet. A switch reaches
+    // a seat by its session name, the newest session row, which is rig B's.
+    const add = (rigId: string, node: string, member: string) => {
+      db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, 'fleet')").run(rigId);
+      db.prepare("INSERT OR IGNORE INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, 'claude-code', '/w', ?)").run(node, rigId, `dev.${member}`, `pod-${rigId}`);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, 'stopped', 'ready')").run(`sess-${node}`, node, `${member}@fleet`);
+    };
+    add("rig-a", "a1", "a"); add("rig-a", "b1", "b"); add("rig-b", "a2", "a");
+    const claude = stoppedClaude();
+    const planned = await svc.assignmentPlan({ rig: "rig-a", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.rows.map((r) => [r.seat, r.effect, r.precheck?.safe, r.precheck?.reasons])).toEqual([
+      ["a@fleet", "change", false, ["seat_name_shared"]], ["b@fleet", "change", true, []]]);
+    expect(planned.plan.rows[0]!.precheck!.message).toContain("a@fleet is also a seat in rig rig-b");
+    const applied = await svc.applyAssignment(request("max-2", planned.plan.digest, { rig: "rig-a" }), { claudeSeat: claude });
+    expect(applied.ok && applied.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "failed_before_effect"], ["b@fleet", "switched"]]);
+    // Neither a@fleet changed, and each result is stored for the node it's about.
+    expect([readClaudeSeatTokenRef(db, "a1"), readClaudeSeatTokenRef(db, "a2")]).toEqual([null, null]);
+    expect(readClaudeSeatTokenRef(db, "b1")).toMatchObject({ label: "max-2" });
+    expect(new ProviderAccountAssignmentsRepository(db).results("rig-a", "claude").map((r) => [r.nodeId, r.kind]).sort())
+      .toEqual([["a1", "failed_before_effect"], ["b1", "switched"]]);
+    expect(new ProviderAccountAssignmentsRepository(db).results("rig-b", "claude")).toEqual([]);
   });
 
   it("a seat brought in with --include-overrides that's already on the account follows the assignment from then on", async () => {
