@@ -472,6 +472,42 @@ describe("seat-pool add: names, folders and what an add reports (#3395 Piece 1)"
     expect(w.converge).toHaveBeenCalledTimes(1);
   });
 
+  it("An add whose issue fails with an unexpected error leaves no slot row, keeps its number free, and the next cycle adds slot 1.", async () => {
+    const w = addWorld();
+    const m = await w.model();
+    const issue = vi.spyOn(w.slots, "issueAttempt").mockImplementationOnce(() => { throw new Error("disk I/O error"); });
+
+    await expect(w.executor.cycle({ jobId: m.jobId, context: { model_node_id: m.nodeId } })).rejects.toThrow("disk I/O error");
+    await w.executor.idle();
+    expect(issue).toHaveBeenCalledTimes(1);
+    expect(w.slots.forModel(m.nodeId)).toEqual([]);
+    expect(w.slots.nextSlot(m.nodeId)).toEqual({ slotNumber: 1, logicalId: "dev.impl-s1" });
+    expect(w.converge).not.toHaveBeenCalled();
+    expect(w.correlations()).toEqual([]);
+
+    const next = await w.notesOf(m.jobId);
+    expect(next.add).toMatchObject({ issued: [{ slotNumber: 1, logicalId: "dev.impl-s1" }] });
+    await w.executor.idle();
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase])).toEqual([[1, "live"]]);
+  });
+
+  it("An add that settles while the next cycle waits for custody is reported `running` in both `slots` and `settled` of that cycle, never `in_flight` beside `running`.", async () => {
+    const w = addWorld();
+    const m = await w.model();
+    const gate = deferred();
+    w.hooks.beforeAdd = () => gate.promise;
+    const first = await w.notesOf(m.jobId);
+    const attemptId = (first.add as { issued: Array<{ attempt: { id: string } }> }).issued[0]!.attempt.id;
+
+    // the next cycle reads its slots, then the add settles while it waits for the lease
+    const custody = w.deps.custody;
+    w.deps.custody = async (ids, fn) => { gate.resolve(); await w.executor.idle(); return custody(ids, fn); };
+    const during = await w.notesOf(m.jobId);
+    const agent = w.nodeOf(m.rigId, "dev.impl-s1")!;
+    expect(during.settled).toEqual([{ slotNumber: 1, logicalId: "dev.impl-s1", nodeId: agent.id, attempt: { id: attemptId, status: "running" } }]);
+    expect(during.slots).toEqual([{ slotNumber: 1, nodeId: agent.id, phase: "live", attempt: { id: attemptId, status: "running" } }]);
+  });
+
   it("With `count` above one, each add has its own reservation, issue and operation id, one after another.", async () => {
     const w = addWorld();
     const m = await w.model({ pool: { max: 3, min: 2 } });
@@ -483,5 +519,50 @@ describe("seat-pool add: names, folders and what an add reports (#3395 Piece 1)"
     expect(w.converge.mock.calls.map((c) => c[1].member["id"])).toEqual(["impl-s1", "impl-s2"]);
     expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase, s.attemptState])).toEqual([[1, "live", "settled"], [2, "live", "settled"]]);
     expect(w.correlations().map((c) => c.operation_id).sort()).toEqual(issued.map((i) => i.attempt.id).sort());
+  });
+});
+
+describe("seat-pool add: the model's member startup (#3395 Piece 1)", () => {
+  const STARTUP = { files: [{ path: "guidance/member.md", delivery_hint: "send_text", required: true }], actions: [] };
+
+  it("A model whose member startup file comes from a root other than the rig's stored root gives a new pool agent that startup, resolved from the model's own launch root, and the rig export still leaves it out.", async () => {
+    const w = addWorld();
+    fs.mkdirSync(path.join(w.root, "guidance"));
+    fs.writeFileSync(path.join(w.root, "guidance", "member.md"), "member guidance");
+    const m = await w.model({ member: { startup: STARTUP } });
+    const elsewhere = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "seat-pool-other-root-")));
+    cleanups.push(() => fs.rmSync(elsewhere, { recursive: true, force: true }));
+    w.rigRepo.setRigStartupLayers(m.rigId, { ...w.rigRepo.getRigStartupLayers(m.rigId)!, root: elsewhere });
+    expect(w.exporter.memberStartupNotCarried(m.rigId)).toContainEqual({ logicalId: "dev.impl", reason: "different source root" });
+
+    const notes = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect(notes.add).toMatchObject({ issued: [{ slotNumber: 1 }] });
+    const [, op, rigRoot] = w.converge.mock.calls[0]!;
+    expect(rigRoot).toBe(w.root);
+    expect((op.member["startup"] as { files: Array<{ path: string }> }).files.map((f) => f.path)).toEqual(["guidance/member.md"]);
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase])).toEqual([[1, "live"]]);
+    // the rig export is unchanged: it still leaves the member's startup out
+    const exported = w.exporter.exportRig(m.rigId) as { pods: Array<{ members: Array<{ id: string; startup?: unknown }> }> };
+    expect(exported.pods[0]!.members.find((member) => member.id === "impl")!.startup).toBeUndefined();
+  });
+
+  it("A model whose member startup files can't be resolved from its own launch root makes the pool add no agent and record why.", async () => {
+    const w = addWorld();
+    fs.mkdirSync(path.join(w.root, "guidance"));
+    fs.writeFileSync(path.join(w.root, "guidance", "member.md"), "member guidance");
+    const m = await w.model({ member: { startup: STARTUP } });
+    // no launch recipe: the add would resolve the files from no root of the model's
+    const layers = w.rigRepo.getRigStartupLayers(m.rigId)!;
+    const recipe = w.rigRepo.getNodeLaunchRecipe(m.nodeId)!;
+    w.rigRepo.setRigStartupLayers(m.rigId, { ...layers, materializedSources: [{ root: recipe.rigRoot, spec: recipe.rigSpec, nodeIds: [m.nodeId] }] });
+    w.db.prepare("UPDATE nodes SET launch_recipe_json = NULL WHERE id = ?").run(m.nodeId);
+
+    const notes = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect((notes.add as { refused: string }).refused).toMatch(/^add refused: the model member can't be exported \(.*startup/);
+    expect(w.converge).not.toHaveBeenCalled();
+    expect(w.slots.forModel(m.nodeId)).toEqual([]);
+    expect(w.correlations()).toEqual([]);
   });
 });

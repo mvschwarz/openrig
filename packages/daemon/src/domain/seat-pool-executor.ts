@@ -495,7 +495,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       const { model, modelNodeId, rigId } = found;
       const slots = deps.slots.forModel(modelNodeId);
       let block = blockView(deps.rigRepo.getNodePool(modelNodeId));
-      const base = () => ({ modelNodeId, ...block, slots: slotsView(slots) });
+      // The report reads the slot rows when it is built, not the snapshot the plan used: an add that settles while the cycle
+      // waits for custody is then reported the same way in `slots` and in `settled`.
+      const base = () => ({ modelNodeId, ...block, slots: slotsView(deps.slots.forModel(modelNodeId)) });
       if (!active()) return report({ ...base(), held: JOB_STOPPED });
       if (block.block === "none") return report(base());
       if (block.block === "unusable") return report({ ...base(), held: BLOCK_UNREADABLE, advisory: unreadableAdvisory(block.error) });
@@ -610,19 +612,18 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
 
             // The issue: the job's state and the holds again, then the issued attempt, what it was issued on and the
             // operation id, in one transaction.
-            const recheck = readSeatPoolHold(deps.db, rigId);
-            if (!active() || recheck.stoppedSeq !== null) {
-              deps.slots.removeAddWithoutNode(slot.slotId, attemptId);
-              if (!active()) held = JOB_STOPPED;
-              else { hold = recheck; held = { cause: "rig stopped", seq: recheck.stoppedSeq!, message: `held: rig stopped (event ${recheck.stoppedSeq})` }; }
-              break;
-            }
             const targets = [rigId, pod];
             const body = JSON.stringify({ member, rigRoot });
-            const eventSeq = (deps.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = ?").get(rigId) as { seq: number | null }).seq;
-            const basis = JSON.stringify({ eventSeq, targets, body });
             let operation: IssuedAdd["operation"];
+            let stopped: SeatPoolHoldRead | undefined;
             try {
+              const recheck = readSeatPoolHold(deps.db, rigId);
+              if (!active() || recheck.stoppedSeq !== null) {
+                stopped = recheck;
+                throw new AddNotIssued("held");
+              }
+              const eventSeq = (deps.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = ?").get(rigId) as { seq: number | null }).seq;
+              const basis = JSON.stringify({ eventSeq, targets, body });
               operation = deps.db.transaction(() => {
                 if (!deps.slots.issueAttempt(slot.slotId, attemptId, basis)) throw new AddNotIssued("slot_changed");
                 const reserved = reserveOperation(deps.db, attemptId, "member.add", targets, body);
@@ -630,8 +631,15 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
                 return reserved;
               })();
             } catch (error) {
+              // Whatever stops the issue after the reservation, the reserved row goes, so its number is free again. A
+              // failed removal does not hide the error that stopped the issue.
+              try { deps.slots.removeAddWithoutNode(slot.slotId, attemptId); } catch { /* the issue's own error is the one raised */ }
               if (!(error instanceof AddNotIssued)) throw error;
-              deps.slots.removeAddWithoutNode(slot.slotId, attemptId);
+              if (stopped !== undefined) {
+                if (!active()) held = JOB_STOPPED;
+                else { hold = stopped; held = { cause: "rig stopped", seq: stopped.stoppedSeq!, message: `held: rig stopped (event ${stopped.stoppedSeq})` }; }
+                break;
+              }
               notIssued.push({ slotNumber: slot.slotNumber, logicalId, code: error.code });
               continue;
             }

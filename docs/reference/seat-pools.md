@@ -58,18 +58,22 @@ It then moves waiting rows to free agents and adds agents, in that order.
   block as it is then.
 - **Rows left with a drained agent.** A pending row addressed to a `drained` pool agent, under any of its names, is
   moved to a free pool agent the same way, whatever its tags.
-- **Adding agents.** When rows have waited `dispatch_after_s` and no agent is free to take them (or fewer agents run
-  than `min`), the job adds one agent per row, up to `max`, named `<member>-s<n>`. It adds it the same way as
-  `rig add`, and the agent is launched right away:
+- **Adding agents.** The job keeps the pool at a target: the larger of `min` and the demand, capped at `max` (0 under
+  `drain`). The demand is the busy agents plus the rows that have waited `dispatch_after_s` and found no free agent,
+  and it is never below the busy agents plus the agents still starting. Agents that run and agents still starting
+  (phase `adding`) both count toward the target, so an add already reserved or issued is not repeated. The job adds
+  the difference, limited to the room left under `max` (every slot except a `drained` one takes room). Each agent is
+  named `<member>-s<n>`, added the same way as `rig add`, and launched right away:
   - it takes the model member's launch settings as the rig export writes them, without `pool`, `id`, `label`, `cwd`
     and `session_source`, and its launch additions are copied from the model; it starts without the model's
-    conversation;
+    conversation. Its member `startup` files resolve from the model's launch root, also when the rig export leaves
+    them out because that root is not the rig's stored root;
   - it is never kept alive, whatever the model or its agent spec says about `keep_alive`;
   - it works in the model's folder or, with `cwd_template`, in the template's folder with `{rig}` (the rig's name)
     and `{slot}` (the agent's member id, such as `impl-s1`) filled in; the daemon only creates that folder;
   - no agent is added, and the notes say why (`add refused: …`), while the model's stored `process_limits` or
     `claude_auto_mode` can't be read, or while the model has an `accountHome` or an `api-key` token reference, which
-    a pool agent does not carry;
+    a pool agent does not carry, or while the model's member `startup` files can't be resolved from its launch root;
   - `n` is one more than the highest slot number on record, skipping a logical id the rig already has. An add that
     ends with no node removes its slot row, which frees its number;
   - the add is reserved and issued under the model's custody lease, with an operation id, and runs after the lease is
