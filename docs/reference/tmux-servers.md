@@ -11,8 +11,17 @@ new instance, or before a deliberate restart of an existing daemon:
 rig config set terminal.tmux_server isolated
 ```
 
-The setting is read once at daemon startup. Changing it does not move a running
-seat. Inspect the effective choice with:
+Isolation separates the seats from your own tmux server, so a server-wide command
+on yours, such as `tmux kill-server`, doesn't end them. It doesn't protect the
+seats' server from the agents running on it: each seat's pane carries tmux's `TMUX`
+value for that server, so a tmux command an agent runs there without `-L` or `-S`,
+`tmux kill-server` included, acts on the seats' own server and can end every seat
+on it.
+
+The setting is read once at daemon startup, and a restart keeps the previous server
+while registered sessions remain on it (see
+[Existing teams and deferred migration](#existing-teams-and-deferred-migration)).
+Changing it does not move a running seat. Inspect the effective choice with:
 
 ```sh
 rig terminal status --json
@@ -208,6 +217,20 @@ run: a daemon restarted during a loss records it again. In between:
   when it has not answered, `rig doctor` fails the `terminal_server` check, and
   healthz carries the state in `terminals` while `status` stays `ok`, because the
   daemon itself is up.
+
+To bring the seats back after the server has died, including when it left its
+socket file behind (as after `tmux kill-server`), run `rig up <rig> --existing`
+for each rig that ran on it. The restore finds the seats' sessions gone, starts the
+tmux server again, and resumes each seat's conversation where its provider history
+allows; a seat without usable history waits for an explicit fresh-start choice, as
+in the restoration rules above. The command talks to the daemon, not to tmux, so
+run it from any terminal that wasn't on the lost server.
+
+`rig seat launch <seat> --fresh --reason "<why>"` can also reopen a dead server
+whose socket file remains, one seat at a time. That is a deliberate blank
+replacement, not a resume: the seat starts a new conversation and none of its
+earlier ones is resumed. `--reason` is required. Use it when you want that seat to
+start over, not to get its conversation back.
 
 ## Two instances on one machine
 
