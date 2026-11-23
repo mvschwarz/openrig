@@ -317,8 +317,8 @@ commands; if the two ever differ, this step is right.
     rendered in the seat's pane) or `claimed` (picked up); `delivered-ack-pending` (sent, render unconfirmed: not
     proof it was woken); `retained` (the seat's typing guard held the wake, the task is still there to read, and it
     isn't retried automatically: wake the task's destination once its input is free with
-    `rig send <destination> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
-    owed: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
+    `rig send <destination> "task <id> is yours"`); `failed` (the wake wasn't delivered, and the task still needs
+    doing: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
     listing your address's tasks (above), before anything else, including when the person talks to you and when they

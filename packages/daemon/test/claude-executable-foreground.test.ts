@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
-import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, WRAPPED_CLAUDE_LOOKUP_REFUSAL } from "../src/domain/seat-launch-environment.js";
 import { shellQuote as quote } from "../src/adapters/shell-quote.js";
 
 const run = promisify(execFile);
@@ -150,7 +150,7 @@ describe.skipIf(process.platform === "win32" || !hasTmux || !available("bash", [
   "classic Claude launch_wrapper through a native pane",
   () => {
     /** Create an isolated tmux pane with argv-recording Claude and wrapper fixtures. */
-    async function pane(wrapperName: string | null) {
+    async function pane(wrapperName: string | null, opts: { rc?: (userBin: string) => string; shell?: "bash" | "zsh" } = {}) {
       const temp = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "claude-wrap-")));
       const socket = path.join(temp, "tmux.sock"); const session = "claude-fixture";
       const bin = path.join(temp, "bin"); const userBin = path.join(temp, "user-bin"); const cwd = path.join(temp, "work");
@@ -163,13 +163,15 @@ describe.skipIf(process.platform === "win32" || !hasTmux || !available("bash", [
       fs.writeFileSync(path.join(temp, "rig"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
       const rc = path.join(temp, "pane.rc");
       const readyMarker = path.join(temp, "rc-ready");
-      fs.writeFileSync(rc, `export PATH=${quote(userBin + ":" + bin + ":/usr/bin:/bin")}\n: > ${quote(readyMarker)}\n`);
+      fs.writeFileSync(rc, `export PATH=${quote(userBin + ":" + bin + ":/usr/bin:/bin")}\n${opts.rc?.(userBin) ?? ""}\n: > ${quote(readyMarker)}\n`);
+      // zsh would save its history into this folder as the server ends, racing the cleanup below.
+      if (opts.shell === "zsh") fs.writeFileSync(path.join(temp, ".zshrc"), `HISTFILE=/dev/null\nSAVEHIST=0\n${fs.readFileSync(rc, "utf8")}`);
       const sessionEnv = { PATH: `${bin}:/usr/bin:/bin`, OPENRIG_HOME: path.join(temp, "instance"), OPENRIG_URL: "", OPENRIG_NODE_ID: "fixture-node",
         OPENRIG_SESSION_NAME: session, OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1" };
       const tm = async (args: string[]) => (await run("tmux", ["-S", socket, "-f", "/dev/null", ...args], { timeout: 8000 })).stdout;
       await tm(["new-session", "-d", "-s", session, "-x", "200", "-y", "50",
-        ...Object.entries(sessionEnv).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
-        `/bin/bash --noprofile --rcfile ${quote(rc)} -i`]);
+        ...Object.entries({ ...sessionEnv, ...(opts.shell === "zsh" ? { ZDOTDIR: temp } : {}) }).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+        opts.shell === "zsh" ? "zsh -i" : `/bin/bash --noprofile --rcfile ${quote(rc)} -i`]);
       const tmux = new TmuxAdapter(async command => {
         if (!command.startsWith("tmux ")) throw Error("Unexpected fixture command");
         return (await run("/bin/sh", ["-c", command.replace(/^tmux /, "tmux -S " + quote(socket) + " -f /dev/null ")], { timeout: 8000 })).stdout;
@@ -199,6 +201,34 @@ describe.skipIf(process.platform === "win32" || !hasTmux || !available("bash", [
         expect(wrapped.slice(1)).toEqual(argv); // the wrapper's child is exactly claude and the args claude then received
         expect(argv).toEqual(expect.arrayContaining(kind === "resume" ? ["--resume", "old-id"] : kind === "fork" ? ["--resume", "parent-id", "--fork-session"] : ["--session-id"]));
         for (const intermediary of ["eval", "sh", "bash", "env", "exec"]) expect(wrapped).not.toContain(intermediary);
+      } finally { await p.cleanup(); }
+    });
+
+    // #3746: a shell function or alias named claude around a working executable. A launch_wrapper needs claude's executable
+    // file and OpenRig doesn't look past the function, which may carry the person's settings, so nothing starts and the pane
+    // and the ready check say which it is and what to do.
+    it.each([
+      { shell: "bash" as const, kind: "function" as const, rc: (userBin: string) => `claude() { command ${quote(path.join(userBin, "claude"))} "$@"; }` },
+      { shell: "bash" as const, kind: "alias" as const, rc: (userBin: string) => `alias claude=${quote(path.join(userBin, "claude"))}` },
+      { shell: "zsh" as const, kind: "function" as const, rc: (userBin: string) => `claude() { command ${quote(path.join(userBin, "claude"))} "$@"; }` },
+    ].filter(({ shell }) => available(shell, ["-c", ":"])))("a claude $kind in $shell starts nothing, and the pane and the ready check name it (#3746)", async ({ shell, kind, rc }) => {
+      const p = await pane("native-wrapper", { rc, shell });
+      try {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        await p.adapter.launchHarness(p.binding as never, { name: p.session });
+        warn.mockRestore();
+        const probe = path.join(p.temp, "probe");
+        await p.tm(["send-keys", "-t", p.session, `printf '%s\\n' "$?" > ${quote(probe)}`, "Enter"]);
+        await expect.poll(() => fs.existsSync(probe) && fs.readFileSync(probe, "utf8").includes("\n"), { timeout: 5000 }).toBe(true);
+        const screen = await p.capture();
+        expect(fs.existsSync(p.claudeLog), `claude ran; pane:\n${screen}`).toBe(false);
+        expect(fs.existsSync(p.wrapperLog), `the wrapper ran; pane:\n${screen}`).toBe(false);
+        expect(fs.readFileSync(probe, "utf8").trim(), `exit status; pane:\n${screen}`).not.toBe("0");
+        expect(screen).toContain(WRAPPED_CLAUDE_LOOKUP_REFUSAL(kind));
+        expect(screen).not.toContain("launch_wrapper unavailable");
+        const ready = await p.adapter.checkReady(p.binding as never);
+        expect(ready, screen).toMatchObject({ ready: false, code: "returned_to_shell" });
+        expect((ready as { reason: string }).reason).toContain(`OpenRig doesn't look past a shell ${kind} named claude`);
       } finally { await p.cleanup(); }
     });
 
