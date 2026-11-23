@@ -171,11 +171,13 @@ the authority.
    `089_classification_identity_provenance.ts` is a one-line example.
 2. Take the next number after the highest on `main` (095 at this commit). Parallel pull requests
    often pick the same number, so check again and renumber if `main` moved before you merge.
-3. Import it in `packages/daemon/src/db/all-migrations.ts` and append it to `ALL_MIGRATIONS`.
-   Startup runs exactly that list (`startup-migrations-mirror.test.ts` pins this).
-4. Add it to `migrationsForFullTestDb` in `packages/daemon/test/helpers/test-app.ts`, or list it in
-   `migrationsForFullTestDbExclusions` with a reason. `migration-fixture-parity.test.ts` fails
-   otherwise.
+3. There's no list to add it to: `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts`) is every
+   file in `migrations/`, found when the module loads, and startup runs exactly that
+   (`startup-migrations-mirror.test.ts` pins this; `migration-discovery.test.ts` checks each file exports one
+   migration named after it).
+4. The shared test fixture (`migrationsForFullTestDb` in `packages/daemon/test/helpers/test-app.ts`) carries
+   every migration except those in `migrationsForFullTestDbExclusions`. Add an exclusion, with its reason,
+   only if that core fixture shouldn't carry yours.
 5. `migrate()` sorts migrations by name and records each applied name in `schema_migrations`, so
    an install that already applied a migration never runs it again. Editing a migration that has
    shipped changes nothing for those installs; add a new one instead. A long-lived install applies
