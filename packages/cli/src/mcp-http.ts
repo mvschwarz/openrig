@@ -21,7 +21,7 @@ import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 import { DaemonClient } from "./client.js";
-import { createMcpServer, mintUnknownSender, type McpAccess, type UnfilledSeat } from "./mcp-server.js";
+import { createMcpServer, mintUnknownSender, type McpAccess, type UnfilledSeat, type McpInstructionExtension } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
 import { MCP_PRESENCE_FILE, presenceRecorder } from "./mcp-presence.js";
 import { resolveRigHandle } from "./rig-handle.js";
@@ -393,6 +393,8 @@ export type McpHttpOptions = {
   resolver?: CallerResolver;
   /** One budget for body reading, instance lookup, resolver and seat check (default 5000 ms). */
   resolverTimeoutMs?: number;
+  /** Endpoint-owned introduction and static resources, beside Core's caller-scoped guidance. */
+  instructions?: McpInstructionExtension;
   /** Operator-configured receiver for external callers omitting a task destination; never an authority grant. */
   taskDestination?: string;
   /** rig mcp serve --front-door: a caller that isn't external gets the front-door instructions, not the member workflow. */
@@ -512,7 +514,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     // A grant that names its person gets a client acting as them, which records only their answers to the team.
     const person = caller.access?.external ? caller.access.external.person : caller.access?.person;
     return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access, principalSource: caller.principal?.source,
-      requestSignal: caller.signal,
+      requestSignal: caller.signal, instructions: opts.instructions,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
       unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),
       ...(person ? { personClient: makeClient(opts.daemonUrl, `${person}@external`, caller.principal) } : {}) });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -1443,6 +1443,129 @@ edges: []
     // Its spec can no longer be read: still no resolution and no warning (a Claude seat in the same state warns, as the test above shows).
     delete files[agentPath];
     expect(await inst.seatContinuityPolicy(rigId, nodeId)).toEqual({ ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: "codex" });
+    db.close();
+  });
+
+  describe("a seat moved with rig seat set-runtime", () => {
+    let root: string;
+    afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+    /** A seat materialized on Codex, with a model and effort its member authored for Codex, then moved to Claude as
+     *  rig seat set-runtime records it: the node's runtime and the settings the move chose (none here: Claude's own
+     *  defaults). Its launch recipe keeps the member as materialized. Its agent selects a plugin only Claude reads (no
+     *  Codex manifest), one of whose skills holds a link: resolving the seat for Claude leaves that skill out with a
+     *  warning, and resolving it for Codex never reads the plugin. */
+    async function movedSeat() {
+      root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "moved-seat-"));
+      const put = (file: string, text: string) => { fs.mkdirSync(nodePath.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
+      const plugin = nodePath.join(root, "plugins", "claude-only");
+      put(nodePath.join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "claude-only", version: "1.0.0" }));
+      for (const id of ["review", "handoff"]) put(nodePath.join(plugin, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: ${id}\n---\n${id}`);
+      fs.symlinkSync(nodePath.join(plugin, "skills", "handoff", "SKILL.md"), nodePath.join(plugin, "skills", "review", "linked.md"));
+      const rigRoot = nodePath.join(root, "rig");
+      const agentPath = nodePath.join(rigRoot, "agents", "impl", "agent.yaml");
+      const agentText = `name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: claude-only\n      source: { kind: local, path: ${plugin} }\nprofiles:\n  default:\n    uses:\n      plugins: [claude-only]\n`;
+      put(agentPath, agentText);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined,
+        { fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: (p: string) => fs.existsSync(p) } });
+      const result = await fixture.inst.instantiate(`
+version: "0.2"
+name: test-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        model: gpt-6-astra
+        effort: xhigh
+        cwd: .
+    edges: []
+edges: []
+`, rigRoot);
+      if (!result.ok) throw new Error(JSON.stringify(result));
+      const rigId = result.result.rigId;
+      const nodeId = fixture.rigRepo.getRig(rigId)!.nodes[0]!.id;
+      const before = await fixture.inst.seatSkillSelection(rigId, nodeId);
+      fixture.db.prepare("UPDATE nodes SET runtime = 'claude-code', model = NULL, effort = NULL, advisor = NULL, codex_config_profile = NULL WHERE id = ?").run(nodeId);
+      expect(fixture.rigRepo.getNodeLaunchRecipe(nodeId)!.rigSpec.pods[0]!.members[0]).toMatchObject({ runtime: "codex", model: "gpt-6-astra" });
+      return { ...fixture, rigId, nodeId, before, agentPath, agentText };
+    }
+    /** Its session ends and a restore launches it fresh from the recipe: on Claude, never Codex. The Claude launch's binding. */
+    async function launchFresh(f: Awaited<ReturnType<typeof movedSeat>>) {
+      for (const session of f.sessionRegistry.getSessionsForRig(f.rigId)) f.sessionRegistry.markDetached(session.id);
+      f.sessionRegistry.clearBinding(f.nodeId);
+      vi.mocked(f.adapter.launchHarness).mockClear();
+      vi.mocked(f.codexAdapter.launchHarness).mockClear();
+      const fresh = await f.inst.launchPersistedFresh(f.rigId, f.nodeId);
+      expect(fresh.status, JSON.stringify(fresh)).toBe("launched");
+      expect(f.codexAdapter.launchHarness).not.toHaveBeenCalled();
+      expect(f.adapter.launchHarness).toHaveBeenCalledTimes(1);
+      return vi.mocked(f.adapter.launchHarness).mock.calls[0]![0];
+    }
+    const pluginSkipped = (out: Awaited<ReturnType<PodRigInstantiator["seatSkillSelection"]>>) =>
+      out.ok && out.selection.warnings.some((w) => w.startsWith("plugin_skill_skipped: plugin claude-only"));
+
+    it("resolves today's skill selection for its new runtime", async () => {
+      const { db, inst, rigId, nodeId, before } = await movedSeat();
+      expect(pluginSkipped(before), JSON.stringify(before)).toBe(false);
+      const after = await inst.seatSkillSelection(rigId, nodeId);
+      expect(pluginSkipped(after), JSON.stringify(after)).toBe(true);
+      db.close();
+    });
+
+    it("launches fresh on its new runtime, without the old runtime's model or effort", async () => {
+      const f = await movedSeat();
+      const binding = await launchFresh(f);
+      expect(binding.model).toBeUndefined();
+      expect(binding.effort).toBeUndefined();
+      expect(f.db.prepare("SELECT runtime, model, effort FROM nodes WHERE id = ?").get(f.nodeId)).toEqual({ runtime: "claude-code", model: null, effort: null });
+      f.db.close();
+    });
+
+    it("launches fresh with the advisor its move stored, though the agent spec names another since", async () => {
+      const f = await movedSeat();
+      f.db.prepare("UPDATE nodes SET advisor = 'advisor-at-move' WHERE id = ?").run(f.nodeId);
+      fs.writeFileSync(f.agentPath, `${f.agentText}defaults:\n  advisor: advisor-now\n`);
+      expect((await launchFresh(f)).advisor).toBe("advisor-at-move");
+      expect(f.db.prepare("SELECT advisor FROM nodes WHERE id = ?").get(f.nodeId)).toEqual({ advisor: "advisor-at-move" });
+      f.db.close();
+    });
+  });
+
+  it("a seat that was not moved keeps its recipe's model and effort when its node has none stored", async () => {
+    const files: Record<string, string> = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") };
+    const { db, rigRepo, sessionRegistry, inst, codexAdapter } = setup(files);
+    const result = await inst.instantiate(`
+version: "0.2"
+name: test-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        model: gpt-6-astra
+        effort: xhigh
+        cwd: .
+    edges: []
+edges: []
+`, RIG_ROOT);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const rigId = result.result.rigId;
+    const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+    db.prepare("UPDATE nodes SET model = NULL WHERE id = ?").run(nodeId);
+    for (const session of sessionRegistry.getSessionsForRig(rigId)) sessionRegistry.markDetached(session.id);
+    sessionRegistry.clearBinding(nodeId);
+    vi.mocked(codexAdapter.launchHarness).mockClear();
+    const fresh = await inst.launchPersistedFresh(rigId, nodeId);
+    expect(fresh.status, JSON.stringify(fresh)).toBe("launched");
+    expect(vi.mocked(codexAdapter.launchHarness).mock.calls[0]![0]).toMatchObject({ model: "gpt-6-astra", effort: "xhigh" });
     db.close();
   });
 
