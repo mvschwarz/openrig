@@ -941,7 +941,40 @@ describe("live seat runtime switch", () => {
     expect(community.runtime).toBe("cursor");
   });
 
-  it("a switch to a community harness commits the harness and its conversation, and back is accepted", async () => {
+  it.each([
+    ["community:cursor-token", "community:other"],
+    ["community:cursor bad", "community:cursor"],
+  ])("does not record an unusable community conversation (%s, %s)", async (token, type) => {
+    const community = { ...adapter("cursor"), runtime: "cursor",
+      launchHarness: vi.fn(async () => ({ ok: true, resumeToken: token, resumeType: type })) } as unknown as RuntimeAdapter;
+    fs.mkdirSync(presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(presetsDir, "cursor.yaml"),
+      "format: 1\nname: cursor\ncommand: node C:/fixture/cursor.mjs\nmaintainer: test\nlaunch_result: true\nresume: true\n", "utf8");
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), cursor: community } });
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "cursor", reason: "Check reported identity" })).toMatchObject({ ok: true, changed: true });
+    expect(db.prepare("SELECT resume_type, resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeId))
+      .toMatchObject({ resume_type: null, resume_token: null });
+  });
+
+  it.each([false, true])("uses the rig's recorded source root before the project cwd (install root=%s)", async installed => {
+    const sourceRoot = path.join(home, "source-rig"), project = path.join(home, "project");
+    for (const [root, model] of [[sourceRoot, "source-model"], [project, "project-model"]]) {
+      fs.mkdirSync(path.join(root!, "agents", "impl"), { recursive: true });
+      fs.writeFileSync(path.join(root!, "rig.yaml"), "version: \"0.2\"\nname: seat-rig\npods: []\n");
+      fs.writeFileSync(path.join(root!, "agents", "impl", "agent.yaml"),
+        `name: impl\nversion: "1.0.0"\ndefaults:\n  runtime: claude-code\n  model: ${model}\nprofiles:\n  default:\n    uses:\n      skills: []\n`);
+    }
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id;
+    rigRepo.setRigStartupLayers(rigId, { root: installed ? project : sourceRoot });
+    db.prepare("UPDATE rigs SET install_root = ? WHERE id = ?").run(installed ? sourceRoot : null, rigId);
+    db.prepare("UPDATE nodes SET cwd = ?, agent_ref = 'local:agents/impl', profile = 'default', resolved_spec_name = 'impl' WHERE id = ?").run(project, nodeId);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'codex')").run(nodeId);
+    const result = await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Read original rig", dryRun: true });
+    expect(result).toMatchObject({ ok: true, dryRun: true, settings: { model: { value: "source-model", source: "agent_spec" } } });
+  });
+
+  it.each(["openrig-build-upgrade-1a2b3c4d", "launcher-native-ref-7"])("a switch to a community harness commits the harness and its conversation, and back is accepted (%s)", async nativeRef => {
     // The successor must carry the harness on its session and the preset's own conversation type, or a relaunch, a
     // restore, or a switch back can't resolve any of it. This exercises the commit, which nothing covered before.
     const builtIns = { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi") };
@@ -952,7 +985,7 @@ describe("live seat runtime switch", () => {
       "format: 1\nname: cursor\ncommand: node C:/fixture/cursor.mjs\nmaintainer: test\nlaunch_result: true\nresume: true\n", "utf8");
     // The harness's launcher reports its conversation as `community:cursor`, the type the built-in validator doesn't know.
     const community = { ...adapter("cursor"), runtime: "cursor",
-      launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "community:cursor-abc-123", resumeType: "community:cursor" })) } as unknown as RuntimeAdapter;
+      launchHarness: vi.fn(async () => ({ ok: true, resumeToken: nativeRef, resumeType: "community:cursor" })) } as unknown as RuntimeAdapter;
 
     const svc = service({ runtimeAdapters: { ...withResolver, cursor: community } });
     successorConfirms(svc);
@@ -963,7 +996,7 @@ describe("live seat runtime switch", () => {
       .get(nodeId) as { agent_app: string | null; resume_type: string | null; resume_token: string | null };
     expect(committed.agent_app).toBe("cursor");
     expect(committed.resume_type).toBe("community:cursor");
-    expect(committed.resume_token).toBe("community:cursor-abc-123");
+    expect(committed.resume_token).toBe(nativeRef);
 
     // Back to a built-in is accepted now that the successor's selection names the harness, and its token is a built-in's.
     const back = { ...adapter("codex"), runtime: "codex",

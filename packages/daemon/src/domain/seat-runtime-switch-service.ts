@@ -37,6 +37,7 @@ import { clearCodexMemberPermissions } from "./codex-member-permissions.js";
 import { validateNativePermissionSelection, type NativePermissionSelection } from "./native-permission-selection.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { validateResumeToken } from "./resume-token-validation.js";
+import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
 import { SnapshotCapture } from "./snapshot-capture.js";
 import { SnapshotRepository } from "./snapshot-repository.js";
 import { CheckpointStore } from "./checkpoint-store.js";
@@ -364,7 +365,7 @@ export class SeatRuntimeSwitchService {
       if (!saved.ok && node.agentRef) return refuse("runtime_target_unavailable", saved.refusal.message);
       materials = planRuntimeSwitchMaterials({ db, node, rigName: status.status.rig_name, canonicalSession: sessionName!, runtime: target,
         explicit, saved: saved.ok ? saved.context : null, claudeManagedBlockFile: rigRepo.getRigClaudeManagedBlockFile(node.rigId) ?? undefined,
-        rigRoot: rigRepo.getRigInstallRoot(node.rigId), resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
+        rigRoot: rigRepo.getRigInstallRoot(node.rigId) ?? rigRepo.getRigStartupLayers(node.rigId)?.root, resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
     } catch (error) { return refuse("runtime_target_unavailable", (error as Error).message); }
 
     // An explicit Codex target mode replaces the seat's envelope, which the commit clears; inherit keeps it.
@@ -668,12 +669,13 @@ export class SeatRuntimeSwitchService {
       }
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
-      const hooked = db.prepare("SELECT successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_token: string | null };
+      const hooked = db.prepare("SELECT successor_resume_type, successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_type: string | null; successor_resume_token: string | null };
       const nativeId = hooked.successor_resume_token ?? ctx.launchResume?.token;
+      const nativeType = hooked.successor_resume_token ? hooked.successor_resume_type : ctx.launchResume?.type;
       if (nativeId) {
         // A community harness's launcher reports `community:<name>`; that type is the preset's own, not a built-in's, so it is
         // accepted here when it names this target. The built-in validator still decides every built-in token.
-        const communityToken = isCommunityHarnessRuntime(target) && nativeId.startsWith(`community:${target}`)
+        const communityToken = isCommunityHarnessRuntime(target) && nativeType === `community:${target}` && usableCommunityNativeRef(nativeId)
           ? { ok: true as const, resumeType: `community:${target}`, token: nativeId } : null;
         const token = communityToken ?? (isCommunityHarnessRuntime(target) ? null : validateResumeToken(target, nativeId));
         if (token?.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hooked.successor_resume_token ? "hook" : "scrape");
