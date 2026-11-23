@@ -1683,7 +1683,7 @@ describe("rig queue CLI", () => {
           replyTo: "qitem-parent",
           parkWarning: {
             code: "qitem_park_not_confirmed",
-            message: "qitem qitem-verify-parked-gateway-same-body already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.",
+            message: "qitem qitem-verify-parked-gateway-same-body-retry already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.",
           },
         },
       },
