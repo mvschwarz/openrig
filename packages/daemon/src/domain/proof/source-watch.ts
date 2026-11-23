@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
 import type { ScopeFsDeps } from "../scope/scope-view-projection.js";
-import { createProofPolicyRead, proofFs, readProjectReadinessAsync, resolveProjectRoot } from "./judgments.js";
+import { createProofPolicyRead, nearestExistingAncestor, proofFs, readProjectReadinessAsync, resolveProjectRoot } from "./judgments.js";
 
 export interface ProofSourceWatch {
   close(): void;
@@ -29,8 +29,8 @@ function add(out: Shallow, dir: string, name: string) {
 /** The real location of `p`, resolving its nearest existing ancestor (as containment does), or null if unreadable. */
 function canonical(p: string): string | null {
   try {
-    let existing = path.resolve(p);
-    while (!fs.existsSync(existing)) existing = path.dirname(existing);
+    const existing = nearestExistingAncestor(path.resolve(p));
+    if (existing === null) return null;
     return path.resolve(fs.realpathSync(existing), path.relative(existing, path.resolve(p)));
   } catch { return null; }
 }

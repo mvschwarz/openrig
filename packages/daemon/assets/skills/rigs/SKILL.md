@@ -57,9 +57,18 @@ even when setup was skipped or `runtime.codex.hooks_enabled` is false. That sett
 writes. These settings can reach their other sessions using the same Codex home. Reuse a yes that already covered
 these writes; an explicit project-only request doesn't cover them. If they decline, don't launch that same path or
 remove the writes afterwards as a substitute for consent. Explain that setup has no project-only mode. A git worktree
-or project `.codex/config.toml` doesn't redirect these writes. An existing separate `CODEX_HOME` isolates Codex's
-config, login and session state together; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
-Carry the person's scope constraint to the operator.
+or project `.codex/config.toml` doesn't redirect these writes.
+
+**Keep their own login:** a team runs on the person's existing login through the home that holds it (`~/.codex` or
+their `CODEX_HOME`; for Claude Code, `~/.claude` or their `CLAUDE_CONFIG_DIR`). Keeping that home and asking once about
+these writes is how someone who wants changes kept in their project still gets a working team. Don't make a new
+`CODEX_HOME` or `CLAUDE_CONFIG_DIR` to avoid the writes, inside the project or anywhere else: a new home has no login,
+and the team can't start until someone signs it in. Never copy credentials into a new home or the project. A separate
+home helps only if they already have one that is signed in; it keeps that home's config, login and sessions together
+and doesn't relocate `~/.tmux.conf`. If they decline the writes and have no such home, say plainly that the team can't
+start here without their yes to the writes or a sign-in they choose to do, and let them choose. Don't offer a route
+that needs a new sign-in, or a large download such as a local model, without saying so first. Carry the person's scope
+constraint to the operator.
 
 **Codex individual approvals:** explain before installation that even reads may ask repeatedly during setup and
 follow-up, separately from the team's permissions. Use plain, separate commands so each request is readable.
