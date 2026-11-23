@@ -357,7 +357,8 @@ export class CodexInPlaceRestart {
     // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
     progress.stage = "respawn";
     const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command,
-      { cwd, ...(keepPlan?.keep ? { keepLimitOf: target.seat.nodeId, processLimitsMode: "recovery" as const } : {}) });
+      { cwd, groupSeatOf: target.seat.nodeId,
+        ...(keepPlan?.keep ? { keepLimitOf: target.seat.nodeId, processLimitsMode: "recovery" as const } : {}) });
     if (!respawned.ok) {
       return this.afterFailedStop(target, report, observed, held, recoveryCommand, `the pane could not be respawned: ${respawned.message}`, progress);
     }

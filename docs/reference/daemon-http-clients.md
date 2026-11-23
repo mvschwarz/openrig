@@ -51,26 +51,47 @@ in the case named:
 
 ## Bearer tokens
 
-The daemon reads two tokens from its environment at start:
+The daemon reads these two bearer-token settings from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
-  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`), and the `/api/rig-mode`
-  binding writes. `rig host pair` hands this token to the paired machine, so a daemon that will be paired with
-  needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
-- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport` and `/api/compaction` route, `POST
-  /api/terminal/follow` and `/viewer/ensure`, and every `GET /api/terminal/<name>` route, the terminal websocket
-  included. When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a
-  tailnet address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`) and `GET /api/hosts/pair/<pairId>`, the `/api/rig-mode`
+  binding writes, the `/api/network` writes (`POST /bindings`, `POST /installations` and `POST /bindings/<id>/disconnect`;
+  `GET /bindings` checks no token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
+  `POST /api/gateway/slack/forwarded`, a shared Slack app's relay. The other `/api/apps/v1` routes take a Core app
+  credential instead; see [Core app](core-app.md). `rig host pair` hands this token to the paired machine, so a daemon
+  that will be paired with needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
+- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport`, `/api/compaction` and `/api/startup` route, `POST
+  /api/terminal/follow`, `/viewer/ensure`, `/open-all` and `/close-all`, and every `GET /api/terminal/<name>` route, the terminal websocket
+  included. It also checks these seat routes:
+  - `GET /api/rigs/<rigId>/nodes/<logicalId>/preview` and `POST /api/rigs/<rigId>/nodes/<logicalId>/open-cmux`;
+  - under `/api/sessions/<session>`: `GET /preview`, `/generation-record` and `/generation-record-expected`, and `POST
+    /reconcile`, `/repair-missing-pane`, `/clear-attention`, `/resume-token` and `/unclaim`.
 
-A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
+  When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a tailnet
+  address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) do not check either
+of these bearer tokens. On the default binds (loopback, and the tailnet address when Tailscale is active),
+a client that can reach the daemon can read them. The [Browser access](browser-access.md) boundary still applies.
+
+Pairing-request routes `POST /api/hosts/pair-request`, `GET /api/hosts/pair-requests` and
+`GET /api/hosts/pair-request/<pairId>` do not check the operator bearer. They are open by design: a requester
+does not yet have the paired machine's token. They remain subject to their pairing workflow and the
+[Browser access](browser-access.md) boundary.
+
+When one of the two bearer checks has no configured token, that check passes the request through. Other
+route-specific requirements still apply. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
 or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
 approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
 `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
 refused for want of it, `rig host` and the TUI say what to set.
 
-A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
-and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
+A configured bearer check rejects a wrong or missing token with HTTP 401. The shared bearer middleware returns
+`{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`; the seat routes above
+use this shared body. The Core app API also has its own credential errors; see [Core app](core-app.md).
+`/api/startup` replaces an authentication failure with `{ "ok": false, "code": "terminal_auth_unavailable",
+"freshAllowed": false, "message" }`.
 The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
 for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
 [Browser access](browser-access.md).
@@ -377,6 +398,7 @@ What reads these declarations:
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **A workflow step's label.** A spec step can carry an optional `label`, a short name for a person ("QA pass"). `GET /api/workflow/<id>` returns it in `startedSpec.spec.steps[].label`, the spec the run started with. Match it by step id: the instance's `currentStepId`, each `frontierPackets[].stepId`, or a trace entry's `stepId`. A step without a label, or a step the started spec doesn't list (the run's file was edited or its graph revised since it started), shows its `id`. A label is display only: the step's `objective` stays its instruction. A daemon from before labels refuses a labelled spec with `spec_unknown_key`.
 - **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with

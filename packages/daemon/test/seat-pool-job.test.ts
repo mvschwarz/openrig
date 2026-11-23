@@ -407,9 +407,11 @@ describe("seat-pool job registration: also tested, without a numbered control", 
       expect(results[1]).toMatchObject({ code: "auto_registration_ambiguous" });
       expect(results[3]).toMatchObject({ code: "auto_registration_state_invalid" });
       expect(w.jobRows(delta.session)).toEqual([{ jobId: deltaJob.jobId, state: "paused" }]);
-      // no row picked: both stay as they were, neither retired
-      expect(w.jobRows(bravo.session)).toEqual(
-        [{ jobId: dup1.jobId, state: "active" }, { jobId: dup2.jobId, state: "active" }].sort((a, b) => a.jobId.localeCompare(b.jobId)),
+      // no row picked: both stay as they were, neither retired. Compared as a set: the two IDs can share a ULID
+      // millisecond while their registered_at differs, so neither registration order nor ID order is fixed.
+      const byJobId = (a: { jobId: string }, b: { jobId: string }) => (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0);
+      expect([...w.jobRows(bravo.session)].sort(byJobId)).toEqual(
+        [{ jobId: dup1.jobId, state: "active" }, { jobId: dup2.jobId, state: "active" }].sort(byJobId),
       );
       expect(w.nonterminal(alpha.session)).toEqual([]);
       expect(w.nonterminal(charlie.session)).toHaveLength(1);

@@ -1223,6 +1223,8 @@ export class QueueRepository {
    *     best-effort {@link maybeNudge} when no store is attached (P34 made that
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
+  /** #2829 slice 1 — cold-start notifier, late-wired by startup after the restore orchestrator exists. */
+  private wakeWithoutReceiverNotifier: ((destinationSession: string, drainPass?: object) => void) | undefined;
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
@@ -1528,7 +1530,7 @@ export class QueueRepository {
     return { source: trigger, urgent, ...(urgent && row ? { urgentBy: trigger === "openrig" ? "OpenRig" : row.sourceSession } : {}) };
   }
 
-  private classifyWakeResult(res: Awaited<ReturnType<QueueNudgeTransport["send"]>>): WakeAttemptOutcome {
+  private classifyWakeResult(res: Awaited<ReturnType<QueueNudgeTransport["send"]>>, destinationSession?: string): WakeAttemptOutcome {
     // Held by the seat's hold or interruption level (on purpose; a retry is held again) is the typing guard's; any other
     // retention is the draft-aware delivery's (a draft, an unreadable input, a native prompt), which can clear.
     if (res.outcome === "retained") return { classified: "retained", nudgeResult: res.reason === "typing_guard_enabled"
@@ -1547,7 +1549,14 @@ export class QueueRepository {
     if (inputUncertain || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
       return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}`, ...usageLimit };
     }
-    return { classified: "failed", nudgeResult: `failed:${detail}`, preInputFailure: res.inputPhase === "not_reached" && res.sent !== true };
+    const outcome: WakeAttemptOutcome = { classified: "failed", nudgeResult: `failed:${detail}`, preInputFailure: res.inputPhase === "not_reached" && res.sent !== true };
+    // #2829 slice 1 — positive no-receiver evidence rides the shared send path: a send
+    // that never reached the input phase means the seat was gone before the wake could be
+    // typed. Best-effort; it can never change this classification.
+    if (outcome.preInputFailure === true && destinationSession !== undefined) {
+      try { this.wakeHasNoReceiver(destinationSession); } catch { /* never changes the outcome */ }
+    }
+    return outcome;
   }
 
   /**
@@ -1568,6 +1577,13 @@ export class QueueRepository {
       );
     }
     this.outbox = outbox;
+  }
+
+  /** #2829 slice 1 — late-wired cold-start notifier. Fired (fire-and-forget, never
+   * awaited, never throwing) whenever a wake's destination provably has no receiver:
+   * the drain's skip branch and the unroutable send classification both land here. */
+  attachWakeWithoutReceiverNotifier(notifier: (destinationSession: string, drainPass?: object) => void): void {
+    this.wakeWithoutReceiverNotifier = notifier;
   }
 
   /** The one transition-write classifier. It consumes structured state/action facts only. */
@@ -2105,6 +2121,7 @@ export class QueueRepository {
       waiting?: { notifications: number; seats: string[] } } = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
     const attempted = new Set<string>();
+    const coldStartPass = {};
     // Notifications left alone for want of a receiver; one a later claim in this pass attempted isn't waiting.
     const skipped = new Map<string, string>();
     const result = () => {
@@ -2128,7 +2145,7 @@ export class QueueRepository {
     // records why it didn't land.
     const eligible = (entry: OutboxEntry): boolean => {
       if (opts?.stopRequested?.() || opts?.eligible && !opts.eligible(entry)) return false;
-      if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession)) return true;
+      if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession, coldStartPass)) return true;
       skipped.set(entry.outboxId, entry.destinationSession);
       return false;
     };
@@ -2159,19 +2176,30 @@ export class QueueRepository {
    * move the row's last nudge time, which the stuck sweep reads as new evidence; #2939), or the newest session under
    * the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A canonical
    * address resolves to its current physical session first. Anything unknown may have a receiver. */
-  private wakeHasNoReceiver(destinationSession: string): boolean {
+  private wakeHasNoReceiver(destinationSession: string, drainPass?: object): boolean {
     try {
       const destClass = this.classifyDestinationOf(destinationSession).class;
-      if (destClass === "unroutable") return true;
+      if (destClass === "unroutable") return this.noteWakeWithoutReceiver(destinationSession, drainPass);
       if (destClass !== "pane-bound") return false;
       const physical = physicalSessionName(this.db, destinationSession);
       if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physical)) return true;
       const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
         .get(physical) as { status: string } | undefined;
-      return newest?.status === "exited" || newest?.status === "detached";
+      return (newest?.status === "exited" || newest?.status === "detached") && this.noteWakeWithoutReceiver(destinationSession, drainPass);
     } catch {
       return false;
     }
+  }
+
+  /** #2829 slice 1 — positive no-receiver evidence is the cold-start trigger. The notifier is
+   * fire-and-forget and can never change the predicate's value or throw into its caller. */
+  private noteWakeWithoutReceiver(destinationSession: string, drainPass?: object): boolean {
+    try {
+      this.wakeWithoutReceiverNotifier?.(destinationSession, drainPass);
+    } catch {
+      /* a notifier failure must never change delivery semantics */
+    }
+    return true;
   }
 
   /**
@@ -2209,6 +2237,10 @@ export class QueueRepository {
     if (!opts?.explicit && this.deliveryDrains.holds(destinationSession)) return;
     if (!this.transport) return;
     const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger, undefined, opts?.explicit === true);
+    // #2829 slice 1 — `preInputFailure` is the honest no-receiver shape: the input phase
+    // was never reached and nothing was sent, meaning the seat was gone before the wake
+    // could be typed. The positive-evidence check itself rides the shared send path
+    // (performWakeSend / classifyWakeResult) and covers this caller.
     this.recordNudgeAttempt(qitemId, outcome.nudgeResult, outcome.usageLimit);
   }
 
@@ -2502,6 +2534,9 @@ export class QueueRepository {
       };
     }
     if (destClass.class === "unroutable") {
+      // #2829 slice 1 — positive no-receiver evidence: the queue's cold-start
+      // trigger. Fire-and-forget; it can never change this classification.
+      this.noteWakeWithoutReceiver(destinationSession);
       return { classified: "failed", nudgeResult: destClass.teaching };
     }
     // A hosted member with a trigger: ring it. Accepted is indeterminate, never verified: pickup is its claim.
@@ -2564,13 +2599,16 @@ export class QueueRepository {
       // expired — so it records `indeterminate` (never silently delivered, never a
       // hard `failed`). A definite non-timeout failure (unreachable, unknown
       // session) stays `failed`.
-      return this.classifyWakeResult(res);
+      return this.classifyWakeResult(res, destinationSession);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // A thrown timeout is equally ambiguous (see above).
       if (isWakeTimeoutSignal(msg)) {
         return { classified: "indeterminate", nudgeResult: `indeterminate:${msg}` };
       }
+      // #2829 slice 1 — a thrown send is still an attempted send: the same positive
+      // no-receiver evidence check rides here (best-effort, never changes the outcome).
+      try { this.wakeHasNoReceiver(destinationSession); } catch { /* never changes the outcome */ }
       return { classified: "failed", nudgeResult: `failed:${msg}` };
     }
   }
