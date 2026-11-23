@@ -1,0 +1,83 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type Database from "better-sqlite3";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { TranscriptStore } from "../src/domain/transcript-store.js";
+import { TRANSCRIPT_SECRET_PATTERNS, hasTranscriptSecret, redactTranscriptContent } from "../src/domain/transcript-redaction.js";
+import * as surface from "../src/transcript-redaction-surface.js";
+
+// The full-transcript route keeps the identifiers an agent needs (full commits, 64-hex hashes, long paths, ids)
+// while masking explicit credential shapes. These cells run the production createApp, not a hand-built router.
+
+const commit = "a".repeat(40);
+const hash = "b".repeat(64);
+const longPath = "/Users/example/code/rigs/lab/seats/security";
+const hyphenatedPath = "/Users/example/code/rigs/lab/seats/security-reviewer/notes";
+const row = "qitem-root-three-retraces-20261123T0823";
+const shortSha = "e3b3d90c5";
+// Synthetic credentials, assembled at run time so no source line holds a token-shaped literal. NOT real.
+const apiKey = "sk-" + "Fake".repeat(5);
+const bearer = "Bearer " + "Fake".repeat(8);
+const privateKey = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----";
+
+describe("transcript redaction keeps identifiers", () => {
+  it("leaves commits, hashes, paths and ids unchanged", () => {
+    for (const identifier of [commit, hash, longPath, hyphenatedPath, row, shortSha]) {
+      expect(redactTranscriptContent(identifier), identifier).toBe(identifier);
+      expect(hasTranscriptSecret(identifier), identifier).toBe(false);
+    }
+  });
+
+  it("is the rule the CLI's restore packets import", () => {
+    expect(surface.TRANSCRIPT_SECRET_PATTERNS).toBe(TRANSCRIPT_SECRET_PATTERNS);
+    expect(surface.redactTranscriptContent).toBe(redactTranscriptContent);
+  });
+});
+
+describe("GET /api/transcripts/:session/full through createApp", () => {
+  let db: Database.Database;
+  let root: string;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    root = mkdtempSync(join(tmpdir(), "transcript-full-redaction-"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("returns identifiers as they were and masks credentials", async () => {
+    const store = new TranscriptStore({ transcriptsRoot: root, enabled: true });
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { transcriptStore: store, appDeps: { transcriptStore: store } });
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    store.ensureTranscriptDir("my-rig");
+    writeFileSync(store.getTranscriptPath("my-rig", "dev-impl@my-rig"), [
+      `merged ${commit} for ${row} (short ${shortSha})`,
+      `tarball sha256 ${hash}`,
+      `wrote ${longPath} and ${hyphenatedPath}`,
+      `pasted ${apiKey} and ${bearer}`,
+      privateKey,
+      "trailing line",
+    ].join("\n"));
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/full");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { session: string; content: string };
+    expect(body.session).toBe("dev-impl@my-rig");
+    for (const identifier of [commit, hash, longPath, hyphenatedPath, row, shortSha]) {
+      expect(body.content, identifier).toContain(identifier);
+    }
+    expect(body.content).not.toContain(apiKey);
+    expect(body.content).not.toContain(bearer);
+    expect(body.content).not.toContain("MIIEvMIIEv");
+    expect(body.content).toContain("[REDACTED]");
+    expect(body.content).toContain("trailing line");
+  });
+});

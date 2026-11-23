@@ -1,30 +1,36 @@
-// transcript-redaction.ts — daemon-side mirror of the v0 redaction policy.
+// transcript-redaction.ts — the one credential-redaction rule for transcript text.
 //
-// Mirrors packages/cli/src/restore-packet/redaction.ts SECRET_PATTERNS
-// (M1 contract § 4 / openrig-v0 policy). Patterns duplicated rather than
-// imported because @openrig/cli is not a daemon dependency (and adding
-// it would invert the package graph). For M2c-Daemon scope: keep this
-// list byte-equivalent to the CLI list. A future slice may factor a
-// shared @openrig/redaction package; until then, drift between these
-// two arrays is a defect — reviewers should diff them on any change.
+// GET /api/transcripts/:session/full applies it before serialization, and the CLI's restore packets
+// apply it through the `@openrig/daemon/transcript-redaction` surface, so the two can't drift apart.
+//
+// It masks explicit credential shapes only. Full commits, 64-hex hashes, paths and ids are identifiers
+// a restored seat or a reading agent needs, so no pattern here matches a bare run of hex or a path.
+// An earlier rule masked any 40-character base64-shaped run, which erased exactly those.
 
-/** v0 secret-pattern list. Mirrors packages/cli/src/restore-packet/redaction.ts:31-37. */
+/** Explicit credential shapes, each a known token or key format rather than a length rule. */
 export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
-  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/g,
-  /\b[A-Za-z0-9+/]{40,}={0,2}\b/g,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/g, // OpenAI and Anthropic API keys
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, // GitHub tokens
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, // GitHub fine-grained tokens
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/g, // bearer tokens
+  /\bglpat-[A-Za-z0-9_-]{20,}/g, // GitLab personal access tokens
+  /\bnpm_[A-Za-z0-9]{36}\b/g, // npm tokens
+  /\bxoxe\.xox[bp]-[A-Za-z0-9-]{10,}/g, // Slack rotation tokens
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/g, // Slack bot, user and refresh tokens
+  /\bxapp-[A-Za-z0-9-]{10,}/g, // Slack app-level tokens
+  /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/g, // Slack incoming webhook URLs
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
+  /(?<=\baws_secret_access_key["']?\s*[=:]\s*["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named
+  /\bAIza[0-9A-Za-z_-]{35}/g, // Google API keys
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JSON Web Tokens
+  // Private keys: the whole block, or everything after a BEGIN line whose END was cut off.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*)/g,
+  /(?<=\bhttps?:\/\/)[^\s/@:]+:[^\s/@]+(?=@)/g, // a user and password in a URL
 ];
 
 /**
- * Apply the openrig-v0 redaction policy to transcript content. Returns
- * the input with each match of the secret patterns replaced by the
- * literal string `[REDACTED]`. Pure function; no side effects.
- *
- * Used by GET /api/transcripts/:session/full to redact the wire payload
- * BEFORE serialization, so credential patterns never reach the response
- * body even when a transcript file contains them.
+ * Replace each credential match with the literal `[REDACTED]`, keeping everything around it.
+ * Pure function; no side effects.
  */
 export function redactTranscriptContent(text: string): string {
   let out = text;
@@ -32,4 +38,10 @@ export function redactTranscriptContent(text: string): string {
     out = out.replace(pattern, "[REDACTED]");
   }
   return out;
+}
+
+/** Whether any credential shape occurs in the text. Builds fresh non-global probes, since the global patterns
+ *  carry `lastIndex` between calls. */
+export function hasTranscriptSecret(text: string): boolean {
+  return TRANSCRIPT_SECRET_PATTERNS.some((pattern) => new RegExp(pattern.source, pattern.flags.replace("g", "")).test(text));
 }
