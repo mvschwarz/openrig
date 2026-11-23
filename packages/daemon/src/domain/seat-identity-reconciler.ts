@@ -356,7 +356,8 @@ export class SeatIdentityReconciler {
       // reads it. A seat whose recorded process still runs is on a server this daemon doesn't see, as the boot
       // reconciler reads it, so it stays unavailable, as does anything else.
       let table: Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }> | null> | undefined;
-      const processes = () => (table ??= this.readRunnerCensus()
+      let sharedCensus: Promise<RunnerProcessCensus> | undefined;
+      const processes = () => (table ??= (sharedCensus ??= this.readRunnerCensus())
         .then(census => census.rows.flatMap(row => row.startedAt === undefined ? [] : [{ ...row, startedAt: row.startedAt }]))
         .catch(() => null));
       for (const seat of seats) {
@@ -374,7 +375,7 @@ export class SeatIdentityReconciler {
         const observedGrant = observedGrants.get(seat.node_id);
         if (published && gone && observedGrant) grants!.revoke({ grantId: observedGrant.grantId }, "runner_exit_observed");
       }
-      await this.refreshBackgroundEvidence(seats, null, occupantGenerations, generation);
+      await this.refreshBackgroundEvidence(seats, null, occupantGenerations, generation, sharedCensus);
       return;
     }
 
@@ -485,13 +486,14 @@ export class SeatIdentityReconciler {
         this.store.upsert(this.tmuxUnavailableVerdict(seat, this.now().toISOString(), !liveSessions.has(seat.session_name)));
       }
     }
-    await this.refreshBackgroundEvidence(seats, firstPanes, occupantGenerations, generation, firstCensus, secondCensus, panes, firstCensusAt);
+    await this.refreshBackgroundEvidence(seats, firstPanes, occupantGenerations, generation, undefined, firstCensus, secondCensus, panes, firstCensusAt);
   }
 
   /** Use this existing reconciliation pass; no independent poll or process signalling is introduced. */
   private async refreshBackgroundEvidence(
     seats: RunningSeatRow[], panes: Map<string, PaneObservation> | null,
     occupantGenerations: Map<string, string | null>, sweepGeneration: number,
+    sharedCensus?: Promise<RunnerProcessCensus>,
     firstSnapshot?: RunnerProcessCensus | null, lastSnapshot?: RunnerProcessCensus | null,
     finalPaneSnapshot?: Map<string, PaneObservation>,
     firstCensusAt?: number,
@@ -503,7 +505,7 @@ export class SeatIdentityReconciler {
     if (!eligible.length) return;
     let census: RunnerProcessCensus;
     try {
-      census = firstSnapshot ?? await this.readRunnerCensus();
+      census = firstSnapshot ?? await (sharedCensus ?? this.readRunnerCensus());
     }
     catch { this.backgroundMatches.clear(); return; }
     if (sweepGeneration !== this.generation) return;

@@ -451,6 +451,40 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     expect(afterClose.backgroundWork).toEqual([]);
   });
 
+  it.each(["complete", "hidden", "failed"] as const)("reuses one empty-session census with retained background evidence (%s)", async mode => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
+      const registry = new SessionRegistry(db);
+      registry.mintOccupantTenure("n1", "initial", "first");
+      db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run("2026-07-02 11:00:00", "n1");
+      let lost = false;
+      const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "bash", command: "bash", startedAt: "2026-07-02T11:00:00Z" };
+      const codex = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "codex", command: "codex", argv: ["codex"], startedAt: "2026-07-02T11:00:30Z" };
+      const child = { pid: 12, ppid: 11, command: "worker", startedAt: "2026-07-02T11:01:00Z" };
+      const tmux = { ...makeTmux({ panePid: { "%1": 10 }, paneCommand: { "%1": "bash" } }),
+        listSessions: async () => lost ? [] : [{ name: "s1@rig" }] as never,
+        probeSession: async () => ({ state: lost ? "absent" as const : "present" as const }),
+        readAllPaneProcesses: async () => lost ? new Map() : new Map([["%1", { pid: 10, command: "bash" }]]) };
+      const census = vi.fn(async () => {
+        if (lost && mode === "failed") throw new Error("census unavailable");
+        return { rows: lost ? [{ ...child, ppid: 1 }] : [root, codex, child], permissionHiddenPids: lost && mode === "hidden" ? [99] : [] };
+      });
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, readProcessTableCensus: census,
+        listProcesses: async () => lost ? [{ ...child, ppid: 1 }] : [root, codex, child] });
+      await rec.reconcileAll();
+      expect(census).toHaveBeenCalledTimes(2); // Healthy native proof keeps two fresh observations.
+      lost = true;
+      for (let sweep = 0; sweep < 2; sweep++) {
+        census.mockClear();
+        await rec.reconcileAll();
+        expect(census).toHaveBeenCalledTimes(1);
+        expect(rec.backgroundWorkUnknown()).toMatchObject([{ state: "unknown", reason: "session_missing",
+          processes: mode === "complete" ? [{ pid: 12, command: "worker" }] : [] }]);
+      }
+    } finally { db.close(); }
+  });
+
   it("uses the first census time to reject a newborn descendant after a slow sweep", async () => {
     const db = createFullTestDb();
     seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
