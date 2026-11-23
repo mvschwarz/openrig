@@ -105,6 +105,7 @@ export class RigSpecCodec {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
+    if (spec.seatSlice) doc["seat_slice"] = spec.seatSlice;
     if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.defaultOnboardingPack !== undefined) doc["default_onboarding_pack"] = spec.defaultOnboardingPack;
