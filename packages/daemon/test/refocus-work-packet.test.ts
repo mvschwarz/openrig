@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSy
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deriveWorkCandidates, frontmatterIntent, type WorkCandidateLookups } from "../src/domain/current-work.js";
+import { deriveCurrentWork, deriveWorkCandidates, frontmatterIntent, type WorkCandidateLookups } from "../src/domain/current-work.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -146,8 +146,52 @@ describe("deriveWorkCandidates — labelled evidence beside the strict derivatio
       { qitemId: "q-next", state: "pending", summary: "later", tags: ["mission:release-b"] },
     ], w.missions, { getRow: () => null, continuationOf: (id) => (id === "q-held" ? "resume the build" : null) });
     expect(out.candidates).toEqual([]);
-    expect(out.held).toEqual([{ qitemId: "q-held", summary: "parked", blockedOn: "q-gate", continuation: "resume the build" }]);
-    expect(out.next).toEqual([{ qitemId: "q-next", summary: "later", missions: ["release-b"] }]);
+    expect(out.held).toEqual([{ qitemId: "q-held", summary: "parked", blockedOn: "q-gate", continuation: "resume the build",
+      missions: ["release-a"], slice: null, missionPath: join(w.missions, "release-a"), slicePath: null, unresolved: null }]);
+    expect(out.next).toEqual([{ qitemId: "q-next", summary: "later",
+      missions: ["release-b"], slice: null, missionPath: join(w.missions, "release-b"), slicePath: null, unresolved: null }]);
+  });
+
+  it("gives each held and pending row its own resolved scope, and its first body line when it has no summary", () => {
+    const w = world();
+    const out = deriveWorkCandidates([
+      { qitemId: "q-held", state: "blocked", summary: "", body: "\n---\n## Fix the parked build\nmore detail", tags: ["mission:release-a"], blockedOn: "q-gate" },
+      { qitemId: "q-slice", state: "pending", summary: null, tags: ["mission:release-a", "slice:12-refocus"] },
+      { qitemId: "q-gone", state: "pending", summary: "s", tags: ["mission:release", "slice:12-refocus"] },
+      { qitemId: "q-typo", state: "pending", summary: "s", tags: ["mission:release-a", "slice:99-none"] },
+      { qitemId: "q-two", state: "pending", summary: "s", tags: ["mission:release-a", "mission:release-b"] },
+      { qitemId: "q-done", state: "done", summary: "finished", tags: ["mission:release-b"] },
+    ], w.missions, nothingElse);
+    const missionA = join(w.missions, "release-a");
+    expect(out.held).toEqual([{ qitemId: "q-held", summary: "Fix the parked build", blockedOn: "q-gate", continuation: null,
+      missions: ["release-a"], slice: null, missionPath: missionA, slicePath: null, unresolved: null }]);
+    expect(out.next).toEqual([
+      { qitemId: "q-slice", summary: null, missions: ["release-a"], slice: "12-refocus", missionPath: missionA, slicePath: w.slice, unresolved: null },
+      { qitemId: "q-gone", summary: "s", missions: ["release"], slice: "12-refocus", missionPath: null, slicePath: null,
+        unresolved: "mission release resolves to 0 directories on this host" },
+      { qitemId: "q-typo", summary: "s", missions: ["release-a"], slice: "99-none", missionPath: missionA, slicePath: null,
+        unresolved: "slice 99-none resolves to 0 directories under release-a" },
+      { qitemId: "q-two", summary: "s", missions: ["release-a", "release-b"], slice: null, missionPath: null, slicePath: null,
+        unresolved: "2 mission tags; none is resolved on its own" },
+    ]);
+    // Completed work is never held or next, and nothing here is current work.
+    expect(JSON.stringify(out)).not.toContain("q-done");
+    expect(out.candidates).toEqual([]);
+  });
+
+  it("resolves a held row through its own project's missions root, so one mission name in two projects is two directories", () => {
+    const w = world();
+    const other = join(w.root, "other/missions/release-a");
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(other, "SPEC.md"), "---\nintent: Another project's A\n---\n", "utf8");
+    const byProject = (row: { tags?: string[] | null }) =>
+      ((row.tags ?? []).includes("project:other") ? join(w.root, "other/missions") : w.missions);
+    const out = deriveWorkCandidates([
+      { qitemId: "q-1", state: "blocked", tags: ["project:main", "mission:release-a"] },
+      { qitemId: "q-2", state: "pending", tags: ["project:other", "mission:release-a"] },
+    ], byProject, nothingElse, w.missions);
+    expect(out.held[0]!.missionPath).toBe(join(w.missions, "release-a"));
+    expect(out.next[0]!.missionPath).toBe(other);
   });
 
   it("never treats a mission named only in body text as evidence", () => {
@@ -534,6 +578,196 @@ describe("trace-to-root --packet — the work packet as text", () => {
   });
 });
 
+describe("trace-to-root with nothing in progress — held and pending work as context, never current work", () => {
+  const NO_BATON = deriveCurrentWork([], "/missions").currentWorkBasis;
+  type Row = Parameters<typeof deriveWorkCandidates>[0][number];
+  /** What the plain whoami answer carries as heldAndPendingWork, built by the same derivation. */
+  const heldWork = (w: ReturnType<typeof world>, rows: Row[], extra: object = {},
+    resolver: Parameters<typeof deriveWorkCandidates>[1] = w.missions) => {
+    const { held, next } = deriveWorkCandidates(rows, resolver, nothingElse, null);
+    return { missionsRoot: w.missions, held, next, heldTruncated: false, nextTruncated: false, ...extra };
+  };
+  // The hook always passes --check; none of these is a failure.
+  const plain = (w: ReturnType<typeof world>, held: unknown, args: string[] = []) =>
+    w.trace(["--trees", "work", "--check", "--unresolved-work-advisory", "--work-basis", NO_BATON, "--held-work", "-", ...args], held);
+  const packet = (w: ReturnType<typeof world>, rows: Row[]) =>
+    w.trace(["--trees", "work", "--check", "--packet", "--work-candidates", "-"], { ...deriveWorkCandidates(rows, w.missions, nothingElse),
+      heldTruncated: false, nextTruncated: false, heldAndNextTruncated: false });
+  const parked = (tags: string[], qitemId = "q-held"): Row => ({ qitemId, state: "blocked", summary: "parked", tags, blockedOn: "q-gate" });
+  const pending = (tags: string[], qitemId = "q-next"): Row => ({ qitemId, state: "pending", summary: "later", tags });
+  const CONTEXT = "CONTEXT FROM HELD AND PENDING WORK — nothing is in progress";
+
+  it("traces the one slice a held row resolves to, labelled as context with the row listed as held (held-only)", () => {
+    const w = world();
+    const result = plain(w, heldWork(w, [parked(["mission:release-a", "slice:12-refocus"])]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`## WORK TRACE\n${CONTEXT}, and every held and pending row (1 held, 0 pending) resolves to this slice. `
+      + "It is context, not your current work: using it does not resume a task.");
+    expect(result.stdout).toContain(`start: ${w.slice}`);
+    expect(result.stdout).toContain("intent: Ship A");
+    expect(result.stdout).toContain("intent: Refocus knows the work");
+    expect(result.stdout).toContain("HELD WORK (blocked; this is not next):\n- q-held — parked — blocked on q-gate — continuation: none recorded [mission: release-a / slice: 12-refocus]");
+    expect(result.stdout).not.toContain("FALLBACK");
+    expect(result.stdout).not.toContain("WORK FROM QUEUE EVIDENCE");
+  });
+
+  it("traces the mission a pending row names (pending-only)", () => {
+    const w = world();
+    const result = plain(w, heldWork(w, [pending(["mission:release-b"])]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("(0 held, 1 pending) resolves to this mission (no slice named)");
+    expect(result.stdout).toContain(`start: ${join(w.missions, "release-b")}`);
+    expect(result.stdout).toContain("intent: Ship B");
+    expect(result.stdout).toContain("POSSIBLE NEXT WORK (pending; no order implied):\n- q-next — later [mission: release-b]");
+    expect(result.stdout).not.toContain("FALLBACK");
+  });
+
+  it("reaches the mission for a held row with a mission tag and no slice", () => {
+    const w = world();
+    const result = plain(w, heldWork(w, [parked(["mission:release-a"])]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("(1 held, 0 pending) resolves to this mission (no slice named)");
+    expect(result.stdout).toContain(`start: ${join(w.missions, "release-a")}`);
+    expect(result.stdout).toContain("intent: Ship A");
+    expect(result.stdout).not.toContain("Refocus knows the work");
+  });
+
+  it("stops at the mission when the rows share it but name different slices", () => {
+    const w = world();
+    mkdirSync(join(w.missions, "release-a/slices/13-other"), { recursive: true });
+    writeFileSync(join(w.missions, "release-a/slices/13-other/SPEC.md"), "---\nintent: Other slice\n---\n", "utf8");
+    const result = plain(w, heldWork(w, [parked(["mission:release-a", "slice:12-refocus"]), pending(["mission:release-a", "slice:13-other"])]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("(1 held, 1 pending) resolves to this mission (not every row resolves to one slice, so it stops at the mission)");
+    expect(result.stdout).toContain(`start: ${join(w.missions, "release-a")}\n`);
+    expect(result.stdout).not.toContain("Refocus knows the work");
+    expect(result.stdout).not.toContain("Other slice");
+    // A slice that does not resolve stops there too, and its row says why.
+    const typo = plain(w, heldWork(w, [parked(["mission:release-a", "slice:12-refocus"]), pending(["mission:release-a", "slice:99-none"])]));
+    expect(typo.stdout).toContain("resolves to this mission (not every row resolves to one slice, so it stops at the mission)");
+    expect(typo.stdout).toContain("- q-next — later [mission: release-a / slice: 99-none] — UNRESOLVED ON THIS HOST: slice 99-none resolves to 0 directories under release-a");
+    expect(typo.stdout).not.toContain("Refocus knows the work");
+  });
+
+  it("lists conflicting missions with the work-start route and keeps the broad orientation", () => {
+    const w = world();
+    const result = plain(w, heldWork(w, [parked(["mission:release-a", "slice:12-refocus"]), pending(["mission:release-b"])]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("## WORK — name it\nNo in-progress queue row names your work.");
+    expect(result.stdout).toContain("does not settle one mission (the rows name different missions). Choosing one does not resume a task. The missions it names:\n"
+      + `- release-a / 12-refocus — ${w.slice}\n- release-b — ${join(w.missions, "release-b")}\n`);
+    expect(result.stdout).toContain(`--trees work --packet --work-start ${w.missions}/<mission>`);
+    expect(result.stdout).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
+    expect(result.stdout).not.toContain(CONTEXT);
+    expect(result.stdout).not.toContain("intent: Ship A");
+  });
+
+  it("gives one mission name in two project roots no shared chain", () => {
+    const w = world();
+    const other = join(w.root, "other/missions");
+    mkdirSync(join(other, "release-a"), { recursive: true });
+    writeFileSync(join(other, "release-a/SPEC.md"), "---\nintent: Another project's A\n---\n", "utf8");
+    const byProject = (row: { tags?: string[] | null }) => ((row.tags ?? []).includes("project:other") ? other : w.missions);
+    const result = plain(w, heldWork(w, [parked(["mission:release-a"]), pending(["project:other", "mission:release-a"])], {}, byProject));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("(the rows name different missions)");
+    expect(result.stdout).toContain(`- release-a — ${join(w.missions, "release-a")}\n- release-a — ${join(other, "release-a")}`);
+    expect(result.stdout).not.toContain(CONTEXT);
+    expect(result.stdout).not.toContain("Another project's A");
+  });
+
+  it.each([
+    ["a cut held list", { heldTruncated: true }, [], "the held or pending list was cut, so rows past the cut may name other work"],
+    ["a cut list from a daemon before the per-list flags", { heldTruncated: undefined, nextTruncated: undefined, heldAndNextTruncated: true }, [],
+      "the held or pending list was cut"],
+    ["an unresolved mission", {}, [pending(["mission:release"], "q-gone")], "a row's mission did not resolve to one directory here"],
+    ["a row with no mission", {}, [pending([], "q-untagged")], "a row names no mission"],
+  ] as const)("keeps partial evidence partial: %s", (_label, flags, extraRows, why) => {
+    const w = world();
+    const result = plain(w, heldWork(w, [parked(["mission:release-a"]), ...extraRows], flags));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`does not settle one mission (${why}`);
+    expect(result.stdout).toContain(`- release-a — ${join(w.missions, "release-a")}`);
+    expect(result.stdout).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
+    expect(result.stdout).not.toContain(CONTEXT);
+    if (extraRows.some((row) => row.qitemId === "q-gone")) {
+      expect(result.stdout).toContain("- release — UNRESOLVED ON THIS HOST: mission release resolves to 0 directories on this host");
+    }
+  });
+
+  it("keeps today's fallback, byte for byte, when no held or pending row names a mission (none)", () => {
+    const w = world();
+    const today = w.trace(["--trees", "work", "--check", "--unresolved-work-advisory", "--work-basis", NO_BATON]);
+    for (const held of [heldWork(w, []), heldWork(w, [pending([], "q-fyi")])]) {
+      const result = plain(w, held);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout.split("\n\nPOSSIBLE NEXT WORK")[0]!.trimEnd()).toBe(today.stdout.trimEnd());
+    }
+  });
+
+  it("shows a held row's first body line when it has no summary", () => {
+    const w = world();
+    const result = plain(w, heldWork(w, [{ qitemId: "q-held", state: "blocked", summary: null, body: "# Unblock the eval\nwaiting on keys",
+      tags: ["mission:release-a"], blockedOn: "q-gate" }]));
+    expect(result.stdout).toContain("- q-held — Unblock the eval — blocked on q-gate");
+  });
+
+  it("traces held context in a catalogued project outside workspace.root from the hook's work roots, and is a gap without them", () => {
+    const w = world();
+    const outside = join(w.root, "project-b/missions");
+    mkdirSync(join(outside, "m1"), { recursive: true });
+    writeFileSync(join(w.root, "project-b/SPEC.md"), "---\nintent: ship project b\n---\n", "utf8");
+    writeFileSync(join(outside, "m1/SPEC.md"), "---\nintent: mission one\n---\n", "utf8");
+    const held = heldWork(w, [parked(["mission:m1"])], {}, outside);
+    const result = plain(w, held, ["--work-root", join(w.root, "project-b")]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`root: ${join(w.root, "project-b")}`);
+    expect(result.stdout).toContain("intent: mission one");
+    const unknownRoot = plain(w, held);
+    expect(unknownRoot.status).toBe(1);
+    expect(unknownRoot.stdout).toContain("TRACE GAP — start is outside configured root");
+  });
+
+  it("does the same on the work-packet path in place of the name-it ask", () => {
+    const w = world();
+    const one = packet(w, [parked(["mission:release-a", "slice:12-refocus"]), pending(["mission:release-a", "slice:12-refocus"])]);
+    expect(one.status, one.stdout + one.stderr).toBe(0);
+    expect(one.stdout).toContain(`${CONTEXT}, and every held and pending row (1 held, 1 pending) resolves to this slice.`);
+    expect(one.stdout).toContain("intent: Refocus knows the work");
+    expect(one.stdout).not.toContain("No in-progress queue row names your work");
+    expect(one.stdout).not.toContain("ORIENTATION");
+    expect(one.stdout).toContain("HELD WORK (blocked; this is not next):");
+    const two = packet(w, [parked(["mission:release-a"]), pending(["mission:release-b"])]);
+    expect(two.status, two.stdout + two.stderr).toBe(0);
+    expect(two.stdout).toContain("No in-progress queue row names your work. If you are working from messages, name the mission they belong to; "
+      + "if you have no current work, say so.\nHeld and pending work is context, not current work, and does not settle one mission");
+    expect(two.stdout).toContain(`- release-b — ${join(w.missions, "release-b")}\nMissions on this host: release-a, release-b`);
+    expect(two.stdout).toContain("## ORIENTATION — the project-level chain, not your work");
+    expect(two.stdout).not.toContain(CONTEXT);
+    // A daemon from before resolved scope sends a pending row's mission names only: that is unknown, not unresolved.
+    const older = w.trace(["--trees", "work", "--check", "--packet", "--work-candidates", "-"],
+      { candidates: [], unknown: [], held: [], next: [{ qitemId: "q-next", summary: "later", missions: ["release-a"] }], missionsOnHost: ["release-a"] });
+    expect(older.status, older.stdout + older.stderr).toBe(0);
+    expect(older.stdout).toContain("(the daemon did not say which folders the rows' missions resolve to)");
+    expect(older.stdout).toContain("- q-next — later [mission: release-a]");
+    expect(older.stdout).not.toContain(CONTEXT);
+  });
+
+  it("leaves in-progress work as it is: its candidate is the work, and held rows stay held", () => {
+    const w = world();
+    const result = packet(w, [{ qitemId: "q-1", state: "in-progress", tags: ["mission:release-b"] }, parked(["mission:release-a"])]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("WORK FROM QUEUE EVIDENCE — tag mission:release-b on row q-1");
+    expect(result.stdout).toContain("- q-held — parked — blocked on q-gate — continuation: none recorded [mission: release-a]");
+    expect(result.stdout).not.toContain(CONTEXT);
+    // An explicit start wins over held work too.
+    const explicit = plain(w, heldWork(w, [parked(["mission:release-a"])]), ["--work-start", join(w.missions, "release-b")]);
+    expect(explicit.stdout).toContain("intent: Ship B");
+    expect(explicit.stdout).not.toContain(CONTEXT);
+    expect(explicit.stdout).not.toContain("HELD WORK");
+  });
+});
+
 describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
   function fire(w: ReturnType<typeof world>, extra: NodeJS.ProcessEnv, runtime: "claude" | "codex" = "claude") {
     const home = join(w.root, "home");
@@ -623,5 +857,46 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
     const w = world();
     const { argv } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: "1", OPENRIG_REFOCUS_WORK_NODE: w.slice });
     expect(argv).toContain(`--work-start ${w.slice} --work-candidates -`);
+  });
+
+  // With nothing in progress, the plain answer carries the seat's held and pending rows; the hook hands them to the trace.
+  const NO_BATON = deriveCurrentWork([], "/missions").currentWorkBasis;
+  const noBaton = (w: ReturnType<typeof world>) => {
+    const { held, next } = deriveWorkCandidates([{ qitemId: "q-held", state: "blocked", summary: "parked", tags: ["mission:release-a"] }],
+      w.missions, nothingElse, null);
+    const heldAndPendingWork = { missionsRoot: w.missions, held, next, heldTruncated: false, nextTruncated: false };
+    return { heldAndPendingWork, answer: { currentWork: null, currentWorkBasis: NO_BATON, role: { state: "not-declared", files: [] }, heldAndPendingWork } };
+  };
+
+  it.each(["claude", "codex"] as const)("with the packet off (%s), passes held and pending work from the one plain lookup", (runtime) => {
+    const w = world();
+    const { heldAndPendingWork, answer } = noBaton(w);
+    const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: undefined, RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(answer) }, runtime);
+    expect(w.calls().split("\n").filter((call) => call.startsWith("queue "))).toEqual(["queue whoami --json"]);
+    expect(argv).toBe(`${TRACE} --trees work --depth light --check --unresolved-work-advisory --work-basis ${NO_BATON} --held-work -\n`);
+    expect(JSON.parse(stdin)).toEqual(heldAndPendingWork);
+  });
+
+  it("with the packet on and an older rig CLI, the plain fallback still carries held and pending work", () => {
+    const w = world();
+    const { heldAndPendingWork, answer } = noBaton(w);
+    const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: "1", RIG_REJECT_CANDIDATES: "1", RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(answer) });
+    expect(w.calls()).toContain("queue whoami --json --work-candidates\nqueue whoami --json\n");
+    expect(argv).toContain(`--packet --work-basis ${NO_BATON} --held-work -\n`);
+    expect(JSON.parse(stdin)).toEqual(heldAndPendingWork);
+  });
+
+  it("never passes held work beside a current work node, an explicit start, or a topology-only trace", () => {
+    const passes = (w: ReturnType<typeof world>, extra: NodeJS.ProcessEnv, ending: string) => {
+      const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: "0", RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(noBaton(w).answer), ...extra });
+      expect(argv.endsWith(`--unresolved-work-advisory ${ending}\n`), argv).toBe(true);
+      expect(stdin).toBe("");
+    };
+    const settled = world();
+    const current = { mission: "release-a", slice: "12-refocus", workNodePath: settled.slice, basis: "one typed" };
+    passes(settled, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ ...noBaton(settled).answer, currentWork: current }) }, `--work-start ${settled.slice}`);
+    const explicit = world();
+    passes(explicit, { OPENRIG_REFOCUS_WORK_NODE: explicit.slice }, `--work-start ${explicit.slice}`);
+    passes(world(), { OPENRIG_REFOCUS_TREES: "topology" }, `--work-basis ${NO_BATON}`);
   });
 });

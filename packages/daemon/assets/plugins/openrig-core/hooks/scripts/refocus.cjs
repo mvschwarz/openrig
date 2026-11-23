@@ -291,10 +291,18 @@ function renderTrace() {
   // An explicit start always wins. Otherwise the candidates replace the strict answer: the
   // strict node ignores mission-only rows, so it could hide a second mission in flight.
   const explicitStart = Boolean(process.env.OPENRIG_REFOCUS_WORK_NODE);
+  let heldWork = null;
   if (work.start && (explicitStart || !evidence)) args.push("--work-start", work.start);
   else if (evidence) args.push("--work-candidates", "-");
-  else if (work.basis) args.push("--work-basis", work.basis);
-  else if (work.unknown) {
+  else if (work.basis) {
+    args.push("--work-basis", work.basis);
+    // With nothing in progress, the same answer carries the seat's held and pending rows; the trace shows them as context.
+    const held = whoami?.answer?.heldAndPendingWork;
+    if (trees !== "topology" && held && typeof held === "object") {
+      heldWork = JSON.stringify(held);
+      args.push("--held-work", "-");
+    }
+  } else if (work.unknown) {
     args.push("--work-unknown", work.unknown);
     if (work.timedOut) args.push("--work-unknown-timed-out");
   }
@@ -319,7 +327,7 @@ function renderTrace() {
     ? { error: new Error("no time left in the refocus budget"), status: null, stdout: "", stderr: "" }
     : spawnSync(process.env.PYTHON || "python3", args, {
       encoding: "utf8",
-      ...(evidence ? { input: evidence } : {}),
+      ...(evidence || heldWork ? { input: evidence || heldWork } : {}),
       env,
       timeout,
       maxBuffer: 16 * 1024 * 1024,

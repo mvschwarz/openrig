@@ -1591,25 +1591,21 @@ export function queueRoutes(): Hono {
         ?.resolve({ sessionName: transportSenderSession(c) ?? session, compact: true });
       role = deriveRole(c.get("db" as never) as Database.Database | undefined, identity?.identity.nodeId ?? null);
     } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
-    // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
-    // default answer is unchanged. In-progress rows are the candidate evidence, so they come
-    // from the same unbounded read as the derivation; held and next work are bounded display lists.
+    // Held and next work are bounded display lists, read only in blocked and pending states.
     // Each list gets its own bound, so newer pending rows can never push a set-aside row out of
     // "held" (a parked row silently missing there is the costliest miss).
-    if (c.req.query("candidates") === "1") {
+    const readHeldAndNext = () => {
       const held = repo.list({ destinationSession: session, state: ["blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
       const next = repo.list({ destinationSession: session, state: ["pending"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
-      const heldTruncated = held.length > WORK_CANDIDATE_LIST_LIMIT;
-      const nextTruncated = next.length > WORK_CANDIDATE_LIST_LIMIT;
-      const workCandidates = deriveWorkCandidates(
-        [...inProgress, ...held.slice(0, WORK_CANDIDATE_LIST_LIMIT), ...next.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
-        currentWorkRoot,
-        {
-          getRow: (qitemId) => repo.getById(qitemId) ?? null,
-          continuationOf: (qitemId) => repo.currentParkContinuation(qitemId),
-        },
-        missionsRoot,
-      );
+      return { held: held.slice(0, WORK_CANDIDATE_LIST_LIMIT), next: next.slice(0, WORK_CANDIDATE_LIST_LIMIT),
+        heldTruncated: held.length > WORK_CANDIDATE_LIST_LIMIT, nextTruncated: next.length > WORK_CANDIDATE_LIST_LIMIT };
+    };
+    // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
+    // default answer is unchanged. In-progress rows are the candidate evidence, so they come
+    // from the same unbounded read as the derivation.
+    if (c.req.query("candidates") === "1") {
+      const { held, next, heldTruncated, nextTruncated } = readHeldAndNext();
+      const workCandidates = deriveWorkCandidates([...inProgress, ...held, ...next], currentWorkRoot, lookups, missionsRoot);
       // The selected project's own missions, by its catalog entry's missions root, which may sit outside workspace.root:
       // the trace lists these when it orients from that project. An unhealthy entry adds none and keeps today's listing.
       const selectedMissionsRoot = workProject && "root" in workProject ? projectMissionsRoots.get(workProject.id)?.root : null;
@@ -1620,7 +1616,18 @@ export function queueRoutes(): Hono {
         workCandidates: { ...workCandidates, ...(projectMissions ? { projectMissions } : {}),
           heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
+    // Nothing in progress: the seat's held and pending rows, each with its own resolved scope, ride the plain answer so
+    // refocus can show them as context (never as current work) from its one lookup. Absent when there are none.
+    let heldField = {};
+    if (inProgress.length === 0) {
+      const { held, next, heldTruncated, nextTruncated } = readHeldAndNext();
+      if (held.length > 0 || next.length > 0) {
+        // No default missions root: the host's mission listing is the work packet's, not needed here.
+        const scoped = deriveWorkCandidates([...held, ...next], currentWorkRoot, lookups, null);
+        heldField = { heldAndPendingWork: { missionsRoot, held: scoped.held, next: scoped.next, heldTruncated, nextTruncated } };
+      }
+    }
+    return c.json({ ...position, ...derived, ...choiceField, ...heldField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.

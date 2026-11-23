@@ -597,6 +597,23 @@ exit 1
       expect(fallback.calls).toEqual(["queue whoami --json", "config --json"]);
     });
 
+    it("delivers a parked seat's mission as labelled context from the same 2 rig processes, with the packet off", () => {
+      const f = fixture();
+      const mission = join(f.workspace, "missions/release");
+      const parked = { qitemId: "q-parked", summary: "waiting on review", blockedOn: "q-review", continuation: "ship it",
+        missions: ["release"], slice: "feature", missionPath: mission, slicePath: f.workStart, unresolved: null };
+      const fire = hook(f, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ currentWork: null, currentWorkBasis: NO_BATON,
+        heldAndPendingWork: { missionsRoot: join(f.workspace, "missions"), held: [parked], next: [], heldTruncated: false, nextTruncated: false } }) });
+      expect(fire.status, fire.stderr).toBe(0);
+      expect(fire.context).toContain("CONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending) resolves to this slice.");
+      expect(fire.context).toContain("Ship the release");
+      expect(fire.context).toContain("Deliver refocus");
+      expect(fire.context).toContain("- q-parked — waiting on review — blocked on q-review — continuation: ship it [mission: release / slice: feature]");
+      expect(fire.context).not.toContain("FALLBACK");
+      expect(fire.context).not.toContain("TRACE GAP");
+      expect(fire.calls).toEqual(["queue whoami --json", "config --json"]);
+    });
+
     it("local notes avoid a delayed CLI inside the unchanged default trace cap", () => {
       const f = fixture();
       const result = hook(f, { RIG_SLOW_RESOLVE: "3", OPENRIG_REFOCUS_BUDGET_MS: "" });

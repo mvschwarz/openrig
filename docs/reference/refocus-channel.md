@@ -185,6 +185,34 @@ With the switch on:
 `trace-to-root.py --packet --work-candidates <path|->` renders the same packet
 by hand.
 
+## With nothing in progress: held and pending work as context
+
+When a seat holds no in-progress row, plain `rig queue whoami --json` also
+carries its held (blocked) and pending rows as `heldAndPendingWork`: up to 50 of
+each, with which list was cut. Each row has its summary (or, when it has none,
+its body's first line with words in it), its `mission:` and `slice:` tags, and
+the mission and slice folders they resolve to through the row's project, or why
+they don't. Completed rows are never read, and none of this changes what counts
+as current work. The hook passes these rows to the trace from that same lookup,
+with the work packet on or off, and the work packet's `workCandidates` carries
+the same fields. The trace shows them as context, never as current work:
+
+- When every held and pending row resolves to one mission folder and neither
+  list was cut, the trace shows that mission's chain under
+  `CONTEXT FROM HELD AND PENDING WORK`, down to the slice when every row
+  resolves to the same slice. Missions are compared by folder, so one mission
+  name in two projects is two missions. Using this context does not resume a
+  task.
+- Otherwise (rows naming different missions, a row with no mission tag, a tag
+  that doesn't resolve here, or a cut list) it lists each mission the rows name
+  with its folder and the `--work-start` route, and keeps the broad
+  orientation. Held rows are listed first; that is only the order shown.
+- When no held or pending row names a mission, the orientation is as before.
+
+In every case the held and pending rows follow the work section, labelled as in
+the work packet. `trace-to-root.py --work-basis <basis> --held-work <path|->`
+renders this by hand.
+
 ## Relation to chain files
 
 The chain files are the durable, altitude-addressed home of orientation

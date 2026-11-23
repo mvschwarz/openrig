@@ -3364,6 +3364,90 @@ describe("queue routes", () => {
       expect(workCandidates.heldTruncated).toBe(false);
       expect(workCandidates.nextTruncated).toBe(true);
       expect(workCandidates.heldAndNextTruncated).toBe(true);
+      // The plain answer carries the same bounded lists when nothing is in progress, and says which was cut.
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as {
+        heldAndPendingWork: { held: unknown[]; next: unknown[]; heldTruncated: boolean; nextTruncated: boolean } };
+      expect(plain.heldAndPendingWork.held).toHaveLength(1);
+      expect(plain.heldAndPendingWork.next).toHaveLength(50);
+      expect(plain.heldAndPendingWork.heldTruncated).toBe(false);
+      expect(plain.heldAndPendingWork.nextTruncated).toBe(true);
+    });
+
+    // With nothing in progress, plain whoami carries the seat's held and pending rows with their own resolved scope, so
+    // refocus can show them as context from its one lookup. Never completed rows, and never as current work.
+    describe("held and pending work in the plain answer", () => {
+      let top: string;
+      beforeEach(() => {
+        top = fs.realpathSync(mkdtempSync(join(tmpdir(), "whoami-held-")));
+        mkdirSync(join(top, "missions", "release", "slices", "01-work"), { recursive: true });
+        writeFileSync(join(top, "missions", "release", "SPEC.md"), "---\nintent: x\n---\n", "utf8");
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox, slicesRoot: join(top, "missions") });
+      });
+      afterEach(() => rmSync(top, { recursive: true, force: true }));
+      const row = async (state: "blocked" | "pending" | "done" | "in-progress", tags: string[], fields: { summary?: string; body?: string } = {}) => {
+        const item = await queueRepo.create({ sourceSession: "alice@r", destinationSession: "bob@r", body: fields.body ?? "w",
+          summary: fields.summary, tags, nudge: false });
+        if (state !== "pending") db.prepare("UPDATE queue_items SET state = ?, blocked_on = ? WHERE qitem_id = ?")
+          .run(state, state === "blocked" ? "external:gate" : null, item.qitemId);
+        return item.qitemId;
+      };
+      type Answer = { currentWork: unknown; currentWorkBasis: string; heldAndPendingWork?: { missionsRoot: string;
+        held: Array<Record<string, unknown>>; next: Array<Record<string, unknown>>; heldTruncated: boolean; nextTruncated: boolean } };
+      const whoami = async () => (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as Answer;
+
+      it("names each row's resolved mission and slice, and a summary-less row's first body line", async () => {
+        const parked = await row("blocked", ["mission:release"], { body: "\n# Wait for the eval keys\ndetails" });
+        const next = await row("pending", ["mission:release", "slice:01-work"], { summary: "pick up the work" });
+        const done = await row("done", ["mission:release", "slice:01-work"], { summary: "finished" });
+        const answer = await whoami();
+        expect(answer.currentWork).toBeNull();
+        expect(answer.currentWorkBasis).toMatch(/^no typed in-progress work/);
+        expect(answer.heldAndPendingWork).toEqual({
+          missionsRoot: join(top, "missions"),
+          held: [{ qitemId: parked, summary: "Wait for the eval keys", blockedOn: "external:gate", continuation: null,
+            missions: ["release"], slice: null, missionPath: join(top, "missions", "release"), slicePath: null, unresolved: null }],
+          next: [{ qitemId: next, summary: "pick up the work", missions: ["release"], slice: "01-work",
+            missionPath: join(top, "missions", "release"), slicePath: join(top, "missions", "release", "slices", "01-work"), unresolved: null }],
+          heldTruncated: false, nextTruncated: false,
+        });
+        expect(JSON.stringify(answer)).not.toContain(done);
+      });
+
+      it("adds nothing for completed-only work, which never becomes current", async () => {
+        await row("done", ["mission:release", "slice:01-work"]);
+        const answer = await whoami();
+        expect(answer.currentWork).toBeNull();
+        expect(answer).not.toHaveProperty("heldAndPendingWork");
+        expect(answer).not.toHaveProperty("currentWorkChoice");
+      });
+
+      it("resolves one mission name in two catalogued projects to two directories", async () => {
+        temporaryWorkspace = fs.realpathSync(mkdtempSync(join(tmpdir(), "whoami-held-projects-")));
+        writeFileSync(join(temporaryWorkspace, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+        for (const project of ["alpha", "beta"]) {
+          mkdirSync(join(temporaryWorkspace, project, "work-items", "release"), { recursive: true });
+          writeFileSync(join(temporaryWorkspace, project, "project.yaml"), `id: ${project}\nmissions:\n  root: work-items\n`);
+          writeFileSync(join(temporaryWorkspace, project, "SPEC.md"), `---\nid: ${project}\n---\n`);
+          writeFileSync(join(temporaryWorkspace, project, "work-items", "release", "SPEC.md"), "---\nid: release\n---\n");
+        }
+        const workspace = temporaryWorkspace;
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+          settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? join(workspace, "workspace.yaml") : workspace }) } });
+        await row("blocked", ["project:alpha", "mission:release"]);
+        await row("pending", ["project:beta", "mission:release"]);
+        const work = (await whoami()).heldAndPendingWork!;
+        expect(work.held[0]!.missionPath).toBe(join(workspace, "alpha", "work-items", "release"));
+        expect(work.next[0]!.missionPath).toBe(join(workspace, "beta", "work-items", "release"));
+      });
+
+      it("adds nothing beside in-progress work, which keeps today's answer", async () => {
+        await row("blocked", ["mission:release"]);
+        const claimed = await row("in-progress", ["mission:release", "slice:01-work"]);
+        const answer = await whoami();
+        expect((answer.currentWork as { workNodePath: string }).workNodePath).toBe(join(top, "missions", "release", "slices", "01-work"));
+        expect(answer).not.toHaveProperty("heldAndPendingWork");
+        expect(claimed).toBeTruthy();
+      });
     });
 
     it("GET /api/queue/whoami returns 400 without session query param", async () => {

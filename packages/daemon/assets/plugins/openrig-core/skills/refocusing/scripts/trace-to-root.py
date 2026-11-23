@@ -208,7 +208,10 @@ DEFAULT_NOTES_MAX_AGE_DAYS = 14
 FIELD_CHARS = 160
 HELD_SHOWN = 20
 NEXT_SHOWN = 10
+CHOICES_SHOWN = 10
 SECTION_CHARS = 1500
+NOTHING_IN_PROGRESS = ("No in-progress queue row names your work. If you are working from messages, "
+                       "name the mission they belong to; if you have no current work, say so.")
 
 
 def one_line(text):
@@ -549,6 +552,18 @@ def cut_notice(name, state, rows, shown, daemon_cut):
             f"`rig queue list --owned --state {state}` has the rest)")
 
 
+def unresolved_note(row):
+    return f" — UNRESOLVED ON THIS HOST: {row['unresolved']}" if row.get("unresolved") else ""
+
+
+def scope_label(row):
+    """A held or next row's own mission (and slice) tags, as a label, and why they did not resolve here if they didn't."""
+    missions = ", ".join(row.get("missions") or [])
+    if not missions:
+        return ""
+    return f" [mission: {missions}" + (f" / slice: {row['slice']}" if row.get("slice") else "") + "]" + unresolved_note(row)
+
+
 def render_held_and_next(evidence):
     output = []
     per_list = "heldTruncated" in evidence or "nextTruncated" in evidence
@@ -559,15 +574,13 @@ def render_held_and_next(evidence):
             (summary, blocked_on, continuation), pointer = row_fields(
                 row, ("summary", "no summary"), ("blockedOn", "unknown"), ("continuation", "none recorded"))
             output.append(f"- {row.get('qitemId') or 'a row'} — {summary} — blocked on {blocked_on} — "
-                          f"continuation: {continuation}{pointer}")
+                          f"continuation: {continuation}{scope_label(row)}{pointer}")
     following = evidence.get("next") or []
     if following:
         output.append("POSSIBLE NEXT WORK (pending; no order implied):")
         for row in following[:NEXT_SHOWN]:
-            missions = ", ".join(row.get("missions") or [])
             (summary,), pointer = row_fields(row, ("summary", "no summary"))
-            output.append(f"- {row.get('qitemId') or 'a row'} — {summary}"
-                          + (f" [mission: {missions}]" if missions else "") + pointer)
+            output.append(f"- {row.get('qitemId') or 'a row'} — {summary}{scope_label(row)}{pointer}")
     notices = [
         cut_notice("held", "blocked", held, HELD_SHOWN, per_list and bool(evidence.get("heldTruncated"))),
         cut_notice("next", "pending", following, NEXT_SHOWN, per_list and bool(evidence.get("nextTruncated"))),
@@ -576,6 +589,59 @@ def render_held_and_next(evidence):
     if not per_list and evidence.get("heldAndNextTruncated"):
         output.append("(held and next lists were cut; `rig queue list` has the rest)")
     return "\n".join(output)
+
+
+def scope_choice(row):
+    name = ", ".join(row["missions"]) + (f" / {row['slice']}" if row.get("slice") else "")
+    where = row.get("slicePath") or row.get("missionPath")
+    return f"- {name}" + (f" — {where}" if where else "") + unresolved_note(row)
+
+
+def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
+    """Nothing in progress: held (blocked) and pending rows are context, never current work. Returns (trace, choices):
+    the work trace of the one mission every row resolves to (of its slice, when that is the same for every row too), or
+    else no trace and lines naming the missions the rows do name, for the agent to choose from. Missions are compared by
+    resolved directory, never by name, and only across the daemon's whole lists: a cut list, a row naming no mission or
+    one that did not resolve leaves the choice to the agent. Held rows come first only in the listing."""
+    held, following = evidence.get("held") or [], evidence.get("next") or []
+    rows = [*held, *following]
+    named = [row for row in rows if row.get("missions")]
+    if not named:
+        return None, []
+    missions = {row.get("missionPath") for row in rows}
+    slices = {row.get("slicePath") for row in rows}
+    if any(evidence.get(flag) for flag in ("heldTruncated", "nextTruncated", "heldAndNextTruncated")):
+        why = "the held or pending list was cut, so rows past the cut may name other work"
+    elif len(named) < len(rows):
+        why = "a row names no mission"
+    elif any("missionPath" not in row for row in named):
+        why = "the daemon did not say which folders the rows' missions resolve to"
+    elif None in missions:
+        why = "a row's mission did not resolve to one directory here"
+    elif len(missions) > 1:
+        why = "the rows name different missions"
+    else:
+        if len(slices) == 1 and None not in slices:
+            start, level = next(iter(slices)), "this slice"
+        else:
+            start = next(iter(missions))
+            level = ("this mission (not every row resolves to one slice, so it stops at the mission)"
+                     if any(row.get("slice") for row in rows) else "this mission (no slice named)")
+        note = (f"CONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row "
+                f"({len(held)} held, {len(following)} pending) resolves to {level}. It is context, not your current "
+                "work: using it does not resume a task.")
+        traced = render_work(Path(start), work_root_for(start, root, extra_roots), depth, failures, packet=packet)
+        head, _, rest = traced.partition("\n")
+        return "\n".join([head, note, rest]), []
+    choices = list(dict.fromkeys(scope_choice(row) for row in named))
+    more = [f"- … and {len(choices) - CHOICES_SHOWN} more"] if len(choices) > CHOICES_SHOWN else []
+    return None, [f"Held and pending work is context, not current work, and does not settle one mission ({why}). "
+                  "Choosing one does not resume a task. The missions it names:", *choices[:CHOICES_SHOWN], *more]
+
+
+def work_start_route(start_root, extra_root=""):
+    return ["Then read that mission's current intent as text:",
+            f"  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {start_root}/<mission>"]
 
 
 def selected_project_missions(entry, project):
@@ -607,6 +673,10 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
         traced = render_work(start, work_root_for(start, root, extra_roots), depth, failures, packet=True)
         head, _, rest = traced.partition("\n")
         return "\n".join([head, *notes, rest])
+    held_trace, held_choices = (held_context(evidence, root, depth, failures, extra_roots, packet=True)
+                                if not candidates and not unknown else (None, []))
+    if held_trace:
+        return held_trace
 
     missions_root = evidence.get("missionsRoot") or str(root / "missions")
     names = evidence.get("missionsOnHost") or []
@@ -625,8 +695,8 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
         extra_root = f" --work-root {shlex.quote(str(Path(project).expanduser().resolve()))}"
     output = ["## WORK — name it"]
     if not candidates and not unknown:
-        output.append("No in-progress queue row names your work. If you are working from messages, "
-                      "name the mission they belong to; if you have no current work, say so.")
+        output.append(NOTHING_IN_PROGRESS)
+        output.extend(held_choices)
     elif len(candidates) > 1:
         output.append(f"{len(candidates)} candidates are in flight. Say which mission you are actually working on.")
     else:
@@ -641,8 +711,7 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
             output.append(f"- {row.get('qitemId') or 'a row'} — {summary}: {row.get('reason')}{pointer}")
     if not candidates and names:
         output.append(f"{listing}: " + ", ".join(names) + (", …" if names_cut else ""))
-    output.append("Then read that mission's current intent as text:")
-    output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {start_root}/<mission>")
+    output.extend(work_start_route(start_root, extra_root))
     # Nothing in progress: orient from the seat's selected project, which may live outside
     # workspace.root (#3320), or say why none was selected. Held and next work stay evidence only.
     orient_root = root
@@ -741,6 +810,7 @@ def main():
     parser.add_argument("--check", action="store_true", help="exit nonzero on trace or notes resolution failure; rendered text is unchanged")
     parser.add_argument("--packet", action="store_true", help="carry duties and notes as text by section, with old-notes cues")
     parser.add_argument("--work-candidates", help="labelled work evidence as JSON (a path, or - for stdin), from `rig queue whoami --work-candidates`")
+    parser.add_argument("--held-work", help="with --work-basis naming no current baton: the seat's held and pending rows as JSON (a path, or - for stdin), the `heldAndPendingWork` field of `rig queue whoami --json`; shown as context, never as current work")
     args = parser.parse_args()
 
     sections = []
@@ -767,11 +837,21 @@ def main():
             # only a standalone run with neither falls back to inferring from the working directory.
             extra_roots = extra_work_roots(args.work_root)
             explicit = args.work_start or os.environ.get("OPENRIG_REFOCUS_WORK_NODE")
-            evidence = None
+            evidence = held = None
             if args.work_candidates:
                 evidence, error = read_candidates(args.work_candidates)
                 if error:
                     sections.append(gap(f"## WORK TRACE\nTRACE GAP — {error}"))
+            elif args.held_work and not explicit and args.work_basis == NO_CURRENT_BATON_BASIS:
+                held, error = read_candidates(args.held_work)
+                if error:
+                    sections.append(gap(f"## WORK TRACE\nTRACE GAP — held and pending {error}"))
+            # Nothing in progress: held and pending work as context, traced when it settles one mission, else listed
+            # for the agent to choose from above the broad orientation below.
+            held_trace, held_choices = held_context(held, root, args.depth, failures, extra_roots, args.packet) if held else (None, [])
+            if held_choices:
+                missions_root = held.get("missionsRoot") or str(root / "missions")
+                sections.append("\n".join(["## WORK — name it", NOTHING_IN_PROGRESS, *held_choices, *work_start_route(missions_root)]))
             if explicit:
                 sections.append(render_work(Path(explicit), work_root_for(explicit, root, extra_roots), args.depth, failures, packet=args.packet))
             elif evidence is not None:
@@ -779,6 +859,8 @@ def main():
                                                   project=args.work_project, project_unknown=args.work_project_unknown))
             elif args.work_candidates:
                 pass  # the unreadable-evidence gap above is the answer; never fall back to the root
+            elif held_trace:
+                sections.append(held_trace)
             elif args.work_basis == NO_CURRENT_BATON_BASIS and args.work_project:
                 # The seat's selected project, which may live outside workspace.root (#3320).
                 project = Path(args.work_project).expanduser().resolve()
@@ -810,7 +892,7 @@ def main():
                 start = derive_work_start(root)
                 sections.append(render_work(start, root, args.depth, failures, packet=args.packet) if start else
                                 gap("## WORK TRACE\nTRACE GAP — current work node is unresolved; pass --work-start with a literal absolute path (or configure OPENRIG_REFOCUS_WORK_NODE separately)"))
-            held_and_next = render_held_and_next(evidence) if evidence else ""
+            held_and_next = render_held_and_next(evidence or held) if evidence or held else ""
             if held_and_next:
                 sections.append(held_and_next)
 
