@@ -193,6 +193,16 @@ describe("#3081 POST /api/terminal/open-all, /close-all, and /rig-viewers", () =
     expect((await post(downApp, "/api/terminal/open-all", {})).status).toBe(503);
   });
 
+  it.each([
+    [{ provider: "herdr" }, { provider: "herdr" }],
+    [{ provider: "herdr", reuseLive: false }, { provider: "herdr", reuseLive: false }],
+  ])("passes /open-all reuseLive through as sent, so the service's reuse default applies when it's left out: %j", async (body, expected) => {
+    const openAll = vi.fn(async () => ({ provider: "herdr", ok: true, rigs: [] }));
+    const { app } = makeApp({ service: { openAll } });
+    expect((await post(app, "/api/terminal/open-all", body)).status).toBe(200);
+    expect(openAll).toHaveBeenCalledExactlyOnceWith(expected);
+  });
+
   it("delegates /close-all and leaves removed /rig-viewers routes unavailable", async () => {
     const closeAll = vi.fn(async () => ({ ok: true, viewers: [{ view: "rig:a", provider: "herdr", target: "w1", outcome: "closed" }] }));
     const registerRigViewer = vi.fn(async () => ({ ok: true }));
