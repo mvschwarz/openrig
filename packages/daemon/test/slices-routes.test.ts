@@ -3771,6 +3771,70 @@ describe("GET /api/slices observed queue counts", () => {
         readySpy.mockRestore();
       }
     });
+
+    it("isolates frontmatter-id slice aliases between two overlapping WAL cooperative requests across a symlink retarget", async () => {
+      db.close();
+      db = createDb(path.join(root, "openrig-concurrent-alias-wal.sqlite"));
+      migrate(db, ALL_MIGRATIONS);
+
+      const oldRoot = path.join(root, "alpha", "missions");
+      const newRoot = path.join(root, "beta", "missions");
+      const alias = path.join(root, "wal-concurrent-alias");
+
+      write(path.join(oldRoot, "shipping", "SPEC.md"), nodeBytes("M.OLD", "active", "Old Mission"));
+      write(path.join(oldRoot, "shipping", "slices", "01-shared", "SPEC.md"), nodeBytes("SLICE.SHARED.ID", "active", "Old Shared"));
+      write(path.join(oldRoot, "shipping", "slices", "02-old-fallback", "SPEC.md"), nodeBytes("SLICE.OLD.FALLBACK", "active", "Old Fallback"));
+
+      write(path.join(newRoot, "shipping", "SPEC.md"), nodeBytes("M.NEW", "active", "New Mission"));
+      // Under newRoot, 01-shared declares SLICE.UNRELATED (no slice in newRoot owns SLICE.SHARED.ID).
+      // If reqB reuses reqA's oldRoot idAliases cache, reqB folds SLICE.SHARED.ID onto 01-shared, skips the
+      // fallback scan, and finishes before reqA invalidates with a false qitemCount: 1 on 01-shared.
+      write(path.join(newRoot, "shipping", "slices", "01-shared", "SPEC.md"), nodeBytes("SLICE.UNRELATED", "active", "New Unrelated"));
+
+      // Insert >4 cooperative rowid windows (WINDOW_ROWS = 256) so both requests genuinely yield across setImmediate.
+      const insertNoise = db.prepare(`INSERT INTO queue_items
+        (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, tags)
+        VALUES (?, '2026-11-09T00:00:00.000Z', '2026-11-09T00:00:00.000Z', 'writer@fixture', 'worker@fixture', 'done', 'routine', 'noise', NULL)`);
+      db.transaction(() => {
+        for (let i = 0; i < 1100; i++) insertNoise.run(`noise-${String(i).padStart(4, "0")}`);
+      })();
+      row("shared-frontmatter-tag", "blocked", ["slice:SLICE.SHARED.ID"], "frontmatter-tagged work");
+
+      fs.symlinkSync(oldRoot, alias, "dir");
+      const { app } = route("alpha", false, alias);
+
+      let firstSettled = false;
+      const reqA = app.request("/api/slices").then((res) => { firstSettled = true; return res; });
+      // Advance 2 cooperative event-loop turns so reqA is mid-flight, then retarget and start reqB overlapping reqA.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(firstSettled, "reqA must still be in flight when alias retargets and reqB starts").toBe(false);
+      fs.rmSync(alias);
+      fs.symlinkSync(newRoot, alias, "dir");
+      const reqB = app.request("/api/slices");
+
+      const [resA, resB] = await Promise.all([reqA, reqB]);
+      expect(resA.status).toBe(200);
+      expect(resB.status).toBe(200);
+      const bodyA = await resA.json() as { slices: Entry[] };
+      const bodyB = await resB.json() as { slices: Entry[] };
+
+      expect(bodyA.slices.map((s) => s.name).sort()).toEqual(["01-shared", "02-old-fallback"]);
+      expect(bodyA.slices.find((s) => s.name === "01-shared")).toMatchObject({
+        slicePath: path.join(alias, "shipping", "slices", "01-shared"),
+        qitemCount: 1,
+      });
+
+      expect(bodyB.slices.map((s) => s.name)).toEqual(["01-shared"]);
+      expect(bodyB.slices.find((s) => s.name === "01-shared")).toMatchObject({
+        slicePath: path.join(alias, "shipping", "slices", "01-shared"),
+        qitemCount: 0,
+      });
+
+      // A follow-up request on the new target must also observe clean aliases with zero lingering cache poisoning.
+      const followUp = await list(app);
+      expect(followUp.find((s) => s.name === "01-shared")?.qitemCount).toBe(0);
+    });
   });
 
   describe("PR2902 JOIN001 hidden authored node metadata", () => {

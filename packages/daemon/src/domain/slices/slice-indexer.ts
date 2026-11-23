@@ -308,6 +308,7 @@ interface CachedSlice {
 interface SliceIdAliases {
   nameById: Map<string, string>;
   idByName: Map<string, string>;
+  rootsKey: string | null;
   expiresAt: number;
 }
 
@@ -1257,9 +1258,15 @@ export class SliceIndexer {
     return locations.sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  private capturedRootsKey(): string | null {
+    if (this.resolvedRootsForOperation === null) return null;
+    return JSON.stringify(this.sliceRootResolutions().map((root) => [root.identity, root.physicalPath]));
+  }
+
   private sliceIdAliases(): SliceIdAliases {
     const now = Date.now();
-    if (this.idAliases && this.idAliases.expiresAt > now) return this.idAliases;
+    const rootsKey = this.capturedRootsKey();
+    if (this.idAliases && this.idAliases.expiresAt > now && this.idAliases.rootsKey === rootsKey) return this.idAliases;
     // Claims are counted over every physical slice folder in every mission, not just the
     // ones this indexer shows: a mission-scoped indexer must still see that another
     // mission's slice shares the id, and so must one that hides a same-named folder.
@@ -1284,7 +1291,7 @@ export class SliceIndexer {
       nameById.set(id, location.name);
       idByName.set(location.name, id);
     }
-    this.idAliases = { nameById, idByName, expiresAt: now + this.cacheTtlMs };
+    this.idAliases = { nameById, idByName, rootsKey, expiresAt: now + this.cacheTtlMs };
     return this.idAliases;
   }
 
@@ -1342,7 +1349,8 @@ export class SliceIndexer {
 
   private missionIdAliases(): MissionIdAliases {
     const now = Date.now();
-    if (this.missionAliases && this.missionAliases.expiresAt > now) return this.missionAliases;
+    const rootsKey = this.capturedRootsKey();
+    if (this.missionAliases && this.missionAliases.expiresAt > now && this.missionAliases.rootsKey === rootsKey) return this.missionAliases;
     const missionNames = new Set<string>();
     const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
     const claims = new Map<string, Set<string>>();
@@ -1386,7 +1394,7 @@ export class SliceIndexer {
       const only = ids.values().next().value;
       if (only) idByName.set(name, only);
     }
-    this.missionAliases = { nameById, idByName, idByPath, expiresAt: now + this.cacheTtlMs };
+    this.missionAliases = { nameById, idByName, idByPath, rootsKey, expiresAt: now + this.cacheTtlMs };
     return this.missionAliases;
   }
 
