@@ -1,4 +1,5 @@
 import { physicalSessionName } from "./session-registry.js";
+import { createHash } from "node:crypto";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 import { exceptionConfigurationSource, inspectExceptionReadiness, type ExceptionReadiness } from "./workflow-exception-readiness.js";
 import { inspectGraph, recoverGraphOperation, reviseGraph } from "./workflow-reconciliation.js";
@@ -104,6 +105,8 @@ export interface WorkflowRuntimeDeps {
 export interface InstantiateInput {
   specPath: string;
   rootObjective: string;
+  /** Stable identity for an ordinary start; omitted starts remain independent. */
+  operationKey?: string;
   createdBySession: string;
   /**
    * Override default entry-step owner. v1 falls back to spec
@@ -267,7 +270,8 @@ export class WorkflowRuntime {
     entryOwnerSession?: string;
     targetRig?: string;
   }): Promise<InstantiateResult & { compilation: LifecycleCompilation }> {
-    if (this.recoverOperation(input.operationKey)?.kind === "revision") {
+    const prior = this.recoverOperation(input.operationKey);
+    if (prior && prior.kind !== "instantiate") {
       throw new WorkflowProjectorError("lifecycle_operation_conflict", "This key already records a graph revision; inspect workflow operation before choosing a new creation key.");
     }
     const compilation = this.compileLifecycle(input.missionPath, input.operationKey);
@@ -387,6 +391,29 @@ export class WorkflowRuntime {
    * see the workflow.instantiated + queue.created events together.
    */
   async instantiate(input: InstantiateInput): Promise<InstantiateResult> {
+    const operationKey = input.operationKey;
+    if (operationKey !== undefined && (!operationKey.trim() || operationKey.length > 200)) {
+      throw new WorkflowProjectorError("workflow_start_key_invalid", "operation key must be nonempty and at most 200 characters");
+    }
+    const requestDigest = operationKey === undefined ? null : createHash("sha256").update(JSON.stringify({
+      specPath: input.specPath, rootObjective: input.rootObjective, createdBySession: input.createdBySession,
+      entryOwnerSession: input.entryOwnerSession ?? null, targetRig: input.targetRig ?? null, targetPod: input.targetPod ?? null,
+      scope: normalizeWorkflowScope(input.scope ?? {}),
+    })).digest("hex");
+    if (operationKey !== undefined) {
+      const prior = this.recoverOperation(operationKey);
+      if (prior) {
+        if (prior.kind !== "ordinary-instantiate" || prior.receipt.requestDigest !== requestDigest) {
+          throw new WorkflowProjectorError("workflow_start_conflict", `Operation key ${operationKey} already records a different operation. Inspect rig workflow operation before retrying.`);
+        }
+        const entryQitemId = prior.receipt.entryQitemId as string;
+        const entryPacket = this.queueRepo.getById(entryQitemId);
+        const spec = this.specCache.getForInstance(prior.instance);
+        if (!entryPacket || !spec) throw new WorkflowProjectorError("workflow_start_indeterminate", `Operation ${operationKey} is recorded but its entry packet or spec is unavailable.`);
+        return { instance: prior.instance, spec, entryQitemId, entryOwnerSession: entryPacket.destinationSession,
+          advisories: this.packetDestinationAdvisories([entryQitemId]), replayed: true };
+      }
+    }
     // Replay/conflict classification must precede every cache or queue write.
     // The operation key is the durable outer identity; an exact replay reads
     // the already-cached spec and entry row, while changed bytes refuse with
@@ -768,7 +795,16 @@ export class WorkflowRuntime {
     let entryQitemDestinationSession: string | undefined;
     let entryQitemNudge: boolean | undefined;
     let instanceId: string | undefined;
+    let committedConcurrently = false;
     this.eventBus.withNotifyEnvelope((register) => {
+      if (operationKey !== undefined) {
+        const prior = this.recoverOperation(operationKey);
+        if (prior) {
+          if (prior.kind !== "ordinary-instantiate" || prior.receipt.requestDigest !== requestDigest) throw new WorkflowProjectorError("workflow_start_conflict", "Operation key already records a different operation.");
+          committedConcurrently = true;
+          return;
+        }
+      }
       const instance = this.instanceStore.create({
         workflowName: specRow.name,
         workflowVersion: specRow.version,
@@ -794,6 +830,9 @@ export class WorkflowRuntime {
           : undefined,
       });
       instanceId = instance.instanceId;
+      if (operationKey !== undefined) this.db.prepare(`INSERT INTO workflow_start_operations
+        (operation_key, request_digest, instance_id, entry_qitem_id, created_at, actor_session) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(operationKey, requestDigest, instance.instanceId, preallocatedEntryQitemId, createdAt, input.createdBySession);
 
       // Create entry qitem in the same txn (gate-aware: a gated entry
       // rides the shipped human-route / handler-route write path).
@@ -901,6 +940,7 @@ export class WorkflowRuntime {
         }),
       );
     });
+    if (committedConcurrently) return this.instantiate(input);
     if (entryQitemId && entryQitemDestinationSession) {
       await this.queueRepo.maybeNudge(entryQitemId, entryQitemDestinationSession, entryQitemNudge, input.createdBySession);
     }
