@@ -43,7 +43,7 @@ function sameShape(a: StartupAction, b: StartupAction): boolean {
 }
 
 /** Apply seat-owned replacements to freshly resolved actions, without editing shared sources. */
-export function applyStartupTextOverrides(db: Database.Database, nodeId: string, actions: StartupAction[], warnings: string[] = []): StartupAction[] {
+export function applyStartupTextOverrides(db: Database.Database, nodeId: string, actions: StartupAction[], warnings: string[] = [], source: "resolved" | "saved" = "resolved"): StartupAction[] {
   const recipe = new RigRepository(db).getNodeLaunchRecipe(nodeId);
   if (!recipe || actions.length === 0) return actions;
   const overrides = recipe.startupTextOverrides ?? [];
@@ -53,7 +53,7 @@ export function applyStartupTextOverrides(db: Database.Database, nodeId: string,
   overrides.forEach((override, i) => {
     const matches = matchesByOverride[i]!;
     if (matches.length !== 1 || matchesByOverride.some((other, j) => j !== i && other.includes(matches[0]!))) {
-      warnings.push(`Saved startup text override ${i} is stale or overlaps another action; using current source text. Inspect or clear the saved override.`);
+      warnings.push(`Saved startup text override ${i} is stale or overlaps another action; using ${source === "saved" ? "saved startup" : "current source"} text. Inspect or clear the saved override.`);
     } else replacements.set(matches[0]!, override.value);
   });
   return actions.map((action, index) => replacements.has(index) ? { ...action, value: replacements.get(index)! } : action);

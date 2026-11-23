@@ -1434,7 +1434,7 @@ Example:
         if (data["recipeText"] !== undefined) console.log(`Recipe readback: ${JSON.stringify(data["recipeText"])}`);
         console.log(`Applies on: ${JSON.stringify(data["appliesOn"])}; eligible for restore replay: ${String(data["restoreEligible"])}.`);
         if (data["overlap"]) console.log("Warning: this replacement overlaps another action; an ambiguous override will be skipped at start.");
-        if (opts.layer === "context") console.log("If a saved override no longer matches uniquely, startup uses the current source and warns.");
+        if (opts.layer === "context") console.log("If a saved override no longer matches uniquely, startup warns and uses its input text: current source for recipe-resolved starts, saved startup context for seat fresh launches.");
         console.log("Existing snapshots keep their captured text. The current conversation is unchanged; no launch was started.");
       });
     });

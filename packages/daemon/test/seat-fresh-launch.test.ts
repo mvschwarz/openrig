@@ -158,6 +158,20 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   afterEach(() => db.close());
 
+  it("reports saved startup text when an override overlaps saved fresh-launch actions", async () => {
+    const seat = seedSeat();
+    const before = { type: "send_text", value: "A", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true };
+    const saved = { ...before, value: "B" };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "fresh-rig", pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agentRef: "local:agent", profile: "default", runtime: "claude-code", cwd: "." }] }] }, startupTextOverrides: [{ before, value: "B" }] };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), seat.node.id);
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(JSON.stringify([saved, saved]), seat.node.id);
+
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("using saved startup text")]));
+    expect(vi.mocked(tmux.sendText).mock.calls.filter(([, text]) => text === "B")).toHaveLength(2);
+  });
+
   it.each([
     { runtime: "terminal" as const, fail: false },
     { runtime: "claude-code" as const, fail: false },

@@ -19,6 +19,7 @@ describe("saved startup text", () => {
     const warnings: string[] = [];
     expect(applyStartupTextOverrides(db, "a", [action, other], warnings)).toEqual([action, other]);
     expect(warnings.join(" ")).toContain("stale");
+    expect(warnings.join(" ")).toContain("using current source text");
     expect(inspectSavedStartupText(db, "a", "dev.build", [action, other])).toMatchObject({ overrides: [{ status: "stale", overlap: true }] });
     const inspection = inspectSavedStartupText(db, "a", "dev.build");
     if (!inspection.ok) throw new Error(inspection.message);

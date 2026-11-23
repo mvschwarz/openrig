@@ -183,6 +183,8 @@ export interface StartupInput {
   plan: ProjectionPlan;
   resolvedStartupFiles: ResolvedStartupFile[];
   startupActions: StartupAction[];
+  /** Whether actions were loaded from the seat's saved startup context. */
+  startupActionsSource?: "saved" | "resolved";
   isRestore: boolean;
   /**
    * OPR.0.7.0.13: a fresh relaunch's decisions about the seat's own skills (seatSkillReplay): saved skill entries and
@@ -354,7 +356,7 @@ export class StartupOrchestrator {
       return guard.lifecycle([input.nodeId], () => this.startNodeWithWarnings(input, warnings));
     }
     if (!input.isRestore && !input.continueFreshStartup && !input.skipHarnessLaunch && !input.snapshotStartupActions && input.startupActions.length) {
-      const actions = applyStartupTextOverrides(this.db, input.nodeId, input.startupActions, warnings);
+      const actions = applyStartupTextOverrides(this.db, input.nodeId, input.startupActions, warnings, input.startupActionsSource);
       input = { ...input, startupActions: actions };
     }
     // A contained runtime reconciles saved execution before the ordinary startup prelude writes state or files.

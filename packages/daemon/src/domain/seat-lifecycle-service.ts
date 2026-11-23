@@ -1994,6 +1994,7 @@ export class SeatLifecycleService {
       plan: startup.plan,
       resolvedStartupFiles: startup.resolvedStartupFiles,
       startupActions: startup.startupActions,
+      startupActionsSource: "saved",
       isRestore: false,
       includeDurableObligations: true,
       sessionName: canonicalSessionName,
