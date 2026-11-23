@@ -36,7 +36,7 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
-import { shellArg } from "../../adapters/shell-quote.js";
+import { shellWord } from "../../adapters/shell-quote.js";
 import { RigRepository } from "../rig-repository.js";
 import { SeatStatusService } from "../seat-status-service.js";
 import { assignmentStanding, planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
@@ -331,8 +331,8 @@ export class ProviderServiceImpl implements ProviderService {
 
   /** The plan command again, as the person copies it into a shell. */
   private reviewCommand(input: AssignmentPlanRequest): string {
-    return `rig provider assign ${shellArg(input.rig)} --provider ${input.provider} --account ${shellArg(input.label)}`
-      + `${input.includeOverrides ? " --include-overrides" : ""}${input.accountHome ? ` --account-home ${shellArg(input.accountHome)}` : ""}`;
+    return `rig provider assign ${shellWord(input.rig)} --provider ${input.provider} --account ${shellWord(input.label)}`
+      + `${input.includeOverrides ? " --include-overrides" : ""}${input.accountHome ? ` --account-home ${shellWord(input.accountHome)}` : ""}`;
   }
 
   /** #3625 slice 3: the plan again, and if its digest is the one the person saw, each seat through the existing switch.

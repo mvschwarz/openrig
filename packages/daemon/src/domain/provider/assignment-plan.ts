@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { shellArg } from "../../adapters/shell-quote.js";
+import { shellWord } from "../../adapters/shell-quote.js";
 import type { ClaudeSeatTokenRef } from "../claude-seat-token.js";
 import type { AppliedAccount, AssignmentIntent, AssignmentResultKind } from "./provider-account-assignments.js";
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
@@ -315,7 +315,7 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
       ...(shared(s) ? { sharedName: true as const } : {}),
       effect: s.rigId === input.rigId ? "would restart"
         : shared(s) ? "not restarted; another seat has its session name, so a restart by that name could reach that one instead"
-        : `not restarted; needs rig seat restart ${shellArg(s.session)}` })) });
+        : `not restarted; needs rig seat restart ${shellWord(s.session)}` })) });
   }
 
   const plan: Omit<AssignmentPlan, "digest"> = {

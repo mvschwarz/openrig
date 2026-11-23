@@ -3,7 +3,9 @@ export function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
 }
 
-/** One argument of a command printed for a person to copy into a shell: as it is when it's plain, quoted otherwise. */
-export function shellArg(s: string): string {
-  return /^[\w@%+=:,./-]+$/.test(s) ? s : shellQuote(s);
+/** A word the shell reads as itself is left as it is; anything else is single-quoted (the same safe set as the tmux
+ *  adapter's argv join). A name that needed no quoting prints exactly as before. */
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+export function shellWord(s: string): string {
+  return SHELL_SAFE.test(s) ? s : shellQuote(s);
 }

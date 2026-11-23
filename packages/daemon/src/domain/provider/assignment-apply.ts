@@ -1,4 +1,4 @@
-import { shellArg } from "../../adapters/shell-quote.js";
+import { shellWord } from "../../adapters/shell-quote.js";
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
 import type { AppliedReference, AssignmentResultKind } from "./provider-account-assignments.js";
 import { asAppliedText, type AssignmentPlan, type PlanRow } from "./assignment-plan.js";
@@ -58,7 +58,7 @@ export interface ApplyDeps {
   now(): string;
 }
 
-const restartCommand = (seat: string) => `rig seat restart ${shellArg(seat)} --keep-conversation`;
+const restartCommand = (seat: string) => `rig seat restart ${shellWord(seat)} --keep-conversation`;
 
 /** Why no restart command is given for a seat its session name no longer reaches alone (another seat has it, or none does). */
 const NO_NAME = "It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone";
@@ -235,7 +235,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     if (!gone(r.seat, plan.rigId) || (!r.recovery && r.kind !== "unknown")) return;
     const { recovery: _dropped, ...rest } = r;
     // A switch whose seat wasn't restarted writes the seat's restart command into its message: that goes too.
-    const names = [...new Set([r.seat, shellArg(r.seat)])].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    const names = [...new Set([r.seat, shellWord(r.seat)])].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
     const inline = new RegExp(`: rig seat restart (?:${names}) --keep-conversation(?: --reason "[^"]*")?`, "g");
     results[i] = { ...rest, detail: `${r.detail.replace(inline, "").replace(` ${NO_NAME}.`, "").replace(/\.$/, "")}. ${REMOVED}.` };
   });
@@ -273,7 +273,7 @@ export function switchKind(seat: string, r: ProviderSwitchResult): [AssignmentRe
 
 /** A move to a prepared home, as one of the six kinds. */
 export function successorKind(seat: string, r: SuccessorResult): [AssignmentResultKind, string, string | undefined] {
-  const recover = `rig seat set-runtime ${shellArg(seat)} --recover`;
+  const recover = `rig seat set-runtime ${shellWord(seat)} --recover`;
   if (r.ok) {
     if (!r.changed) return ["unchanged", "already on the prepared home", undefined];
     if (r.recoveryPending) return ["unknown", "the successor took the seat, but finishing the switch needs recovery", recover];
