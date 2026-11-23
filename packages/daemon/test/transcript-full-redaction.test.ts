@@ -73,6 +73,13 @@ describe("transcript redaction keeps identifiers", () => {
     expect(redactTranscriptContent(encryptedKey.slice(0, encryptedKey.indexOf("\n-----END")))).toBe("[REDACTED]");
   });
 
+  it("masks compact encrypted private keys without changing surrounding text", () => {
+    const compact = encryptedKey.replaceAll("\n", "");
+    expect(redactTranscriptContent(`left|${compact}|right`)).toBe("left|[REDACTED]|right");
+    expect(redactTranscriptContent(compact.slice(0, compact.indexOf("-----END")))).toBe("[REDACTED]");
+    expect(redactTranscriptContent(JSON.stringify({ private_key: compact }))).toBe('{"private_key":"[REDACTED]"}');
+  });
+
   it("masks named credentials in AWS CLI output, Azure connection strings, Basic auth and password-only URLs", () => {
     const cases: Array<[string, string]> = [
       [`"SecretAccessKey": "${awsCliSecret}"`, '"SecretAccessKey": "[REDACTED]"'],
@@ -139,6 +146,7 @@ describe("GET /api/transcripts/:session/full through createApp", () => {
       awsContext + awsSecret,
       `service account ${JSON.stringify({ private_key: privateKey })}`,
       encryptedKey,
+      "compact encrypted " + encryptedKey.replaceAll("\n", ""),
       `{"Credentials": {"SecretAccessKey": "${awsCliSecret}"}}`,
       `cloned https://:${urlPassword}@git.example.com/r.git`,
       "trailing line",

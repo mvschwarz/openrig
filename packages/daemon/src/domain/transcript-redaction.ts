@@ -35,7 +35,8 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   // goes). The body is runs of base64, or an encrypted key's Proc-Type and DEK-Info lines, each after whitespace or an
   // escaped line break, so a key inside a JSON string goes too. No run can match the characters that end it, which
   // keeps the scan linear, and a base64 run can't match "-", so a match stops at the END line or another key.
-  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:[A-Za-z0-9+/=]|\\\/)*(?:(?:\s|\\[rn])+(?:(?:Proc-Type|DEK-Info):[ \t]*[^\s\\]+|(?:[A-Za-z0-9+/=]|\\\/)+))*(?:(?:\s|\\[rn])*-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
+  // A compact traditional key keeps its two named encryption headers; its IV scan is bounded.
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:Proc-Type:[ \t]*4,ENCRYPTED|DEK-Info:[ \t]*[A-Za-z0-9-]+,[A-Fa-f0-9]{1,32}|[A-Za-z0-9+/=]|\\\/)*(?:(?:\s|\\[rn])+(?:(?:Proc-Type|DEK-Info):[ \t]*[^\s\\]+|(?:[A-Za-z0-9+/=]|\\\/)+))*(?:(?:\s|\\[rn])*-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
   /(\bhttps?:\/\/)[^\s/?#@:]*:[^\s/?#@]+(?=@)/g, // a password in a URL, with or without a user
 ];
 

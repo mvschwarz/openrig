@@ -389,6 +389,13 @@ describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
     expect(redact("-----BEGIN " + "RSA PRIVATE KEY-----\n" + "MIIEv".repeat(13))).toBe("[REDACTED]");
   });
 
+  it("masks compact encrypted private keys through the CLI surface", () => {
+    const compact = ["-----BEGIN RSA " + "PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-256-CBC," + "0A1B".repeat(8), "QUJDRA".repeat(13), "-----END RSA " + "PRIVATE KEY-----"].join("");
+    expect(redact(`left|${compact}|right`)).toBe("left|[REDACTED]|right");
+    expect(redact(compact.slice(0, compact.indexOf("-----END")))).toBe("[REDACTED]");
+    expect(redact(JSON.stringify({ private_key: compact }))).toBe('{"private_key":"[REDACTED]"}');
+  });
+
   it("leaves non-credential content unchanged byte-for-byte", () => {
     const text = "Normal message: visit https://example.com for docs.";
     const redacted = redact(text);
@@ -1805,7 +1812,7 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
         payload: {
           type: "message",
           role: "assistant",
-          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}\n${awsContext}${awsSecret}\nservice account ${JSON.stringify({ private_key: privateKey })}\n${encryptedKey}\n{"Credentials": {"SecretAccessKey": "${awsCliSecret}"}}\ncloned https://:${urlPassword}@git.example.com/r.git` }],
+          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}\n${awsContext}${awsSecret}\nservice account ${JSON.stringify({ private_key: privateKey })}\n${encryptedKey}\ncompact encrypted ${encryptedKey.replaceAll("\n", "")}\n{"Credentials": {"SecretAccessKey": "${awsCliSecret}"}}\ncloned https://:${urlPassword}@git.example.com/r.git` }],
         },
       }),
     ].join("\n"), "utf8");
