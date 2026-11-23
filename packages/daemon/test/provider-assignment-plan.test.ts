@@ -276,10 +276,10 @@ describe("the daemon's assignment plan", () => {
     expect([switchSeat.mock.calls.map(([s]) => s), restartPeer.mock.calls.map(([s]) => s)]).toEqual([["a1@fleet"], ["a3@fleet"]]);
     // No restart command is given by that name, for this rig's seat or the other rig's: it could reach the other seat.
     const a2 = report.results.find((r) => r.seat === "a2@fleet")!;
-    expect([a2.recovery, a2.detail]).toEqual([undefined, expect.stringContaining("It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone.")]);
+    expect([a2.recovery, a2.detail]).toEqual([undefined, expect.stringContaining("It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone.")]);
     expect(planned.plan.codexHomes[0]!.seats.find((s) => s.rigId === "rig-b")!.effect).toBe("not restarted; another seat has its session name, so a restart by that name could reach that one instead");
     expect(report.otherRigPeers).toEqual([{ seat: "a2@fleet", rig: "fleet", home: codexHome,
-      why: "It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone" }]);
+      why: "It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone" }]);
 
     // With --account-home, the successor's dry run isn't asked about it either, and its move is never attempted.
     const prepared = path.join(dir, "prepared");
@@ -412,7 +412,7 @@ describe("the daemon's assignment plan", () => {
     expect(a).toMatchObject({ seat: "a@fleet", kind: "unknown" });
     expect(a!.recovery).toBeUndefined();
     expect(a!.detail).toContain('"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.');
-    expect(a!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone.");
+    expect(a!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone.");
     expect(a!.detail).not.toContain("rig seat restart");
     expect(b).toMatchObject({ seat: "b@fleet", kind: "unknown", recovery: "rig seat restart b@fleet --keep-conversation" });
     const assignments = new ProviderAccountAssignmentsRepository(db);
@@ -444,7 +444,7 @@ describe("the daemon's assignment plan", () => {
     const report = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat: vi.fn(async () => ({ outcome: "succeeded" as const, message: "switched" })),
       restartPeer: vi.fn(), activityOf: () => "idle", save: () => {}, now: () => "t" });
     expect(report.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: codexHome,
-      why: "It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone" }]);
+      why: "It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone" }]);
   });
 
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {

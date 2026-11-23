@@ -59,7 +59,7 @@ export interface ApplyDeps {
 const restartCommand = (seat: string) => `rig seat restart ${shellArg(seat)} --keep-conversation`;
 
 /** Why no restart command is given for a seat its session name no longer reaches alone (another seat has it, or none does). */
-const NO_NAME = "It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone";
+const NO_NAME = "It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone";
 
 export async function applyAssignment(plan: AssignmentPlan, account: AccountRef, deps: ApplyDeps): Promise<AssignmentApplyReport> {
   const results: ApplySeatResult[] = [];
