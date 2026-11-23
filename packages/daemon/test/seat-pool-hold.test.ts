@@ -41,11 +41,14 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
+import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import type { ConvergeResult } from "../src/domain/topology-converge.js";
 
-// #3395 (Piece 1): the seat pool's whole-rig holds. While a hold stands, a cycle moves nothing and records the cause;
-// add, drain and comeback join these holds in later changes. The job is unarmed in the daemon, so each test composes
+// #3395 (Piece 1): the seat pool's whole-rig holds. While a hold stands, a cycle moves and adds nothing and records the
+// cause; drain and comeback join these holds in later changes. The job is unarmed in the daemon, so each test composes
 // the executor and an engine that has the seat-pool policy, and drives `rig down`, `rig up` and `rig launch --seats`
-// through the real teardown and restore orchestrators.
+// through the real teardown and restore orchestrators. The add's call is a fake that records it and creates no node.
 
 const RIG = "pool-rig";
 const SPEC: SeatPoolSpec = {
@@ -56,6 +59,9 @@ const FALLBACK_ACTOR = "system:queue-fallback";
 const RIG_ROOT = "/project/rigs/pool-rig";
 /** Every seat's saved conversation: restore resumes it and finds it in the pane's process tree. */
 const TOKEN = "00000000-0000-4000-8000-000000000086";
+
+/** A short wait, so a row created after it is younger than the rows created before. */
+const later = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -153,6 +159,11 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
   /** Runs after each real move, before the cycle sees its result. */
   const hooks: { afterMove?: () => void } = {};
   const effects = seatPoolQueueEffects(queue);
+  const exporter = new RigSpecExporter({ rigRepo, sessionRegistry: sessions, podRepo });
+  /** The add's call: recorded, and ended with no node. */
+  const converge = vi.fn(async (): Promise<ConvergeResult> => ({
+    kind: "add_member", supported: true, outcome: { ok: false, code: "rig_not_found", message: "the add's call is a fake here" },
+  }));
   const deps: SeatPoolExecutorDeps = {
     db, rigRepo, slots, jobsRepo,
     queue: { ...effects, moveRow: async (input) => { const result = await effects.moveRow(input); hooks.afterMove?.(); return result; } },
@@ -161,6 +172,7 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
     seatState: (id) => activity.get(id) ?? null,
     custody: (ids, fn) => guard.custody(ids, fn),
     now: () => clock.now,
+    add: { exportMember: (rigId, nodeId) => exporter.exportedRawMemberFromNode(rigId, nodeId), converge, makeFolder: vi.fn() },
   };
   const capture = vi.fn((_rigId: string) => ({ snapshotId: "snap-drain" }));
   const stopSeat = vi.fn(async (_input: { seatRef: string; reason: string; expected: { nodeId: string; sessionId: string } }) => ({ ok: true as const }));
@@ -263,11 +275,18 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
     expect(result.errors).toEqual([]);
     return result;
   };
+  /** What an add leaves behind: the call, the slot rows and the operation ids reserved. */
+  const addTrace = () => ({
+    calls: converge.mock.calls.length,
+    slots: (db.prepare("SELECT COUNT(*) AS n FROM seat_pool_slots").get() as { n: number }).n,
+    operations: (db.prepare("SELECT COUNT(*) AS n FROM operation_correlations").get() as { n: number }).n,
+  });
   return {
     db, bus, rigRepo, podRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, reg, capture, stopSeat,
+    exporter, converge,
     get engine() { return composed.engine; }, get executor() { return composed.executor; },
     restart, compose, teardown, downTmux, restorer, up, launchSeats, snapshotCapture, checkpointStore,
-    model, agent, ready, row, jobOf, jobFor, evaluate, notesOf, destinationOf, rerouted, events, down,
+    model, agent, ready, row, jobOf, jobFor, evaluate, notesOf, destinationOf, rerouted, events, down, addTrace,
   };
 }
 
@@ -282,7 +301,11 @@ describe("seat-pool holds: the whole pool through rig down and up (#3395 Piece 1
       const s1 = w.agent(m, 1);
       const job = w.jobFor(m);
       const q = await w.row(m.session);
+      // a second row: with one free agent, the plan would also add one
+      await later();
+      await w.row(m.session);
       const slotsBefore = w.slots.forModel(m.nodeId);
+      const addBefore = w.addTrace();
 
       const stoppedDown = await w.down(m.rigId);
       const [stopped] = w.events(m.rigId, "rig.stopped");
@@ -294,6 +317,10 @@ describe("seat-pool holds: the whole pool through rig down and up (#3395 Piece 1
         expect(notes).not.toHaveProperty("moved");
         expect(w.destinationOf(q)).toBe(m.session);
         expect(w.slots.forModel(m.nodeId)).toEqual(slotsBefore);
+        // no add is reserved or issued
+        expect(notes).not.toHaveProperty("add");
+        await w.executor.idle();
+        expect(w.addTrace()).toEqual(addBefore);
       }
 
       const up = await w.up(stoppedDown.snapshotId!);
@@ -306,6 +333,10 @@ describe("seat-pool holds: the whole pool through rig down and up (#3395 Piece 1
       expect(notes).not.toHaveProperty("held");
       expect(notes.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
       expect(w.destinationOf(q)).toBe(s1.session);
+      // released, the row left over gets an add (here the fake call creates no node, and the slot row goes)
+      expect(notes.add).toMatchObject({ issued: [{ slotNumber: 2 }] });
+      await w.executor.idle();
+      expect(w.slots.forModel(m.nodeId)).toEqual(slotsBefore);
 
       // a second `rig down`: the hold starts from the latest `rig.stopped`, not the first one the up released
       const s2 = w.agent(m, 2);
@@ -316,9 +347,13 @@ describe("seat-pool holds: the whole pool through rig down and up (#3395 Piece 1
       const q2 = await w.row(m.session);
       w.ready(s1);
       w.ready(s2);
+      const addHeld = w.addTrace();
       const again = await w.notesOf(job.jobId);
       expect(again.held).toEqual(rigStopped(stoppedAgain[1]!));
       expect(again).not.toHaveProperty("moved");
+      expect(again).not.toHaveProperty("add");
+      await w.executor.idle();
+      expect(w.addTrace()).toEqual(addHeld);
       expect(w.destinationOf(q2)).toBe(m.session);
       expect(w.rerouted(q2)).toEqual([]);
     } finally {
@@ -608,6 +643,10 @@ describe("seat-pool holds: the job's own state and its model (#3395 Piece 1)", (
       const s2 = w.agent(m, 2);
       const q1 = await w.row(m.session);
       const q2 = await w.row(m.session);
+      // a third row: with two free agents, the plan also adds one
+      await later();
+      await w.row(m.session);
+      const addBefore = w.addTrace();
 
       // the operator stops the job while the first move's I/O is in flight
       let moves = 0;
@@ -635,6 +674,9 @@ describe("seat-pool holds: the job's own state and its model (#3395 Piece 1)", (
       expect(await w.evaluate(job.jobId)).toMatchObject({ action: "skip", reason: "job_not_active" });
       expect(w.destinationOf(waiting)).toBe(m.session);
       expect(w.rerouted(waiting)).toEqual([]);
+      // no add was reserved or issued, in the evaluation stopped between moves or after
+      await w.executor.idle();
+      expect(w.addTrace()).toEqual(addBefore);
     } finally {
       w.db.close();
     }
@@ -647,7 +689,11 @@ describe("seat-pool holds: the job's own state and its model (#3395 Piece 1)", (
       const s1 = w.agent(m, 1);
       const job = w.jobFor(m);
       const q = await w.row(m.session);
+      // a second row: with one free agent, the plan would also add one
+      await later();
+      await w.row(m.session);
       const slotsBefore = w.slots.forModel(m.nodeId);
+      const addBefore = w.addTrace();
       w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: 2, min: 5 }), m.nodeId);
 
       const notes = await w.notesOf(job.jobId);
@@ -659,6 +705,10 @@ describe("seat-pool holds: the job's own state and its model (#3395 Piece 1)", (
       expect(w.slots.forModel(m.nodeId)).toEqual(slotsBefore);
       expect(w.rigRepo.getNodePool(m.nodeId)).toMatchObject({ raw: { max: 2, min: 5 }, error: expect.any(String) });
       expect(w.sessions.getSessionsForRig(m.rigId).some((s) => s.nodeId === s1.nodeId)).toBe(true);
+      // no add is reserved or issued
+      expect(notes).not.toHaveProperty("add");
+      await w.executor.idle();
+      expect(w.addTrace()).toEqual(addBefore);
     } finally {
       w.db.close();
     }
@@ -681,6 +731,51 @@ describe("seat-pool holds: the job's own state and its model (#3395 Piece 1)", (
       // the agent stays as an ordinary member, with its session
       expect(w.rigRepo.getRig(m.rigId)!.nodes.map((n) => n.id)).toContain(s1.nodeId);
       expect(w.sessions.getSessionsForRig(m.rigId).some((s) => s.nodeId === s1.nodeId)).toBe(true);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("With `min: 0`, one free `live` agent and two pending rows to the model, `rig seat stop` of the model writes no `rig.stopped`, the next cycle moves one row to the free agent and issues one add from the model's stored settings, and no hold is reported.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model();
+      // stored settings of the model that the new agent takes
+      w.rigRepo.setNodeClaudeMcp(m.nodeId, "none");
+      w.rigRepo.setNodeStatuslineThrottle(m.nodeId, 45);
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      const q1 = await w.row(m.session);
+      await later();
+      const q2 = await w.row(m.session);
+
+      const stopTmux = {
+        ...teardownTmux(),
+        probeSession: vi.fn(async () => ({ state: "present" as const })),
+        deliveryGuard: w.guard,
+      } as unknown as TmuxAdapter;
+      const lifecycle = new SeatLifecycleService({ db: w.db, rigRepo: w.rigRepo, sessionRegistry: w.sessions, eventBus: w.bus, tmuxAdapter: stopTmux });
+      expect(await lifecycle.stopSeat({ seatRef: m.session, reason: "the operator stops the model only" })).toMatchObject({ ok: true });
+      expect(stopTmux.killSession).toHaveBeenCalledWith(m.session);
+      expect(w.events(m.rigId, "rig.stopped")).toEqual([]);
+
+      const notes = await w.notesOf(job.jobId);
+      expect(notes).not.toHaveProperty("held");
+      expect(notes.moved).toEqual([{ qitemId: q1, from: m.session, to: s1.session }]);
+      expect(w.destinationOf(q2)).toBe(m.session);
+      const issued = (notes.add as { issued: Array<{ slotNumber: number; logicalId: string; attempt: { id: string; status: string } }> }).issued;
+      expect(issued).toEqual([{ slotNumber: 2, logicalId: "dev.impl-s2", attempt: { id: expect.any(String), status: "in_flight", message: `in flight (attempt ${issued[0]!.attempt.id})` } }]);
+      await w.executor.idle();
+      expect(w.converge).toHaveBeenCalledTimes(1);
+      const [rigId, op, rigRoot, opts] = w.converge.mock.calls[0] as unknown as [string, { kind: string; pod: string; member: Record<string, unknown> }, string, Record<string, unknown>];
+      expect(rigId).toBe(m.rigId);
+      expect(rigRoot).toBe(".");
+      expect(opts).toEqual(expect.objectContaining({ recordCreated: expect.any(Function) }));
+      expect(op).toMatchObject({ kind: "add_member", pod: "dev" });
+      expect(op.member).toEqual({
+        id: "impl-s2", agent_ref: "", profile: "default", runtime: "claude-code", cwd: "/tmp",
+        claude_mcp: "none", statusline_throttle: 45, restore_policy: "resume_if_possible", keep_alive: false,
+      });
     } finally {
       w.db.close();
     }

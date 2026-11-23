@@ -20,6 +20,12 @@ A participant is either:
 
 People and channels share one address space: a channel can't take a person's id.
 
+A seat whose member name (the part before `@`) is a registered person's id is treated as that person: work and messages
+addressed to `<id>@<rig>` go to the person `<id>@external`. That's how a person's own pane is reached. `rig gateway human add`
+warns when a seat on this daemon already has the new person's id as its member name. It reads the seat names in one
+request and waits at most 2 seconds for it; when the daemon can't be read in time, the person is registered without
+the check.
+
 A registered person is addressed as `<id>@external`, including without Slack: for example,
 `rig gateway human add alex --display-name "Alex" --delivery-class B` creates `alex@external`, reached in the Feed and Steering.
 A person can also bind to a local bridge adapter using a `relay` binding:

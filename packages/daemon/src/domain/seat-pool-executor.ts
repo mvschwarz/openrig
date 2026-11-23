@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import { readClaudeAutoModeForLaunch } from "./claude-auto-mode.js";
+import { reserveOperation, type RecordCreated } from "./operation-correlation.js";
 import {
   planSeatPool,
   seatPoolCanReceive,
@@ -12,20 +15,26 @@ import {
 import type { PolicyEvaluation, PolicyJob } from "./policies/types.js";
 import type { QueueRepository } from "./queue-repository.js";
 import type { RigRepository } from "./rig-repository.js";
+import type { NodeWithBinding } from "./types.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { seatPoolModelOfJob, type SeatPoolModel } from "./seat-pool-registration.js";
 import type { SeatPoolSlot, SeatPoolSlotsRepository } from "./seat-pool-slots.js";
 import { parsePoolBlock, type SeatPoolSpec, type StoredSeatPool } from "./seat-pool-spec.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
+import { seatLaunchAdditionPathsForNode } from "./seat-launch-additions.js";
+import type { SeatSkillPaths } from "./seat-skill-storage.js";
+import type { AddMemberOutcome } from "./rigspec-instantiator.js";
+import type { ConvergeResult, TopologyOp } from "./topology-converge.js";
 import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 
 // #3395 (Piece 1): the seat-pool executor, which the `seat-pool` policy hands each evaluation to.
 //
 // One cycle reads the pool afresh (the model's stored block, its slot rows, each pool agent's latest session, activity,
 // open rows and held messages, and the rows waiting for the model or for a drained agent), plans with the pure planner,
-// and applies two effects: moving a waiting row to a free pool agent, and draining a free agent idle past
-// `idle_grace_s`. The plan is read outside any lease; the hold check, the moves and each drain's decision run under the
-// delivery guard's custody lease on the model node, and each re-checks the stored block and the agent just before it.
+// and applies three effects: moving a waiting row to a free pool agent, draining a free agent idle past
+// `idle_grace_s`, and adding agents. The plan is read outside any lease; the hold check, the moves, each drain's
+// decision and the add's reservation and issue run under the delivery guard's custody lease on the model node, and each
+// move and drain re-checks the stored block and the agent just before it.
 //
 // A drain keeps the agent's node, sessions and history. Under the agent's lifecycle lease it reads the agent again (a
 // row or a held message that reached it, or a wake since the plan, sends the slot back to `live`; an agent relaunched
@@ -36,10 +45,16 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 // free; an unconfirmed stop known to have had no effect gives the slot back to `live`. After `pool: {}` the job drains
 // with the last spec stored on its row and ends once every agent is drained.
 //
-// The whole pool is held, and nothing moves or drains, while the job is not `active`, while the stored block can't be
-// read, while the model node is gone (or has no canonical session), and from the rig's latest `rig.stopped` until a
-// later `restore.completed`, whatever its result. The cause goes in the job's notes. Adding and bringing agents back
-// are not done here.
+// An add reserves a new `<member>-s<n>` slot, issues it with an operation id, and, after the lease is released, adds the
+// member through the same converge path as `rig add`, from the model member as the export writes it (without
+// `pool`, `id`, `label`, `cwd` and `session_source`, and with `keep_alive: false`). The cycle does not wait for the launch: it reports
+// the add in flight, and the settlement writes the outcome to the slot row (the agent runs: `live`; no node was created:
+// the row goes and frees the number). A later cycle reports what settled.
+//
+// The whole pool is held, and nothing moves, drains or is added, while the job is not `active`, while the stored block
+// can't be read, while the model node is gone (or has no canonical session), and from the rig's latest `rig.stopped`
+// until a later `restore.completed`, whatever its result. The cause goes in the job's notes. Bringing agents back is not
+// done here; while a slot is `drained`, no new number is added.
 
 /** What one move returns: moved, or refused with the queue's code. */
 export type SeatPoolMoveResult = { ok: true } | { ok: false; code: string; message: string };
@@ -63,11 +78,28 @@ export interface SeatPoolQueue {
   moveRow(input: { qitemId: string; from: string; to: string; reason: string }): Promise<SeatPoolMoveResult>;
 }
 
+/** The member add the pool issues: a pod member fragment, as `rig add` sends it. */
+export type SeatPoolAddOp = Extract<TopologyOp, { kind: "add_member" }>;
+
+/** The add's effects, as the daemon composes them. */
+export interface SeatPoolAddDeps {
+  /** The model member as the pod-aware export writes it, in the spec's own keys (RigSpecExporter.exportedRawMemberFromNode).
+   *  Throws when the member can't be exported. */
+  exportMember(rigId: string, modelNodeId: string): Record<string, unknown>;
+  /** One member added to a pod and launched, as `POST /rigs/:rigId/pods/:pod/members` does it: convergeOp over the
+   *  daemon's instantiator. */
+  converge(rigId: string, op: SeatPoolAddOp, rigRoot: string,
+    opts: { recordCreated: RecordCreated; launchAdditionsFrom?: SeatSkillPaths }): Promise<ConvergeResult>;
+  /** Creates a folder and its parents (mkdir -p): all the daemon does for a `cwd_template` folder. */
+  makeFolder(path: string): void;
+}
+
 export interface SeatPoolExecutorDeps {
   /** The job's model, the agents' latest sessions and the rig's events. */
   db: Database.Database;
-  rigRepo: Pick<RigRepository, "getNodePool">;
-  slots: Pick<SeatPoolSlotsRepository, "forModel" | "setPhase" | "stopOutcome">;
+  rigRepo: Pick<RigRepository, "getNodePool" | "getNodeLaunchRecipe" | "getRig">;
+  slots: Pick<SeatPoolSlotsRepository, "forModel" | "setPhase" | "stopOutcome" | "get" | "reserveAdd" | "issueAttempt"
+    | "recordAttemptNode" | "settleAdd" | "recordAttemptOutcome" | "removeAddWithoutNode">;
   jobsRepo: Pick<WatchdogJobsRepository, "getById">;
   queue: SeatPoolQueue;
   /** Messages held for a node in the outbox (OutboxHandler.heldCount). */
@@ -81,6 +113,8 @@ export interface SeatPoolExecutorDeps {
   now(): Date;
   /** The drain's effects. Without them a planned drain is not made, and the cycle reports it as not composed. */
   drain?: SeatPoolDrainEffects;
+  /** The add's effects. Without them a cycle adds nothing (and skips the whole add stage). */
+  add?: SeatPoolAddDeps;
 }
 
 /** What the checked stop returned, as the pool reads it (SeatLifecycleService.stopSeat). */
@@ -132,8 +166,10 @@ export function seatPoolStopReport(stop: SeatPoolSeatStop): SeatPoolStopReport {
 }
 
 export interface SeatPoolExecutor {
-  /** One cycle of the job: read, hold, plan, move, drain. Never throws for a refused move or a custody refusal. */
+  /** One cycle of the job: read, hold, plan, move, drain, add. Never throws for a refused move or a custody refusal. */
   cycle(job: Pick<PolicyJob, "jobId" | "context">): Promise<PolicyEvaluation>;
+  /** Resolves once every add started so far has settled. */
+  idle(): Promise<void>;
 }
 
 /** The queue's reroute actor and note, as the queue records a reroute (the queue's own rule for "was rerouted"). */
@@ -226,6 +262,13 @@ function agentNode(db: Database.Database, nodeId: string): { sessionName: string
   return { sessionName: deriveCanonicalSessionName(row.logical_id.slice(0, dot), row.logical_id.slice(dot + 1), row.rig_name) };
 }
 
+/** The model's pod namespace: its logical id before the first dot (a resolved model always has one). */
+function modelPod(db: Database.Database, modelNodeId: string): string | null {
+  const row = db.prepare("SELECT logical_id FROM nodes WHERE id = ?").get(modelNodeId) as { logical_id: string } | undefined;
+  const dot = row ? row.logical_id.indexOf(".") : -1;
+  return dot > 0 ? row!.logical_id.slice(0, dot) : null;
+}
+
 function validIso(value: string | null | undefined): value is string {
   return typeof value === "string" && value !== "" && Number.isFinite(Date.parse(value));
 }
@@ -249,7 +292,7 @@ export function readSeatPoolAgents(deps: SeatPoolExecutorDeps, slots: readonly S
       slotNumber: slot.slotNumber,
       sessionName,
       phase: slot.phase,
-      attemptState: null,
+      attemptState: slot.attemptState,
       running,
       idleAtPrompt,
       // Every agent idle at its prompt has a time: an unreadable one starts the grace now rather than never.
@@ -329,8 +372,69 @@ function unreadableAdvisory(error: string): string {
   return `the stored pool block can't be read (${error}); the pool is held until the block is fixed, and nothing is removed`;
 }
 
-function slotsView(slots: readonly SeatPoolSlot[]): Array<{ slotNumber: number; nodeId: string | null; phase: SeatPoolPhase }> {
-  return slots.map((slot) => ({ slotNumber: slot.slotNumber, nodeId: slot.nodeId, phase: slot.phase }));
+/** How a slot's attempt is reported. Reserved or issued: in flight. Settled: the add settled running. */
+interface AttemptView { id: string; status: "in_flight" | "running" | "no_node"; message?: string; code?: string }
+
+function inFlight(attemptId: string): AttemptView {
+  return { id: attemptId, status: "in_flight", message: `in flight (attempt ${attemptId})` };
+}
+
+function slotsView(slots: readonly SeatPoolSlot[]): Array<{ slotNumber: number; nodeId: string | null; phase: SeatPoolPhase; attempt?: AttemptView }> {
+  return slots.map((slot) => ({
+    slotNumber: slot.slotNumber,
+    nodeId: slot.nodeId,
+    phase: slot.phase,
+    ...(slot.attemptId === null || slot.attemptState === null
+      ? {}
+      : { attempt: slot.attemptState === "settled" ? { id: slot.attemptId, status: "running" as const } : inFlight(slot.attemptId) }),
+  }));
+}
+
+/** The interim rule until drained slots come back: no new number while one is `drained`. Reported for the add only. */
+const DRAINED_SLOT_GUARD = "held: drained slot awaiting comeback";
+/** The model member's keys an agent does not take: it gets its own id and folder, no pool, no conversation of the
+ *  model's, and its own `keep_alive: false` (below). */
+const NOT_INHERITED = ["pool", "id", "label", "cwd", "session_source", "keep_alive"];
+
+/** One add issued in a cycle, waiting for its call after the lease is released. */
+interface IssuedAdd {
+  slotId: string;
+  slotNumber: number;
+  logicalId: string;
+  attemptId: string;
+  rigId: string;
+  op: SeatPoolAddOp;
+  rigRoot: string;
+  /** The `cwd_template` folder to create before the add; null without a template. */
+  folder: string | null;
+  launchAdditionsFrom: SeatSkillPaths | undefined;
+  operation: Extract<ReturnType<typeof reserveOperation>, { state: "fresh" }>;
+}
+
+/** What one add settled as, reported by the model's next cycle. */
+interface SettledAdd { slotNumber: number; logicalId: string; nodeId?: string; attempt: AttemptView }
+
+/** The outcome of the add call, as kept on the slot row. */
+type AddCallOutcome =
+  | { ok: true; status: string; nodeId: string; error?: string; sessionName?: string }
+  | { ok: false; code: string; message: string };
+
+function addCallOutcome(outcome: AddMemberOutcome): AddCallOutcome {
+  if (!outcome.ok) return { ok: false, code: outcome.code, message: "message" in outcome ? outcome.message : outcome.errors.join("; ") };
+  const node = outcome.result.node;
+  return {
+    ok: true, status: node.status, nodeId: node.nodeId,
+    ...(node.error ? { error: node.error } : {}), ...(node.sessionName ? { sessionName: node.sessionName } : {}),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A refusal to issue an add, raised inside the issue transaction so it rolls back. */
+class AddNotIssued extends Error {
+  constructor(readonly code: string) { super(code); }
 }
 
 
@@ -387,10 +491,6 @@ function freeToDrain(agent: SeatPoolAgentRead): boolean {
   return agent.running && agent.idleAtPrompt && agent.openRows === 0 && agent.heldCount === 0;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecutor {
   /** Woken since the plan: the agent's recorded idle time can be read and is not the one the plan read. */
   const woken = (nodeId: string, idleSince: string) => {
@@ -399,14 +499,113 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
   };
   const at = () => deps.now().toISOString();
 
+  /** The adds started and not settled yet. */
+  const pending = new Set<Promise<void>>();
+  /** model node id → what settled since that model's last report. */
+  const settled = new Map<string, SettledAdd[]>();
+
+  /** Why the model member gives no agent, read from the model node itself (the export leaves these out silently), or null. */
+  const addRefusal = (rigId: string, modelNodeId: string): string | null => {
+    let node: NodeWithBinding | undefined;
+    try {
+      node = deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === modelNodeId);
+    } catch (error) {
+      return `add refused: the model member can't be read (${errorMessage(error)})`;
+    }
+    if (!node) return "add refused: the model member can't be read (no such node)";
+    if (node.processLimitsError !== undefined) return `add refused: the model's stored process_limits can't be read (${node.processLimitsError})`;
+    if (node.runtime === "claude-code") {
+      const autoMode = readClaudeAutoModeForLaunch(deps.db, modelNodeId);
+      if (autoMode !== undefined && "unreadable" in autoMode) return "add refused: the model's stored claude_auto_mode can't be read";
+    }
+    if (node.accountHome) return "add refused: the model has an accountHome, which a pool agent does not carry";
+    if (node.claudeTokenRef?.kind === "api-key") return "add refused: the model has an api-key token ref, which a pool agent does not carry";
+    return null;
+  };
+
+  /** The add's call, after the lease, and its settlement on the slot row. Never rejects. */
+  const runAdd = async (modelNodeId: string, add: IssuedAdd): Promise<void> => {
+    const report = (entry: SettledAdd) => settled.set(modelNodeId, [...(settled.get(modelNodeId) ?? []), entry]);
+    try {
+      let outcome: AddCallOutcome | undefined;
+      if (add.folder !== null) {
+        try { deps.add!.makeFolder(add.folder); } catch (error) { outcome = { ok: false, code: "cwd_unavailable", message: errorMessage(error) }; }
+      }
+      if (outcome === undefined) {
+        // The node id goes to the slot row in the same transaction that creates the node: a rolled-back create leaves both
+        // unwritten. The first call names only the rig.
+        const recordCreated: RecordCreated = (createdRigId, nodeId) => {
+          add.operation.recordCreated(createdRigId, nodeId);
+          if (nodeId !== undefined) deps.slots.recordAttemptNode(add.slotId, add.attemptId, nodeId);
+        };
+        try {
+          const converged = await deps.add!.converge(add.rigId, add.op, add.rigRoot, {
+            recordCreated, ...(add.launchAdditionsFrom ? { launchAdditionsFrom: add.launchAdditionsFrom } : {}),
+          });
+          outcome = converged.kind === "add_member" && converged.supported
+            ? addCallOutcome(converged.outcome)
+            : { ok: false, code: "add_unsupported", message: "the converge path did not run the member add" };
+        } catch (error) {
+          const code = (error as { code?: unknown }).code;
+          outcome = { ok: false, code: typeof code === "string" ? code : "add_failed", message: errorMessage(error) };
+        }
+      }
+      // The node decides, never the code alone: an add can fail after it created its node.
+      const slot = deps.slots.get(add.slotId);
+      if (!slot || slot.attemptId !== add.attemptId) return; // its row went with a node deleted by hand
+      const stored = JSON.stringify(outcome);
+      if (slot.nodeId === null) {
+        deps.slots.removeAddWithoutNode(add.slotId, add.attemptId);
+        const code = outcome.ok ? "node_not_recorded" : outcome.code;
+        report({
+          slotNumber: add.slotNumber, logicalId: add.logicalId,
+          attempt: { id: add.attemptId, status: "no_node", code, ...(outcome.ok ? {} : { message: outcome.message }) },
+        });
+        return;
+      }
+      const latest = add.operation.read().current.nodes.find((node) => node.id === slot.nodeId)?.latestSession ?? null;
+      const runs = outcome.ok && outcome.status === "launched" && latest !== null
+        && (latest.status === "running" || latest.status === "idle") && latest.startupStatus === "ready";
+      if (runs && deps.slots.settleAdd(add.slotId, add.attemptId, {
+        outcome: stored, result: JSON.stringify({ nodeId: slot.nodeId, sessionId: latest!.id }), at: deps.now().toISOString(),
+      })) {
+        report({ slotNumber: add.slotNumber, logicalId: add.logicalId, nodeId: slot.nodeId, attempt: { id: add.attemptId, status: "running" } });
+        return;
+      }
+      // A node that does not run (or not yet) is not settled here: the attempt stays issued, with its outcome kept.
+      deps.slots.recordAttemptOutcome(add.slotId, add.attemptId, stored);
+    } catch (error) {
+      report({ slotNumber: add.slotNumber, logicalId: add.logicalId, attempt: { ...inFlight(add.attemptId), code: "settle_failed", message: errorMessage(error) } });
+    }
+  };
+
+  /** One add after another, each after the lease is released; the cycle does not wait for them. */
+  const startAdds = (modelNodeId: string, adds: readonly IssuedAdd[]) => {
+    if (adds.length === 0) return;
+    const run = adds.reduce<Promise<void>>((previous, add) => previous.then(() => runAdd(modelNodeId, add)), Promise.resolve());
+    pending.add(run);
+    void run.finally(() => pending.delete(run));
+  };
+
   return {
+    async idle() {
+      while (pending.size > 0) await Promise.all([...pending]);
+    },
     async cycle(job) {
       const active = () => deps.jobsRepo.getById(job.jobId)?.state === "active";
       const found = seatPoolModelOfJob(deps.db, job);
       if (!found.found && found.cause === "no_model_node_id") {
         return { action: "skip", reason: "seat_pool_model_unknown", notes: { modelNodeId: found.modelNodeId } };
       }
-      const report = (notes: Record<string, unknown>): PolicyEvaluation => ({ action: "skip", reason: "seat_pool_report", notes });
+      // What settled since this model's last report goes in this one.
+      // Not while the job is no longer active: the engine records no evaluation of a stopped job, so what settled waits
+      // for a report it does record.
+      const report = (notes: Record<string, unknown>): PolicyEvaluation => {
+        const id = typeof notes["modelNodeId"] === "string" && active() ? notes["modelNodeId"] : null;
+        const done = id === null ? undefined : settled.get(id);
+        if (id !== null) settled.delete(id);
+        return { action: "skip", reason: "seat_pool_report", notes: done?.length ? { ...notes, settled: done } : notes };
+      };
       if (!found.found) {
         // No custody: the guard can't resolve a node that is gone.
         const held: Held = found.cause === "node_gone"
@@ -417,7 +616,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       const { model, modelNodeId, rigId } = found;
       const slots = deps.slots.forModel(modelNodeId);
       let block = blockView(deps.rigRepo.getNodePool(modelNodeId));
-      const base = () => ({ modelNodeId, ...block, slots: slotsView(slots) });
+      // The report reads the slot rows when it is built, not the snapshot the plan used: an add that settles while the cycle
+      // waits for custody is then reported the same way in `slots` and in `settled`.
+      const base = () => ({ modelNodeId, ...block, slots: slotsView(deps.slots.forModel(modelNodeId)) });
       if (!active()) return report({ ...base(), held: JOB_STOPPED });
       if (block.block === "unusable") return report({ ...base(), held: BLOCK_UNREADABLE, advisory: unreadableAdvisory(block.error) });
       // After `pool: {}` the model has no block: the job drains with the spec last stored on its row (`drain` set), and
@@ -428,11 +629,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       const spec: SeatPoolSpec = block.block === "stored" ? block.spec : { ...lastSpec!, drain: true };
       const removal = removed ? { removal: "the pool block was removed; draining with the spec last stored on the job" } : {};
 
-      // The plan is read outside the lease; the custody is only for the hold check, the moves and the drain decisions.
+      // The plan is read outside the lease; the custody is for the hold check, the moves, the drain decisions and the
+      // add's reservation and issue. The add's call goes out after it.
       const read: SeatPoolReadState = { ...readSeatPoolState(deps, model, slots), lastStepAt: lastDrainStep(slots) };
       const plan = planSeatPool(spec, read, deps.now().getTime());
       const dispatches = plan.intents.filter((i): i is Extract<SeatPoolIntent, { kind: "dispatch" }> => i.kind === "dispatch");
       const drainIntents = plan.intents.filter((i): i is Extract<SeatPoolIntent, { kind: "drain" }> => i.kind === "drain");
+      const addIntent = plan.intents.find((i): i is Extract<SeatPoolIntent, { kind: "add" }> => i.kind === "add");
       const plannedTo = (slotNumber: number) => read.agents.find((a) => a.slotNumber === slotNumber)?.sessionName ?? `slot ${slotNumber}`;
       // The session each agent ran when the plan read it: a drain stops only that session.
       const planSession = new Map(read.agents.map((a) => [a.slotNumber, a.nodeId === null ? null : latestSession(deps.db, a.nodeId)?.id ?? null]));
@@ -467,6 +670,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         drains.push({ ...step, outcome: "skipped", code });
       };
 
+      let addNotes: Record<string, unknown> | undefined;
+      const issued: IssuedAdd[] = [];
+      let thrown: unknown;
       try {
         await deps.custody([modelNodeId], async () => {
           if (!active()) { held = JOB_STOPPED; return; }
@@ -543,11 +749,101 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             if (!deps.slots.setPhase({ slotId: slot.slotId, from: "live", to: "draining", at: at(), stop: null })) { drainSkipped(step, "slot_moved_on"); continue; }
             toDrain.push({ slot, nodeId: slot.nodeId, session: agent.sessionName, sessionId, idleSince: d.idleSince });
           }
+
+          // The add, after the moves of the same cycle, under the same lease. Nothing in it awaits.
+          if (!addIntent || !deps.add || held || blockChanged) return;
+          if (!active()) { held = JOB_STOPPED; return; }
+          const storedNow = deps.rigRepo.getNodePool(modelNodeId);
+          if (storedNow === undefined || !("spec" in storedNow) || !sameSpec(storedNow.spec, spec)) {
+            addNotes = { skipped: "pool_block_changed" };
+            return;
+          }
+          const current = deps.slots.forModel(modelNodeId);
+          if (current.some((slot) => slot.phase === "drained")) { addNotes = { held: DRAINED_SLOT_GUARD }; return; }
+          const refusal = addRefusal(rigId, modelNodeId);
+          if (refusal) { addNotes = { refused: refusal }; return; }
+          let raw: Record<string, unknown>;
+          try {
+            raw = deps.add.exportMember(rigId, modelNodeId);
+          } catch (error) {
+            addNotes = { refused: `add refused: the model member can't be exported (${errorMessage(error)})` };
+            return;
+          }
+          const inherited = Object.fromEntries(Object.entries(raw).filter(([key]) => !NOT_INHERITED.includes(key)));
+          const pod = modelPod(deps.db, modelNodeId);
+          if (pod === null) { addNotes = { refused: "add refused: the model member has no pod" }; return; }
+          const rigRoot = deps.rigRepo.getNodeLaunchRecipe(modelNodeId)?.rigRoot ?? ".";
+          const launchAdditionsFrom = seatLaunchAdditionPathsForNode(deps.db, modelNodeId);
+          const issuedView: Array<{ slotNumber: number; logicalId: string; attempt: AttemptView }> = [];
+          const notIssued: Array<{ slotNumber: number; logicalId: string; code: string }> = [];
+          for (let unit = 0; unit < addIntent.count; unit++) {
+            if (!active()) { held = JOB_STOPPED; break; }
+            // The reservation: a new number and its row in one transaction. The operation id is a UUID.
+            const attemptId = randomUUID();
+            const { slot, logicalId } = deps.slots.reserveAdd({ modelNodeId, attemptId, at: deps.now().toISOString() });
+            const memberId = logicalId.slice(pod.length + 1);
+            const folder = spec.cwdTemplate === null
+              ? null
+              : spec.cwdTemplate.replace(/\{(rig|slot)\}/g, (_, key: string) => (key === "rig" ? model.rigName : memberId));
+            // A pool agent is never kept alive: a kept-alive agent would be relaunched against the pool's own stops. Leaving
+            // the key out is not enough, since the add then resolves it from the agent spec's profile or defaults.
+            const member = { id: memberId, ...inherited, cwd: folder ?? raw["cwd"], keep_alive: false };
+
+            // The re-check just before the issue (a lower max, drain, a hold or surplus since the plan) goes here.
+
+            // The issue: the job's state and the holds again, then the issued attempt, what it was issued on and the
+            // operation id, in one transaction.
+            const targets = [rigId, pod];
+            const body = JSON.stringify({ member, rigRoot });
+            let operation: IssuedAdd["operation"];
+            let stopped: SeatPoolHoldRead | undefined;
+            try {
+              const recheck = readSeatPoolHold(deps.db, rigId);
+              if (!active() || recheck.stoppedSeq !== null) {
+                stopped = recheck;
+                throw new AddNotIssued("held");
+              }
+              const eventSeq = (deps.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = ?").get(rigId) as { seq: number | null }).seq;
+              const basis = JSON.stringify({ eventSeq, targets, body });
+              operation = deps.db.transaction(() => {
+                if (!deps.slots.issueAttempt(slot.slotId, attemptId, basis)) throw new AddNotIssued("slot_changed");
+                const reserved = reserveOperation(deps.db, attemptId, "member.add", targets, body);
+                if (reserved.state !== "fresh") throw new AddNotIssued(`operation_${reserved.state}`);
+                return reserved;
+              })();
+            } catch (error) {
+              // Whatever stops the issue after the reservation, the reserved row goes, so its number is free again. A
+              // failed removal does not hide the error that stopped the issue.
+              try { deps.slots.removeAddWithoutNode(slot.slotId, attemptId); } catch { /* the issue's own error is the one raised */ }
+              if (!(error instanceof AddNotIssued)) throw error;
+              if (stopped !== undefined) {
+                if (!active()) held = JOB_STOPPED;
+                else { hold = stopped; held = { cause: "rig stopped", seq: stopped.stoppedSeq!, message: `held: rig stopped (event ${stopped.stoppedSeq})` }; }
+                break;
+              }
+              notIssued.push({ slotNumber: slot.slotNumber, logicalId, code: error.code });
+              continue;
+            }
+            issued.push({
+              slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, rigId, rigRoot, folder, launchAdditionsFrom, operation,
+              op: { kind: "add_member", pod, member },
+            });
+            issuedView.push({ slotNumber: slot.slotNumber, logicalId, attempt: inFlight(attemptId) });
+          }
+          addNotes = {
+            ...(issuedView.length ? { issued: issuedView } : {}),
+            ...(notIssued.length ? { failed: notIssued } : {}),
+          };
         });
       } catch (error) {
+        thrown = error;
+      }
+      // The calls go out after the lease is released, whatever happened after their issue.
+      startAdds(modelNodeId, issued);
+      if (thrown !== undefined) {
         // A refused custody is not a failure: the cycle had no effect.
-        if (!(error instanceof DeliveryGuardError)) throw error;
-        custody = { code: error.code, message: error.message };
+        if (!(thrown instanceof DeliveryGuardError)) throw thrown;
+        custody = { code: thrown.code, message: thrown.message };
       }
 
       if (!held && !custody && deps.drain) {
@@ -762,6 +1058,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         ...(skipped.length ? { skipped } : {}),
         ...(failed.length ? { failed } : {}),
         ...(drains.length ? { drains } : {}),
+        ...(addNotes && Object.keys(addNotes).length ? { add: addNotes } : {}),
         ...(custody ? { custody } : {}),
       };
       // After `pool: {}`: the job ends once every agent is drained (busy agents stay `live` until they are free).
