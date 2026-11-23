@@ -260,7 +260,7 @@ export function streamRoutes(): Hono {
   });
 
   app.get("/actions/list", (c) => {
-    const parsed = queryLimit(c);
+    const parsed = queryLimit(c, { boundIntoSql: false });
     if (!parsed.ok) return parsed.response;
     const mode = c.req.query("mode") || "history";
     if (mode !== "history" && mode !== "current") return c.json({ error: "mode must be history or current" }, 400);

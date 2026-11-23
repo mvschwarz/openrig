@@ -102,6 +102,16 @@ it("bulk actions bound page size and keep the old per-item response unchanged", 
   expect(await response.json()).toEqual({ streamItemId: "S1", ...before });
 });
 
+it.each([["10000000000000000000", 500], ["-10000000000000000000", 1]] as const)(
+  "bulk actions clamp safe large integer %s before binding", async (limit, expected) => {
+    record("S1", "reader-a@rig", "act"); record("S1", "reader-b@rig", "duplicate");
+    const result = await page("limit=" + limit);
+    expect(result.limit).toBe(expected);
+    expect(result.items).toHaveLength(Math.min(expected, 2));
+    expect(result.hasMore).toBe(expected === 1);
+  },
+);
+
 it.each(["mode=other", "action=other", "limit=no", "since=not-a-date", "until=2026-02-31T00:00:00Z",
   "since=2026-01-01T00:00:00.0001Z", "since=" + T2 + "&until=" + T1])("bulk actions reject malformed query %s", async query => {
   expect((await app.request("/api/stream/actions/list?" + query)).status).toBe(400);

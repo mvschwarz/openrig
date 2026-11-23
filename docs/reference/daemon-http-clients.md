@@ -114,11 +114,11 @@ All of them are server-sent events (`text/event-stream`):
 
 ## Read many stream items' reader actions
 
-`GET /api/stream/actions/list` pages the same records as `GET /api/stream/:id/actions` without a request per
-item. Each `items` entry has `actionId`, `streamItemId`, `readerSession`, `action` (`act`, `decline`, `duplicate`),
-`workQitemId`, `duplicateOf`, `reason` and `actedAt`. It records a reader's declaration, not proof that the reader
-used a decision. Clients choose which kinds and work links count as citations; repeated historical acts remain
-separate records.
+A reader action is an agent's recorded response to a stream item: it acted on it as work, declined it, or marked
+it as a duplicate. `GET /api/stream/actions/list` pages these records without a request per item. Each `items`
+entry has `actionId`, `streamItemId`, `readerSession`, `action` (`act`, `decline`, `duplicate`), `workQitemId`,
+`duplicateOf`, `reason` and `actedAt`. Repeated historical acts remain separate records. The existing
+`GET /api/stream/:id/actions` returns one item's records.
 
 - `mode=history` (default) reads all matching retained actions. `mode=current` reads the newest **actionId** per
   item and reader, selected across the whole history before kind, time and page filters. A later decline cannot
@@ -130,9 +130,14 @@ separate records.
   ascending `actionId`, a unique tie-breaker even when action timestamps are equal. Follow `nextAfterActionId`
   as `afterActionId`, keeping the other filters/mode unchanged, until `hasMore` is false. A page is not a total count.
 - Archived items' actions are included. `missingStreamItemIds` lists explicitly requested IDs absent from the
-  item table; a present item with no matching actions is different from a missing item. Manually orphaned action
-  rows remain readable without item-metadata filters, as on the per-item route; absent metadata cannot match a tag
-  or source filter. `historyScope: "retained"` does not promise history removed manually or unavailable elsewhere.
+  item table; a present item with no matching actions is different from a missing item. Actions can still be
+  returned after someone removes their item row. Those actions cannot match a tag or source filter because the
+  item's metadata is gone. `historyScope: "retained"` means the result includes only action records this daemon
+  still stores; it cannot recover deleted records.
+
+Tag matching examines stored JSON values. Items have a source-session index, but filtering or sorting the joined
+action records can still examine more records than a page returns. In current mode, finding each reader's latest
+action can also read more history than the page contains.
 
 Paging has no gaps or repeats on stable data. It is not a snapshot: new action IDs ahead of the cursor can appear
 on later pages, IDs inserted behind it are not revisited, and concurrent corrections can change which records
