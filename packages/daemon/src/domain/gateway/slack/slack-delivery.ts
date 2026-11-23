@@ -14,6 +14,7 @@
 //     releases the driver's in-flight guard.
 
 import { createHash, randomUUID } from "node:crypto";
+import { isUtf8 } from "node:buffer";
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
@@ -25,6 +26,7 @@ import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
 import type { OutboundPostPayload } from "./outbound-driver.js";
+import { SLACK_TEXT_ATTACHMENT_EXTENSIONS } from "./config.js";
 
 export interface SubsystemSlackDeliveryOpts {
   botToken: string;
@@ -95,6 +97,8 @@ export interface SubsystemSlackDeliveryOpts {
    *  LOCAL_ATTACHMENT_MAX_BYTES). Return null = not a local attachment; { skipped } = an
    *  attachment that can't be sent (logged, the text still delivers). */
   readLocalImage?: (refPath: string) => LocalAttachment | null;
+  /** Opt-in text extensions from the connector config; media defaults remain available. */
+  textAttachmentExtensions?: readonly string[];
   log?: (msg: string) => void;
 }
 
@@ -158,9 +162,12 @@ function pendingTransportFailureReceipt(
  *  of at most LOCAL_ATTACHMENT_MAX_BYTES, readable — else null (not an attachment), or { skipped }
  *  when it is an attachment that can't be sent (too large, missing, unreadable), so the miss is
  *  logged rather than silent. */
-export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
+export function defaultReadLocalImage(refPath: string, textAttachmentExtensions: readonly string[] = []): LocalAttachment | null {
   if (!path.isAbsolute(refPath)) return null;
-  if (!LOCAL_ATTACHMENT_EXT.has(path.extname(refPath).toLowerCase())) return null;
+  const ext = path.extname(refPath).toLowerCase();
+  const isText = SLACK_TEXT_ATTACHMENT_EXTENSIONS.includes(ext as typeof SLACK_TEXT_ATTACHMENT_EXTENSIONS[number])
+    && textAttachmentExtensions.includes(ext);
+  if (!LOCAL_ATTACHMENT_EXT.has(ext) && !isText) return null;
   // The path is resolved ONCE: open it, then stat and read that same descriptor, so the file checked is the file
   // sent. O_NONBLOCK keeps the open from waiting on a FIFO (refused below as not a regular file), and the read is
   // bounded by the size just checked.
@@ -179,7 +186,15 @@ export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
       if (n === 0) break;
       read += n;
     }
-    return { bytes: read === bytes.length ? bytes : bytes.subarray(0, read), filename: path.basename(refPath) };
+    let content = read === bytes.length ? bytes : bytes.subarray(0, read);
+    if (isText) {
+      if (!isUtf8(content)) return { skipped: "text attachment is not valid UTF-8" };
+      content = Buffer.from(redactSecrets(Buffer.from(content).toString("utf8")), "utf8");
+      if (content.length > LOCAL_ATTACHMENT_MAX_BYTES) {
+        return { skipped: `redacted text is over the ${LOCAL_ATTACHMENT_MAX_BYTES}-byte attachment cap` };
+      }
+    }
+    return { bytes: content, filename: path.basename(refPath) };
   } catch (e) {
     return { skipped: `unreadable (${(e as NodeJS.ErrnoException).code ?? "error"})` };
   } finally {
@@ -498,7 +513,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // HTTPS evidence already appeared as a link in the posted message. Unsupported
     // local files are skipped. A failed upload is logged without reposting the decision.
     const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
-      ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
+      ? (opts.readLocalImage ? opts.readLocalImage(String(q.evidenceRef)) : defaultReadLocalImage(String(q.evidenceRef), opts.textAttachmentExtensions))
       : null;
     if (local && "skipped" in local) {
       log(`ATTACHMENT skipped for ${q.qitemId ?? decision.decisionId}: ${path.basename(String(q.evidenceRef))} ${local.skipped} (text delivered; attachment missing)`);

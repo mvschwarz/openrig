@@ -63,8 +63,11 @@ export interface SlackConnectorConfig {
   reactions?: SlackReactionsMode;
   /** Link and media previews on human-row posts; absent defaults to off. */
   unfurl?: "on" | "off";
+  /** Explicitly upload these UTF-8 text evidence refs, with secret redaction. Absent or empty = pointers only. */
+  textAttachmentExtensions?: string[];
 }
 
+export const SLACK_TEXT_ATTACHMENT_EXTENSIONS = [".md", ".txt", ".csv", ".json"] as const;
 export const SLACK_REACTIONS_MODES = ["route", "off"] as const;
 export type SlackReactionsMode = typeof SLACK_REACTIONS_MODES[number];
 
@@ -124,6 +127,10 @@ function validateConfig(cfg: SlackConnectorConfig, opts: { reading?: boolean } =
   if (!opts.reading && cfg.unfurl !== undefined && cfg.unfurl !== "on" && cfg.unfurl !== "off") {
     throw new Error(`unfurl must be on or off (got ${String(cfg.unfurl)})`);
   }
+  if (cfg.textAttachmentExtensions !== undefined && (!Array.isArray(cfg.textAttachmentExtensions)
+    || cfg.textAttachmentExtensions.some((ext) => !SLACK_TEXT_ATTACHMENT_EXTENSIONS.includes(ext as typeof SLACK_TEXT_ATTACHMENT_EXTENSIONS[number])))) {
+    throw new Error(`textAttachmentExtensions must be an array containing only ${SLACK_TEXT_ATTACHMENT_EXTENSIONS.join(", ")}`);
+  }
 }
 
 export function configPathFor(home?: string): string {
@@ -182,6 +189,8 @@ export function staticReadiness(cfg: SlackConnectorConfig, hasBotToken: boolean,
       detail: cfg.inboundDestination === INHERIT_INBOUND_DESTINATION ? `${INHERIT_INBOUND_DESTINATION} (the host's default receiving agent)` : cfg.inboundDestination },
     { ok: cfg.enabled, label: "enabled", detail: cfg.enabled ? "yes" : "no (run `rig slack enable`)" },
     { ok: true, label: "human-row previews", detail: cfg.unfurl === "on" ? "on" : "off" },
+    ...(cfg.textAttachmentExtensions?.length ? [{ ok: true, label: "text-attachments",
+      detail: `${cfg.textAttachmentExtensions.join(", ")}; UTF-8, secret-redacted, at most 50 MB` }] : []),
     ...channelMapReadiness(cfg),
     ...botInboxReadiness(cfg),
     ...forwardReadiness(cfg),
