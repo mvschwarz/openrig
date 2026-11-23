@@ -117,6 +117,7 @@ export const WORKFLOW_TOP_LEVEL_KEYS = [
 ] as const;
 export const WORKFLOW_STEP_KEYS = [
   "id",
+  "label",
   "actor_role",
   "objective",
   "allowed_exits",
@@ -480,6 +481,14 @@ export function parseWorkflowSpec(rawYaml: string, sourcePath: string): Workflow
         }
       }
       assertNextOwnerMode(s.next_owner, `workflow.steps[${idx}].next_owner`, sourcePath);
+      // A display name for the step; `id` stays its identity and `objective` its instruction.
+      if (s.label !== undefined && (typeof s.label !== "string" || s.label.trim().length === 0)) {
+        throw new WorkflowSpecError(
+          "spec_field_invalid",
+          `workflow spec at ${sourcePath}: workflow.steps[${idx}].label must be a non-empty string when present (got ${JSON.stringify(s.label)}). Remove it to show the step by its id.`,
+          { sourcePath, path: `workflow.steps[${idx}].label` },
+        );
+      }
       // OPR.0.4.6.WF2 FR-3: host pin shape — non-empty string. Registry
       // membership is the validator's check (it sees the registry);
       // the parser only pins the shape.
