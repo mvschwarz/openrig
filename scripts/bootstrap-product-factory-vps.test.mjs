@@ -122,7 +122,7 @@ node -e 'const c=require("node:crypto"),f=require("node:fs");const h=c.createHas
  * Run the downloader once in a scratch tree.
  * mode: "match" pins the correct hash, "mismatch" pins a wrong one, "unpinned" passes none.
  */
-function runCase({ mode = "match", curlFails = false, installerExit = 0, shaFails = false } = {}) {
+function runCase({ mode = "match", curlFails = false, installerExit = 0, shaFails = false, rmFails = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-bootstrap-case-"));
   const shims = path.join(root, "shims");
   const tmp = path.join(root, "tmp");
@@ -132,6 +132,11 @@ function runCase({ mode = "match", curlFails = false, installerExit = 0, shaFail
   for (const [name, body] of [["curl", CURL_SHIM], ["sha256sum", SHA_SHIM]]) {
     const shim = path.join(shims, name);
     fs.writeFileSync(shim, body);
+    fs.chmodSync(shim, 0o755);
+  }
+  if (rmFails) {
+    const shim = path.join(shims, "rm");
+    fs.writeFileSync(shim, "#!/bin/sh\nexit 9\n");
     fs.chmodSync(shim, 0o755);
   }
   const payload = path.join(root, "installer.sh");
@@ -225,6 +230,19 @@ test("an installer that fails is reported as a failure and leaves nothing behind
     result.cleanup();
   }
 });
+
+for (const installerExit of [0, 37]) {
+  test(`failed cleanup warns and preserves installer status ${installerExit}`, { skip: SKIP_NO_BASH }, () => {
+    const result = runCase({ installerExit, rmFails: true });
+    try {
+      assert.equal(result.status, installerExit, "cleanup must not replace the installer's status");
+      assert.match(result.output, /WARNING: could not remove temporary installer/, "cleanup failure is reported");
+      assert.equal(result.leftovers.length, 1, "the failed cleanup leaves the temporary file for inspection");
+    } finally {
+      result.cleanup();
+    }
+  });
+}
 
 
 test("a failing hash computation removes the downloaded installer", { skip: SKIP_NO_BASH }, () => {

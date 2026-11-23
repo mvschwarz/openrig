@@ -47,30 +47,27 @@ step() { echo; echo "==> $*"; }
 # bytes are written to a file first so a mismatch can stop the bootstrap before anything runs. With
 # no checksum pinned the step says so out loud — the point is that the script never implies a
 # verification it did not do.
-# The temporary file must not outlive this call on ANY path — a failed download, a mismatched hash, an
-# installer that exits non-zero, or success. Under `set -e` a bare failing command ends the script
-# before any later cleanup runs, so every failure path returns through its own `rm -f` and the
-# installer's status is captured rather than allowed to abort. A retry therefore never accumulates a
-# half-downloaded installer in $TMPDIR.
+# Attempt cleanup on every path. A cleanup failure warns without replacing the download, hash or
+# installer outcome; the installer's status is captured rather than allowed to abort under `set -e`.
 download_and_run_installer() {
   local url="$1" expected="$2" interpreter="$3"
   local file status=0
   file="$(mktemp "${TMPDIR:-/tmp}/openrig-installer.XXXXXX")"
   echo "   fetching $url"
   if ! curl -fsSL "$url" -o "$file"; then
-    rm -f "$file"
+    rm -f "$file" || echo "WARNING: could not remove temporary installer $file" >&2 || true
     return 1
   fi
   if [[ -n "$expected" ]]; then
     local actual
     if ! actual="$(sha256sum "$file" | awk '{print $1}')"; then
       echo "could not compute the SHA-256 of $url — sha256sum failed" >&2
-      rm -f "$file"
+      rm -f "$file" || echo "WARNING: could not remove temporary installer $file" >&2 || true
       return 1
     fi
     if [[ "$actual" != "$expected" ]]; then
       echo "refusing to run $url: SHA-256 is ${actual}, not the pinned ${expected}" >&2
-      rm -f "$file"
+      rm -f "$file" || echo "WARNING: could not remove temporary installer $file" >&2 || true
       return 1
     fi
     echo "   sha256 ok: $actual"
@@ -78,7 +75,7 @@ download_and_run_installer() {
     echo "   WARNING: running $url unverified — pin it with the matching *_SHA256 variable to check the bytes"
   fi
   "$interpreter" "$file" || status=$?
-  rm -f "$file"
+  rm -f "$file" || echo "WARNING: could not remove temporary installer $file" >&2 || true
   return "$status"
 }
 
