@@ -60,7 +60,7 @@ interface DeliveryResultBase {
 export interface GatewayDeliveryResult extends DeliveryResultBase {
   receiptSource: "gateway";
   /** not-alerted: an ask created without --alert to a person whose Slack subscription is urgent-only, so it's on Steering and the TUI and never sent to Slack. */
-  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted" | "not-requested";
+  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
   /** #96: present for a --reply-to update once posted; false = it posted top-level instead. */
@@ -1734,7 +1734,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
         };
         const usableCreateRow = (value: unknown): value is QueueRow =>
-          isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state) && value.createOutcome !== "unknown";
+          isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state);
         if (res instanceof Error) {
           // A pre-header disconnect can follow a committed create. Preserve the typed error,
           // but do not let the shared renderer assert nondelivery.
@@ -1779,7 +1779,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const warning = received[key];
             if (isQueueRow(warning) && typeof warning.message === "string") console.error(`Warning: ${warning.message}`);
           }
-          const error = new DaemonResponseError(res.status, "", res.headers);
+          const error = new DaemonResponseError(res.status, "");
           error.message += ` ${recovery}`;
           throw error;
         }

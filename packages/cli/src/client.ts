@@ -111,11 +111,9 @@ export class DaemonConnectionError extends Error {
  * so the CLI can render "slow, not stopped" instead of daemon-down language.
  */
 export class DaemonTimeoutError extends DaemonConnectionError {
-  readonly headers?: Headers;
-  constructor(message: string, headers?: Headers) {
+  constructor(message: string) {
     super(message);
     this.name = "DaemonTimeoutError";
-    this.headers = headers;
   }
 }
 
@@ -128,13 +126,11 @@ export class DaemonTimeoutError extends DaemonConnectionError {
 export class DaemonResponseError extends Error {
   readonly status: number;
   readonly bodySnippet: string;
-  readonly headers?: Headers;
-  constructor(status: number, body: string, headers?: Headers) {
+  constructor(status: number, body: string) {
     super(`The daemon returned an unreadable response (HTTP ${status}).`);
     this.name = "DaemonResponseError";
     this.status = status;
     this.bodySnippet = body.slice(0, 200);
-    this.headers = headers;
   }
 }
 
@@ -409,7 +405,6 @@ export class DaemonClient {
     this.identity ??= this.identityHeaders();
     init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...await this.identity } };
     let responseStatus: number | undefined;
-    let responseHeaders: Headers | undefined;
     try {
       const response = await fetchWithTimeout(
         timeoutMs >= FETCH_HEADERS_TIMEOUT_MS ? this.longFetchImpl : this.fetchImpl,
@@ -419,7 +414,6 @@ export class DaemonClient {
           timeoutMs,
           consumeResponse: consumeResponse ? async (response) => {
             responseStatus = response.status;
-            responseHeaders = response.headers;
             await consumeResponse(response);
           } : undefined,
           timeoutMessage: `Request to ${this.baseUrl}${path} timed out after ${timeoutMs}ms`,
@@ -436,11 +430,11 @@ export class DaemonClient {
       // the daemon may be up but saturated. Surface it as a subclass so callers
       // still catch DaemonConnectionError, but the CLI can say "slow, not stopped".
       if (err instanceof FetchTimeoutError) {
-        throw new DaemonTimeoutError(`The OpenRig daemon at ${this.baseUrl} did not respond in time: ${msg}`, responseHeaders);
+        throw new DaemonTimeoutError(`The OpenRig daemon at ${this.baseUrl} did not respond in time: ${msg}`);
       }
       // Headers prove that the daemon received the request, but not that a write
       // finished. A dropped body must preserve unknown-outcome guidance.
-      if (responseStatus !== undefined) throw new DaemonResponseError(responseStatus, "", responseHeaders);
+      if (responseStatus !== undefined) throw new DaemonResponseError(responseStatus, "");
       const causeCode = connectionErrorCode(err);
       throw new DaemonConnectionError(
         `Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}${causeCode && !msg.includes(causeCode) ? ` (${causeCode})` : ""}`,
@@ -461,7 +455,7 @@ export class DaemonClient {
     try {
       return { status: res.status, data: JSON.parse(text) as T, headers: res.headers };
     } catch {
-      throw new DaemonResponseError(res.status, text, res.headers);
+      throw new DaemonResponseError(res.status, text);
     }
   }
 

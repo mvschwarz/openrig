@@ -1208,7 +1208,7 @@ describe("queue create scope advisories preserve admission and output", () => {
         if (typedLoss) {
           await response.text();
           calls.committedBeforeLoss.push(target.daemon.deps.queueRepo.getById((body as { qitemId: string }).qitemId));
-          throw new DaemonResponseError(response.status, "fixture lost committed response body", response.headers);
+          throw new DaemonResponseError(response.status, "fixture lost committed response body");
         }
         return { status: response.status, data: await response.json(), headers: response.headers };
       },

@@ -534,7 +534,6 @@ export function queueRoutes(): Hono {
   async function forwardQueueWrite(
     c: {
       get: (key: string) => unknown;
-      header: (name: string, value: string) => void;
       json: (body: unknown, status?: number) => Response;
       req: { header: (name: string) => string | undefined };
     },
@@ -656,7 +655,6 @@ export function queueRoutes(): Hono {
   async function crossHostHandoff(
     c: {
       get: (key: string) => unknown;
-      header: (name: string, value: string) => void;
       json: (body: unknown, status?: number) => Response;
       req: { header: (name: string) => string | undefined };
     },
@@ -993,7 +991,7 @@ export function queueRoutes(): Hono {
       }
 
       const responseStatus = (fwd.status === 204 ? 200 : fwd.status) as 200;
-      if (!isObjectRecord(payload) || payload.createOutcome === "unknown") return c.json(payload, responseStatus);
+      if (!isObjectRecord(payload)) return c.json(payload, responseStatus);
       const outputRow = payload;
       const existingAdvisories = Array.isArray(outputRow.advisories) ? outputRow.advisories : [];
       const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
