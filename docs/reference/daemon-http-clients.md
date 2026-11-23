@@ -133,6 +133,19 @@ Open FYIs are ordered by priority, then newest first. `view=all` (also the defau
 `view=default` selects the effective default person, or all when no default is available. A named view that cannot
 resolve a person has `perspective.basis: "unknown"` and no items when a registry is available. With no registered
 people there is no perspective filter: inspect `perspective` rather than assuming the requested view was applied.
+
+For open FYIs on one selected machine, add `host=<registered-id>` to
+`GET /api/queue/open-human-updates`. The home daemon resolves that target before reading and forwards `view` and
+`limit` using the target's configured bearer, or no bearer for a tokenless entry. It does not forward the app's
+incoming credential. An unknown or unavailable target returns a structured read failure, never a complete empty
+list or an all-host fallback. The request and response body share the existing five-second read deadline.
+
+Keep the selected request host as the origin key alongside the returned envelope; do not infer it from a queue
+item id. Successful JSON is the origin's envelope verbatim and does not add a host stamp. The target resolves its
+own `view`: an unknown named person gives an unknown perspective and no items when people are registered, while
+an absent or unavailable people registry can return unfiltered items without `perspective`. Do not label that
+unfiltered result as a confirmed personal view. This read leaves action-required attention, delivered-update
+history and notification behavior unchanged.
 A person's view also includes instance or unassigned items when that person is the default. These are views on a
 trusted daemon, not per-person authentication or access control; existing daemon and browser access rules still apply.
 
