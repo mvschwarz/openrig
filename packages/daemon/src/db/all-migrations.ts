@@ -6,14 +6,14 @@ import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
+import { ompTuiRuntimeSwitchesSchema } from "./migrations/191_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "./migrations/192_omp_switch_adoption.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
 import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
 import { coreAppAccessSchema } from "./migrations/175_core_app_access.js";
-import { ompTuiRuntimeSwitchesSchema } from "./migrations/175_omp_tui_runtime_switches.js";
-import { ompSwitchAdoptionSchema } from "./migrations/179_omp_switch_adoption.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -341,7 +341,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   streamIntakeCursorSchema,
   nodeLaunchWrapperSchema,
   piAccountSwitchesSchema,
-  ompTuiRuntimeSwitchesSchema,
   workflowInstanceSpecSchema,
   eventsRetentionMarksSchema,
   workflowInstanceRootObjectiveSchema,
@@ -371,10 +370,11 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeStatuslineThrottleSchema,
   workflowBoundPodSchema,
   seatPoolSchema,
-  ompSwitchAdoptionSchema,
   remoteControlObservationsSchema,
   sessionStopAttemptSchema,
   nodeKeepAliveSchema,
   queueItemsBlockedOnIndexSchema,
   queueItemsScanIndexesSchema,
+  ompTuiRuntimeSwitchesSchema,
+  ompSwitchAdoptionSchema,
 ];
