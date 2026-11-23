@@ -384,17 +384,22 @@ describe("the daemon's assignment plan", () => {
 
   // Found in review of #3679: a seat's result row references its node, so an apply whose seat was removed while it ran
   // threw on saving that row, after other seats had changed, and reported nothing.
-  it("a seat removed while the apply runs is still reported, with no command; the apply finishes and saves the other seats' results", async () => {
+  it.each([
+    ["seat", false],
+    ["seat's rig", true],
+  ] as const)("a %s removed while the apply runs is still reported, with no command; the apply finishes and saves what remains", async (_case, wholeRig) => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
     seat("fleet", "k1", "codex", "a@fleet");
     seat("fleet", "k2", "codex", "b@fleet");
     const nodeOf = (s: string) => (db.prepare("SELECT node_id FROM sessions WHERE session_name = ?").get(s) as { node_id: string }).node_id;
     const removed = nodeOf("a@fleet");
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(removed) as { rig_id: string }).rig_id;
     // a@fleet's removal holds its lease first: the pinned restart then finds no seat, as restartInPlace reports it.
     const run = vi.fn<SeatRestart["run"]>(async (s) => {
       if (s !== "a@fleet") return { ok: true, codexHome, outcome: "restarted_account_unverified", message: "restarted", activity: { state: "idle" }, peers: [] } as never;
-      new RigRepository(db).deleteNode(removed);
+      if (wholeRig) new RigRepository(db).deleteRig(rigId);
+      else new RigRepository(db).deleteNode(removed);
       return { ok: false, code: "seat_name_shared", message: '"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.' } as never;
     });
     const seatRestart = { plan: vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never), run };
@@ -415,9 +420,9 @@ describe("the daemon's assignment plan", () => {
     expect(a!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone.");
     expect(a!.detail).not.toContain("rig seat restart");
     expect(b).toMatchObject({ seat: "b@fleet", kind: "unknown", recovery: "rig seat restart b@fleet --keep-conversation" });
+    // A removed rig saves no intent and no results (they'd go with it); otherwise only the removed seat's result is missing.
     const assignments = new ProviderAccountAssignmentsRepository(db);
-    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeOf("b@fleet")) as { rig_id: string }).rig_id;
-    expect(assignments.results(rigId, "codex").map((r) => [r.seat, r.kind])).toEqual([["b@fleet", b!.kind]]);
+    expect(assignments.results(rigId, "codex").map((r) => [r.seat, r.kind])).toEqual(wholeRig ? [] : [["b@fleet", b!.kind]]);
   });
 
   it("an outside peer whose session name a seat in a third rig has, on another home, gets no restart command", async () => {
