@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -685,6 +685,18 @@ describe("trace-to-root with nothing in progress — held and pending work as co
     expect(result.stdout).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
     expect(result.stdout).not.toContain(CONTEXT);
     expect(result.stdout).not.toContain("intent: Ship A");
+  });
+
+  it("quotes the script's own path in each choice's command, so an install folder with a space stays one argument", () => {
+    const w = world();
+    const copy = join(w.root, "tools with space", "trace-to-root.py");
+    mkdirSync(dirname(copy), { recursive: true });
+    copyFileSync(TRACE, copy);
+    const result = spawnSync(process.env.OPENRIG_TEST_PYTHON || "python3",
+      [copy, "--trees", "work", "--check", "--unresolved-work-advisory", "--work-basis", NO_BATON, "--held-work", "-"],
+      { encoding: "utf8", env: w.env, input: JSON.stringify(heldWork(w, [parked(["mission:release-a", "slice:12-refocus"]), pending(["mission:release-b"])])) });
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`\n  python3 '${copy}' --trees work --packet --work-start ${w.slice}\n`);
   });
 
   it("gives one mission name in two project roots no shared chain", () => {

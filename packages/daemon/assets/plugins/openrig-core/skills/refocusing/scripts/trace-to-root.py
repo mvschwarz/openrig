@@ -606,7 +606,7 @@ def scope_choice(row, root, extra_roots):
         return line
     work_root = work_root_for(where, root, extra_roots)
     extra_root = f" --work-root {shlex.quote(str(work_root))}" if work_root != root else ""
-    return f"{line}\n  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {shlex.quote(where)}"
+    return f"{line}\n  python3 {shlex.quote(str(Path(__file__).resolve()))} --trees work --packet{extra_root} --work-start {shlex.quote(where)}"
 
 
 def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
@@ -659,7 +659,7 @@ def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
 
 def work_start_route(start_root, extra_root=""):
     return ["Then read that mission's current intent as text:",
-            f"  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {start_root}/<mission>"]
+            f"  python3 {shlex.quote(str(Path(__file__).resolve()))} --trees work --packet{extra_root} --work-start {start_root}/<mission>"]
 
 
 def selected_project_missions(entry, project):
