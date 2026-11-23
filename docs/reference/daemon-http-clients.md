@@ -93,6 +93,15 @@ All of them are server-sent events (`text/event-stream`):
   same option again) has no event, and neither does a typed reply, which settles the ask through its own
   `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
   client that re-reads the ask after a gap still sees it.
+  A queue create the daemon refuses leaves `queue.create_refused`: `{ sourceSession, destinationSession, reason, status,
+  hostId }`, where `reason` is the response's own error code or text. A send to a destination that doesn't resolve, when
+  nothing is kept in the sender's outbox, leaves `transport.send_refused`: `{ senderSession, session, reason, status }`.
+  A forwarded create whose result is unknown (it timed out, so the remote may still commit it) leaves
+  `queue.create_remote_unknown`: `{ qitemId, sourceSession, destinationSession, hostId, failureClass }`; reconcile by
+  `qitemId` before retrying. A send kept as a failed message in the sender's outbox is none of these: read it with
+  `GET /api/queue/outbox/list`. The events carry no message body and are never written for an accepted request; the
+  refused command's own response is unchanged. Read the reason and the parties from this stream or the `GET /api/events`
+  replay; `rig telemetry events` shows event metadata only, with no payload and no filter by type.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.

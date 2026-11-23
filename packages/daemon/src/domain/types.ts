@@ -394,6 +394,12 @@ export type RigEvent =
   // (null for legacy/omitted — always present, never absent, so consumers
   // can title feed cards without a second fetch).
   | { type: "queue.created"; qitemId: string; sourceSession: string; destinationSession: string; priority: string; tier: string | null; summary: string | null }
+  // #3728: a queue write or send the daemon refused or could not settle, so it stays diagnosable when the caller loses
+  // stderr. Three outcomes stay apart: these refusals (nothing stored), a send kept as a failed message in the sender's
+  // outbox (queue outbox list, not an event), and a forwarded write whose result is unknown. Never carries the body.
+  | { type: "queue.create_refused"; sourceSession: string | null; destinationSession: string | null; reason: string; status: number; hostId: string | null }
+  | { type: "queue.create_remote_unknown"; qitemId: string | null; sourceSession: string | null; destinationSession: string | null; hostId: string; failureClass: string }
+  | { type: "transport.send_refused"; senderSession: string | null; session: string | null; reason: string; status: number }
   | { type: "queue.handed_off"; qitemId: string; fromSession: string; toSession: string; closureReason: "handed_off_to"; summary: string | null }
   | { type: "queue.claimed"; qitemId: string; destinationSession: string; claimedAt: string; closureRequiredAt: string | null; summary: string | null }
   | { type: "queue.unclaimed"; qitemId: string; destinationSession: string; reason: string; summary: string | null }
