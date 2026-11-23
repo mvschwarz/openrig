@@ -109,6 +109,55 @@ describe("provider-managed network bindings", () => {
   const workerDeps = (removalFetch: typeof fetch) => ({ bindings: store, home, removalFetch } as NetworkConnectorDeps);
   const reply = (request: RequestInit, outcome: Record<string, unknown>) => new Response(JSON.stringify({ ...JSON.parse(String(request.body)), ...outcome }), { status: 200 });
 
+  it.each(["bare-403", "missing-404", "non-403", "missing-marker", "invalid-code", "binding", "seat", "provider", "revision"] as const)("R2 non-contract refusal %s stays pending and can recover", async (variant) => {
+    let now = Date.parse("2026-11-23T00:00:00Z");
+    store = new NetworkBindingStore(db, home, () => new Date(now));
+    const b = create(); store.disconnect(b.id); let calls = 0;
+    const removalFetch: typeof fetch = async (_url, init) => {
+      calls++;
+      if (calls > 1) return reply(init!, { alreadyRemoved: true });
+      if (variant === "bare-403") return new Response("<html>proxy refusal</html>", { status: 403 });
+      if (variant === "missing-404") return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
+      const refusal: Record<string, unknown> = { ...JSON.parse(String(init!.body)), refused: true, code: "wrong_epoch" };
+      if (variant === "missing-marker") delete refusal.refused;
+      if (variant === "invalid-code") refusal.code = "not a contract code";
+      if (variant === "binding") refusal.bindingId = "another-binding";
+      if (variant === "seat") refusal.hubSeat = "another@team";
+      if (variant === "provider") refusal.provider = { ...provider, installation: "another-install" };
+      if (variant === "revision") refusal.removalRevision = "another-epoch";
+      return new Response(JSON.stringify(refusal), { status: variant === "non-403" ? 401 : 403 });
+    };
+    await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!, { retryDelayMs: 5_000 });
+    expect(store.get(b.id)!.providerRemoval).toBe("pending");
+    expect(store.get(b.id)!.providerRemovalReason).toMatch(/unknown/);
+    expect(store.pendingProviderRemovals()[0]).toMatchObject({ hasCapability: true, attempts: 1, nextAttemptAt: new Date(now + 5_000).toISOString() });
+    expect(store.readRemovalToken(store.pendingProviderRemovals()[0]!)).toBe("removal-one");
+    now += 5_000;
+    await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!);
+    expect(calls).toBe(2); expect(store.get(b.id)!.providerRemoval).toBe("confirmed");
+  });
+
+  it("R2 legacy no-capability removal stays manual across sweeps and reconstruction", async () => {
+    const b = store.create({ session: "a@lab", hubUrl: "https://hub.example/mcp", hubSeat: "alex@team", token: "old-work", installation: { id: "local-account", name: "alex", account: "original-account-install" } });
+    store.disconnect(b.id); store.sweepCredentials();
+    store = new NetworkBindingStore(db, home); store.sweepCredentials();
+    const removal = store.pendingProviderRemovals()[0]!;
+    expect(removal).toMatchObject({ hasCapability: false, attempts: 0, removalRevision: "local-0" });
+    let calls = 0;
+    await runNetworkProviderRemovalPass(workerDeps(async (_url, init) => { calls++; return reply(init!, { alreadyRemoved: true }); }), removal);
+    expect(calls).toBe(0);
+    expect(store.pendingProviderRemovals()[0]).toMatchObject({ hasCapability: false, attempts: 0 });
+    expect(store.get(b.id)!.providerRemovalReason).toBeNull();
+  });
+
+  it("R2 positive capability evidence stays durable when stored metadata is absent", () => {
+    const b = create(); store.disconnect(b.id);
+    db.prepare("UPDATE network_bindings SET removal_revision = NULL WHERE id = ?").run(b.id);
+    store = new NetworkBindingStore(db, home); store.sweepCredentials();
+    expect(store.pendingProviderRemovals()[0]).toMatchObject({ hasCapability: true, removalRevision: "epoch-one", attempts: 0 });
+    expect(store.readRemovalToken(store.pendingProviderRemovals()[0]!)).toBe("removal-one");
+  });
+
   it("R1 removal redirects stay pending without forwarding the capability", async () => {
     const b = create(); store.disconnect(b.id);
     let initialRequests = 0, redirectedRequests = 0;
@@ -238,9 +287,9 @@ describe("provider-managed network bindings", () => {
     expect(store.get(b.id)!.providerRemoval).toBe("superseded"); expect(store.pendingProviderRemovals()).toEqual([]);
   });
 
-  it("a provider refusal is unconfirmed with its code and stops retrying", async () => {
+  it("R2 a matching contract refusal is unconfirmed with its code and stops retrying", async () => {
     const b = create(); store.disconnect(b.id);
-    await runNetworkProviderRemovalPass(workerDeps((async () => new Response(JSON.stringify({ code: "wrong_epoch" }), { status: 403 })) as typeof fetch), store.pendingProviderRemovals()[0]!);
+    await runNetworkProviderRemovalPass(workerDeps((async (_url, init) => new Response(JSON.stringify({ ...JSON.parse(String(init!.body)), refused: true, code: "wrong_epoch" }), { status: 403 })) as typeof fetch), store.pendingProviderRemovals()[0]!);
     expect(store.get(b.id)).toMatchObject({ providerRemoval: "unconfirmed", providerRemovalReason: "provider-refused:wrong_epoch" });
     expect(store.pendingProviderRemovals()).toEqual([]);
     // An explicit later provider report may confirm the same unconfirmed revision; automatic retry stays stopped.

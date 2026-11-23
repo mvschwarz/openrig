@@ -361,6 +361,8 @@ export class NetworkBindingStore {
 
   private recordRemovalIntent(binding: NetworkBinding): void {
     if (!binding.provider) return;
+    const removalRevision = (this.db.prepare("SELECT removal_revision FROM network_bindings WHERE id = ? AND credential_revision = ?")
+      .get(binding.id, binding.credentialRevision) as Pick<Row, "removal_revision"> | undefined)?.removal_revision;
     const at = this.now().toISOString();
     this.db.prepare(`INSERT INTO network_binding_removals
       (binding_id,credential_revision,removal_revision,provider_json,hub_url,hub_seat,has_capability,status,next_attempt_at,updated_at)
@@ -368,8 +370,8 @@ export class NetworkBindingStore {
       ON CONFLICT(binding_id,credential_revision) DO UPDATE SET
         has_capability = MAX(network_binding_removals.has_capability, excluded.has_capability)
       WHERE network_binding_removals.status = 'pending'`).run(binding.id, binding.credentialRevision,
-        binding.providerRemovalRevision ?? `local-${binding.credentialRevision}`, JSON.stringify(binding.provider), binding.hubUrl, binding.hubSeat,
-        binding.providerRemovalRevision ? 1 : 0, at, at);
+        removalRevision ?? `local-${binding.credentialRevision}`, JSON.stringify(binding.provider), binding.hubUrl, binding.hubSeat,
+        removalRevision ? 1 : 0, at, at);
   }
 
   pendingProviderRemovals(): NetworkProviderRemoval[] {

@@ -27,19 +27,22 @@ export async function runNetworkProviderRemovalPass(deps: NetworkConnectorDeps, 
     if (response.status === 408 || response.status === 429) {
       defer("provider-temporary:http-" + response.status); return;
     }
-    if (response.status >= 400 && response.status < 500) {
-      let code = `http-${response.status}`;
-      try { const refusal = await response.json() as { code?: unknown }; if (typeof refusal.code === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(refusal.code)) code = refusal.code; } catch { /* Status alone still cannot confirm removal. */ }
-      deps.bindings.reportProviderRemoval(removal.bindingId, { provider: removal.provider, removalRevision: removal.removalRevision,
-        status: "unconfirmed", reason: `provider-refused:${code}` });
-      deps.log?.("network leave: refused"); return;
-    }
-    if (!response.ok) { defer("provider-unavailable"); deps.log?.("network leave: store-unreachable"); return; }
+    const clientError = response.status >= 400 && response.status < 500;
+    if (!response.ok && !clientError) { defer("provider-unavailable"); deps.log?.("network leave: store-unreachable"); return; }
     const body = await response.json() as Record<string, unknown>;
     const sameProvider = body?.provider && typeof body.provider === "object" && Object.entries(removal.provider).every(([k, v]) => (body.provider as Record<string, unknown>)[k] === v)
       && Object.keys(body.provider).length === Object.keys(removal.provider).length;
+    const matching = body?.bindingId === removal.bindingId && body?.hubSeat === removal.hubSeat && body?.removalRevision === removal.removalRevision && sameProvider;
+    if (clientError) {
+      if (response.status === 403 && body?.refused === true && matching && typeof body.code === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(body.code)) {
+        deps.bindings.reportProviderRemoval(removal.bindingId, { provider: removal.provider, removalRevision: removal.removalRevision,
+          status: "unconfirmed", reason: `provider-refused:${body.code}` });
+        deps.log?.("network leave: refused");
+      } else { defer("provider-response-unknown:http-" + response.status); }
+      return;
+    }
     const outcomes = [typeof body?.removedAt === "string" && body.removedAt.length > 0, body?.alreadyRemoved === true, body?.superseded === true].filter(Boolean).length;
-    if (body?.bindingId !== removal.bindingId || body?.hubSeat !== removal.hubSeat || body?.removalRevision !== removal.removalRevision || !sameProvider || outcomes !== 1) {
+    if (!matching || outcomes !== 1) {
       defer("invalid-removal-receipt"); return;
     }
     deps.bindings.reportProviderRemoval(removal.bindingId, { provider: removal.provider, removalRevision: removal.removalRevision,
