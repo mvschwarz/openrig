@@ -333,14 +333,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(registered.isLocalHumanDecisionWithoutGateway(candidate)).toBe(false);
   });
 
-  it("a row whose destination no longer resolves does not stop the other findings, and the pass still reports the failure", async () => {
+  it("falls back to the source on an unknown_destination_rig refusal without stopping unrelated findings", async () => {
     // A historic row addressed to a rig that has since gone: admitted when it was created, refused now.
     let rigGone = false;
     repo = new QueueRepository(db, bus, {
-      validateRig: (destination) => !(rigGone && destination.endsWith("@product-team")),
+      validateRig: (destination) => !(rigGone && destination === "legacy-worker"),
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
     });
-    const orphan = await mkRow("dev1-impl@product-team");
+    const orphan = await mkRow("legacy-worker");
     const valid = await mkRow("worker@r");
     ageCreated(orphan.qitemId, 130);
     ageCreated(valid.qitemId, 120);
@@ -350,20 +350,19 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     // The later, unrelated row is still recovered.
     const created = await findingsFor(valid.qitemId);
     expect(created).toEqual([expect.objectContaining({ destinationSession: "worker@r", state: "pending" })]);
-    expect(result.findings).toEqual([expect.objectContaining({ qitemId: valid.qitemId, action: "created" })]);
-    // The pass still fails visibly, naming the row it could not route, and counts what it did route.
-    expect(result.outcome).toBe("failed");
-    expect(result.error).toContain(orphan.qitemId);
-    expect(status.snapshot()).toMatchObject({ lastOutcome: "failed", consecutiveFailures: 1, findingsRouted: 1 });
-    expect(await findingsFor(orphan.qitemId)).toEqual([]);
+    expect(result.findings).toContainEqual(expect.objectContaining({ qitemId: valid.qitemId, action: "created" }));
+    expect(result.outcome).toBe("findings");
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "findings", consecutiveFailures: 0, findingsRouted: 2 });
+    expect(await findingsFor(orphan.qitemId)).toEqual([expect.objectContaining({ destinationSession: "sender@r", state: "pending" })]);
     // The orphan row itself is left as it was.
-    expect(repo.getById(orphan.qitemId)).toMatchObject({ state: "pending", destinationSession: "dev1-impl@product-team" });
+    expect(repo.getById(orphan.qitemId)).toMatchObject({ state: "pending", destinationSession: "legacy-worker" });
 
-    // The next pass refreshes the made finding rather than duplicating it, and still reports the failure.
+    // The next pass refreshes both findings rather than duplicating them.
     const again = (await runSweep()).result;
-    expect(again.outcome).toBe("failed");
+    expect(again.outcome).toBe("findings");
     expect(await findingsFor(valid.qitemId)).toEqual([expect.objectContaining({ qitemId: created[0]!.qitemId })]);
-    expect(again.findings).toEqual([expect.objectContaining({ qitemId: valid.qitemId, action: "refreshed" })]);
+    expect(again.findings).toHaveLength(2);
+    expect(again.findings).toContainEqual(expect.objectContaining({ qitemId: valid.qitemId, action: "refreshed" }));
   });
 
   it("OVERDUE HALF: a claimed-never-closed row past closure_required_at yields exactly one finding row to the claimant, evidence inline", async () => {
@@ -1151,6 +1150,29 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
     await runSweep();
     expect(await findingsFor(resolved.qitemId)).toHaveLength(0);
+  });
+
+  it("says each finding is a diagnostic about its row, not a second assignment, in words true for its kind", async () => {
+    const stalled = await mkRow();
+    repo.claim({ qitemId: stalled.qitemId, destinationSession: stalled.destinationSession });
+    ageClaim(stalled.qitemId, 60);
+    const closed = await mkRow();
+    repo.claim({ qitemId: closed.qitemId, destinationSession: closed.destinationSession });
+    repo.update({
+      qitemId: closed.qitemId,
+      actorSession: closed.destinationSession,
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: "qitem-20990101000000-feedface",
+      transitionNote: "handed off to a successor not visible in this local store",
+    });
+    await runSweep();
+    const [generic] = await findingsFor(stalled.qitemId);
+    expect(generic!.body).toContain(`\nThis is a diagnostic about ${stalled.qitemId}, not a second assignment. Read ${stalled.qitemId} and act on it: pick it up, resume, route or park it, as fits; `
+      + `the sweep closes this finding itself once ${stalled.qitemId} is no longer stuck. Closing this finding alone doesn't complete ${stalled.qitemId}.`);
+    const [custody] = await findingsFor(closed.qitemId);
+    expect(custody!.body).toContain(`\nThis is a diagnostic about ${closed.qitemId}, not a second assignment: the checks and notes above settle it, `
+      + "and closing this finding alone doesn't.");
   });
 
   it("COMMA SPLIT: fully local fan-out is clean; a partial local miss names only the member requiring verification", async () => {

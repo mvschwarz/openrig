@@ -60,13 +60,16 @@ import { shellQuote } from "../adapters/shell-quote.js";
 const WORKFLOW_CONTEXT_SHORTCUT =
   "Context: this workflow packet is a shortcut, not the whole story; inspect additional project, mission, and receipt evidence before choosing an authored exit.";
 
-/** One occurrence-bound action, shared by packet bodies and authored wait wakes. */
+/** One occurrence-bound action, shared by packet bodies, authored wait wakes and the execution view.
+ * A step the lifecycle binding requires names the receipt its close needs. */
 export function renderWorkflowProjectCommand(input: {
   instanceId: string;
   packetId: string;
-  step?: Pick<WorkflowStepSpec, "acceptance">;
+  step?: Pick<WorkflowStepSpec, "acceptance"> & { id?: string };
+  binding?: Record<string, unknown> | null;
 }): string {
-  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>`;
+  const receiptRequired = input.step?.id !== undefined && requiredLifecycleSteps(input.binding ?? null).includes(input.step.id);
+  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>${receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
   const acceptance = input.step?.acceptance;
   if (!acceptance) return base;
   const verdict = acceptance.verdicts.length === 1
@@ -120,7 +123,7 @@ export function workflowWaitWakeMessage(input: {
     ...(input.step.objective ? [`Objective: ${input.step.objective}`] : []),
     ...workflowPlanningContext(input.spec.context_refs, input.instance.instanceId),
     ...(input.spec.context_refs ?? []).map((ref) => `Context reference: ${ref}`),
-    `Continuation: ${renderWorkflowProjectCommand({ ...input, instanceId: input.instance.instanceId })}`,
+    `Continuation: ${renderWorkflowProjectCommand({ ...input, instanceId: input.instance.instanceId, binding: input.instance.lifecycleBinding })}`,
     WORKFLOW_CONTEXT_SHORTCUT,
   ].join("\n");
 }
@@ -546,6 +549,8 @@ export class WorkflowProjector {
     let nextQitemId: string | null = null;
     let nextOwnerSession: string | null = null;
     let nextStepId: string | null = null;
+    // A same-role handoff that left the session closing its own packet for the role's preferred_targets (#3757).
+    let sameRoleRerouteNotice: string | undefined;
     type PostCommitNudge = { destinationSession: string; nudge: boolean | undefined };
     let nextQitemCreatePostCommit: PostCommitNudge | null = null;
     // OPR.0.4.6.WF5 FR-2 class (a): the exception item's post-commit nudge
@@ -563,6 +568,11 @@ export class WorkflowProjector {
       // the gate destination instead of the step's role owner (FR-5).
       let resolvedNextOwner: string | null = null;
       let gateCompile: GateCompileResult | null = null;
+      // next_owner: same_as_previous, on a handoff into a step of the same role with no gate and no explicit owner: the
+      // next packet stays with the session that closed this one, when that session was this packet's destination. The
+      // step's value overrides the spec's.
+      let continuation = false;
+      const closerOwnedPacket = input.actorSession === currentPacket.destinationSession;
       if (routes) {
         if (!nextStep) {
           throw new WorkflowProjectorError(
@@ -579,16 +589,51 @@ export class WorkflowProjector {
             this.nodeRuntimeOf(s),
           );
           resolvedNextOwner = input.nextOwnerSession;
+        } else if (
+          (nextStep.next_owner ?? spec.next_owner) === "same_as_previous" &&
+          input.exit === "handoff" &&
+          nextStep.actor_role === currentStep.actor_role &&
+          closerOwnedPacket
+        ) {
+          reconcileExplicitOwnerHarness(nextStep, input.actorSession, (s) => this.nodeRuntimeOf(s), "continuation");
+          resolvedNextOwner = input.actorSession;
+          continuation = true;
         } else {
-          const owner = resolveDefaultOwner(spec, nextStep, (s) => this.nodeRuntimeOf(s), roleCtx);
+          let owner: string | null;
+          try {
+            owner = resolveDefaultOwner(spec, nextStep, (s) => this.nodeRuntimeOf(s), roleCtx);
+          } catch (err) {
+            // The bound-rig resolver names its own repairs and is shared with gates, where --next-owner does not
+            // apply; on this path an explicit owner is one more way out, so name it here.
+            if (err instanceof WorkflowProjectorError && err.code === "next_owner_unresolved") {
+              throw new WorkflowProjectorError(
+                err.code,
+                `${err.message} Or supply nextOwnerSession explicitly (rig workflow project --next-owner <session>).`,
+                err.details,
+              );
+            }
+            throw err;
+          }
           if (!owner) {
             throw new WorkflowProjectorError(
               "next_owner_unresolved",
-              `cannot resolve next owner for step "${nextStep.id}" (role "${nextStep.actor_role}"); supply nextOwnerSession explicitly or add preferred_targets to the role in the spec`,
+              `cannot resolve next owner for step "${nextStep.id}" (role "${nextStep.actor_role}"); supply nextOwnerSession explicitly (rig workflow project --next-owner <session>) or add preferred_targets to the role in the spec`,
               { instanceId: instance.instanceId, nextStepId: nextStep.id, nextRole: nextStep.actor_role },
             );
           }
           resolvedNextOwner = owner;
+          if (
+            input.exit === "handoff" &&
+            nextStep.actor_role === currentStep.actor_role &&
+            (spec.roles?.[nextStep.actor_role]?.preferred_targets ?? []).length > 0 &&
+            closerOwnedPacket &&
+            owner !== input.actorSession
+          ) {
+            sameRoleRerouteNotice =
+              `next owner ${owner} for step "${nextStep.id}" comes from preferred_targets of role "${nextStep.actor_role}", ` +
+              `not from ${input.actorSession}, which closed its own packet in the same role; ` +
+              `pass --next-owner ${input.actorSession} to keep it, or set next_owner: same_as_previous in the spec`;
+          }
         }
       }
 
@@ -657,7 +702,9 @@ export class WorkflowProjector {
               ? "gate"
               : input.nextOwnerSession
                 ? "explicit"
-                : (spec.roles?.[nextStep.actor_role]?.preferred_targets ?? []).length > 0
+                : continuation
+                  ? "continuation"
+                  : (spec.roles?.[nextStep.actor_role]?.preferred_targets ?? []).length > 0
                   ? "preferred_targets"
                   : "role",
             role: nextStep.actor_role,
@@ -995,7 +1042,11 @@ export class WorkflowProjector {
       nextOwnerSession,
       nextStepId,
       emittedEventTypes: persistedEvents.map((e) => e.type),
-      ...withAdvisories([unansweredHumanGate, alreadyClosed ? alreadyClosedNotice(input.currentPacketId, alreadyClosed, input.exit) : undefined]),
+      ...withAdvisories([
+        unansweredHumanGate,
+        alreadyClosed ? alreadyClosedNotice(input.currentPacketId, alreadyClosed, input.exit) : undefined,
+        sameRoleRerouteNotice,
+      ]),
     };
   }
 
@@ -1782,14 +1833,19 @@ export function reconcileExplicitOwnerHarness(
   step: WorkflowStepSpec,
   explicitOwner: string,
   runtimeOf: (session: string) => string | null,
+  /** "continuation": the owner is the closing session under next_owner: same_as_previous, not a supplied one. */
+  ownerSource?: "continuation",
 ): void {
   if (!step.harness) return;
   const actual = runtimeOf(explicitOwner);
   if (actual !== step.harness) {
+    const owner = ownerSource === "continuation"
+      ? `the closing session ${explicitOwner} (next_owner: same_as_previous)`
+      : `the explicitly supplied owner ${explicitOwner}`;
     throw new WorkflowProjectorError(
       "harness_pin_unsatisfied",
-      `step "${step.id}" pins harness "${step.harness}" but the explicitly supplied owner ${explicitOwner} runs ${actual ?? "unknown (not a managed node)"}. Supply a ${step.harness} seat or change/remove the pin.`,
-      { stepId: step.id, harness: step.harness, explicitOwner, actualRuntime: actual },
+      `step "${step.id}" pins harness "${step.harness}" but ${owner} runs ${actual ?? "unknown (not a managed node)"}. Supply a ${step.harness} seat or change/remove the pin.`,
+      { stepId: step.id, harness: step.harness, explicitOwner, actualRuntime: actual, ...(ownerSource === "continuation" ? { continuation: true } : {}) },
     );
   }
 }

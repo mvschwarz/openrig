@@ -4,8 +4,67 @@ import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { attentionLines, replyAct, answerRequest } from "../src/attention/attention-model.js";
 import { parseCommand } from "../src/grammar.js";
-import type { AttentionRead } from "@openrig/daemon/attention";
+import { demoSnapshot } from "../src/demo-data.js";
+import { renderScreen } from "../src/render.js";
+import type { AttentionItem, AttentionRead } from "@openrig/daemon/attention";
 import type { Action, FleetSnapshot } from "../src/types.js";
+
+const feedRequest: AttentionItem = {
+  id: "queue:request", kind: "action", summary: "Choose a cover", unblocks: null, urgency: "routine",
+  at: "2026-09-10T01:00:00Z", scope: "instance", project: null, source: "/api/queue/request",
+};
+const localAsker = "orch-lead@openrig-build";
+const askerTerminal: Action = { type: "act", act: "open-terminal", view: "seat:openrig-build/orch.lead" };
+
+function renderRequest(item: AttentionItem, details = false) {
+  const snap: FleetSnapshot = { ...demoSnapshot(), attentionRead: {
+    scope: "instance", readAt: item.at ?? "", items: [item], sources: [], detailError: null,
+    detail: details ? { item, lines: [], files: [] } : null,
+  } };
+  const view = createViewState({ instanceId: "feed-seat", getSnapshot: () => snap });
+  view.dispatch(parseCommand("attention"));
+  if (details) view.dispatch({ type: "attention-open", id: item.id });
+  return renderScreen(view.get(), snap, { cols: 120, rows: 32 });
+}
+
+it("offers the asking seat's terminal directly on the Feed row", () => {
+  const screen = renderRequest({ ...feedRequest, asker: localAsker });
+  const row = screen.contentTargets.find(target => target.action.type === "attention-open" && target.action.id === feedRequest.id);
+  const chat = screen.contentTargets.find(target => target.action.type === "act" && target.action.act === "open-terminal");
+
+  expect(row).toBeDefined();
+  expect(chat?.action).toEqual(askerTerminal);
+  expect(chat?.y).toBe((row?.y ?? 0) + 1);
+  expect(screen.lines[(chat?.y ?? 0) - 1]).toContain(`Chat with ${localAsker}`);
+});
+
+it("shows the verbatim source session on the Feed row for an unloaded asker", () => {
+  const asker = "Dev-QA@remote-rig.v2";
+  const screen = renderRequest({ ...feedRequest, asker });
+  const row = screen.contentTargets.find(target => target.action.type === "attention-open" && target.action.id === feedRequest.id);
+
+  expect(row).toBeDefined();
+  expect(screen.lines[row?.y ?? 0]?.slice(screen.explorerWidth + 1).trim()).toBe(`From: ${asker}`);
+  expect(screen.contentTargets.some(target => target.action.type === "act" && target.action.act === "open-terminal")).toBe(false);
+});
+
+it("keeps the existing Chat link in request details", () => {
+  const screen = renderRequest({ ...feedRequest, asker: localAsker }, true);
+  const chat = screen.contentTargets.find(target => target.action.type === "act" && target.action.act === "open-terminal");
+
+  expect(chat?.action).toEqual(askerTerminal);
+  expect(screen.lines[(chat?.y ?? 0) - 1]).toContain(`Chat with ${localAsker} (opens its terminal)  (open ▸)`);
+});
+
+it("leaves Feed rows without an asker unchanged", () => {
+  const screen = renderRequest(feedRequest);
+  const row = screen.contentTargets.find(target => target.action.type === "attention-open" && target.action.id === feedRequest.id);
+
+  expect(row).toBeDefined();
+  expect(screen.lines[(row?.y ?? 0) - 1]).toContain("Choose a cover");
+  expect(screen.lines[row?.y ?? 0]).toContain("instance ·");
+  expect(screen.contentTargets.some(target => target.action.type === "act" && target.action.act === "open-terminal")).toBe(false);
+});
 
 it.each([140, 80])("keeps readable summaries, passive exact source navigation and Back at width %i", async width => {
   const requests: string[] = [];

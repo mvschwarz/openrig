@@ -18,6 +18,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { eventsSchema } from "../src/db/migrations/003_events.js";
+import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
+import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { missionsRoutes } from "../src/routes/missions.js";
 import { slicesRoutes } from "../src/routes/slices.js";
@@ -247,6 +252,36 @@ describe("POST /api/missions/:missionId/complete", () => {
     expect(res.status).toBe(503);
   });
 
+  it("finds the mission folder without reading queue_items on a cold index (#3354)", async () => {
+    const queueDb = createDb(":memory:");
+    migrate(queueDb, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    const insert = queueDb.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tags, body)
+       VALUES (?, '2026-05-04T00:00:00.000Z', '2026-05-04T00:00:00.000Z', 'src@r', 'dst@r', 'pending', 'routine', NULL, ?)`,
+    );
+    for (let i = 0; i < 20; i++) insert.run(`q-${i}`, `work on mission-${i % 4} slice-${i}`);
+    for (let m = 0; m < 4; m++) {
+      writeMissionReadme(missionsRoot, `mission-${m}`, "---\nstatus: active\n---\n# Mission\n");
+      writeSliceInMission(missionsRoot, `mission-${m}`, `slice-${m}`);
+    }
+    const coldIndexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db: queueDb });
+    const statements: string[] = [];
+    const prepare = queueDb.prepare.bind(queueDb);
+    queueDb.prepare = ((sql: string) => {
+      statements.push(sql);
+      return prepare(sql);
+    }) as typeof queueDb.prepare;
+    try {
+      const res = await buildApp(coldIndexer).request("/api/missions/mission-2/complete", { method: "POST" });
+      expect(res.status).toBe(200);
+      const readme = fs.readFileSync(path.join(missionsRoot, "mission-2", "README.md"), "utf-8");
+      expect(readme).toContain("status: complete");
+      expect(statements.filter((sql) => /queue_items/i.test(sql))).toEqual([]);
+    } finally {
+      queueDb.close();
+    }
+  });
+
   it("preserves unrelated frontmatter fields when updating status", async () => {
     writeMissionReadme(
       missionsRoot,
@@ -277,7 +312,7 @@ describe("POST /api/missions/:missionId/complete", () => {
 type SidecarBody = { missions: Record<string, { authoredStatus: string | null; readiness: unknown }> };
 
 const legacyReadiness = {
-  name: "relx", state: "legacy", historicalStatus: null, slices: [], issues: [],
+  name: "relx", state: "legacy", historicalStatus: null, slices: [], issues: [], activeSlices: 0,
   revision: expect.stringMatching(/^[a-f0-9]{64}$/),
 };
 

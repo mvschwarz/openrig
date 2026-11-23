@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -25,7 +26,7 @@ import { loadHumanRegistry, type HumanFragment } from "../../daemon/src/domain/g
 import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
 import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/message.js";
 import { mcpCommand } from "../src/commands/mcp.js";
-import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
+import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock, rotateGrant, type McpHttpOptions } from "../src/mcp-http.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
@@ -82,6 +83,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
+    setSelfHostId(null);
     for (const close of closers.splice(0).reverse()) await close();
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
     db.close();
@@ -92,8 +95,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
   });
 
-  async function listen() {
-    const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+  async function listen(options: Partial<McpHttpOptions> = {}) {
+    const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile, ...options });
     closers.push(() => served.close());
     return served;
   }
@@ -104,10 +107,11 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const client = new Client({ name: "http-test", version: "1.0.0" });
     await client.connect(transport);
     closers.push(() => client.close());
-    return async (name: string, args: Record<string, unknown> = {}) => {
+    const call = async (name: string, args: Record<string, unknown> = {}) => {
       const result = await client.callTool({ name, arguments: args });
       return { isError: result.isError === true, structured: result.structuredContent as Record<string, any>, text: (result.content as Array<{ text: string }>)[0]?.text ?? "" };
     };
+    return Object.assign(call, { client });
   }
 
   const post = (url: string, headers: Record<string, string> = {}) => fetch(url, {
@@ -122,6 +126,54 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   const rows = () => (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n;
   const grant = (name: string, extra: Partial<{ rigs: string[]; roots: string[]; workspace: boolean; owner: boolean }> = {}) =>
     addGrant(tokenFile, { name, seat: `${name}@team`, rigs: ["team"], roots: [], workspace: false, owner: false, ...extra });
+
+  it("serves caller-scoped coordination resources to a local read-only token without an extension", async () => {
+    seat("team", "reader");
+    const token = await addGrant(tokenFile, { name: "reader", seat: "reader@team", rigs: ["team"], roots: [],
+      workspace: false, owner: false, readOnly: true });
+    const served = await listen();
+    const call = await connect(served.url, token);
+    const uri = "openrig://reference/coordination";
+    expect((await call.client.listResources()).resources.map(resource => resource.uri)).toEqual([uri]);
+    const reference = await call.client.readResource({ uri });
+    expect(reference.contents[0]).toMatchObject({ uri, mimeType: "text/plain", text: call.client.getInstructions() });
+    expect(call.client.getInstructions()).toContain("read operations only");
+    expect(call.client.getInstructions()).not.toContain("rig_queue_create");
+    expect((await call.client.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+  });
+
+  it("passes endpoint-owned instructions through the resolver while the Core reference follows each caller", async () => {
+    setSelfHostId("instruction-resource-fixture");
+    seat("team", "reader"); seat("team", "writer");
+    const guideUri = "embedding://team/guide";
+    const served = await listen({
+      instructions: { introduction: "Read this endpoint's guide.", resources: [
+        { uri: guideUri, name: "team-guide", mimeType: "text/plain", text: "A configured team guide" },
+      ] },
+      resolver: async ({ bearer }) => {
+        if (bearer !== "reader" && bearer !== "writer") return { ok: false, refusal: "unknown" };
+        return { ok: true, seat: `${bearer}@team`, principal: { source: "embedding", id: bearer },
+          access: { principal: bearer, owner: false, rigs: ["team"], roots: [], workspace: false }, readOnly: bearer === "reader" };
+      },
+    });
+    const reader = (await connect(served.url, "reader")).client;
+    const writer = (await connect(served.url, "writer")).client;
+    for (const client of [reader, writer]) {
+      expect(client.getInstructions()).toContain("Read this endpoint's guide.");
+      expect(await client.readResource({ uri: guideUri })).toEqual({
+        contents: [{ uri: guideUri, mimeType: "text/plain", text: "A configured team guide" }],
+      });
+    }
+    const readerCore = (await reader.readResource({ uri: "openrig://reference/coordination" })).contents[0] as { text: string };
+    const writerCore = (await writer.readResource({ uri: "openrig://reference/coordination" })).contents[0] as { text: string };
+    expect(readerCore.text).toContain("read operations only");
+    expect(readerCore.text).not.toContain("rig_queue_create");
+    expect(writerCore.text).not.toContain("read operations only");
+    expect(writerCore.text).not.toBe(readerCore.text);
+    expect(readerCore.text).not.toContain("Read this endpoint's guide.");
+    expect((await reader.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+    expect((await writer.listTools()).tools.map(tool => tool.name)).toContain("rig_queue_create");
+  });
 
   it("with no grants serves loopback as the env's seat, declared and not authenticated, and refuses to bind beyond loopback", async () => {
     seat("elsewhere", "env-seat");
@@ -570,4 +622,353 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(await run(["revoke", "dana"])).toContain("Revoked dana");
     expect(JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals).toEqual([]);
   });
+  describe("a configured caller resolver", () => {
+    const credential = "opaque-local-credential";
+    const profile = () => ({ ok: true as const, seat: "caller@team",
+      principal: { source: "local-authority", id: "user:42", label: "Local caller" },
+      access: { principal: "user:42", owner: false, workspace: false, rigs: ["team"], roots: [],
+        external: { objects: { queue: ["create", "show", "list", "claim", "update"], team: ["list"] }, peerSeats: ["peer@team"] } },
+    });
+    const prepare = () => {
+      setSelfHostId("resolver-test");
+      for (const member of ["caller", "peer", "stranger"]) seat("team", member);
+    };
+
+    it("uses the resolved opaque caller per request and records its authority without reading the token file", async () => {
+      prepare();
+      const identity = path.join(home, "identity.sqlite");
+      const idDb = createDb(identity);
+      idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
+      idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'resolver-test')").run();
+      idDb.close();
+      vi.stubEnv("OPENRIG_DB", identity);
+      closers.push(async () => { vi.unstubAllEnvs(); });
+      fs.writeFileSync(tokenFile, "unreadable file that this mode never reads");
+      const resolve = vi.fn(async () => profile());
+      const served = await listen({ resolver: resolve });
+      expect(served.authenticated).toBe(true);
+      const call = await connect(served.url, credential);
+      const created = await call("rig_queue_create", { qitemId: "qitem-resolved", destination: "peer@team", body: "work" });
+      expect(created.isError).toBe(false);
+      expect(db.prepare("SELECT source_session FROM queue_items WHERE qitem_id = ?").get("qitem-resolved"))
+        .toEqual({ source_session: "caller@team" });
+      const recorded = db.prepare("SELECT identity_principal AS who FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id LIMIT 1")
+        .get("qitem-resolved") as { who: string };
+      expect(JSON.parse(recorded.who)).toEqual(profile().principal);
+      expect(resolve.mock.calls.length).toBeGreaterThan(1);
+      resolve.mockImplementation(async () => ({ ok: false, refusal: "revoked" }) as never);
+      expect((await post(served.url, { Authorization: `Bearer ${credential}` })).status).toBe(401);
+    });
+
+    it("passes ordered operation metadata and retains authentication before parse errors", async () => {
+      prepare();
+      let denied = false;
+      const seen: Array<{ instance: string; methods: readonly string[]; bearer: string }> = [];
+      const served = await listen({ resolver: async request => {
+        seen.push(request);
+        return denied ? { ok: false, refusal: "wrong_instance" } : profile();
+      } });
+      const send = (body: string) => fetch(served.url, { method: "POST", headers: {
+        Authorization: `Bearer ${credential}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream",
+      }, body });
+      await send(JSON.stringify([{ jsonrpc: "2.0", method: "ping", id: 1 }, { jsonrpc: "2.0", method: "tools/list", id: 2 }]));
+      expect(seen.at(-1)).toMatchObject({ bearer: credential, instance: "resolver-test", methods: ["ping", "tools/list"] });
+      expect((await send("{")).status).toBe(400);
+      expect(seen.at(-1)?.methods).toEqual([]);
+      denied = true;
+      expect((await send("{")).status).toBe(401);
+      denied = false;
+      expect((await send('"' + "x".repeat(4 * 1024 * 1024) + '"')).status).toBe(413);
+    });
+
+    it.each(["unknown", "revoked", "expired", "wrong_instance", "malformed", "unavailable"] as const)("preserves the refusal mapping for %s", async refusal => {
+      prepare();
+      const served = await listen({ resolver: async () => ({ ok: false, refusal }) });
+      const response = await post(served.url, { Authorization: `Bearer ${credential}` });
+      const status = ["malformed", "unavailable"].includes(refusal) ? 503 : 401;
+      expect(response.status).toBe(status);
+      if (status === 401) expect(response.headers.get("www-authenticate")).toContain("Bearer");
+      expect(rows()).toBe(0);
+    });
+
+    it("bounds an uncooperative resolver and signals its deadline without exposing a credential", async () => {
+      prepare();
+      let signal: AbortSignal | undefined;
+      const served = await listen({ resolverTimeoutMs: 120, resolver: async request => {
+        signal = request.signal;
+        return new Promise(() => {});
+      } });
+      const before = performance.now();
+      const response = await post(served.url, { Authorization: `Bearer ${credential}` });
+      expect(response.status).toBe(503);
+      expect(performance.now() - before).toBeLessThan(3000);
+      expect(signal?.aborted).toBe(true);
+      expect(await response.text()).not.toContain(credential);
+    });
+
+    it("includes a stalled seat check in the same resolver budget", async () => {
+      prepare();
+      const realFetch = globalThis.fetch;
+      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+        if (String(input).includes("/api/whoami?")) return new Promise(() => {});
+        return realFetch(input, init);
+      });
+      const served = await listen({ resolverTimeoutMs: 120, resolver: async () => profile() });
+      const before = performance.now();
+      expect((await post(served.url, { Authorization: `Bearer ${credential}` })).status).toBe(503);
+      expect(performance.now() - before).toBeLessThan(3000);
+    });
+
+    it("bounds body reading before the resolver and cancels an abandoned resolution", async () => {
+      prepare();
+      const resolve = vi.fn(async () => profile());
+      const served = await listen({ resolverTimeoutMs: 150, resolver: resolve });
+      const status = await new Promise<number>(done => {
+        const request = http.request(served.url, { method: "POST", headers: { Authorization: `Bearer ${credential}` } }, response => {
+          response.resume();
+          response.once("end", () => { request.destroy(); done(response.statusCode!); });
+        });
+        request.on("error", () => {});
+        request.write("{");
+      });
+      expect(status).toBe(503);
+      expect(resolve).not.toHaveBeenCalled();
+
+      let entered!: () => void;
+      let aborted!: () => void;
+      const active = new Promise<void>(done => { entered = done; });
+      const cancelled = new Promise<void>(done => { aborted = done; });
+      const second = await listen({ resolver: async request => {
+        request.signal.addEventListener("abort", aborted, { once: true });
+        entered();
+        return new Promise(() => {});
+      } });
+      const request = http.request(second.url, { method: "POST", headers: { Authorization: `Bearer ${credential}` } });
+      request.on("error", () => {});
+      request.end(JSON.stringify(INITIALIZE));
+      await active;
+      request.destroy();
+      await cancelled;
+    });
+
+    it("serves an exact materialized seat without creating or launching it", async () => {
+      prepare();
+      const rig = setup.rigRepo.listRigs().find(value => value.name === "team")!;
+      setup.rigRepo.addNode(rig.id, "pod.materialized", { role: "worker" });
+      const count = db.prepare("SELECT COUNT(*) AS count FROM nodes").get();
+      const served = await listen({ resolver: async () => ({ ...profile(), seat: "pod-materialized@team" }) });
+      expect((await post(served.url, { Authorization: `Bearer ${credential}` })).status).toBe(200);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM nodes").get()).toEqual(count);
+    });
+
+    it("treats thrown resolver errors as unavailable without logging their contents", async () => {
+      prepare();
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const served = await listen({ resolver: async () => { throw new Error(credential); } });
+      const response = await post(served.url, { Authorization: `Bearer ${credential}` });
+      expect(response.status).toBe(503);
+      expect(await response.text()).not.toContain(credential);
+      expect(JSON.stringify(log.mock.calls)).not.toContain(credential);
+    });
+
+    it("does not turn a missing seat or a malformed resolver result into an authenticated owner", async () => {
+      prepare();
+      let answer: unknown = { ...profile(), seat: "missing@team" };
+      const served = await listen({ resolver: async () => answer as ReturnType<typeof profile> });
+      expect((await post(served.url, { Authorization: `Bearer ${credential}` })).status).toBe(503);
+      answer = { ...profile(), access: { ...profile().access, owner: true } };
+      expect((await post(served.url, { Authorization: `Bearer ${credential}` })).status).toBe(503);
+      expect(rows()).toBe(0);
+    });
+
+    it.each([false, true])("routes the shown logical peer through the default receiver (canonical also allowed: %s)", async (alsoCanonical) => {
+      prepare();
+      const answer = profile();
+      answer.access.external.peerSeats = alsoCanonical ? ["peer@team", "pod-peer@team"] : ["pod-peer@team"];
+      const call = await connect((await listen({ resolver: async () => answer, taskDestination: "pod-peer@team" })).url, credential);
+      const team = await call("rig_team");
+      const shown = team.structured.seats.find((seat: { logicalId: string }) => seat.logicalId === "pod.peer");
+      expect(shown.session).toBe(alsoCanonical ? "peer@team" : "pod-peer@team");
+      const created = await call("rig_queue_create", { qitemId: "qitem-logical-receiver", body: "work" });
+      expect(created.isError).toBe(false);
+      expect(db.prepare("SELECT destination_session FROM queue_items WHERE qitem_id = ?").get("qitem-logical-receiver"))
+        .toEqual({ destination_session: shown.session });
+      expect(rows()).toBe(1);
+    });
+
+    it("keeps caller modes exclusive and allows OAuth metadata with a resolver", async () => {
+      prepare();
+      await expect(listen({ resolver: async () => profile(), grantService: { url: "https://example.invalid" } }))
+        .rejects.toThrow("Choose one");
+      const served = await listen({ resolver: async () => profile(), oauth: { resource: "https://example.test/mcp", issuer: "https://issuer.test" } });
+      expect((await fetch(served.url.replace("/mcp", "/.well-known/oauth-protected-resource/mcp"))).status).toBe(200);
+    });
+  });
+
+  describe("the optional local caller profile", () => {
+    const scopedGrant = (extra: Partial<Parameters<typeof addGrant>[1]> = {}) => addGrant(tokenFile, {
+      name: "opaque-user", seat: "caller@team", rigs: [], roots: [], owner: false, workspace: false,
+      objects: { queue: ["create", "show", "list", "claim", "update"], team: ["list"] }, peerSeats: ["peer@team"], ...extra,
+    });
+    const prepare = () => { for (const member of ["caller", "peer", "stranger"]) seat("team", member); };
+    const editProfile = (fields: Record<string, unknown>) => {
+      const stored = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
+      Object.assign(stored.principals[0], fields);
+      fs.writeFileSync(tokenFile, JSON.stringify(stored));
+    };
+
+    it("keeps reads, settlement and landed retries usable under malformed local backoff", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const token = await scopedGrant();
+      await repo.create({ qitemId: "qitem-landed-bad-delay", sourceSession: "caller@team", destinationSession: "peer@team", body: "landed" });
+      await repo.create({ qitemId: "qitem-owned-bad-delay", sourceSession: "peer@team", destinationSession: "caller@team", body: "answer" });
+      editProfile({ newWorkRetryAfterSeconds: "not a delay" });
+      const call = await connect((await listen()).url, token);
+      expect((await call("rig_queue_create", { qitemId: "qitem-new-bad-delay", destination: "peer@team", body: "work" })).structured)
+        .toMatchObject({ code: "fair_use_retry_later", retryAfterSeconds: 600, outcome: "not_written" });
+      expect((await call("rig_queue_create", { qitemId: "qitem-landed-bad-delay", destination: "peer@team", body: "landed" })).isError).toBe(false);
+      expect((await call("rig_queue_show", { qitemId: "qitem-owned-bad-delay" })).isError).toBe(false);
+      expect((await call("rig_queue_claim", { qitemId: "qitem-owned-bad-delay" })).isError).toBe(false);
+      expect((await call("rig_queue_update", { qitemId: "qitem-owned-bad-delay", state: "done", closureReason: "no-follow-on", note: "completed" })).isError).toBe(false);
+      expect(db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get("qitem-owned-bad-delay")).toEqual({ state: "done" });
+      expect(rows()).toBe(2);
+      expect(warnings.mock.calls.flat().join("\n")).toMatch(/newWorkRetryAfterSeconds.*finite nonnegative.*600/);
+    });
+
+    it("treats malformed readOnly as read-only while preserving valid read limits", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const token = await scopedGrant();
+      await repo.create({ qitemId: "qitem-read-only-repair", sourceSession: "peer@team", destinationSession: "caller@team", body: "answer" });
+      editProfile({ readOnly: "false" });
+      const call = await connect((await listen()).url, token);
+      expect((await call("rig_queue_show", { qitemId: "qitem-read-only-repair" })).isError).toBe(false);
+      expect((await call.client.listTools()).tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+      expect(warnings.mock.calls.flat().join("\n")).toMatch(/readOnly.*true or false.*read-only/);
+      expect(rows()).toBe(1);
+    });
+
+    it("treats malformed peers as no peers without dropping valid object limits", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const token = await scopedGrant();
+      editProfile({ peerSeats: ["peer@team", "not a seat"] });
+      const call = await connect((await listen()).url, token);
+      expect((await call.client.listTools()).tools.map(tool => tool.name)).toContain("rig_queue_create");
+      expect((await call("rig_queue_create", { destination: "peer@team", body: "work" })).structured.code).toBe("out_of_scope");
+      expect((await call("rig_team")).structured.seats.map((seat: { session: string }) => seat.session)).toEqual(["caller@team"]);
+      expect(warnings.mock.calls.flat().join("\n")).toMatch(/peerSeats.*array.*no peers/);
+      expect(rows()).toBe(0);
+    });
+
+    it("disables only malformed object actions without restoring owner or workspace access", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const token = await scopedGrant();
+      await repo.create({ qitemId: "qitem-valid-object-read", sourceSession: "peer@team", destinationSession: "caller@team", body: "answer" });
+      editProfile({ owner: true, workspace: true, objects: { queue: ["show", "claim", "update", "list"], team: "not operations" } });
+      const call = await connect((await listen()).url, token);
+      expect((await call("rig_queue_show", { qitemId: "qitem-valid-object-read" })).isError).toBe(false);
+      const tools = (await call.client.listTools()).tools.map(tool => tool.name);
+      expect(tools).not.toContain("rig_team");
+      expect(tools).not.toContain("rig_queue_create");
+      expect(tools).not.toContain("rig_up");
+      expect(warnings.mock.calls.flat().join("\n")).toMatch(/objects.team.*array of operation names/);
+    });
+
+    it("keeps legacy grants without optional fields on their existing rig scope", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const token = await grant("legacy");
+      const call = await connect((await listen()).url, token);
+      expect((await call("rig_queue_create", { destination: "stranger@team", body: "legacy rig scope" })).isError).toBe(false);
+      expect(warnings).not.toHaveBeenCalled();
+      const stored = JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals[0];
+      for (const field of ["objects", "peerSeats", "readOnly", "newWorkRetryAfterSeconds"]) expect(stored).not.toHaveProperty(field);
+    });
+
+    it("does not restore legacy authority when peerSeats lacks its objects map", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const token = await grant("legacy");
+      editProfile({ owner: true, workspace: true, peerSeats: ["peer@team"] });
+      const call = await connect((await listen()).url, token);
+      const tools = call.client.getServerCapabilities()?.tools ? (await call.client.listTools()).tools : [];
+      expect(tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+      expect(warnings.mock.calls.flat().join("\n")).toMatch(/peerSeats.*objects map/);
+      expect(rows()).toBe(0);
+    });
+
+    it("uses exact local peer membership for destinations, reads and the team without a name convention", async () => {
+      prepare();
+      const token = await scopedGrant();
+      const call = await connect((await listen()).url, token);
+      expect((await call("rig_queue_create", { qitemId: "qitem-exact-peer", destination: "peer@team", body: "work" })).isError).toBe(false);
+      expect((await call("rig_queue_create", { destination: "stranger@team", body: "work" })).structured.code).toBe("out_of_scope");
+      const shown = await call("rig_queue_show", { qitemId: "qitem-exact-peer" });
+      expect(shown.isError).toBe(false);
+      const rig = setup.rigRepo.listRigs().find(value => value.name === "team")!;
+      const peer = db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rig.id, "pod.peer") as { id: string };
+      const stranger = db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rig.id, "pod.stranger") as { id: string };
+      setup.rigRepo.addEdge(rig.id, stranger.id, peer.id, "delegates_to");
+      const team = await call("rig_team");
+      expect(JSON.stringify(team.structured)).not.toContain("stranger");
+      expect(team.structured.seats.map((value: { session: string }) => value.session).sort()).toEqual(["caller@team", "peer@team"]);
+      expect(rows()).toBe(1);
+    });
+
+    it("removes writes from discovery and invocation for a read-only local profile", async () => {
+      prepare();
+      const token = await scopedGrant({ readOnly: true });
+      const call = await connect((await listen()).url, token);
+      const tools = (await call.client.listTools()).tools.map(tool => tool.name);
+      expect(tools).toContain("rig_queue_show");
+      expect(tools).not.toContain("rig_queue_create");
+      expect(call.client.getInstructions()).not.toContain("rig_queue_create");
+      const denied = await call("rig_queue_create", { destination: "peer@team", body: "work" }).catch(() => ({ isError: true }));
+      expect(denied.isError).toBe(true);
+      expect(rows()).toBe(0);
+    });
+
+    it("applies local new-work backoff while same-id retries, reads and existing work continue", async () => {
+      prepare();
+      const token = await scopedGrant();
+      const call = await connect((await listen()).url, token);
+      expect((await call("rig_queue_create", { qitemId: "qitem-before-backoff", destination: "peer@team", body: "work" })).isError).toBe(false);
+      await repo.create({ qitemId: "qitem-owned-backoff", sourceSession: "peer@team", destinationSession: "caller@team", body: "answer" });
+      const stored = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
+      stored.principals[0].newWorkRetryAfterSeconds = 9;
+      fs.writeFileSync(tokenFile, JSON.stringify(stored));
+      expect((await call("rig_queue_create", { qitemId: "qitem-new-backoff", destination: "peer@team", body: "work" })).structured)
+        .toMatchObject({ code: "fair_use_retry_later", retryAfterSeconds: 9, outcome: "not_written" });
+      expect((await call("rig_queue_create", { qitemId: "qitem-before-backoff", destination: "peer@team", body: "work" })).isError).toBe(false);
+      expect((await call("rig_queue_show", { qitemId: "qitem-owned-backoff" })).isError).toBe(false);
+      expect((await call("rig_queue_claim", { qitemId: "qitem-owned-backoff" })).isError).toBe(false);
+      expect((await call("rig_queue_update", { qitemId: "qitem-owned-backoff", note: "on it" })).isError).toBe(false);
+      expect(rows()).toBe(2);
+    });
+
+    it("preserves the local profile on rotation and isolates another grant's unusable optional profile", async () => {
+      prepare();
+      const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+      const old = await scopedGrant();
+      const good = await grant("good");
+      const rotated = await rotateGrant(tokenFile, "opaque-user");
+      expect(rotated).not.toBeNull();
+      const stored = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
+      expect(stored.principals[0]).toMatchObject({ peerSeats: ["peer@team"], objects: { queue: ["create", "show", "list", "claim", "update"] } });
+      stored.principals[0].objects = "unreadable";
+      fs.writeFileSync(tokenFile, JSON.stringify(stored));
+      const served = await listen();
+      expect((await post(served.url, { Authorization: `Bearer ${old}` })).status).toBe(401);
+      expect((await post(served.url, { Authorization: `Bearer ${rotated}` })).status).toBe(200);
+      const narrowed = await connect(served.url, rotated!);
+      const tools = narrowed.client.getServerCapabilities()?.tools ? (await narrowed.client.listTools()).tools : [];
+      expect(tools.map(tool => tool.name)).not.toContain("rig_queue_create");
+      expect(warnings.mock.calls.flat().join("\n")).toMatch(/objects.*object-to-operation-list map/);
+      expect((await post(served.url, { Authorization: `Bearer ${good}` })).status).toBe(200);
+    });
+  });
+
 });

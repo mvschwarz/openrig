@@ -1,4 +1,5 @@
 import { helpScreen } from "./commands/help.js";
+import { replaceControlCharacters, stripTerminalEscapes, terminalSafeText } from "./terminal-safe-text.js";
 import { commandFocusVisible } from "./motion.js";
 import { attentionLines } from "./attention/attention-model.js";
 import { fileLines, externalLines, fileTargetForPath, referenceLines, referenceAction } from "./reading.js";
@@ -69,6 +70,36 @@ function pad(text: string | number | null | undefined, width: number): string {
 
 function padLeft(text: string | number | null | undefined, width: number): string {
   return fit(text, width, "right");
+}
+
+const commandGraphemes = new Intl.Segmenter();
+
+function commandViewport(draft: string, cols: number, caret = draft.length): string {
+  const prefix = "cmd ▸ ";
+  if (!draft) return `${prefix}▊`;
+  const budget = cols - columns(prefix) - 1;
+  if (budget <= 0) return `${prefix.slice(0, Math.max(0, cols - 1))}▊`;
+
+  const segments = commandGraphemes.segment(draft);
+  const point = segments.containing(caret)?.index ?? draft.length;
+  const after = draft.slice(point);
+  const afterWidth = columns(after);
+  const beforeWidth = columns(draft.slice(0, point));
+  const rightContext = Math.min(afterWidth, Math.floor(budget / 2));
+  let left = budget - rightContext - 1;
+  let start = point;
+  if (beforeWidth <= budget) {
+    start = 0;
+  } else {
+    for (let part = segments.containing(start - 1); part; part = segments.containing(start - 1)) {
+      left -= columns(part.segment);
+      if (left < 0) break;
+      start = part.index;
+    }
+  }
+  const before = (start > 0 ? "…" : "") + draft.slice(start, point);
+  const right = budget - columns(before);
+  return `${prefix}${before}▊${right > 0 ? pad(after, right) : ""}`;
 }
 
 type Align = "left" | "right";
@@ -424,6 +455,9 @@ function agentDetailLines(
           // effort report is this host's read — a remote seat has none here.
           ...(localSeat ? wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth) : []),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
+          ...(localSeat && (agent.canRun ?? !agent.live)
+            ? [fieldLine({ label: "action", value: "run ▸", link: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: agent.name } })]
+            : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
           ...(localSeat
             ? [fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } })]
@@ -1495,12 +1529,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 export interface RenderOptions {
   /** Independent endpoint chosen for a standalone TUI after a collision. */
   controlSocketPath?: string;
+  /** No control socket could be bound this session; the status bar says so. */
+  controlSocketUnavailable?: boolean;
   /** First visit: preserve the prior frame with its original label and no effect targets. */
   previousPage?: { state: ViewState; snapshot: FleetSnapshot };
   startup?: StartupState;
   /** I5 — the live command context (from the C3 detector); default "standard". */
   commandContext?: string;
   completion?: { candidates: string[]; message: string } | null;
+  /** Display-only UTF-16 insertion offset; the terminal editor defaults to the end. */
+  readonly commandCaret?: number;
   cols?: number;
   rows?: number;
   /** wall-clock ms for time-driven motion (spinner frames, flash windows);
@@ -1674,7 +1712,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   const flashRows: number[] = [];
   let flashAck = false;
 
-  lines.push(pad(`cmd ▸ ${inputLine}▊${inputLine ? "" : "  " + readStatus(load, state.timeZone)}`, cols));
+  lines.push(pad(commandViewport(inputLine, cols, options.commandCaret) + (inputLine ? "" : "  " + readStatus(load, state.timeZone)), cols));
   if (load.stale && !inputLine) hitMap.push({ y: 1, x1: 9, x2: cols, action: { type: "noop" } });
   if (options.completion) {
     lines.push(pad(options.completion.message, cols));
@@ -1848,14 +1886,14 @@ function crashCartShell(
   contentTitle: string,
   cols: number,
   rows: number,
-  inputLine: string,
+  commandLine: string,
   opts?: { wrap?: boolean; scroll?: number },
 ): Screen {
   const explW = explorerWidth(cols);
   const lines: string[] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
   const hitMap: Screen["hitMap"] = [];
-  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  lines.push(pad(commandLine, cols));
   lines.push(paneRule(cols, explW, "top", "{ EXPLORER }", contentTitle));
 
   // The explorer's source note, then any discovered rigs (name + seat count).
@@ -1902,18 +1940,54 @@ export function drawableSize(columns: number | undefined, rows: number | undefin
   return size.cols > 0 && size.rows > 0 ? size : null;
 }
 
+/** Credentials out of text headed for the screen: URL userinfo and Bearer tokens. */
+function redactCredentials(text: string): string {
+  return text
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+}
+
+/**
+ * Detail text that is both cleaned and redacted, in the order that keeps the redaction effective.
+ *
+ * Escape sequences go first, before any redaction. Redacting a URL inside an OSC payload can delete the
+ * sequence's own introducer — the credential pattern happily matches across `\x9d`, or across the bytes
+ * that follow `\x1b]` — and then the stripper no longer recognises the sequence and its tail survives as
+ * literal text. Consuming the sequence whole is what makes its payload leave with it.
+ *
+ * Then redaction, then control replacement, then redaction again. Redacting after the escapes are gone
+ * catches a credential a sequence was interrupting (`https:<CSI>//user:...`) and a Bearer token the
+ * sequence split. The pass after control replacement catches one a control byte split, since that byte
+ * becomes a space the credential pattern cannot cross.
+ */
+function redactedDetailText(text: string): string {
+  return redactCredentials(
+    replaceControlCharacters(redactCredentials(stripTerminalEscapes(text))),
+  );
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const screen = state.palette
     ? helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32)
     : renderBody(state, snap, options, inputLine);
   if (options.controlSocketPath && screen.lines.length) {
     const row = screen.lines.length - 1;
-    const socketPath = options.controlSocketPath.replace(/[\x00-\x1f\x7f]/g, " ");
+    // The row shows the path with terminal control cleaned out, and the copy action keeps the bound
+    // path itself: main.ts recognises this action by `value === socket.path`, so rewriting the value
+    // here would hand the click to whichever screen is underneath. The copy sink cleans the bytes it
+    // prints, so the shown text and the copied text still agree.
+    const shownPath = terminalSafeText(options.controlSocketPath);
     const label = "socket: [copy]";
     const cols = options.cols ?? 120;
-    screen.lines[row] = pad(`${label} ${socketPath} · ${screen.lines[row]!.trimEnd()}`, cols);
-    // The status stays compact; its copy target retains the actual bound path.
+    screen.lines[row] = pad(`${label} ${shownPath} · ${screen.lines[row]!.trimEnd()}`, cols);
     screen.hitMap.unshift({ y: row + 1, x1: 1, x2: Math.min(cols, label.length), action: { type: "print-for-copy", label: "Control socket", value: options.controlSocketPath } });
+    if (screen.segRows) delete screen.segRows[row + 1];
+  } else if (options.controlSocketUnavailable && screen.lines.length) {
+    // Said here rather than only in a notice: a notice is replaced as soon as work is chosen, and this
+    // is a fact about the session that stays true. Short on purpose, so it fits a narrow status bar.
+    const row = screen.lines.length - 1;
+    const cols = options.cols ?? 120;
+    screen.lines[row] = pad(`socket: unavailable · ${screen.lines[row]!.trimEnd()}`, cols);
     if (screen.segRows) delete screen.segRows[row + 1];
   }
   const commandReady = !state.palette && !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");
@@ -1936,12 +2010,11 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   if (options.startup?.open) {
     const startup = options.startup;
     const content = wrapContentLines(startupLines(startup).map((line) => ({ ...line,
-      text: line.text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f]/g, " ")
-        .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@").replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]"),
+      text: redactedDetailText(line.text),
     })), Math.max(1, cols - explW - 2));
     const selected = content.findIndex((line) => line.action?.type === "startup" && line.action.key === `select:${startup.local?.selected ?? startup.selected}`);
     const scroll = startup.local && !startup.local.result.entries ? startup.local.scroll : startup.expanded ? startup.scroll : Math.max(0, selected - Math.max(1, rows - 12));
-    const screen = crashCartShell(content, { note: "startup", rows: [] }, "START AND RETURN", cols, rows, "", { scroll });
+    const screen = crashCartShell(content, { note: "startup", rows: [] }, "START AND RETURN", cols, rows, commandViewport("", cols), { scroll });
     screen.lines[rows - 1] = pad("? Help · w Skip · L Local · ↑↓ scroll · Enter read · Esc Back · q Quit", cols);
     return screen;
   }
@@ -1951,22 +2024,19 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // verbatim; all rails stand. DOWN → cockpit; UNVERIFIED → cannot-verify (no restore).
   // B1 ROUND 2 — an ACTIVE fleet restore takes precedence over the cockpit: the operator sees live
   // progress (from the poll stream) and, on done, the rollup + keyboard-walkable triage list.
+  const commandLine = commandViewport(inputLine, cols, options.commandCaret);
   if (options.restore) {
     const led = buildLedgerExplorer(options.crashCart?.foundOnHost ?? []);
     // wrap: the triage needs are full sentences — wrap them to the pane so the EXACT need is never
     // clipped off the edge. scroll: a triage list longer than the viewport is vertically scrollable so
     // the final row's exact need is reachable (HIGH-2 — keyboard-walkable, not viewport-truncated).
-    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, inputLine, {
+    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, commandLine, {
       wrap: true,
       scroll: options.restoreScroll ?? 0,
     });
   }
   if (options.unavailable) {
-    const detail = options.unavailable
-      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-      .replace(/[\x00-\x1f\x7f]/g, " ")
-      .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-      .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+    const detail = redactedDetailText(options.unavailable);
     const summary = /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|better-sqlite3/i.test(detail)
       ? "The installed native module cannot load in this runtime. Repair the installation prerequisite, then retry."
       : "Startup state could not be read. Retry after resolving the reported prerequisite.";
@@ -1977,7 +2047,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
       { text: "" },
       { text: "r retry · d details · q quit" },
       ...(options.unavailableExpanded ? [{ text: "" }, { text: detail }] : []),
-    ], { note: "state unavailable", rows: [] }, "STARTUP", cols, rows, inputLine,
+    ], { note: "state unavailable", rows: [] }, "STARTUP", cols, rows, commandLine,
     { wrap: true, scroll: options.restoreScroll ?? 0 });
   }
   if (options.daemonState === "down" && options.crashCart) {
@@ -1989,11 +2059,11 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
       : options.confirm
       ? [...renderConfirmBanner(options.confirm), ...renderCrashCartView(options.crashCart)]
       : renderCrashCartView(options.crashCart);
-    return crashCartShell(content, led, "CRASH-CART", cols, rows, inputLine, options.confirm ? { wrap: true } : undefined);
+    return crashCartShell(content, led, "CRASH-CART", cols, rows, commandLine, options.confirm ? { wrap: true } : undefined);
   }
   if (options.daemonState === "unverified" && options.daemonEvidence) {
     const led = { note: "daemon unverified", rows: [] }; // No ledger discovery occurred on this path.
-    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, inputLine);
+    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, commandLine);
   }
   // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
   // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
@@ -2017,7 +2087,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // shell accepts typing from the empty state, so the honest readiness
   // affordance must show BEFORE the first key (no new focus state; stylize
   // paints the cell; the shared motion clock controls its visibility).
-  lines.push(pad(`cmd ▸ ${inputLine}▊${inputLine ? "" : "  " + readStatus(load, state.timeZone)}`, cols));
+  lines.push(pad(commandLine + (inputLine ? "" : "  " + readStatus(load, state.timeZone)), cols));
   if (load.stale && !inputLine) hitMap.push({ y: 1, x1: 9, x2: cols, action: { type: "noop" } });
   if (options.completion) {
     lines.push(pad(options.completion.message, cols));

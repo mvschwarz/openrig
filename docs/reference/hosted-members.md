@@ -37,6 +37,18 @@ Assistants that run on your machine can reach OpenRig's MCP server locally. Many
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
 - **`rig_whoami`** answers the seat its grant names, though the member has no session.
 
+To wait for one task's answer in the same read, call `rig_queue_show` with its `qitemId` and optional `waitSeconds`
+(an integer from 0 to 50). Omitted or zero keeps today's immediate read. A positive wait holds only while that item
+is `pending` or `in-progress`; a claim, progress note or another item's change does not finish it. It returns at once
+when the item leaves those states, including `blocked`, `done`, `handed-off`, `failed`, `denied` or `canceled`.
+State, closure reason, resolution, transitions and any visible successor keep their usual meaning; no successor is
+automatically followed. At the bound the current item returns with an additive top-level
+`waited: { outcome: "timeout", seconds: <requested bound> }`. A timeout is not an answer or completed work.
+Cancellation or a disconnected HTTP call releases the wait without changing the durable task. The read uses the
+same grant scope as an immediate read; another member's private task is still refused. Keep the caller's MCP timeout
+above the requested bound (the usual SDK default is 60 seconds); only this daemon call gets a longer timeout, not
+ordinary requests. `GET /api/queue/:qitemId?waitSeconds=<bound>` offers the same wait to daemon API callers.
+
 ## Asking a person while keeping the work
 
 When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
@@ -56,7 +68,7 @@ member, so it checks its rows again.
 
 The server tells the member this in its MCP instructions. The text is versioned, so you can check which version a tool received:
 
-> Member workflow (member-workflow/v2). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
+> Member workflow (member-workflow/v3). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. An item titled "Checked on …" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself. Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
 
 ## Ring it when work lands
 
@@ -113,7 +125,8 @@ These facts stay separate on the row:
     member itself. A notice to a creator lists only that creator's rows: when another creator's row joins, the notice moves to
     the next recipient. It says whether the member has read its own pending inbox recently: a check-in, never a receipt or a
     claim. A member with a declared route (a delegation parent or `escalates_to`) gets one finding per unclaimed row at that
-    route instead.
+    route instead. A finding is a diagnostic about its row, not a second assignment: read the row and act on it. Closing the
+    finding alone doesn't complete the row, and the sweep closes the finding itself once the row is no longer stuck.
   - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
   - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.
@@ -167,6 +180,132 @@ line; when that notice is filed doesn't change.
 ## Revoke
 
 `rig mcp token revoke grok` refuses its next request. The rows it worked, and their answers, stay.
+
+## Embed the HTTP endpoint from Node.js
+
+An ESM application can start and close the same HTTP endpoint without running the CLI:
+
+```js
+import { startMcpHttpServer } from "@openrig/cli/mcp.js";
+
+const endpoint = await startMcpHttpServer({
+  daemonUrl: "http://127.0.0.1:7433",
+  host: "127.0.0.1",
+  port: 7434,
+  tokenFile: "/absolute/path/to/mcp-http-tokens.json",
+});
+// endpoint.url is the MCP URL; endpoint.authenticated says whether authentication is configured.
+// Keep the endpoint for as long as the application serves it, then:
+await endpoint.close();
+```
+
+`McpHttpOptions`, `McpAccess`, `McpPrincipal`, `McpGrant` and `GrantServiceOptions` are exported types;
+`McpHttpConfigError` is the endpoint's configuration error. Importing the module starts neither an endpoint
+nor a daemon. Start the daemon separately, and use the existing token commands above to manage grants.
+The CLI commands, authentication and tool scope work as before. No package exports map is added, so
+existing deep imports and CommonJS extension lookup keep their previous resolution; `@openrig/cli/mcp.js`
+is the documented entry.
+
+This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
+additional adapter callbacks that those options do not implement.
+
+### Add an introduction and static references
+
+Pass `instructions` to `startMcpHttpServer` to add endpoint-owned guidance. Its exported type is
+`McpInstructionExtension`:
+
+```js
+const instructions = {
+  introduction: "The team guide is available at team://reference/guide.",
+  resources: [{
+    uri: "team://reference/guide",
+    name: "team-guide",
+    mimeType: "text/markdown",
+    text: "# Team guide\nUse this team's documented workflow.",
+  }],
+};
+```
+
+Core keeps its existing caller-scoped instructions and appends the introduction. Static resources
+use the SDK's `resources/list` and `resources/read` protocol. The built-in
+`openrig://reference/coordination` resource always serves Core's generic guidance for the current
+caller, including read-only and offered-tool filtering. It is available without an extension and
+with local token-file grants as well as a resolver or grant service. Its URI is reserved for Core.
+
+Configured introduction and resource text belong to the endpoint and are delivered to callers admitted by that
+endpoint; use separate endpoint configurations when the content differs. They do not grant Core tools
+or object access. Resources contain the supplied text, not a file path or a loader callback. Duplicate
+resource URIs follow the SDK's existing registration error behavior. Without an introduction, the
+existing initialization instructions remain unchanged.
+
+### Supply a caller resolver
+
+An embedding can pass `resolver` and `resolverTimeoutMs` to `startMcpHttpServer`. The supported
+`@openrig/cli/mcp.js` entry exports the `CallerResolver` and `CallerResolution` types. There is no module loader:
+your application supplies the function and owns its credential authority.
+
+The resolver receives `{ bearer, instance, methods, signal }` on each request. `instance` is this daemon's
+reported instance id, not a client parameter. `methods` lists the JSON-RPC methods in message order; it is empty
+for non-POST requests or an unreadable body. It is operation metadata, not permission to run those methods.
+The POST body is read within the shared bounded budget before the resolver decides; authentication refusals
+take precedence over parse errors, not over reading the body.
+A successful result has this shape:
+
+```ts
+{
+  ok: true,
+  principal: { source: "example-authority", id: "guest-42" },
+  seat: "guest@team",
+  access: {
+    principal: "guest-42", owner: false, workspace: false, rigs: [], roots: [],
+    external: {
+      objects: { queue: ["create", "show", "list"], team: ["list"] },
+      peerSeats: ["lead@team", "helper@team"]
+    }
+  }
+}
+```
+
+The exact seat must already exist in this daemon, including a materialized seat that has not launched.
+Core does not create or start it during resolution. The principal's opaque `source` and `id`, with optional
+`grant`, `version` and `label`, are attribution, never credentials. `access.principal` is normalized to that id.
+`external.objects` uses the existing object/action capability evaluator. With `external.peerSeats`, only those
+exact peers are in scope for destinations, rows and team members; rig selection follows the named seat addresses.
+The `rigs` list is ignored when `peerSeats` is supplied.
+Without `peerSeats`, the existing rig-scoped rule remains. Without peers or rigs, only the caller's own rows are
+in scope. An external work profile has `owner: false` and `workspace: false`.
+A non-external result can instead be an owner or workspace caller, carrying the embedding's full authority;
+the embedding owns that choice.
+
+A result may also reduce the profile with `readOnly: true`, or set `newWorkRetryAfterMs`. Read-only connections
+are offered only read operations and cannot invoke hidden writes. Backoff holds only new creates, returns a
+retryable result with the same request id, and leaves reads, claims, updates and already-landed same-id retries
+available. The existing backoff range is 1–600 seconds for a positive delay; zero means no backoff.
+
+A refusal is `{ ok: false, refusal }`. `unknown`, `revoked`, `expired` and `wrong_instance` return HTTP 401 with a
+Bearer challenge; `malformed` and `unavailable` return 503. A thrown error, unusable result, missing instance or
+unavailable seat is also unavailable. Resolver exceptions are not echoed or logged. No result falls back to the
+token file or the process's seat. A resolver and a grant service cannot both be selected.
+
+The default 5000 ms budget covers reading the body, looking up the instance, calling the resolver and checking
+the seat. The signal aborts on that deadline or a disconnected client. Core bounds its wait even when the returned
+promise ignores the signal, and ignores late completion. Authentication refusals take precedence over JSON
+parse errors; an authenticated malformed body still gets 400, and a body over 4 MiB gets 413. OAuth resource
+metadata and the configured task destination can also be used with a resolver.
+
+### Use the same profile in a local token file
+
+A token-file entry can optionally carry `objects`, `peerSeats`, `readOnly` and `newWorkRetryAfterSeconds`.
+`objects` selects the scoped work profile above; `peerSeats` requires `objects`. An entry without these fields
+keeps its existing rig, workspace and owner behavior. The read-only reduction and new-work delay also work on
+ordinary local grants. Rotation preserves the optional fields. A malformed field gets a warning naming the
+field and its repair, and a conservative reading: `readOnly` becomes true, invalid peers become an empty list,
+and invalid object actions are disabled while valid object limits remain. A peer list without `objects` allows
+no object actions. These cases never restore owner, workspace or unrestricted legacy access.
+
+An unusable `newWorkRetryAfterSeconds` uses the bounded 600-second new-work delay with a warning. Reads,
+existing-work settlement and landed same-ID retries remain usable; the authenticated token does not become
+unavailable. Other grants are unaffected. No service or service-shaped principal id is needed.
 
 ## Assistants connected through a grant service
 
@@ -236,6 +375,13 @@ pair, the person's assistant can read the team's questions waiting on them and s
 Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
 unusable `person` withholds only these two tools while the grant's other tools keep working.
 
+A token-file grant can be bound to a person the same way, without a grant service:
+`rig mcp token add <name> --seat <seat> --person <entity_id>`. That connection is offered `rig_question_list` and
+`rig_question_answer` for that registered person, beside its seat's own tools, and answers through the same path as
+below. The person is only ever the one named with `--person`: never the seat, and never an `--owner` grant's. The
+answer's audit names the route as `file-grant`, with the grant's name as its principal; a token-file grant has no grant
+id or version. Revoking the grant stops both tools on its next request.
+
 - **Register the person** on the instance, once:
   `rig gateway human add <entity_id> --display-name "<name>" --delivery-class B --default`.
   Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
@@ -246,7 +392,7 @@ unusable `person` withholds only these two tools while the grant's other tools k
 - **`rig_question_answer`** takes the question, the revision the person saw, and either the options they chose (one per
   question) or exactly what they typed. It records through Steering's own write path (`answer` for an ask, `resolve` for a
   park), as the person, so Steering shows the same answer and the asker's work continues once. The answer's audit names the
-  route it came by: the caller's seat, the grant's principal and the grant's id and version.
+  route it came by: the caller's seat, the grant's principal and, for a grant service's grant, its id and version.
 - **What it says back:** a success names what was submitted (`submitted`), never a fresh read of the question's answers.
   - `answered`;
   - `recorded`, when parts of the question are still unanswered;
@@ -270,4 +416,4 @@ unusable `person` withholds only these two tools while the grant's other tools k
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
   isn't rung; work it leaves unclaimed past the unclaimed age is listed in one notice instead, which goes to its person, else
   its rows' shared creator, the operator agent or the member itself.
-- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant service's grant that names its person, which records that person's own answers (above).
+- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant that names its person (a grant service's, or a token-file grant with `--person`), which records that person's own answers (above).

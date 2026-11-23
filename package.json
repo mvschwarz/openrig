@@ -26,10 +26,15 @@
     "generate-context-packs": "node scripts/generate-context-packs.mjs",
     "generate-context-packs:check": "node scripts/generate-context-packs.mjs --check",
     "gate:substance": "node scripts/check-substance-gate.mjs",
-    "gate": "node scripts/gate-lane.mjs"
+    "gate": "node scripts/gate-lane.mjs",
+    "test:mcp-package": "node scripts/test-mcp-package.mjs"
   },
   "engines": {
-    "node": "^22 || ^24",
+    "node": "^22.14.0 || ^24",
     "npm": ">=10"
+  },
+  "allowScripts": {
+    "esbuild@0.27.4": true,
+    "esbuild@0.25.12": true
   }
 }

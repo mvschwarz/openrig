@@ -21,6 +21,13 @@ import { RigSpecCodec as PodRigSpecCodec } from "../src/domain/rigspec-codec.js"
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { RigNotFoundError } from "../src/domain/errors.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { SeatPoolSlotsRepository, type SeatPoolSlotPhase } from "../src/domain/seat-pool-slots.js";
+import type { SeatPoolSpec } from "../src/domain/seat-pool-spec.js";
+import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
+import fs from "node:fs";
+import nodePath from "node:path";
+import os from "node:os";
 
 function setupDb(): Database.Database {
   const db = createFullTestDb();
@@ -659,6 +666,47 @@ describe("RigSpecExporter (pod-aware)", () => {
       .toEqual({ tasksMax: 512, memoryMax: 4294967296 });
   });
 
+  it("#2940: exports a seat's keep_alive as keep_alive: true and round-trips it; a seat without it exports no key", () => {
+    const { rig, n2 } = seedPodRig();
+    rigRepo.setNodeKeepAlive(n2.id, true);
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const devMembers = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(devMembers.find((m) => m.id === "qa")?.keepAlive).toBe(true);
+    expect("keepAlive" in devMembers.find((m) => m.id === "impl")!).toBe(false);
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml.match(/keep_alive/g)).toEqual(["keep_alive"]);
+    expect(yaml).toContain("keep_alive: true");
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.keepAlive).toBe(true);
+    rigRepo.setNodeKeepAlive(n2.id, false);
+    expect(PodRigSpecCodec.serialize(exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec)).not.toContain("keep_alive");
+  });
+
+  // #2940: keep_alive is most-specific-wins, and a member can turn off what its agent spec turns on. The stored value is
+  // the resolved one, so the export carries the member's own `keep_alive: false` from its authored source: dropping it
+  // would let the agent spec turn the seat back on at the next `rig up`.
+  it("#2940: keeps a member's keep_alive: false override; a seat that declares nothing still exports no key", () => {
+    const rig = rigRepo.createRig("keep-off");
+    const devPod = podRepo.createPod(rig.id, "dev", "Dev");
+    const member = (id: string, keepAlive?: boolean) => ({ id, agentRef: "local:agents/qa", profile: "default", runtime: "codex", cwd: ".",
+      ...(keepAlive === undefined ? {} : { keepAlive }) });
+    const rigSpec = { version: "0.2", name: "keep-off", pods: [{ id: "dev", label: "Dev", members: [member("off", false), member("plain")] }], edges: [] };
+    for (const id of ["off", "plain"]) {
+      rigRepo.addNode(rig.id, `dev.${id}`, { runtime: "codex", podId: devPod.id, agentRef: "local:agents/qa", profile: "default", cwd: ".",
+        launchRecipe: { version: 1, rigRoot: "/tmp", rigSpec } as never });
+    }
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const members = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(members.find((m) => m.id === "off")?.keepAlive).toBe(false);
+    expect("keepAlive" in members.find((m) => m.id === "plain")!).toBe(false);
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml.match(/keep_alive/g)).toEqual(["keep_alive"]);
+    const normalized = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "off")?.keepAlive).toBe(false);
+  });
+
   it("exports selected launch_wrapper array for pi and codex pod members only and round-trips through codec/schema", () => {
     const { rig, n2, devPod } = seedPodRig();
     const nPi = rigRepo.addNode(rig.id, "dev.pi-seat", {
@@ -692,5 +740,132 @@ describe("RigSpecExporter (pod-aware)", () => {
     const clearedMembers = exportedAfterClear.pods.find((p) => p.id === "dev")!.members;
     expect(clearedMembers.find((m) => m.id === "qa")?.launchWrapper).toBeUndefined();
     expect(clearedMembers.find((m) => m.id === "pi-seat")?.launchWrapper).toBeUndefined();
+  });
+
+  const POOL: SeatPoolSpec = { max: 4, min: 0, dispatchAfterSeconds: 60, idleGraceSeconds: 300, cooldownSeconds: 60,
+    dispatchTag: "overflow", cwdTemplate: null, drain: false };
+  const PHASES: SeatPoolSlotPhase[] = ["adding", "live", "draining", "drained"];
+
+  /** dev.impl is the model of a seat pool with one agent in each phase; dev.qa and arch.reviewer are ordinary members. */
+  function seedPool() {
+    const seeded = seedPodRig();
+    rigRepo.setNodePool(seeded.n1.id, { spec: POOL });
+    const slots = new SeatPoolSlotsRepository(db);
+    const agents = PHASES.map((phase, i) => {
+      const node = rigRepo.addNode(seeded.rig.id, `dev.impl-s${i + 1}`, { runtime: "claude-code", podId: seeded.devPod.id,
+        agentRef: "local:agents/impl", profile: "tdd", cwd: "." });
+      slots.insert({ modelNodeId: seeded.n1.id, slotNumber: i + 1, nodeId: node.id, phase, at: "2026-11-18T00:00:00.000Z" });
+      return node;
+    });
+    return { ...seeded, agents };
+  }
+
+  it("Exporting a pooled rig writes the model member with its pool block and writes no pool agent, in any phase including drained, as a member", () => {
+    const { rig, n1, agents } = seedPool();
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const dev = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(dev.map((m) => m.id).sort()).toEqual(["impl", "qa"]);
+    expect(dev.find((m) => m.id === "impl")?.pool).toEqual(POOL);
+    expect(dev.find((m) => m.id === "qa")?.pool).toBeUndefined();
+    expect(exported.pods.find((p) => p.id === "arch")!.members.map((m) => m.id)).toEqual(["reviewer"]);
+    const yaml = PodRigSpecCodec.serialize(exported);
+    for (const agent of agents) expect(yaml).not.toContain(agent.logicalId.split(".")[1]!);
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "impl")?.pool).toEqual(POOL);
+    // the export reads; the agents and their slots stay as they are
+    expect(new SeatPoolSlotsRepository(db).forModel(n1.id).map((s) => s.phase)).toEqual(PHASES);
+  });
+
+  it("The existing not-carried lines and header entries (member startup, auto mode, process limits, launch additions, MCP) never name a pool agent", () => {
+    const home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "export-pool-not-carried-"));
+    const saved = process.env["OPENRIG_HOME"];
+    try {
+      process.env["OPENRIG_HOME"] = home;
+      const { rig, devPod, n1, agents } = seedPool();
+      // dev.ctl is an ordinary member with every defect a pool agent has, so each list below is shown to name it
+      const ctl = rigRepo.addNode(rig.id, "dev.ctl", { runtime: "claude-code", podId: devPod.id, agentRef: "local:agents/ctl", profile: "default", cwd: "." });
+      const mcpCtl = rigRepo.addNode(rig.id, "dev.ctl-mcp", { runtime: "claude-code", podId: devPod.id, agentRef: "local:agents/ctl", profile: "default",
+        cwd: ".", claudeMcp: "none" });
+      const mcpAgent = rigRepo.addNode(rig.id, "dev.impl-s5", { runtime: "claude-code", podId: devPod.id, agentRef: "local:agents/impl", profile: "tdd",
+        cwd: ".", claudeMcp: "none" });
+      new SeatPoolSlotsRepository(db).insert({ modelNodeId: n1.id, slotNumber: 5, nodeId: mcpAgent.id, phase: "drained",
+        at: "2026-11-18T00:00:00.000Z" });
+      for (const node of [ctl, ...agents]) {
+        db.prepare("UPDATE nodes SET process_limits = ?, claude_auto_mode_json = 'broken' WHERE id = ?").run("{not json", node.id);
+        const prompt = nodePath.join(home, `${node.logicalId}.md`);
+        fs.writeFileSync(prompt, "House rules.\n");
+        expect(prepareSeatLaunchAdditions(seatSkillPaths({ rigId: rig.id, logicalId: node.logicalId, runtime: "claude-code" }),
+          { appendSystemPromptFile: prompt }).ok).toBe(true);
+      }
+      // a runtime switch keeps the saved Claude choice, which the export names for the non-Claude seat
+      db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id IN (?, ?)").run(mcpCtl.id, mcpAgent.id);
+
+      const poolAgents = new Set([...agents, mcpAgent].map((a) => a.logicalId));
+      const named = {
+        launchAdditions: exporter.launchAdditionsNotCarried(rig.id),
+        memberStartup: exporter.memberStartupNotCarried(rig.id).map((w) => w.logicalId),
+        claudeMcp: exporter.claudeMcpNotCarried(rig.id),
+        claudeAutoMode: exporter.claudeAutoModeNotCarried(rig.id),
+        processLimits: exporter.processLimitsNotCarried(rig.id),
+      };
+      expect(named.launchAdditions).toEqual(["dev.ctl"]);
+      expect(named.memberStartup).toEqual(expect.arrayContaining(["dev.ctl", "dev.ctl-mcp", "dev.impl"]));
+      expect(named.claudeMcp).toEqual(["dev.ctl-mcp"]);
+      expect(named.claudeAutoMode).toEqual(["dev.ctl"]);
+      expect(named.processLimits).toEqual(["dev.ctl"]);
+      for (const [list, seats] of Object.entries(named)) {
+        expect(seats.filter((seat) => poolAgents.has(seat)), list).toEqual([]);
+      }
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("After the model node is deleted, its former pool agents export as ordinary members, with no pool block and no slot, and their edges are carried as any member's", () => {
+    const { rig, devPod, n1, n2, n3, agents } = seedPool();
+    rigRepo.addEdge(rig.id, agents[1]!.id, n2.id, "can_observe");
+    rigRepo.addEdge(rig.id, agents[0]!.id, n3.id, "escalates_to");
+    const slots = new SeatPoolSlotsRepository(db);
+    expect(exporter.poolEdgesNotCarried(rig.id)).toHaveLength(2);
+
+    rigRepo.deleteNode(n1.id);
+
+    // the model's slot rows go with its node; its agents stay as ordinary members
+    expect(slots.forModel(n1.id)).toEqual([]);
+    expect(slots.poolAgentNodeIds(rig.id)).toEqual([]);
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const dev = exported.pods.find((p) => p.id === "dev")!;
+    expect(dev.members.map((m) => m.id).sort()).toEqual(["impl-s1", "impl-s2", "impl-s3", "impl-s4", "qa"]);
+    expect(dev.members.every((m) => m.pool === undefined)).toBe(true);
+    expect(dev.edges.map((e) => `${e.from} ${e.kind} ${e.to}`)).toEqual(["impl-s2 can_observe qa"]);
+    expect(exported.edges.map((e) => `${e.from} ${e.kind} ${e.to}`)).toEqual(["dev.impl-s1 escalates_to arch.reviewer"]);
+    expect(exporter.poolEdgesNotCarried(rig.id)).toEqual([]);
+    expect(exporter.poolNotCarried(rig.id)).toEqual([]);
+    expect(exporter.memberStartupNotCarried(rig.id).map((w) => w.logicalId)).toEqual(
+      expect.arrayContaining(agents.map((a) => a.logicalId)));
+
+    // a model recreated under the same name doesn't take the former agents back: the export doesn't relink them
+    const recreated = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: devPod.id, agentRef: "local:agents/impl", profile: "tdd", cwd: "." });
+    rigRepo.setNodePool(recreated.id, { spec: POOL });
+    const again = (exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec).pods.find((p) => p.id === "dev")!.members;
+    expect(again.map((m) => m.id).sort()).toEqual(["impl", "impl-s1", "impl-s2", "impl-s3", "impl-s4", "qa"]);
+    expect(again.filter((m) => m.pool !== undefined).map((m) => m.id)).toEqual(["impl"]);
+    expect(slots.forModel(recreated.id)).toEqual([]);
+  });
+
+  it("exportedMemberFromNode gives one node's member as the rig export writes it, and an unpooled rig exports as before", () => {
+    const { rig, n1, n2 } = seedPodRig();
+    rigRepo.setNodeProcessLimits(n2.id, { tasksMax: 512 });
+    const before = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const dev = before.pods.find((p) => p.id === "dev")!.members;
+    expect(exporter.exportedMemberFromNode(rig.id, n1.id)).toEqual(dev.find((m) => m.id === "impl"));
+    expect(exporter.exportedMemberFromNode(rig.id, n2.id)).toEqual(dev.find((m) => m.id === "qa"));
+    expect(dev.every((m) => m.pool === undefined)).toBe(true);
+    rigRepo.setNodePool(n1.id, { spec: POOL });
+    expect(exporter.exportedMemberFromNode(rig.id, n1.id).pool).toEqual(POOL);
+    expect(() => exporter.exportedMemberFromNode(rig.id, "no-such-node")).toThrow(/no-such-node/);
   });
 });

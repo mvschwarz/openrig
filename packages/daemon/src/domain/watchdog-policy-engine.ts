@@ -15,6 +15,7 @@ import {
   type WatchdogJobsRepository,
 } from "./watchdog-jobs-repository.js";
 import { isQueueOnlyDeliveryCode, type QueueOnlyDeliveryCode, type WatchdogHistoryEntry, type WatchdogHistoryLog } from "./watchdog-history-log.js";
+import { resolveWakeRetryIntervalSeconds } from "./queue-wake-ladder.js";
 
 /**
  * Watchdog policy engine (PL-004 Phase C R1).
@@ -182,6 +183,9 @@ interface WatchdogPolicyEngineDeps {
    *  prove they are no longer actionable. A reason terminals the job without
    *  delivering; null preserves the existing send path. */
   resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
+  /** A due timer whose owning domain fires it with no recipient (a usage-limit blocker's expiry, #3704): the hook
+   *  performs the fire and returns the job's terminal reason, and nothing is sent. Null keeps the send path. */
+  fireWithoutDelivery?: (input: { jobId: string }) => string | null;
   /** Queue-side observer for a wake attempt. It appends resume evidence to
    *  every HELD row armed to this job; delivery outcome is preserved. */
   resolveQueueWait?: (input: { jobId: string }) => PolicyEvaluation | null | undefined;
@@ -191,6 +195,9 @@ interface WatchdogPolicyEngineDeps {
   /** The parked row a due reminder is about, when it may share one message with other reminders due for the same
    *  seat in the same scheduler pass. Null, or absent, keeps the reminder's own send. */
   resolveDigestEntry?: (input: { jobId: string; message: string }) => ParkReminderEntry | null;
+  /** Seconds between tries to record a delivered wake whose recording failed (#3479). Absent → the wake retry
+   *  interval setting, as the watchdog's delivery receipts use it. */
+  accountingRetryIntervalSeconds?: () => number;
 }
 
 /** The parked row an ordinary park reminder is about, with the current park's recorded continuation for its preview. */
@@ -286,6 +293,16 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "activity_stale_unknown",
 ]);
 
+/** A job's quiet decisions since this daemon started (#3643): how many, by reason, and the last one. Kept in memory
+ *  only, so `since` says when counting began. It counts evaluations, not loud outcomes, and on its own it says nothing
+ *  about the scheduler's cadence or health. */
+export interface WatchdogQuietCount {
+  since: string;
+  total: number;
+  byReason: Record<string, number>;
+  lastReason: string | null;
+}
+
 export interface EvaluationResult {
   job: WatchdogJob;
   outcome: PolicyEvaluation | { action: "skip"; reason: "active_wake_not_due" };
@@ -308,9 +325,17 @@ export class WatchdogPolicyEngine {
   private readonly targetNameCarried?: (sessionName: string) => boolean;
   private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
+  private readonly fireWithoutDelivery?: WatchdogPolicyEngineDeps["fireWithoutDelivery"];
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
   private readonly onWakeAttempt?: WatchdogPolicyEngineDeps["onWakeAttempt"];
   private readonly resolveDigestEntry?: WatchdogPolicyEngineDeps["resolveDigestEntry"];
+  private readonly accountingRetryIntervalSeconds: () => number;
+  /** Jobs whose delivered wake couldn't be recorded: consecutive failures, and when to try recording it again. In memory:
+   *  a database that can't record the wake may not record this either, and a restart simply tries once more. */
+  private readonly accountingBackoff = new Map<string, { failures: number; retryAtMs: number }>();
+  /** #3643: the quiet decisions per job since this engine started. They write no history row or event. */
+  private readonly quietCounts = new Map<string, { total: number; byReason: Record<string, number>; lastReason: string }>();
+  private readonly quietSince: string;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
@@ -321,12 +346,15 @@ export class WatchdogPolicyEngine {
     this.targetNameCarried = deps.targetNameCarried;
     this.resolveContextUsage = deps.resolveContextUsage;
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
+    this.fireWithoutDelivery = deps.fireWithoutDelivery;
     this.onWakeAttempt = deps.onWakeAttempt;
     this.resolveQueueWait = deps.resolveQueueWait;
     this.resolveDigestEntry = deps.resolveDigestEntry;
     this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
+    this.quietSince = this.now().toISOString();
     this.deliveryDeferred = deps.deliveryDeferred;
+    this.accountingRetryIntervalSeconds = deps.accountingRetryIntervalSeconds ?? resolveWakeRetryIntervalSeconds;
     this.policies = new Map();
     for (const p of PHASE_C_BUILTIN_POLICIES) this.policies.set(p.name, p);
     if (deps.additionalPolicies) {
@@ -336,6 +364,25 @@ export class WatchdogPolicyEngine {
 
   resolvePolicy(name: string): Policy | undefined {
     return this.policies.get(name);
+  }
+
+  /** #3643: the job's quiet count since this engine started; a job with no quiet decision yet reads zero. */
+  quietCount(jobId: string): WatchdogQuietCount {
+    const count = this.quietCounts.get(jobId);
+    return {
+      since: this.quietSince,
+      total: count?.total ?? 0,
+      byReason: { ...count?.byReason },
+      lastReason: count?.lastReason ?? null,
+    };
+  }
+
+  private countQuiet(jobId: string, reason: string): void {
+    const count = this.quietCounts.get(jobId) ?? { total: 0, byReason: {}, lastReason: reason };
+    count.total += 1;
+    count.byReason[reason] = (count.byReason[reason] ?? 0) + 1;
+    count.lastReason = reason;
+    this.quietCounts.set(jobId, count);
   }
 
   private inactiveJobResult(jobId: string): EvaluationResult | null {
@@ -357,6 +404,11 @@ export class WatchdogPolicyEngine {
   }
 
   async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string, pass?: ReminderPass): Promise<EvaluationResult> {
+    // #3479: a delivered wake whose recording failed again waits out its retry interval: no pass, history row or log until then.
+    const backoff = this.accountingBackoff.get(job.jobId);
+    if (backoff && this.now().getTime() < backoff.retryAtMs) {
+      return { job, outcome: { action: "skip", reason: "wake_accounting_retry_pending" }, history: null, delivery: null, meaningful: false };
+    }
     // A prior job's delivery may have yielded since the scheduler selected this row.
     const inactive = this.inactiveJobResult(job.jobId);
     if (inactive) return inactive;
@@ -503,6 +555,7 @@ export class WatchdogPolicyEngine {
       this.jobsRepo.setActionable(job.jobId, false, evaluatedAt);
       const isQuiet = QUIET_SKIP_REASONS.has(outcome.reason);
       if (isQuiet) {
+        this.countQuiet(job.jobId, outcome.reason);
         return {
           job: this.jobsRepo.getByIdOrThrow(job.jobId),
           outcome,
@@ -579,6 +632,7 @@ export class WatchdogPolicyEngine {
         // last_actionable_at.
         this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
         this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
+        this.countQuiet(job.jobId, "active_wake_not_due");
         return {
           job: this.jobsRepo.getByIdOrThrow(job.jobId),
           outcome: { action: "skip", reason: "active_wake_not_due" },
@@ -695,9 +749,11 @@ export class WatchdogPolicyEngine {
     return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold: thresholdFire, notice: outcome.notice === true, sentMessage: message });
   }
 
-  /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */
+  /** The pre-transport guard: a job its owning domain can prove is no longer actionable, or fires itself with no
+   *  recipient, is terminaled, not sent. */
   private terminalBeforeDelivery(job: WatchdogJob, evaluatedAt: string): EvaluationResult | null {
-    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId });
+    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId })
+      ?? this.fireWithoutDelivery?.({ jobId: job.jobId });
     if (!preDeliveryTerminalReason) return null;
     this.jobsRepo.markTerminal(job.jobId, preDeliveryTerminalReason);
     const history = this.historyLog.record({
@@ -816,6 +872,28 @@ export class WatchdogPolicyEngine {
     this.recordAttempt({ ...held, deliverySchedule: schedule, delivery, isContextUsageThreshold: false, sentMessage: message });
   }
 
+  /** Schedule the next try at recording a delivered wake (#3479): the next tick after a first failure, the wake retry
+   *  interval after a repeated one. The first failure of a run returns the error to report, once, through the scheduler's
+   *  tick-error log, with one history row a person reads in `rig watchdog status`; later failures in the same run return
+   *  null and stay quiet until a try succeeds. */
+  private backOffAccounting(job: WatchdogJob, outcome: Extract<PolicyEvaluation, { action: "send" }>, evaluatedAt: string,
+    delivery: DeliveryOutcome, err: unknown): Error | null {
+    const seconds = this.accountingRetryIntervalSeconds();
+    const failures = (this.accountingBackoff.get(job.jobId)?.failures ?? 0) + 1;
+    const retryAt = new Date(this.now().getTime() + seconds * 1000).toISOString();
+    this.accountingBackoff.set(job.jobId, { failures, retryAtMs: failures > 1 ? Date.parse(retryAt) : this.now().getTime() });
+    if (failures > 1) return null;
+    const cause = err instanceof Error ? err.message : String(err);
+    const code = (err as { code?: unknown } | null)?.code;
+    const nextAction = `The wake was delivered and its receipt kept; recording it failed (${cause}). It's tried again at the next check, then every ${seconds}s while it keeps failing, without delivering again.`;
+    try {
+      this.historyLog.record({ jobId: job.jobId, evaluatedAt, outcome: "failed", skipReason: null,
+        deliveryTargetSession: outcome.target.session, deliveryStatus: deliveryStatusLabel(delivery),
+        evaluationNotes: { wakeAccountingFailed: true, error: cause, ...(typeof code === "string" ? { code } : {}), retryIntervalSeconds: seconds, nextAction } });
+    } catch { /* the report below still goes out */ }
+    return new Error(`watchdog ${job.jobId}: ${nextAction}`, { cause: err });
+  }
+
   /** Account for one input attempt or a recovered receipt, then advance only accounted occurrences. */
   private recordAttempt(input: {
     job: WatchdogJob;
@@ -851,24 +929,7 @@ export class WatchdogPolicyEngine {
       ? { ...(deliveryNotes ?? {}), ...(delivery.retryAt ? { retryAt: delivery.retryAt } : {}),
         ...(delivery.nextAction ? { nextAction: delivery.nextAction } : {}),
         ...(delivery.occurrenceTracked ? { outboxIds: delivery.outboxIds ?? [] } : {}) } : deliveryNotes;
-    const history = this.historyLog.record({
-      jobId: job.jobId,
-      evaluatedAt,
-      outcome: delivery.reconciled ? "skipped" : delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
-        : isRefusedInteractive(delivery.error) ? "refused" : "failed",
-      skipReason: delivery.reconciled ? "delivery_receipt_reconciled" : delivery.status === "retained" ? "typing_guard_retained" : null,
-      deliveryTargetSession: outcome.target.session,
-      // `sent` with a queue-only status (watchdog-history-log.ts) means it reached the seat's queue, not typed.
-      deliveryStatus: deliveryStatusLabel(delivery),
-      deliveryMessage: digest?.line ?? delivery.sentMessage ?? sentMessage ?? outcome.message,
-      // OPR.0.5.6.24 — the delivery error/reason string survives into the
-      // durable record so a policy can distinguish an interactive-prompt
-      // refusal from a generic failure (status alone discards that identity).
-      evaluationNotes:
-        delivery.error !== undefined
-          ? { ...receiptNotes, deliveryReason: delivery.error }
-          : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
-    });
+    let history: WatchdogHistoryEntry | null = null;
     const retryPending = delivery.occurrenceTracked && delivery.status === "failed" && !delivery.occurrenceComplete;
     const accountWake = () => {
       const current = this.jobsRepo.getByIdOrThrow(job.jobId);
@@ -891,8 +952,38 @@ export class WatchdogPolicyEngine {
       }
       if (delivery.occurrenceTracked) accountWake();
     };
-    if (delivery.occurrenceTracked) this.eventBus.withNotifyEnvelope(account);
-    else account();
+    try {
+      history = this.historyLog.record({
+        jobId: job.jobId,
+        evaluatedAt,
+        outcome: delivery.reconciled ? "skipped" : delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
+          : isRefusedInteractive(delivery.error) ? "refused" : "failed",
+        skipReason: delivery.reconciled ? "delivery_receipt_reconciled" : delivery.status === "retained" ? "typing_guard_retained" : null,
+        deliveryTargetSession: outcome.target.session,
+        // `sent` with a queue-only status (watchdog-history-log.ts) means it reached the seat's queue, not typed.
+        deliveryStatus: deliveryStatusLabel(delivery),
+        deliveryMessage: digest?.line ?? delivery.sentMessage ?? sentMessage ?? outcome.message,
+        // OPR.0.5.6.24 — the delivery error/reason string survives into the
+        // durable record so a policy can distinguish an interactive-prompt
+        // refusal from a generic failure (status alone discards that identity).
+        evaluationNotes:
+          delivery.error !== undefined
+            ? { ...receiptNotes, deliveryReason: delivery.error }
+            : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
+      });
+      if (delivery.occurrenceTracked) this.eventBus.withNotifyEnvelope(account);
+      else account();
+    } catch (err) {
+      // #3479: this wake's receipt is already durable, so its next pass reconciles without typing it again. One failure
+      // is retried at the next tick, as before. When its recording keeps failing (the pass's history row, or a one-shot
+      // retirement SQLite can't journal), wait the wake retry interval between tries and report it once per failing run,
+      // instead of a pass, a history row and a stack trace every tick.
+      if (!(delivery.occurrenceTracked && delivery.status === "ok")) throw err;
+      const report = this.backOffAccounting(job, outcome, evaluatedAt, delivery, err);
+      if (report) throw report;
+      return { job: this.jobsRepo.getById(job.jobId) ?? job, outcome, history, delivery, meaningful: false };
+    }
+    this.accountingBackoff.delete(job.jobId);
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
     // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
     // leaves the receipt untouched so the next scan retries. A policy that does

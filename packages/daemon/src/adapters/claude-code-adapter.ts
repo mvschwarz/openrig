@@ -1,13 +1,15 @@
 import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
+import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
+import type { SeatIdentityVerdict } from "../domain/types.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
-import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
+import { WRAPPED_CLAUDE_LOOKUP_REFUSAL, type SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -16,14 +18,14 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
-import { shellQuote } from "./shell-quote.js";
+import { shellQuote, shellWord } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
@@ -105,6 +107,23 @@ function claudeSideloadRefusalReason(line: string): string {
   return `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on `
     + "disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load "
     + "this seat's skills and plugins, so this seat can't start while that setting applies.";
+}
+
+/** #3746: the wrapped classic launch's refusal when `claude` in the pane's shell is a function or alias, from the last lines
+ *  of a pane back at its shell. Read from a joined capture where needed, so a wrapped line stays whole. */
+const WRAPPED_LOOKUP_REFUSALS = [WRAPPED_CLAUDE_LOOKUP_REFUSAL("function"), WRAPPED_CLAUDE_LOOKUP_REFUSAL("alias")];
+const mayShowWrappedLookupRefusal = (paneContent: string): boolean => paneContent.replace(/\n/g, "").includes("a launch_wrapper needs claude");
+function claudeWrappedLookupLine(paneContent: string): string | null {
+  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse()
+    .find((line) => WRAPPED_LOOKUP_REFUSALS.includes(line)) ?? null;
+}
+
+function claudeWrappedLookupReason(line: string): string {
+  const kind = line.includes("shell alias") ? "alias" : "function";
+  return `the pane shows OpenRig's launch refusal (${line}) A launch_wrapper starts Claude's executable file, and OpenRig doesn't `
+    + `look past a shell ${kind} named claude, which may set this seat's account, endpoint or hooks. Make claude an executable file `
+    + `on PATH (for example a script that applies the same settings and then execs Claude), or remove the ${kind} from the shell `
+    + "OpenRig's panes start, then relaunch this seat.";
 }
 
 /**
@@ -432,6 +451,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const appliedLaunch = appliedWith(autoMode.block ?? null);
     const hookBridge = (await this.hookBridgeLaunch?.(binding.nodeId, binding.claudeExecutable ?? undefined)) === true;
     const statusLine = await this.throttledStatusLine(binding.nodeId, binding.cwd, opts.name, tokenWarnings);
+    const settingsSeat = { openrigHome: this.stateDir, session: opts.name };
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge, ...(statusLine ? { statusLine } : {}) }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
@@ -474,14 +494,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
       const forkSessionId = this.sessionIdFactory();
-      const launchArgs = permissionArgs(forkSessionId);
+      const launchArgs = transportClaudeSettings(permissionArgs(forkSessionId), settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
       const permissionMode = permissionArg(launchArgs);
       const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
-        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
+        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${shellWord(opts.name)}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await sendClassic(cmd);
       if (!textResult.ok) {
@@ -497,13 +517,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
+    let launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
+    let nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat);
+    const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
+    if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
+    else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
     const permissionMode = permissionArg(launchArgs);
-    const nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null);
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
-      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${shellWord(opts.name)}`
+      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${shellWord(opts.name)}`;
 
     const configPrefix = binding.claudeLaunch?.configDir != null && this.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(binding.claudeLaunch.configDir)} ` : "";
     const classicCommand = configPrefix + (opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable
@@ -511,8 +534,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (!managed && binding.claudeLaunch?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(binding.claudeLaunch, posture, model));
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
-    const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
-    const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
+    const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs, settingsSeat) : autoMode.block ?? null;
     if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
     const launchApplied = appliedWith(sentAutoMode === undefined ? { unknown: "settings_file" } : sentAutoMode);
 
@@ -539,6 +561,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
+      if (verification.warnings) tokenWarnings.push(...verification.warnings);
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
     }
 
@@ -580,6 +603,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const notFound = probe.code === "returned_to_shell"
       ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
     if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell" };
+    // So does the wrapped launch's refusal of a claude function or alias (#3746).
+    const lookup = probe.code === "returned_to_shell" && mayShowWrappedLookupRefusal(paneContent)
+      ? claudeWrappedLookupLine((await this.tmux.capturePaneContent(binding.tmuxSession, 40, { joinWrappedLines: true })) ?? paneContent)
+      : null;
+    if (lookup) return { ready: false, reason: claudeWrappedLookupReason(lookup), code: "returned_to_shell" };
     // Claude's sideload refusal says why too, read from a joined capture so a wrapped refusal line stays whole. It stays
     // a wait for the same reason.
     const refusal = probe.code === "returned_to_shell" && mayShowSideloadRefusal(paneContent)
@@ -799,7 +827,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
+      // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen or its
+      // "No conversation found" through the window (and a longer wait, below), and accept it at the final read if that's
+      // still all there is.
+      if (probe.status === "resumed" && !probe.foregroundOnly) {
         return { ok: true };
       }
 
@@ -831,7 +862,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         const focus = claudeTrustPromptFocus(paneContent);
         const key = focus === "yes" && !trustEntered ? "Enter" : focus === "no" && !trustMoved ? "Down" : null;
         if (!key) {
-          if (slowStart && !trustMoved && !trustEntered) {
+          // A prompt still being drawn (its heading, no options yet) keeps the wait, as the gated-grants backstop's does.
+          if (slowStart && !trustMoved && !trustEntered && !claudeTrustPromptDrawing(paneContent)) {
             slowStart = false;
             break;
           }
@@ -851,7 +883,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // Only a boot in progress (no verdict, no gate, a label that proves nothing) is worth waiting for; a real
       // gate (login, trust or MCP approval, auto-mode identity) won't clear itself.
       const booting = probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
-      if (slowStart && !booting) {
+      // A foreground Claude alone keeps the longer wait going too, to its end, as in the quick window: a resume of a
+      // missing conversation is one until it reports that and exits. It isn't a boot for the checks below, so its process
+      // label never reads as a ready screen there.
+      if (slowStart && !booting && !probe.foregroundOnly) {
         slowStart = false;
         break;
       }
@@ -868,7 +903,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // the occupant), not on every poll. A shell label can't tell Claude having exited from the launch script not having
       // started it yet, and the occupant can change while we wait, so the process tree decides.
       const windowEnd = attempt === windowAttempts - 1;
-      if (booting && (windowEnd || (slowStart && (attempt - windowAttempts + 1) % checkEvery === 0))) {
+      // Claude's process with nothing drawn yet gets the longer wait at the window's end too: its trust dialog can be drawn
+      // after the quick window. In the longer wait it sleeps and polls (above), as it does after a boot.
+      const processOnly = probe.status === "resumed" && probe.foregroundOnly === true;
+      if (windowEnd ? booting || processOnly : booting && slowStart && (attempt - windowAttempts + 1) % checkEvery === 0) {
         if (await this.paneReturnedToShell(binding, await this.tmux.getPaneCommand(tmuxSession))) {
           // Provably back at its shell: the final check reports it. If it isn't by then, the seat is kept.
           if (slowStart) { attempts = attempt + 1; break; }
@@ -893,11 +931,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
 
     if (finalProbe.status === "resumed") {
-      return { ok: true };
+      return finalProbe.foregroundOnly ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
     const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
 
-    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
+    // A gate Claude draws once its process is up (workspace trust, project MCP approval) waits on a person, as the resume
+    // adapter reads it. A different occupant keeps main's result, as below, and so does a shell that's provably back and
+    // idle: the gate's text above it is what Claude left when it exited.
+    let returned: boolean | undefined;
+    const returnedToShell = async () => returned ??= await this.paneReturnedToShell(binding, finalCommand);
+    const gate = finalProbe.code === "trust_gate" || finalProbe.code === "mcp_gate";
+    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required"
+      || (gate && !await returnedToShell() && await this.paneOccupant(binding, false) !== "another")) {
       return {
         ok: false,
         probe: probeEvidence,
@@ -918,14 +963,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    if (await this.paneReturnedToShell(binding, finalCommand)) {
+    if (await returnedToShell()) {
       const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
-      const refusal = notFound || !mayShowSideloadRefusal(finalContent) ? null
+      const lookup = notFound || !mayShowWrappedLookupRefusal(finalContent) ? null
+        : claudeWrappedLookupLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
+      const refusal = notFound || lookup || !mayShowSideloadRefusal(finalContent) ? null
         : claudeSideloadRefusalLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
       return {
         ok: false,
         probe: probeEvidence,
-        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound)
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : lookup ? claudeWrappedLookupReason(lookup)
           : refusal ? claudeSideloadRefusalReason(refusal) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };
@@ -1523,22 +1570,37 @@ function stableJsonKey(value: unknown): string {
 
 // ── OPR.0.5.5.19 A5 — the Claude self-report rung (r3): sessions/<pid>.json ──
 // Claude Code's OWN status registry (since v2.1.139): one JSON file per live process
-// under <configDir>/sessions/, carrying {name: <canonical tmux session name>, status:
-// busy|idle|shell|waiting, statusUpdatedAt, ...}. Self-reported truth, SELF-DATED
-// (statusUpdatedAt) — the research doc's top rung, resolved here by the `name` field
-// (OpenRig's canonical session name; no pane-pid plumbing needed on this path).
+// under <configDir>/sessions/, carrying {name, status: busy|idle|shell|waiting,
+// statusUpdatedAt, ...} and, on the versions seen here, its own `pid`. Self-reported truth,
+// SELF-DATED (statusUpdatedAt) — the research doc's top rung. The seat's file is the one for
+// its verified native PID when the identity reconciler has one (verifiedSelfReportPid);
+// otherwise it's matched by `name`, the conversation title, which OpenRig's launch sets to the
+// seat's session name with `--name` and `/rename` changes.
 // UNDOCUMENTED INTERNAL: any read/parse/shape failure returns null — the ladder falls
 // to the next rung, NEVER errors (SPEC mini-req 2a).
 
 export interface ClaudeSelfReportRead {
   listFiles(dir: string): string[];
   readFile(path: string): string;
+  /** Whether a process with this PID is running. Default: signal 0 (a process we may not signal still exists). */
+  isAlive?(pid: number): boolean;
 }
 
 const defaultSelfReportRead: ClaudeSelfReportRead = {
   listFiles: (dir) => fs.readdirSync(dir),
   readFile: (p) => fs.readFileSync(p, "utf8"),
+  isAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } },
 };
+
+/** The seat's verified native Claude PID for the self-report read: only from a verified verdict for this same session.
+ *  It names the last verified process, until the next completed reconciliation. The reconciler polls every 5 s but runs
+ *  one pass at a time, so a slow pass leaves the stored verdict older than that. Until then the reader checks only that
+ *  some process holds the PID (signal 0) and that its `<pid>.json` records the same `pid`; nothing binds the file to the
+ *  process's start. So if the process ended and its number was reused, a surviving old file for that PID still reads as
+ *  the seat's. */
+export function verifiedSelfReportPid(verdict: SeatIdentityVerdict | null | undefined, sessionName: string): number | undefined {
+  return verdict?.verdict === "verified" && verdict.sessionName === sessionName ? verdict.evidence.observedPid ?? undefined : undefined;
+}
 
 /** Read the freshest self-report for `sessionName` as ladder evidence, or null.
  *  Mapping: busy→working; idle→idle-at-prompt; shell→idle-at-prompt (turn over, a
@@ -1550,12 +1612,24 @@ export function readClaudeSelfReportEvidence(input: {
   sessionsDir: string;
   sessionName: string;
   seatNodeId: string;
+  /** The seat's verified native Claude PID. Its own `<pid>.json` is the seat's, whatever its `name` (the conversation
+   *  title, which `/rename` changes) says, while a process holds that PID; verifiedSelfReportPid names the limit. */
+  pid?: number;
   read?: ClaudeSelfReportRead;
 }): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
   const read = input.read ?? defaultSelfReportRead;
   try {
-    let best: { status: string; statusUpdatedAt: number } | null = null;
-    for (const file of read.listFiles(input.sessionsDir)) {
+    let best: { status: string; statusUpdatedAt: number; file: string } | null = null;
+    if (input.pid !== undefined && (read.isAlive ?? defaultSelfReportRead.isAlive!)(input.pid)) {
+      try {
+        const record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, `${input.pid}.json`))) as
+          { pid?: unknown; status?: unknown; statusUpdatedAt?: unknown };
+        if (record.pid === input.pid && typeof record.status === "string" && typeof record.statusUpdatedAt === "number") {
+          best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt, file: `${input.pid}.json` };
+        }
+      } catch { /* no file for this process: the name match below, as before */ }
+    }
+    for (const file of best ? [] : read.listFiles(input.sessionsDir)) {
       if (!file.endsWith(".json")) continue;
       let record: { name?: unknown; status?: unknown; statusUpdatedAt?: unknown };
       try {
@@ -1566,7 +1640,7 @@ export function readClaudeSelfReportEvidence(input: {
       if (record.name !== input.sessionName) continue;
       if (typeof record.status !== "string" || typeof record.statusUpdatedAt !== "number") continue;
       if (!best || record.statusUpdatedAt > best.statusUpdatedAt) {
-        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
+        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt, file };
       }
     }
     if (!best) return null;
@@ -1575,8 +1649,9 @@ export function readClaudeSelfReportEvidence(input: {
       sessionName: input.sessionName,
       rung: "self-report" as const,
       sourceId: "claude:pid-json",
-      seq: best.statusUpdatedAt, // self-dated monotonic
+      seq: best.statusUpdatedAt, // self-dated monotonic, within one file
       observedAt: new Date(best.statusUpdatedAt).toISOString(),
+      sourceFile: best.file,
     };
     switch (best.status) {
       case "busy":

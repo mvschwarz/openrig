@@ -24,6 +24,9 @@ export interface RemoteOpResult {
    *  connection reset or dropped mid-request, or an unreadable response. Unset when the connection provably
    *  never reached the remote. A caller whose request writes must not read such a failure as "not done". */
   outcomeUnknown?: true;
+  /** With `outcomeUnknown`: the X-OpenRig-Session value the request carried, the name the remote records the caller's
+   *  rows under (the origin triple member@rig@<origin host> when this host's id is known). Unset without a sender. */
+  sender?: string;
 }
 
 // Connection failures that prove the request never reached the target daemon. Codes the kernel can also report on a
@@ -91,12 +94,25 @@ export async function runRemoteHttpOp(
     }
     return { ok: true, failedStep: "none", data: res.data };
   } catch (err) {
+    const arrived = requestMayHaveArrived(err);
+    const sender = arrived ? await carriedSender(client) : undefined;
     return {
       ok: false,
       failedStep: classifyHttpError(err),
       error: (err as Error).message,
-      ...(requestMayHaveArrived(err) ? { outcomeUnknown: true as const } : {}),
+      ...(arrived ? { outcomeUnknown: true as const, ...(sender ? { sender } : {}) } : {}),
     };
+  }
+}
+
+/** The sender a request from this client carried (the cached X-OpenRig-Session value); undefined for a client that can't
+ *  tell (a test double without senderIdentity) or when it fails to say. */
+async function carriedSender(client: DaemonClient): Promise<string | undefined> {
+  if (typeof client.senderIdentity !== "function") return undefined;
+  try {
+    return (await client.senderIdentity()).session;
+  } catch {
+    return undefined;
   }
 }
 

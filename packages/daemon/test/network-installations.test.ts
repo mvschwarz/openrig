@@ -46,6 +46,7 @@ class FakeAccount {
   names = new Map<string, { gen: number; state: "connected" | "revoked" }>();
   readonly elsewhere = new Set(["taken"]);
   readonly puts: string[][] = [];
+  readonly leadLists: Array<string[] | undefined> = [];
   calls = 0;
   readonly inits: Array<{ redirect: string; signal: AbortSignal }> = [];
   /** Makes the next call fail the way fetch does on a redirect it won't follow. */
@@ -73,7 +74,7 @@ class FakeAccount {
     if (this.redirectNext) { this.redirectNext = false; throw Object.assign(new TypeError("fetch failed"), { cause: new Error("unexpected redirect") }); }
     if (this.stallNext) { this.stallNext = false; await new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })); }
     const path = new URL(url).pathname;
-    const body = JSON.parse(init.body) as { code?: string; instance?: string; participants?: string[] };
+    const body = JSON.parse(init.body) as { code?: string; instance?: string; participants?: string[]; leads?: string[] };
     const reply = (status: number, json: unknown) => ({ status, json: async () => json });
     if (path === "/api/connector/enroll" && init.method === "POST") {
       if (this.used.has(body.code!)) return reply(409, { error: "code_not_current" });
@@ -89,9 +90,11 @@ class FakeAccount {
       if (init.headers.Authorization !== `Bearer ${this.key}` || body.instance !== this.instance) return reply(401, { error: "not_enrolled" });
       if (this.delayMs) await sleep(this.delayMs);
       const list = body.participants!;
+      expect(list.every(name => typeof name === "string")).toBe(true);
       if (list.some((n) => this.elsewhere.has(n))) return reply(409, { error: "name_taken" });
       if (this.dropFails > 0) { this.dropFails--; return reply(409, { error: "drop_failed" }); }
       this.puts.push(list);
+      this.leadLists.push(body.leads);
       for (const [name, entry] of this.names) if (!list.includes(name)) entry.state = "revoked";
       const participants = list.map((name) => {
         const entry = this.names.get(name);
@@ -128,10 +131,11 @@ beforeEach(() => {
 });
 afterEach(() => { failRemoval.suffix = null; failRename.suffixes = []; db.close(); rmSync(home, { recursive: true, force: true }); });
 
-function seat(session: string): void {
-  const rig = rigs.listRigs().find((r) => r.name === "lab") ?? rigs.createRig("lab");
+function seat(session: string, rigName = "lab"): string {
+  const rig = rigs.listRigs().find((r) => r.name === rigName) ?? rigs.createRig(rigName);
   const node = rigs.addNode(rig.id, `n${++seq}`, { runtime: "claude-code" });
   db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, ?, ?, 'running')").run(`s${seq}`, node.id, session);
+  return node.id;
 }
 const post = async (path: string, body: unknown) => {
   const res = await app.request(`/api/network${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -156,13 +160,18 @@ it("enrolling trades the code for a key kept privately; a used code is refused w
   expect(listed).not.toContain(KEY);
 
   const calls = account.calls;
-  expect(await enroll()).toMatchObject({ status: 409, data: { error: "already_enrolled" } });
+  // Already enrolled is fine as it is: carry on connecting. It doesn't point at --replace.
+  const again = await enroll();
+  expect(again).toMatchObject({ status: 409, data: { error: "already_enrolled" } });
+  expect(again.data.message).toBe(`This daemon is already enrolled at https://account.example/ (${enrolled.data.id}). Already connected; carry on with rig network connect.`);
   expect(account.calls).toBe(calls);
   expect(await post("/installations", { code: "ec1.good", site: "http://other.example", allowHttp: false })).toMatchObject({ status: 400, data: { error: "http_not_allowed" } });
   expect(account.calls).toBe(calls);
 
-  // The same code at another site: the account says it's spent.
-  expect(await post("/installations", { code: "ec1.good", site: "https://second.example" })).toMatchObject({ status: 409, data: { error: "code_not_current" } });
+  // The same code at another site: the account says it's spent. The words don't claim how long a code lasts or how often it works.
+  const spent = await post("/installations", { code: "ec1.good", site: "https://second.example" });
+  expect(spent).toMatchObject({ status: 409, data: { error: "code_not_current" } });
+  expect(spent.data.message).toBe("The account refused the code (code_not_current). Get a new code from your account page.");
 });
 
 it("connecting by name lists it with the account and binds to the account's MCP front with its bearer; a second seat keeps the first listed", async () => {
@@ -552,4 +561,45 @@ it("a replace whose old key's backup can't be removed after the switch still end
   expect(replaced.data.replaced.problems).toEqual([expect.stringMatching(/backup at .*key\.json\.prev couldn't be removed \(EBUSY/)]);
   expect(readPrivateToken(networkInstallationKeyFile(home, first.data.id), () => "missing")).toBe(account.key);
   expect((await status()).bindings.find((b) => b.id === alpha.data.id)).toMatchObject({ state: "disconnected", accountRemoval: "old-installation" });
+});
+
+
+it("exports only topology-declared lead names, keeps string participants, and drops disconnected declarations", async () => {
+  const lead = seat("entry@lab"), worker = seat("worker@lab"), ordinary = seat("lead-looking-name@lab");
+  const otherLead = seat("entry@other", "other"), otherWorker = seat("worker@other", "other");
+  const lab = rigs.listRigs().find(rig => rig.name === "lab")!;
+  const other = rigs.listRigs().find(rig => rig.name === "other")!;
+  await enroll();
+  await connect("lead-looking-name@lab", "named-lead");
+  expect(account.leadLists.at(-1)).toBeUndefined();
+  rigs.addEdge(lab.id, lead, worker, "delegates_to");
+  const first = await connect("entry@lab", "alpha");
+  expect(first.status).toBe(201);
+  expect(account.leadLists.at(-1)).toEqual(["alpha"]);
+  rigs.addEdge(other.id, otherLead, otherWorker, "delegates_to");
+  const beta = await connect("entry@other", "beta");
+  expect(account.leadLists.at(-1)).toEqual(["alpha", "beta"]);
+  // Two delegation roots in lab mean no single representative in that rig; the other rig's declaration remains.
+  rigs.addEdge(lab.id, ordinary, worker, "delegates_to");
+  await connect("worker@lab", "worker");
+  expect(account.leadLists.at(-1)).toEqual(["beta"]);
+  await post(`/bindings/${beta.data.id}/disconnect`, {});
+  expect(account.leadLists.at(-1)).toBeUndefined();
+  expect(account.puts.at(-1)).not.toContain("beta");
+});
+
+it("exports a declared lead connected by its derived address rather than its physical session name", async () => {
+  const lead = seat("staged-lead@lab"), worker = seat("worker@lab");
+  const lab = rigs.listRigs().find(rig => rig.name === "lab")!;
+  rigs.addEdge(lab.id, lead, worker, "delegates_to");
+  db.prepare("INSERT INTO bindings (id, node_id, tmux_session, attachment_type) VALUES (?, ?, ?, 'tmux')")
+    .run("lead-binding", lead, "staged-lead@lab");
+  const node = db.prepare("SELECT logical_id FROM nodes WHERE id = ?").get(lead) as { logical_id: string };
+  const address = `${node.logical_id.replaceAll(".", "-")}@lab`;
+  await enroll();
+  expect((await connect(address, "alpha")).status).toBe(201);
+  expect(account.leadLists.at(-1)).toEqual(["alpha"]);
+  // Later syncs read the existing binding, whose localSession still holds the typed derived address.
+  expect((await connect("worker@lab", "worker")).status).toBe(201);
+  expect(account.leadLists.at(-1)).toEqual(["alpha"]);
 });

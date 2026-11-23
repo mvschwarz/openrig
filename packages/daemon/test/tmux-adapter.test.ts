@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { TmuxAdapter, defaultTmuxFileOps } from "../src/adapters/tmux.js";
+import { TmuxAdapter, defaultTmuxFileOps, escapeTmuxCommandSeparator } from "../src/adapters/tmux.js";
 import type { ExecFn, TmuxResult, TmuxFileOps, ArgvExecFn } from "../src/adapters/tmux.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
@@ -7,10 +7,14 @@ import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-d
 // tmux-credential-environment tests observe the raw process boundary and real tmux instead.
 function adapterFor(exec: ExecFn, files: TmuxFileOps = defaultTmuxFileOps(), argv?: ArgvExecFn): TmuxAdapter {
   const content = new Map<string, string>();
-  return new TmuxAdapter(async command => {
+  const adapter = new TmuxAdapter(async command => {
     const file = [...content.keys()].find(p => command.endsWith(p) || command.endsWith("'" + p + "'"));
     return exec(command.includes("source-file ") && file ? "tmux " + content.get(file)!.trimEnd() : command);
   }, { ...files, writeFile: async (p, body, opts) => { await files.writeFile(p, body, opts); content.set(p, body); } }, argv);
+  // #3253: the calls pinned here are a daemon's that has already checked its server's bus once (on Linux, a daemon's
+  // first launch runs startServer first; tmux-server-systemd-scope.test.ts covers that).
+  (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
+  return adapter;
 }
 
 const NO_SERVER_ERROR = new Error("no server running on /tmp/tmux-1000/default");
@@ -603,6 +607,53 @@ describe("TmuxAdapter", () => {
       );
     });
 
+    // tmux ends its command at an argument ending in an unescaped `;` (commandsOf in
+    // adapters/tmux-control.ts, pinned against real tmux in test/tmux-control-native.test.ts). Quoting
+    // protects the shell, not tmux, so a trailing `;` is escaped rather than the key being refused.
+    it("escapes a key that ends in a semicolon, so tmux keeps it as one argument", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.sendKeys("r01-dev1-impl", ["x;", "run-shell", "C-c"]);
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux send-keys -t 'r01-dev1-impl' 'x\\;' 'run-shell' 'C-c'"
+      );
+    });
+
+    it("escapes every trailing semicolon unconditionally, so each key arrives byte for byte", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      // tmux checks only the character before a final `;`: backslash means it drops the `;` and turns
+      // that backslash into `;`, anything else ends the command. One backslash added either way, so
+      // `x\;` arrives as `x\;` rather than losing its backslash. Raw strings here so the backslashes
+      // in this expectation are the ones the transport carries.
+      await adapter.sendKeys("r01-dev1-impl", [String.raw`x\;`, String.raw`x\\;`]);
+
+      expect(exec.mock.calls[0]![0]).toBe(String.raw`tmux send-keys -t 'r01-dev1-impl' 'x\\;' 'x\\\;'`);
+
+      // And the property that matters: what tmux's own parser makes of each escaped argument is the
+      // key that was sent. tmux drops the final `;` and turns the one backslash before it into `;`.
+      const asTmuxReads = (arg: string) => (arg.endsWith("\\;") ? `${arg.slice(0, -2)};` : arg);
+      for (const key of ["x;", String.raw`x\;`, String.raw`x\\;`, ";", "Enter"]) {
+        expect(asTmuxReads(escapeTmuxCommandSeparator(key)), key).toBe(key);
+      }
+    });
+
+    it("keeps the vocabulary a caller may send, punctuation included", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.sendKeys("r01-dev1-impl", ["/", "?", ":", "M-Left", "F12", "a-b"]);
+
+      expect(result).toEqual({ ok: true });
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux send-keys -t 'r01-dev1-impl' '/' '?' ':' 'M-Left' 'F12' 'a-b'"
+      );
+    });
+
     it("returns { ok: true } on success", async () => {
       const adapter = new TmuxAdapter(mockExec({ "send-keys": { stdout: "" } }));
       const result: TmuxResult = await adapter.sendKeys("r01-dev1-impl", ["Enter"]);
@@ -786,7 +837,9 @@ describe("TmuxAdapter", () => {
 
       const result = await adapter.killSession("r01-dev1-impl");
 
-      expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied" });
+      // The unguarded stop reports how far it got, so a caller can tell a
+      // no-effect failure from an uncertain one (#2940).
+      expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied", stopPhase: "detach_attempted" });
       expect(exec.mock.calls.map((call) => call[0])).toEqual([
         "tmux detach-client -s '=r01-dev1-impl'",
       ]);

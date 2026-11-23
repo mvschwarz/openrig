@@ -275,6 +275,9 @@ export function armContinuityPolicy(
       registrar.markTerminal!(job.jobId, "continuity_policy_reconciled");
     }
   };
+  // Shape: everything about a stored job except the file it watches. The watched file is judged by the caller: an operator-stopped job
+  // (`rig watchdog stop`) is kept whatever file it watched, because the engine rebinds the file itself and on the restore and fresh-launch
+  // paths the new occupant's transcript is not written yet (#3579 R1).
   const matches = (
     job: StoredContinuityJob,
     desired: ContinuityWatchdogPlan,
@@ -282,12 +285,13 @@ export function armContinuityPolicy(
   ): boolean =>
     job.specYaml === desired.specYaml &&
     job.requiresJobId === requiresJobId &&
-    job.watchedFilePath === (desired.watchedFilePath ?? null) &&
     job.thresholdBytes === (desired.thresholdBytes ?? null) &&
     job.intervalSeconds === desired.intervalSeconds &&
     job.activeWakeIntervalSeconds === (desired.activeWakeIntervalSeconds ?? null) &&
     job.scanIntervalSeconds === (desired.scanIntervalSeconds ?? null) &&
     job.registeredBySession === desired.registeredBySession;
+  const watchesDesiredFile = (job: StoredContinuityJob, desired: ContinuityWatchdogPlan): boolean =>
+    job.watchedFilePath === (desired.watchedFilePath ?? null);
   const isCurrentShapeCandidate = (job: StoredContinuityJob): boolean =>
     job.state === "active" ||
     (job.state === "stopped" &&
@@ -301,18 +305,25 @@ export function armContinuityPolicy(
 
   if (plan.jobs.length === 1) {
     const exact = existing
-      .filter((job) => isCurrentShapeCandidate(job) && matches(job, plan.jobs[0]!, null))
+      .filter((job) =>
+        isCurrentShapeCandidate(job) && matches(job, plan.jobs[0]!, null) &&
+        (job.state === "stopped" || watchesDesiredFile(job, plan.jobs[0]!))
+      )
       .sort((a, b) => Number(b.state === "stopped") - Number(a.state === "stopped"))[0];
     if (exact) {
       retireUnexpected(new Set([exact.jobId]));
       return [exact];
     }
   } else {
+    // A pair stands when its jobs have the planned shape and either both watch the planned file or at least one is operator-stopped: stopping
+    // one job keeps the whole pair as it is (the stop stays a stop, its companion keeps its dependency), whatever file the new occupant writes.
     const exactPairs = existing
       .filter((job) => isCurrentShapeCandidate(job) && matches(job, plan.jobs[0]!, null))
       .flatMap((prepare) => {
         const cutover = existing.find((job) =>
-          isCurrentShapeCandidate(job) && matches(job, plan.jobs[1]!, prepare.jobId)
+          isCurrentShapeCandidate(job) && matches(job, plan.jobs[1]!, prepare.jobId) &&
+          (prepare.state === "stopped" || job.state === "stopped" ||
+            (watchesDesiredFile(prepare, plan.jobs[0]!) && watchesDesiredFile(job, plan.jobs[1]!)))
         );
         return cutover ? [{ prepare, cutover }] : [];
       })

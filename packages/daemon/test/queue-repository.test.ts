@@ -3,9 +3,11 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
@@ -20,6 +22,10 @@ import {
   hasLinkedSuccessor,
 } from "../src/domain/queue-repository.js";
 import { DONE_CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
+import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 
 describe("QueueRepository", () => {
@@ -577,6 +583,618 @@ describe("QueueRepository", () => {
     expect(rerouted.destinationSession).toBe("pod-fallback@rig");
     expect(rerouted.chainOfRecord).toEqual(["fallback-from:bob@rig"]);
     expect(captured.some((e) => e.type === "qitem.fallback_routed")).toBe(true);
+  });
+
+  describe("routeToFallback with an expected state, an expected destination and a wake", () => {
+    const fallbackTransitions = (qitemId: string) =>
+      repo.transitionLog.listForQitem(qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+    const fallbackWakes = (qitemId: string) =>
+      db.prepare("SELECT outbox_id, sender_session, destination_session, delivery_state FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-fallback-%'")
+        .all(qitemId) as Array<{ outbox_id: string; sender_session: string; destination_session: string; delivery_state: string }>;
+    const expectUnchanged = (qitemId: string, state: string, destination: string) => {
+      const row = repo.getById(qitemId)!;
+      expect(row.state).toBe(state);
+      expect(row.destinationSession).toBe(destination);
+      expect(row.chainOfRecord ?? []).toEqual([]);
+      expect(row.resolution).toBeNull();
+      expect(fallbackTransitions(qitemId)).toHaveLength(0);
+      expect(fallbackWakes(qitemId)).toHaveLength(0);
+      expect(captured.some((e) => e.type === "qitem.fallback_routed")).toBe(false);
+    };
+
+    it("A row claimed between the read and the move is refused with `fallback_state_mismatch` and left unchanged.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      captured.length = 0;
+      expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig" }))
+        .toThrow(expect.objectContaining({ code: "fallback_state_mismatch", meta: { state: "in-progress", destinationSession: "bob@rig" } }));
+      expectUnchanged(item.qitemId, "in-progress", "bob@rig");
+    });
+
+    it("A row rerouted elsewhere between the read and the move is refused with `fallback_destination_mismatch` and left unchanged.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.routeToFallback(item.qitemId, "dave@rig", "moved by someone else");
+      const before = repo.getById(item.qitemId)!;
+      captured.length = 0;
+      expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig" }))
+        .toThrow(expect.objectContaining({ code: "fallback_destination_mismatch", meta: { state: "pending", destinationSession: "dave@rig" } }));
+      const after = repo.getById(item.qitemId)!;
+      expect(after).toMatchObject({ destinationSession: "dave@rig", chainOfRecord: before.chainOfRecord, resolution: before.resolution });
+      expect(fallbackTransitions(item.qitemId)).toHaveLength(1);
+      expect(captured.some((e) => e.type === "qitem.fallback_routed")).toBe(false);
+    });
+
+    it("The move's expected destination matches any of the row's session addresses, as a claim does.", async () => {
+      const aliasing = new QueueRepository(db, bus, { resolveSessionAddresses: (name) => (name === "bob" ? ["bob", "bob@rig"] : [name]) });
+      aliasing.attachOutbox(new OutboxHandler(db));
+      const item = await aliasing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      // The claim takes the short address for the same row; the move's expected destination does too.
+      const second = await aliasing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "y", nudge: false });
+      expect(aliasing.claim({ qitemId: second.qitemId, destinationSession: "bob" }).state).toBe("in-progress");
+      const moved = aliasing.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob" });
+      expect(moved.destinationSession).toBe("carol@rig");
+      expect(moved.chainOfRecord).toEqual(["fallback-from:bob@rig"]);
+      // An address that is not one of the row's is still a mismatch.
+      const third = await aliasing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "z", nudge: false });
+      expect(() => aliasing.routeToFallback(third.qitemId, "carol@rig", "slot free", { expectDestination: "dave" }))
+        .toThrow(expect.objectContaining({ code: "fallback_destination_mismatch" }));
+    });
+
+    it("An unknown expected state is refused instead of being treated as a mismatch.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      captured.length = 0;
+      const refusal = (() => {
+        try { repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "in_progress" }); } catch (err) { return err; }
+        return null;
+      })();
+      expect(refusal).toBeInstanceOf(QueueRepositoryError);
+      expect(refusal).toMatchObject({ code: "invalid_state" });
+      expect((refusal as QueueRepositoryError).code).not.toBe("fallback_state_mismatch");
+      expectUnchanged(item.qitemId, "pending", "bob@rig");
+    });
+
+    it("A move stages the wake `wake-intent-fallback-<transitionId>` for the new destination, and the creation wake for the old destination is not delivered.", async () => {
+      // No transport yet: the create stages its wake to bob and it stays undelivered.
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", summary: "review the thing" });
+      const createWake = `wake-intent-${item.qitemId}`;
+      const stateOf = (outboxId: string) =>
+        (db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string } | undefined)?.delivery_state;
+      expect(stateOf(createWake)).toBeDefined();
+      expect(stateOf(createWake)).not.toBe("delivered");
+      const sends: Array<{ session: string; text: string }> = [];
+      repo.attachTransport({ send: async (session: string, text: string) => { sends.push({ session, text }); return { ok: true, verified: true }; } });
+
+      repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+
+      const [move] = fallbackTransitions(item.qitemId);
+      const wakes = fallbackWakes(item.qitemId);
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toMatchObject({ outbox_id: `wake-intent-fallback-${move!.transitionId}`, sender_session: "daemon@kernel", destination_session: "carol@rig" });
+      await vi.waitFor(() => expect(fallbackWakes(item.qitemId)[0]!.delivery_state).toBe("delivered"));
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(sends[0]!.text).toContain(`Queue handoff: ${item.qitemId}`);
+
+      // The create's wake to bob is asked to deliver now: the row is no longer bob's, so bob gets nothing.
+      await repo.deliverWakeForSuccessor(item.qitemId, "bob@rig", true);
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(stateOf(createWake)).not.toBe("delivered");
+    });
+
+    it("A row created with the id `fallback-<N>` before a reroute at transition N: the new seat still gets this reroute's wake, under another id noted on the row, and the other row gets no nudge.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", summary: "review the thing", nudge: false });
+      const nextTransition = () => (db.prepare("SELECT COALESCE(MAX(transition_id), 0) + 1 AS n FROM queue_transitions").get() as { n: number }).n;
+      // The other row's create writes one transition, so the reroute after it gets the id after that.
+      const n = nextTransition() + 1;
+      const other = await repo.create({ qitemId: `fallback-${n}`, sourceSession: "erin@rig", destinationSession: "dave@rig", body: "y", summary: "other work" });
+      expect(nextTransition()).toBe(n);
+      const stateOf = (outboxId: string) =>
+        (db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string } | undefined)?.delivery_state;
+      const otherWake = `wake-intent-${other.qitemId}`;
+      expect(otherWake).toBe(`wake-intent-fallback-${n}`);
+      expect(stateOf(otherWake)).toBeDefined();
+      const sends: Array<{ session: string; text: string }> = [];
+      repo.attachTransport({ send: async (session: string, text: string) => { sends.push({ session, text }); return { ok: true, verified: true }; } });
+
+      const moved = repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+
+      expect(moved.destinationSession).toBe("carol@rig");
+      const [move] = fallbackTransitions(item.qitemId);
+      expect(move!.transitionId).toBe(n);
+      const wakes = fallbackWakes(item.qitemId);
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toMatchObject({ outbox_id: `wake-intent-fallback-${n}:1`, sender_session: "daemon@kernel", destination_session: "carol@rig" });
+      await vi.waitFor(() => expect(fallbackWakes(item.qitemId)[0]!.delivery_state).toBe("delivered"));
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(sends[0]!.text).toContain(`Queue handoff: ${item.qitemId}`);
+      // The other row's create wake is its own, untouched by the move.
+      expect(stateOf(otherWake)).not.toBe("delivered");
+      expect(db.prepare("SELECT audit_pointer, destination_session FROM outbox_entries WHERE outbox_id = ?").get(otherWake))
+        .toEqual({ audit_pointer: other.qitemId, destination_session: "dave@rig" });
+      const notes = repo.transitionLog.listForQitem(item.qitemId).map((t) => t.transitionNote ?? "").filter((note) => note.startsWith("fallback-wake-id-taken: "));
+      expect(notes).toEqual([`fallback-wake-id-taken: wake-intent-fallback-${n} already names a wake for ${other.qitemId} to dave@rig; this reroute's wake to carol@rig is wake-intent-fallback-${n}:1`]);
+      // The noted id still orders as this reroute's: a later reroute back to carol replaces it.
+      repo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+      repo.routeToFallback(item.qitemId, "carol@rig", "again", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+      const replaced = (repo as unknown as { wakeReplacedByReroute(e: { outboxId: string; auditPointer: string; destinationSession: string }): boolean })
+        .wakeReplacedByReroute({ outboxId: `wake-intent-fallback-${n}:1`, auditPointer: item.qitemId, destinationSession: "carol@rig" });
+      expect(replaced).toBe(true);
+    });
+
+    it.each([
+      { name: "`fallback-<N>:1`, with another row created as `fallback-<N>`", suffix: ":1", other: true, expectedId: ":2",
+        holderNote: (other: string) => `a wake for ${other} to dave@rig` },
+      { name: "`fallback-<N>`", suffix: "", other: false, expectedId: ":1", holderNote: () => "this row's create wake" },
+    ])("A row created without a nudge with the id $name, rerouted with a wake at transition N back to a seat an earlier reroute woke: the new wake skips the row's own create wake id and is delivered.", async ({ suffix, other, expectedId, holderNote }) => {
+      const nextTransition = () => (db.prepare("SELECT COALESCE(MAX(transition_id), 0) + 1 AS n FROM queue_transitions").get() as { n: number }).n;
+      // One transition each: the row's create, the other row's create, the reroute to carol, the one back to bob.
+      const n = nextTransition() + (other ? 4 : 3);
+      const item = await repo.create({ qitemId: `fallback-${n}${suffix}`, sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", summary: "review the thing", nudge: false });
+      const ownCreateWake = `wake-intent-${item.qitemId}`;
+      const stateOf = (outboxId: string) =>
+        (db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string } | undefined)?.delivery_state;
+      expect(stateOf(ownCreateWake)).toBeUndefined();
+      const otherRow = other
+        ? await repo.create({ qitemId: `fallback-${n}`, sourceSession: "erin@rig", destinationSession: "dave@rig", body: "y", summary: "other work" })
+        : undefined;
+      if (otherRow) expect(stateOf(`wake-intent-fallback-${n}`)).toBeDefined();
+      repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+      repo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig" });
+      expect(nextTransition()).toBe(n);
+      const sends: Array<{ session: string; text: string }> = [];
+      repo.attachTransport({ send: async (session: string, text: string) => { sends.push({ session, text }); return { ok: true, verified: true }; } });
+
+      repo.routeToFallback(item.qitemId, "carol@rig", "again", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+
+      expect(fallbackTransitions(item.qitemId).map((t) => t.transitionId).at(-1)).toBe(n);
+      const wakeId = `wake-intent-fallback-${n}${expectedId}`;
+      expect(fallbackWakes(item.qitemId).some((w) => w.outbox_id === ownCreateWake)).toBe(false);
+      expect(fallbackWakes(item.qitemId).find((w) => w.outbox_id === wakeId)).toMatchObject({ sender_session: "daemon@kernel", destination_session: "carol@rig" });
+      const replaced = (repo as unknown as { wakeReplacedByReroute(e: { outboxId: string; auditPointer: string; destinationSession: string }): boolean })
+        .wakeReplacedByReroute({ outboxId: wakeId, auditPointer: item.qitemId, destinationSession: "carol@rig" });
+      expect(replaced).toBe(false);
+      await vi.waitFor(() => expect(stateOf(wakeId)).toBe("delivered"));
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(sends[0]!.text).toContain(`Queue handoff: ${item.qitemId}`);
+      const notes = repo.transitionLog.listForQitem(item.qitemId).map((t) => t.transitionNote ?? "").filter((note) => note.startsWith("fallback-wake-id-taken: "));
+      expect(notes).toEqual([`fallback-wake-id-taken: wake-intent-fallback-${n} already names ${holderNote(otherRow?.qitemId ?? "")}; this reroute's wake to carol@rig is ${wakeId}`]);
+      if (otherRow) expect(stateOf(`wake-intent-fallback-${n}`)).not.toBe("delivered");
+    });
+
+    it("A row whose reroute's transition sits only in the archive, reopened, reads as rerouted, as fallbackLineStart reads it.", async () => {
+      migrate(db, [queueTransitionsArchiveSchema]);
+      const archivedRepo = new QueueRepository(db, bus);
+      archivedRepo.attachOutbox(new OutboxHandler(db));
+      const wasRerouted = (id: string) => (archivedRepo as unknown as { wasRerouted(q: string): boolean }).wasRerouted(id);
+      const item = await archivedRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      archivedRepo.routeToFallback(item.qitemId, "carol@rig", "slot free");
+      expect(wasRerouted(item.qitemId)).toBe(true);
+      // The retention sweep's move: the row's transitions leave the live log for the archive.
+      const archive = (qitemId: string) => {
+        const columns = "transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target";
+        db.prepare(`INSERT INTO queue_transitions_archive (${columns}, archived_at) SELECT ${columns}, ts FROM queue_transitions WHERE qitem_id = ?`).run(qitemId);
+        db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ?").run(qitemId);
+      };
+      archive(item.qitemId);
+      expect(wasRerouted(item.qitemId)).toBe(true);
+      // A row never rerouted, archived the same way, still reads as not rerouted.
+      const plain = await archivedRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "y", nudge: false });
+      archive(plain.qitemId);
+      expect(wasRerouted(plain.qitemId)).toBe(false);
+    });
+
+    it("A row rerouted back to a seat with a wake gets that reroute's wake only, not the create's or an earlier reroute's wake again.", async () => {
+      // The recovery pass reads the whole outbox schema, so this case runs on a fully migrated database.
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; delivery_state: string }>);
+        // No transport while the row moves: every wake is staged and none is sent.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "again", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        expect(reroutes).toHaveLength(3);
+        const latest = `wake-intent-fallback-${reroutes[2]!.transitionId}`;
+        expect(wakesOf(item.qitemId).map((w) => w.outbox_id).sort()).toEqual(
+          [`wake-intent-${item.qitemId}`, ...reroutes.map((t) => `wake-intent-fallback-${t.transitionId}`)].sort());
+        const sends: string[] = [];
+        fullRepo.attachTransport({ send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; } });
+
+        await fullRepo.drainPendingWakeIntents();
+
+        expect(sends).toEqual(["carol@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A row that leaves a seat while its creation wake is still staged and comes back with a wake gets the new wake only, not the creation wake.", async () => {
+      // The recovery pass reads the whole outbox schema, so this case runs on a fully migrated database.
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; delivery_state: string }>);
+        // No transport while the row moves: the create's wake to bob stays staged, undelivered.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).toBe("pending");
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        expect(reroutes).toHaveLength(2);
+        const latest = `wake-intent-fallback-${reroutes[1]!.transitionId}`;
+        const sends: string[] = [];
+        fullRepo.attachTransport({ send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; } });
+
+        await fullRepo.drainPendingWakeIntents();
+
+        // The row waits on bob again, where the create's wake is addressed; only the reroute's wake reaches bob.
+        expect(sends).toEqual(["bob@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).not.toBe("delivered");
+      } finally {
+        full.close();
+      }
+    });
+
+    it("An older wake that finishes after a reroute with a wake does not overwrite the row's newer wake result.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const storedResult = (qitemId: string) =>
+          (full.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?").get(qitemId) as { last_nudge_result: string | null }).last_nudge_result;
+        const stateOf = (outboxId: string) =>
+          (full.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string }).delivery_state;
+        // bob's send hangs until the test lets it go; carol's is verified at once.
+        let releaseBob: (r: { ok: boolean; verified?: boolean; error?: string }) => void = () => {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          send: (session: string) => {
+            sends.push(session);
+            return session === "bob@rig" ? new Promise((resolve) => { releaseBob = resolve; }) : Promise.resolve({ ok: true, verified: true });
+          },
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        await vi.waitFor(() => expect(sends).toEqual(["bob@rig"]));
+
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        const reroute = fullRepo.transitionLog.listForQitem(item.qitemId).find((t) => t.transitionNote?.startsWith("fallback-routed: "))!;
+        await vi.waitFor(() => expect(stateOf(`wake-intent-fallback-${reroute.transitionId}`)).toBe("delivered"));
+        const carolResult = storedResult(item.qitemId);
+        expect(carolResult).toBe("verified");
+
+        releaseBob({ ok: false, error: "send timed out" });
+        await vi.waitFor(() => expect(stateOf(`wake-intent-${item.qitemId}`)).not.toBe("sending"));
+        expect(storedResult(item.qitemId)).toBe(carolResult);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A held wake for a seat the row has since left does not overwrite the later reroute's not-retained result.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const outbox = new OutboxHandler(full);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(outbox);
+        // Both seats hold wakes; carol's wake is held, dave's quota is full.
+        fullRepo.attachTransport({
+          retentionTarget: (session: string) => ({ nodeId: `node-${session}`, session, occupant: null, pane: null }),
+          send: async () => ({ ok: true, verified: true }),
+        });
+        const retain = outbox.retain.bind(outbox);
+        vi.spyOn(outbox, "retain").mockImplementation((input, binding, ...rest) => {
+          if (input.destinationSession === "dave@rig") {
+            throw Object.assign(new Error("Held-message quota is full. Retire a specific held message to release active quota; no input was written."), { code: "retained_quota_full" });
+          }
+          return retain(input, binding, ...rest);
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+
+        // Both moves commit before carol's wake delivery runs (it runs after the commit, on a microtask).
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "dave@rig", "carol busy", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const row = fullRepo.getById(item.qitemId)!;
+        expect(row.destinationSession).toBe("dave@rig");
+        expect(row.lastNudgeResult).toMatch(/^failed:wake not retained: Held-message quota is full/);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A hook-bridge end for a wake a reroute replaced does not overwrite the row's wake result; the current wake's end does.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+      repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+      const [current] = fallbackWakes(item.qitemId);
+      repo.recordNudgeAttempt(item.qitemId, "verified");
+      repo.recordBridgedWakeEnd(item.qitemId, { outboxId: `wake-intent-${item.qitemId}`, auditPointer: item.qitemId, kind: "not-delivered" });
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified");
+      repo.recordBridgedWakeEnd(item.qitemId, { outboxId: current!.outbox_id, auditPointer: item.qitemId, kind: "not-delivered" });
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:hook_bridge_not_delivered");
+    });
+
+    it.each([false, true])("An unpark's wake from before the row moved away and back with wakes settles as superseded instead of being delivered beside the latest reroute's wake, also after later moves without a wake (%s); a later unpark's wake is.", async (laterMoves) => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; delivery_state: string }>);
+        const unparkWakes = (qitemId: string) => wakesOf(qitemId).filter((w) => w.outbox_id.startsWith("wake-intent-blocker-"));
+        const unpark = async (qitemId: string) => {
+          const blocker = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "dave@rig", body: "blocker", nudge: false });
+          fullRepo.update({ qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+          fullRepo.claim({ qitemId: blocker.qitemId, destinationSession: "dave@rig" });
+          fullRepo.update({ qitemId: blocker.qitemId, actorSession: "dave@rig", state: "done", closureReason: "no-follow-on" });
+          expect(fullRepo.getById(qitemId)!.state).toBe("pending");
+        };
+        // No transport while the row moves: the unpark's wake to bob stays staged, unsent.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+        await unpark(item.qitemId);
+        const [older] = unparkWakes(item.qitemId);
+        expect(older?.delivery_state).toBe("pending");
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        const latest = `wake-intent-fallback-${reroutes[1]!.transitionId}`;
+        // Moves by a caller that passes no options, away and back: what the reroute with a wake replaced stays replaced.
+        if (laterMoves) {
+          fullRepo.routeToFallback(item.qitemId, "erin@rig", "seat-unreachable");
+          fullRepo.routeToFallback(item.qitemId, "bob@rig", "seat-unreachable");
+        }
+        const sends: string[] = [];
+        fullRepo.attachTransport({ send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; } });
+
+        await fullRepo.drainPendingWakeIntents();
+
+        expect(sends).toEqual(["bob@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
+        // The older wake settles its own entry: refused as superseded, not left pending and not sent.
+        const olderEntry = full.prepare("SELECT delivery_state, tags FROM outbox_entries WHERE outbox_id = ?")
+          .get(older!.outbox_id) as { delivery_state: string; tags: string | null };
+        expect(olderEntry.delivery_state).toBe("failed");
+        expect(JSON.parse(olderEntry.tags ?? "[]")).toContain("queue:wake-superseded");
+
+        // A later park and unpark at bob wakes bob again: its wake comes after the reroute.
+        await unpark(item.qitemId);
+        await fullRepo.drainPendingWakeIntents();
+        const later = unparkWakes(item.qitemId).find((w) => w.outbox_id !== older!.outbox_id);
+        expect(later?.delivery_state).toBe("delivered");
+        expect(sends).toEqual(["bob@rig", "bob@rig"]);
+      } finally {
+        full.close();
+      }
+    });
+
+    it.each([false, true])("An unpark's wake still sending while the row moves away and back with wakes does not overwrite the newer wake's result, also after later moves without a wake (%s), and its own entry is settled.", async (laterMoves) => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const storedResult = (qitemId: string) =>
+          (full.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?").get(qitemId) as { last_nudge_result: string | null }).last_nudge_result;
+        const stateOf = (outboxId: string) =>
+          (full.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string }).delivery_state;
+        // The first send to bob (the unpark's wake) hangs until the test lets it go; every other send is verified at once.
+        let releaseFirst: (r: { ok: boolean; verified?: boolean; error?: string }) => void = () => {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          send: (session: string) => {
+            sends.push(session);
+            return sends.length === 1 ? new Promise((resolve) => { releaseFirst = resolve; }) : Promise.resolve({ ok: true, verified: true });
+          },
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+        const blocker = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "dave@rig", body: "blocker", nudge: false });
+        fullRepo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+        fullRepo.claim({ qitemId: blocker.qitemId, destinationSession: "dave@rig" });
+        fullRepo.update({ qitemId: blocker.qitemId, actorSession: "dave@rig", state: "done", closureReason: "no-follow-on" });
+        void fullRepo.drainPendingWakeIntents();
+        await vi.waitFor(() => expect(sends).toEqual(["bob@rig"]));
+        const unparkWake = (full.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-blocker-%'")
+          .get(item.qitemId) as { outbox_id: string }).outbox_id;
+        expect(stateOf(unparkWake)).toBe("sending");
+
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        const latest = `wake-intent-fallback-${reroutes[1]!.transitionId}`;
+        await vi.waitFor(() => expect(stateOf(latest)).toBe("delivered"));
+        expect(storedResult(item.qitemId)).toBe("verified");
+        if (laterMoves) {
+          fullRepo.routeToFallback(item.qitemId, "erin@rig", "seat-unreachable");
+          fullRepo.routeToFallback(item.qitemId, "bob@rig", "seat-unreachable");
+        }
+
+        releaseFirst({ ok: false, error: "send timed out" });
+        await vi.waitFor(() => expect(stateOf(unparkWake)).toBe("indeterminate"));
+        expect(storedResult(item.qitemId)).toBe("verified");
+      } finally {
+        full.close();
+      }
+    });
+
+    it("An older wake that finishes after a first reroute whose wake a full quota refused does not overwrite the not-retained result.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const outbox = new OutboxHandler(full);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(outbox);
+        const stateOf = (outboxId: string) =>
+          (full.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string }).delivery_state;
+        // bob's send hangs until the test lets it go; a wake for carol would be held there, and carol's quota is full.
+        let releaseBob: (r: { ok: boolean; verified?: boolean; error?: string }) => void = () => {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          retentionTarget: (session: string) => (session === "carol@rig" ? { nodeId: "node-carol", session, occupant: null, pane: null } : null),
+          send: (session: string) => {
+            sends.push(session);
+            return new Promise((resolve) => { releaseBob = resolve; });
+          },
+        });
+        vi.spyOn(outbox, "retain").mockImplementation(() => {
+          throw Object.assign(new Error("Held-message quota is full. Retire a specific held message to release active quota; no input was written."), { code: "retained_quota_full" });
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        await vi.waitFor(() => expect(sends).toEqual(["bob@rig"]));
+
+        // The first reroute with a wake: carol's quota refuses it, so no reroute wake is staged at all.
+        const moved = fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        expect(moved.destinationSession).toBe("carol@rig");
+        expect(full.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-fallback-%'").all(item.qitemId)).toHaveLength(0);
+        const notRetained = fullRepo.getById(item.qitemId)!.lastNudgeResult;
+        expect(notRetained).toMatch(/^failed:wake not retained: Held-message quota is full/);
+
+        releaseBob({ ok: true, verified: true });
+        await vi.waitFor(() => expect(stateOf(createWake)).toBe("delivered"));
+        expect(fullRepo.getById(item.qitemId)!.lastNudgeResult).toBe(notRetained);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A send for the seat a move without options took the row from does not overwrite the row's result, and its own entry is settled.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const stateOf = (outboxId: string) =>
+          (full.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string }).delivery_state;
+        let releaseBob: (r: { ok: boolean; verified?: boolean; error?: string }) => void = () => {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          send: (session: string) => {
+            sends.push(session);
+            return new Promise((resolve) => { releaseBob = resolve; });
+          },
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        await vi.waitFor(() => expect(sends).toEqual(["bob@rig"]));
+
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "seat-unreachable");
+        const before = fullRepo.getById(item.qitemId)!.lastNudgeResult;
+
+        releaseBob({ ok: false, error: "send timed out" });
+        await vi.waitFor(() => expect(stateOf(createWake)).toBe("indeterminate"));
+        expect(fullRepo.getById(item.qitemId)!.lastNudgeResult).toBe(before);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A row moved away with a wake and back by a caller that passes no options gets its creation wake again, and not the wake for the seat it left.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, destination_session, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; destination_session: string; delivery_state: string }>);
+        // No transport while the row moves: the create's wake to bob stays staged, undelivered.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).toBe("pending");
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "seat-unreachable");
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        expect(reroutes).toHaveLength(2);
+        const carolWake = `wake-intent-fallback-${reroutes[0]!.transitionId}`;
+        // A held wake is released only while the guard finds it current: bob's creation wake is, carol's wake is not.
+        const held: { guard?: (entries: ReadonlyArray<{ outboxId: string; auditPointer: string | null; destinationSession: string }>) => boolean } = {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          configureGuardedWakes: (applicable) => { held.guard = applicable; },
+          send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; },
+        });
+        expect(held.guard?.([{ outboxId: createWake, auditPointer: item.qitemId, destinationSession: "bob@rig" }])).toBe(true);
+        expect(held.guard?.([{ outboxId: carolWake, auditPointer: item.qitemId, destinationSession: "carol@rig" }])).toBe(false);
+
+        await fullRepo.drainPendingWakeIntents();
+
+        expect(sends).toEqual(["bob@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([createWake]);
+      } finally {
+        full.close();
+      }
+    });
+
+    it.each(["in-progress", "blocked", "done"] as const)("A wake on a row that is not pending is refused with `wake_not_admitted`, and nothing moves (%s).", async (state) => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      if (state === "in-progress" || state === "done") repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      if (state === "blocked") repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked" });
+      if (state === "done") repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "done", closureReason: "no-follow-on" });
+      expect(repo.getById(item.qitemId)!.state).toBe(state);
+      captured.length = 0;
+      expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { wake: true }))
+        .toThrow(expect.objectContaining({ code: "wake_not_admitted" }));
+      expectUnchanged(item.qitemId, state, "bob@rig");
+    });
+
+    it("A wake with no wake-intent store is refused before anything moves, and a move whose wake cannot be staged is rolled back.", async () => {
+      const noStore = new QueueRepository(db, bus);
+      const item = await noStore.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      captured.length = 0;
+      expect(() => noStore.routeToFallback(item.qitemId, "carol@rig", "slot free", { wake: true }))
+        .toThrow(expect.objectContaining({ code: "wake_intent_store_unavailable" }));
+      expectUnchanged(item.qitemId, "pending", "bob@rig");
+
+      const outbox = new OutboxHandler(db);
+      const failing = new QueueRepository(db, bus);
+      failing.attachOutbox(outbox);
+      const other = await failing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      vi.spyOn(outbox, "record").mockImplementation(() => { throw new Error("disk full"); });
+      expect(() => failing.routeToFallback(other.qitemId, "carol@rig", "slot free", { wake: true })).toThrow("disk full");
+      expectUnchanged(other.qitemId, "pending", "bob@rig");
+    });
+
+    it("A full held-message quota does not undo the reroute.", async () => {
+      // The wake would be held at carol's seat, and that seat's held-message quota is full: unlike a wake that cannot
+      // be staged at all (above), the move stands and the wake is recorded as not retained.
+      const outbox = new OutboxHandler(db);
+      const holding = new QueueRepository(db, bus);
+      holding.attachOutbox(outbox);
+      holding.attachTransport({
+        retentionTarget: (session: string) => ({ nodeId: "node-carol", session, occupant: null, pane: null }),
+        send: async () => ({ ok: true, verified: true }),
+      });
+      const item = await holding.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      vi.spyOn(outbox, "retain").mockImplementation(() => {
+        throw Object.assign(new Error("Held-message quota is full. Retire a specific held message to release active quota; no input was written."), { code: "retained_quota_full" });
+      });
+      const moved = holding.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+      expect(moved.destinationSession).toBe("carol@rig");
+      expect(moved.chainOfRecord).toEqual(["fallback-from:bob@rig"]);
+      expect(fallbackTransitions(item.qitemId)).toHaveLength(1);
+      expect(fallbackWakes(item.qitemId)).toHaveLength(0);
+      expect(holding.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:wake not retained: Held-message quota is full/);
+    });
+
+    it("A caller that passes no options moves the row as before and stages no fallback wake.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      const moved = repo.routeToFallback(item.qitemId, "carol@rig", "seat-unreachable");
+      expect(moved).toMatchObject({ state: "in-progress", destinationSession: "carol@rig", chainOfRecord: ["fallback-from:bob@rig"] });
+      expect(fallbackWakes(item.qitemId)).toHaveLength(0);
+    });
   });
 
   it("list filters by destination + state", async () => {
@@ -1224,6 +1842,99 @@ describe("QueueRepository — generation stamps (Class-B)", () => {
   });
 });
 
+describe("QueueRepository — resuming a parked row re-stamps the claimant generation (#3573)", () => {
+  let db: Database.Database;
+  let bus: EventBus;
+  let repo: QueueRepository;
+  let writeContract: MissionControlWriteContract;
+  let invalidator: DefaultOccupantInvalidator;
+  let genBySession: Map<string, string | null>;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, watchdogJobsSchema,
+      occupantGenerationStampsSchema, missionControlActionsSchema, queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    bus = new EventBus(db);
+    genBySession = new Map();
+    repo = new QueueRepository(db, bus, { validateRig: () => true, resolveOccupantGeneration: (s) => genBySession.get(s) ?? null });
+    writeContract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    invalidator = new DefaultOccupantInvalidator({
+      enforcer: { invalidateOccupant: () => {} },
+      contextUsage: { invalidateOccupantSidecar: () => {} },
+      queue: repo,
+    });
+  });
+  afterEach(() => db.close());
+
+  const stamp = (qitemId: string): string | null =>
+    (db.prepare("SELECT claimed_by_generation_uuid AS v FROM queue_items WHERE qitem_id = ?").get(qitemId) as { v: string | null }).v;
+  const swap = (from: string, to: string): void => {
+    genBySession.set("bob@rig", to);
+    invalidator.invalidateRetiringOccupant({ retiringSessionName: "bob@rig", successorSessionName: "bob@rig", retiringGeneration: from });
+  };
+  const releaseNotes = (qitemId: string): string[] =>
+    repo.transitionLog.listForQitem(qitemId).map((t) => t.transitionNote ?? "").filter((n) => /claimant generation retired/.test(n));
+
+  /** Claimed by gen-1, parked on a typed gate, then inherited by gen-2 at a swap that keeps the blocked row. */
+  async function parkedAndInherited(): Promise<string> {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+    genBySession.set("bob@rig", "gen-1");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: "external:x" });
+    swap("gen-1", "gen-2");
+    expect(repo.getById(item.qitemId)!.state).toBe("blocked");
+    expect(stamp(item.qitemId)).toBe("gen-1");
+    return item.qitemId;
+  }
+
+  it("resolve stamps the destination's current occupant, not the resolving seat's, and the next swap releases the row", async () => {
+    const qitemId = await parkedAndInherited();
+    genBySession.set("carol@rig", "gen-carol");
+    await writeContract.act({ verb: "resolve", qitemId, actorSession: "carol@rig", decision: "x done" });
+    expect(repo.getById(qitemId)!.state).toBe("in-progress");
+    expect(stamp(qitemId)).toBe("gen-2");
+
+    swap("gen-2", "gen-3");
+    expect(repo.getById(qitemId)!.state).toBe("pending");
+    expect(stamp(qitemId)).toBeNull();
+    expect(releaseNotes(qitemId)).toHaveLength(1);
+  });
+
+  it("an update to in-progress stamps the destination's current occupant, and the next swap releases the row", async () => {
+    const qitemId = await parkedAndInherited();
+    genBySession.set("carol@rig", "gen-carol");
+    repo.update({ qitemId, actorSession: "carol@rig", state: "in-progress", transitionNote: "resuming" });
+    expect(stamp(qitemId)).toBe("gen-2");
+
+    swap("gen-2", "gen-3");
+    expect(repo.getById(qitemId)!.state).toBe("pending");
+    expect(releaseNotes(qitemId)).toHaveLength(1);
+  });
+
+  it("a runtime switch after the resume moves the row's claim to the successor generation", async () => {
+    const qitemId = await parkedAndInherited();
+    await writeContract.act({ verb: "resolve", qitemId, actorSession: "carol@rig", decision: "x done" });
+    expect(repo.transferClaimsByGeneration("gen-2", "gen-3", "runtime switch")).toBe(1);
+    expect(stamp(qitemId)).toBe("gen-3");
+  });
+
+  it("an update that keeps a row in progress keeps the claim it has", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+    genBySession.set("bob@rig", "gen-1");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    genBySession.set("bob@rig", "gen-2");
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "in-progress", transitionNote: "still on it" });
+    expect(stamp(item.qitemId)).toBe("gen-1");
+  });
+
+  it("a swap still keeps a blocked row with the successor, and other updates leave the stamp as it was", async () => {
+    const qitemId = await parkedAndInherited();
+    expect(releaseNotes(qitemId)).toHaveLength(0);
+    repo.update({ qitemId, actorSession: "bob@rig", state: "pending", transitionNote: "back to the queue" });
+    expect(stamp(qitemId)).toBe("gen-1");
+  });
+});
+
 describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)", () => {
   let db: Database.Database;
   let bus: EventBus;
@@ -1474,7 +2185,7 @@ describe("QueueRepository.listOpenObligations: the parked query's lean read", ()
     const ids = repo.list({ destinationSession: "b@r" }).map((r) => r.qitemId);
     repo.claim({ qitemId: ids[0]!, destinationSession: "b@r" });
     const want = repo.list({ destinationSession: "b@r", state: ["pending", "in-progress", "blocked"], limit: 500 })
-      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated }));
     const prepare = vi.spyOn(db, "prepare");
     const got = repo.listOpenObligations("b@r", 500);
     expect(got).toEqual(want);
@@ -1519,7 +2230,7 @@ describe("QueueRepository.listOpenObligations: same rows, order and limit as lis
       for (const seat of [...seats, "nobody@r"]) {
         for (const limit of [1, 3, 500]) {
           const want = repo.list({ destinationSession: seat, state: ["pending", "in-progress", "blocked"], limit })
-            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated }));
           expect(repo.listOpenObligations(seat, limit), `seed ${seed} ${seat} limit ${limit}`).toEqual(want);
         }
       }

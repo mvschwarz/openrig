@@ -4,7 +4,7 @@ import { CmuxAdapter } from "../src/adapters/cmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
-import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter, mockNativeRuntime } from "./helpers/test-app.js";
 
 function unavailableCmux() {
   const factory: CmuxTransportFactory = async () => {
@@ -389,7 +389,8 @@ describe("Session routes", () => {
   it("POST .../nodes/launch-subset launches multiple targets with usable snapshot (OPR.0.3.4.11)", async () => {
     // A successful fresh launch starts each harness: the route needs runtime adapters (as startup
     // wires them) and the snapshot needs each node's startup context (#107).
-    const { app, rigRepo } = createTestApp(db, { wireRuntimeAdapters: true });
+    const { app, rigRepo } = createTestApp(db, { wireRuntimeAdapters: true,
+      ...mockNativeRuntime(session => session.startsWith("dev-guard") ? "codex" : "claude-code") });
     const podRepo = new PodRepository(db);
     const rig = rigRepo.createRig("multi-rig");
     const pod = podRepo.createPod(rig.id, "dev", "Development");
@@ -484,7 +485,8 @@ describe("Session routes", () => {
   // `rig launch <rig> <seat>` and `--seats` also take a seat's session name, resolved from the rig's own inventory.
   // Both seats can start fresh: each has its startup context and a fresh restore policy, and the route has adapters.
   async function namedSeatsRig(name: string) {
-    const { app, rigRepo, sessionRegistry } = createTestApp(db, { wireRuntimeAdapters: true });
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { wireRuntimeAdapters: true,
+      ...mockNativeRuntime(session => session.startsWith("dev-guard") ? "codex" : "claude-code") });
     const rig = rigRepo.createRig(name);
     const pod = new PodRepository(db).createPod(rig.id, "dev", "Development");
     const driver = rigRepo.addNode(rig.id, "dev.driver", { runtime: "claude-code", podId: pod.id });

@@ -235,3 +235,9 @@ function looksLikeDaemonUnreachable(text: string): boolean {
 export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+
+/** A word the shell reads as itself is left as it is; anything else is quoted with shellQuote. A name that needed no
+ *  quoting prints exactly as before. */
+export function shellWord(s: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : shellQuote(s);
+}

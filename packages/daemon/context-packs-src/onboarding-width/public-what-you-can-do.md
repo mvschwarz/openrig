@@ -425,7 +425,10 @@ your context, your compaction and your replacement — and it is the only thing 
   and a close with `--resolution "<outcome>"` stores the outcome on the row; `--state done
   --evidence-ref <path>` also keeps the artifact's pointer on it. To accept a re-estimate,
   `--closure-required-at <iso>` on an in-progress row moves its deadline and keeps the claim,
-  recording the old and new time and who accepted it.
+  recording the old and new time and who accepted it. A caller that acts on a state it read earlier
+  (a closer that isn't the claimant) adds `--expect-state <state>`: the update applies only if the
+  row is still in that state, checked in the same transaction, and otherwise writes nothing and
+  fails with `qitem_state_changed` and the current state, so a claim that landed in between stays.
   Since 0.7.16 an otherwise-admitted state-changing park or close stores its supplied non-blank
   `--summary` or `--evidence-ref`, instead of refusing the whole update; note-append and
   re-estimate rules are unchanged, and the receipt names a requested field the stored row doesn't
@@ -784,6 +787,13 @@ not have to tear one down to change it, and you rarely have to start from nothin
   seat in the rig is paused or being typed in, and it takes a seat's session name, including an
   adopted seat's raw tmux name; ambiguous names aren't launched, and the other unambiguous
   selections are handled normally.
+- **`keep_alive: true`** (rig spec member, or an AgentSpec's `lifecycle.keep_alive`; off by default)
+  — the daemon relaunches that seat through the same one-seat launch when it falls while the daemon
+  runs, and leaves it down after `rig seat stop` or `rig down`, which record the stop before stopping
+  anything. A daemon stop changes no seat's desired state. Each fall gets 2 attempts, counted durably;
+  when they run out the seat reads `attention_required` (`keepAliveIncident` in
+  `rig ps --nodes --json --full`) until you start it with `rig launch`. Not for seats attached from
+  outside (`docs/reference/rig-spec.md`, "Keep a seat running").
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a
@@ -879,7 +889,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
   Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
   line about every 20 s: let it finish rather than starting again. Synchronous work can run past
-  the budget, and it isn't a cure for a slow start.
+  the budget, and it isn't a cure for a slow start. `rig config set daemon.start_readiness_wait_seconds <seconds>`
+  (whole seconds, or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS`) sets that budget for later starts.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
   slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
   of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
@@ -896,11 +907,21 @@ version, from checking the environment to a useful report to the OpenRig team.
   database another live daemon already holds (the default, `warn`, only warns), and
   `rig daemon start --allow-db-conflict` allows one deliberate start. A start still in progress reads
   `Daemon starting: launch reserved by pid N since T; not listening yet` in `rig daemon status`, not stopped.
-  A start reservation left from an earlier boot is archived by the next start; don't clear it by
-  hand.
+  A start reservation left from an earlier boot, or one whose recorded launcher and child are both
+  gone in the same pid namespace, is archived by the next start. One that `rig daemon stop` retained
+  after a shutdown it couldn't verify stays until someone inspects the shutdown receipt and daemon.log
+  and archives it, as the stop and start errors say; otherwise don't clear it by hand.
 - **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
   activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
   so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.
+- **`rig config set daemon.identity_poll_interval_ms <5000-30000>`** slows the seat identity sweep (default 5000),
+  which checks that each seat's pane still runs its agent. It's read at daemon start, so restart the daemon to apply
+  it. A longer interval can delay noticing a stopped seat or a changed pane process, updating its identity verdict and
+  revoking its activity grants, and a seat `rig up` just launched answers expected-identity sends with
+  `expected_identity_unavailable` until a sweep verifies it. The value caps the cadence of sweep attempts (the first
+  scheduled one comes one interval after daemon start), not how stale a verdict can get: a sweep still reading skips
+  the ticks that come due, and a change seen after a sweep began waits for a later one, so verification or revocation
+  can take longer than one interval.
 - **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
   (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
   gets the real request. A write that then times out says its outcome is **unknown**: check its

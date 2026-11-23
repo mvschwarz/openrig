@@ -344,6 +344,37 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect([await text(), await text(), await text()]).toEqual(["first", "after", "after"]);
   });
 
+  // D12: a step found by words earlier in the conversation, a reply built from what the pattern captured, and a turn's
+  // own usage.
+  it("matches a rule against the request's whole history when it says within: history, and against the last turn otherwise", async () => {
+    const standIn = await start("messages", { script: { rules: [{ when: "DLV-earlier", within: "history", say: "from history" }, { say: "plain" }] } });
+    const conversation = { model: "m", stream: true, messages: [
+      { role: "user", content: "first DLV-earlier" }, { role: "assistant", content: "ok" }, { role: "user", content: "now DLV-later" }] };
+    const text = async (body: unknown) => events((await post(`${standIn.url}/v1/messages`, body)).text)
+      .filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text).join("");
+    expect(await text(conversation)).toBe("from history");
+    expect(await text(userTurn("only DLV-later"))).toBe("plain");
+  });
+
+  it("fills {{when:name}} in a reply and in a tool's input from the groups its pattern captured", async () => {
+    const standIn = await start("messages", { script: { rules: [
+      { when: String.raw`map to "(?<path>[^"]+)"`, times: 1, tool: { name: "Write", input: { file_path: "{{when:path}}", content: "at {{when:path}}" } } },
+      { when: String.raw`say (?<word>\w+)`, say: "you said {{when:word}}" },
+    ] } });
+    const stream = events((await post(`${standIn.url}/v1/messages`, userTurn('write the map to "/tmp/a b/MAP.md.tmp"'))).text);
+    expect(JSON.parse(stream.find((e) => e.event === "content_block_delta")!.data.delta.partial_json))
+      .toEqual({ file_path: "/tmp/a b/MAP.md.tmp", content: "at /tmp/a b/MAP.md.tmp" });
+    const said = events((await post(`${standIn.url}/v1/messages`, userTurn("say hello"))).text)
+      .filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text).join("");
+    expect(said).toBe("you said hello");
+  });
+
+  it("reports a rule's own usage on its reply, over the defaults", async () => {
+    const standIn = await start("messages", { script: { rules: [{ say: "big", usage: { input_tokens: 190000 } }] } });
+    const stream = events((await post(`${standIn.url}/v1/messages`, userTurn("DLV-usage"))).text);
+    expect(stream[0].data.message.usage).toMatchObject({ input_tokens: 190000, output_tokens: 1 });
+  });
+
   it("writes every request to the JSONL log as it arrives", async () => {
     const dir = mkdtempSync(join(tmpdir(), "stand-in-log-"));
     try {

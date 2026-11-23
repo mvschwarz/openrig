@@ -1634,15 +1634,16 @@ rig specs rename <name-or-id> <new-name> [--json]
 ```bash
 rig mcp serve [--port <daemon-port>]        # stdio: a local app starts the server itself
 rig mcp serve --http [--bind <host:port>]   # Streamable HTTP at /mcp (default 127.0.0.1:7437)
-rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner]
+rig mcp token add <name> --seat <session> [--rig <name>...] [--root <name>...] [--workspace] [--owner] [--person <entity_id>]
 rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
 The 39 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
 offered. An HTTP grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only
-with `--owner`, which offers every tool but the person tools. Only a grant service's grant that names its person offers
-the person tools.
+with `--owner`, which offers every tool but the person tools. Only a grant bound to a person offers the person tools: a
+grant service's grant that names its person, or a token-file grant added with `--person`. A local caller and an unbound
+grant never get them.
 - **Work (20):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
@@ -1674,8 +1675,9 @@ the person tools.
   of event metadata), and:
   - `rig_restore`, which starts a restore and returns its attempt;
   - `rig_restore_status`, that attempt's receipt.
-- **Person (2):** `rig_question_list` and `rig_question_answer`, offered only on a grant service's grant that names the
-  person who owns the connection (`person.entity_id`, with the `question` pair). They list the team's questions waiting on
+- **Person (2):** `rig_question_list` and `rig_question_answer`, offered only on a grant bound to the person who owns
+  the connection: a grant service's grant that names them (`person.entity_id`, with the `question` pair), or a token-file
+  grant added with `--person <entity_id>`. They list the team's questions waiting on
   that person, as Steering shows them, and record that person's own answer, given through the connection: `answer` for an
   ask, which returns their words to the asker, and `resolve` for a park. `docs/reference/hosted-members.md` has the
   contract.
@@ -1730,19 +1732,67 @@ use the `rig` CLI instead, the same way.
    assignee records it, and `rig_artifact_read` reads an artifact it names. A call that times out has an unknown
    outcome: check `rig_queue_show` with the same id before you retry, and retry only with that id.
 5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
-   answer in `note`. To pass it to the next seat, use `rig_queue_handoff`; to put back one you won't finish, use
+   answer in `resolution`. To pass it to the next seat, use `rig_queue_handoff`; to put back one you won't finish, use
    `rig_queue_unclaim`.
 
 Limits today:
 - **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to
-  it is unroutable. It sees new work when it checks `rig_queue_list`, or, if its app can run background shell
-  commands, with the opt-in wait below.
+  it is unroutable. It sees new work when it checks `rig_queue_list`. In Claude Desktop, a scheduled task can check
+  for it (below). An app that can run background shell commands can also wait for it in an open session.
 - **Proven surfaces:** treat each app, and each mode inside one, as unproven until it has been run there.
+
+#### Pick up work in Claude Desktop with a scheduled task (opt-in)
+
+A local scheduled task in Claude Desktop starts a fresh Code-tab session on a schedule, so the seat picks up its work
+with no session left open. This is the default way to pick up work in Claude Desktop. The wait in the next section is
+for a session the person keeps open.
+
+- **Only if the person asks for it.** They create the task, or ask you to, and they choose its permission mode.
+- **Create it by asking Claude in a Code-tab session,** for example: "Create a local scheduled task for this folder,
+  named openrig-pickup, that runs every 2 minutes, with this prompt: …". Desktop's forms take nothing more often
+  than hourly, while Claude can set a schedule as often as every minute (Anthropic's docs). In OpenRig's test, the
+  task Claude created had no folder setting, so name the folder in the prompt. The task's Edit form can also set it.
+- **The prompt**, with this seat's identity from the one-time attach:
+
+```text
+Work in <folder>. Run every rig command with OPENRIG_SESSION_NAME=<seat> set.
+Run rig queue list --owned --state pending,in-progress --json. For each item, read
+it with rig queue show <id> --full. A pending item: claim it with rig queue claim
+<id>. An in-progress item is one an earlier run claimed and didn't finish: don't
+claim it again, and check what that run already did before you redo any step.
+Do the item, then close it with the answer (rig queue update <id> --state done
+--closure-reason no-follow-on --resolution "<answer>"), or hand it off or block
+it. If there are none, end the run.
+```
+
+- **Then click Run now once** on the task's page, and answer its permission prompts with "always allow". A later run
+  that stops at a prompt waits in its own session until someone answers it (Anthropic's docs).
+- **What OpenRig's test measured,** with an earlier version of this prompt that listed only pending items and put
+  the answer in `--note` (one test: Claude Desktop 5.11492.5 with Claude Code 2.1.325, OpenRig 0.7.13,
+  macOS, Auto permission mode): a task every 2 minutes closed two items 51 s and 116 s after they were created, each
+  in a fresh session.
+- **Its limits:**
+  - Each run costs a model turn, even with nothing pending.
+  - Runs happen only while the app is open and the computer is awake. A run is skipped while the previous one is
+    still going (Anthropic's docs).
+  - The prompt takes an in-progress item as one an earlier run left, which holds only while no other session uses
+    this seat (runs of one task don't overlap). While the task is active, don't use the seat elsewhere, including
+    the open-session wait below.
+  - Not tested with the app quit or the Mac asleep.
 
 #### Wake on new work (opt-in; off unless the person turns it on)
 
 An agent whose app can run a shell command in the background, and starts a new turn when that command finishes, can
 wait for its own work. Claude Code, including Claude Desktop's Code tab, does this.
+
+**In Claude Desktop, use it only in a session the person keeps open.** The scheduled task above is the default there.
+- **If the app runs this wait with its Monitor tool,** the watch ends after 5 minutes unless it's given a longer
+  timeout, and after 30 minutes at most, even when asked for longer. Either is before this loop's own 55-minute
+  deadline, so start it again when the app says the watch ended.
+  OpenRig's test saw Desktop end a one-hour Monitor watch at 30:00, and Anthropic's docs give the same cap.
+- **As a plain background command,** Anthropic's docs give it no time limit in the desktop app. In OpenRig's test,
+  one outlasted Monitor's cap: it was still running at 40 minutes when an item arrived, and the session closed that
+  item 11 s after it was created. The full 55 minutes, a quit app and a sleeping Mac weren't tested.
 
 - **Only if the person has said they want teammates to be able to wake this session.** Never turn it on yourself, and
   never change their settings for it.

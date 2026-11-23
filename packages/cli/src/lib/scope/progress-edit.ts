@@ -65,9 +65,18 @@ function bodyStartIndex(lines: string[]): number {
 /** Keep source indices while hiding code examples from the progress grammar. */
 function progressLines(lines: string[]): string[] {
   let fence: { marker: string; length: number } | null = null;
+  let comment = false;
   const start = bodyStartIndex(lines);
   return lines.map((line, i) => {
     if (i < start) return "";
+    if (comment) {
+      if (line.includes("-->")) comment = false;
+      return "";
+    }
+    if (!fence && /^ {0,3}<!--/.test(line)) {
+      comment = !line.includes("-->");
+      return "";
+    }
     const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (match) {
       const marker = match[1]![0]!;
@@ -90,6 +99,37 @@ function progressLines(lines: string[]): string[] {
 export interface ProgressEditResult {
   content: string;
   changed: boolean;
+}
+
+/** Replace the current-state section without touching other sections. */
+export function setCurrentState(content: string, value: string): ProgressEditResult {
+  const text = value.replace(/\r\n/g, "\n").trim();
+  if (!text) throw new ScopeCliError({ fact: "The --current-state text is empty.", consequence: "No progress update was made.", action: "Pass non-empty current state text." });
+  const newline = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split("\n");
+  const visible = progressLines(lines);
+  const matches = visible.flatMap((line, i) => {
+    const heading = line.match(HEADING_RE);
+    return heading && heading[1] === "##" && heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim().toLowerCase() === "current state" ? [i] : [];
+  });
+  if (matches.length > 1) throw new ScopeCliError({ fact: "Multiple Current state sections found.", consequence: "No progress update was made.", action: "Keep one Current state section and retry." });
+  if (!matches.length) {
+    const separator = content.endsWith(newline + newline) ? "" : content.endsWith(newline) ? newline : newline + newline;
+    return { content: content + separator + "## Current state" + newline + newline + text.replace(/\n/g, newline) + newline, changed: true };
+  }
+  const start = matches[0]! + 1;
+  let end = start;
+  while (end < lines.length) {
+    const heading = visible[end]!.match(/^ {0,3}(#{1,6})\s+(.+?)\s*$/);
+    if (heading && heading[1]!.length <= 2) break;
+    end++;
+  }
+  const oldBody = lines.slice(start, end).join("\n").replace(/\r\n/g, "\n").trim();
+  if (oldBody === text) return { content, changed: false };
+  const prefix = lines.slice(0, start).join("\n") + "\n";
+  const suffix = lines.slice(end).join("\n");
+  const body = newline + text.replace(/\n/g, newline) + newline + (suffix ? newline : "");
+  return { content: prefix + body + suffix, changed: true };
 }
 
 /**
