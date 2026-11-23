@@ -35,6 +35,7 @@ import { parkedCommand } from "./commands/parked.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { acpCommand } from "./commands/acp.js";
 import { execCommand, type ExecDeps } from "./commands/exec.js";
+import { resourceCommand } from "./commands/resource.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
@@ -211,6 +212,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
   program.addCommand(acpCommand(depsOverride?.acpDeps));
   program.addCommand(execCommand(depsOverride?.execDeps));
+  program.addCommand(resourceCommand());
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));

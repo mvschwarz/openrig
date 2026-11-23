@@ -250,3 +250,21 @@ Other apps take the same command and arguments wherever they configure a custom 
 - Progress is read every 2 seconds while a turn is open (`--poll-seconds`).
 - Sessions are found among the 2,000 newest rows you've sent, and a reopened session's questions among the 2,000 newest
   sent to you, so a caller with a lot of traffic, such as a busy seat, can't list or fully reopen its oldest sessions.
+## Shared links for work
+
+From a managed seat, link work resources for other seats in the same rig on
+the same host. References are optional labels, such as a qitem or workflow ID.
+Each URL appears once per kind, with all its associations.
+
+```sh
+rig resource link https://github.com/owner/repo/pull/42 --ref qitem-123
+rig resource link https://gitlab.example/team/repo/-/merge_requests/17 --ref workflow-456
+rig resource link https://docs.example/design --kind design
+rig resource list --kind pr --json
+rig resource unlink https://github.com/owner/repo/pull/42 --ref qitem-123
+```
+
+GitHub pull requests and GitLab merge request paths are recognized
+automatically. Use `--kind pr` for an enterprise GitHub host and custom kinds
+for other HTTPS links. The list persists in OpenRig home. It does not grant
+access to linked resources or fetch their status.
