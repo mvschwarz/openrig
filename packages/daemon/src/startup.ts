@@ -462,6 +462,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const topologyValidateRig = makeTopologyDestinationCheck({
     findRigsByName: (name) => rigRepo.findRigsByName(name),
     loadHumanRegistry: () => loadHumanRegistry(),
+    db,
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
@@ -564,7 +565,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   };
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
-    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig, db),
+    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig),
     destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
