@@ -27,6 +27,8 @@ import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 
 // #3395 (Piece 1): the seat pool drains a free agent idle past `idle_grace_s`. Under the agent's lifecycle lease it
 // reads the agent again, captures an `auto-rehydrate` snapshot while the agent still runs, and stops it with the
@@ -77,12 +79,26 @@ function drainWorld() {
 
   const latestOf = (nodeId: string) => db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
     .get(nodeId) as { id: string; status: string } | undefined;
-  /** Each capture: the snapshot, every session's status at that moment, and how many stops came before it. */
-  const captures: Array<{ snapshotId: string; statuses: Map<string, string>; stopsBefore: number }> = [];
+  /** Each capture: the snapshot, every session's status at that moment, how many stops came before it, and how many
+   *  refreshes had finished before it. */
+  const captures: Array<{ snapshotId: string; statuses: Map<string, string>; stopsBefore: number; refreshesBefore: number }> = [];
   const capturing = { fails: false };
+  /** The resume metadata refresh: it finishes a tick later, and throws when `fails`. */
+  const refreshing = { fails: false, finished: 0 };
+  const refresh = vi.fn(async (_input: { rigId: string; nodeId: string; sessionId: string }) => {
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (refreshing.fails) throw new Error("resume probe failed");
+    } finally {
+      refreshing.finished += 1;
+    }
+  });
   /** Results the stop returns, one per call, before it falls back to stopping the expected session. */
   const stopResults: SeatPoolSeatStop[] = [];
-  const stopSeat = vi.fn(async (input: { seatRef: string; reason: string; expected: { nodeId: string; sessionId: string } }): Promise<SeatPoolSeatStop> => {
+  const stopSeat = vi.fn(async (input: {
+    seatRef: string; reason: string; expected: { nodeId: string; sessionId: string };
+    recheck?: () => { ok: false; code: "selection_changed"; message: string } | null;
+  }): Promise<SeatPoolSeatStop> => {
     const queued = stopResults.shift();
     if (queued) return queued;
     const latest = latestOf(input.expected.nodeId);
@@ -100,11 +116,15 @@ function drainWorld() {
     now: () => clock.now,
     drain: {
       lifecycle: async (ids, fn) => { await hooks.beforeLifecycle?.(); return guard.lifecycle(ids, fn); },
+      refresh,
       capture: (rigId) => {
         if (capturing.fails) throw new Error("disk full");
         const snapshot = snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
         const rows = db.prepare("SELECT id, status FROM sessions").all() as Array<{ id: string; status: string }>;
-        captures.push({ snapshotId: snapshot.id, statuses: new Map(rows.map((r) => [r.id, r.status])), stopsBefore: stopSeat.mock.calls.length });
+        captures.push({
+          snapshotId: snapshot.id, statuses: new Map(rows.map((r) => [r.id, r.status])), stopsBefore: stopSeat.mock.calls.length,
+          refreshesBefore: refreshing.finished,
+        });
         return { snapshotId: snapshot.id };
       },
       stopSeat,
@@ -153,7 +173,7 @@ function drainWorld() {
   })).qitemId;
   return {
     db, rigRepo, slots, sessions, queue, jobsRepo, snapshotRepo, activity, clock, hooks, captures, capturing, stopResults, stopSeat,
-    engine, latestOf, seatSession, model, agent, jobFor, cycle, phases, row,
+    refresh, refreshing, guard, bus, engine, latestOf, seatSession, model, agent, jobFor, cycle, phases, row,
   };
 }
 
@@ -209,6 +229,61 @@ describe("seat-pool drain: re-read under the lifecycle lease (#3395 Piece 1)", (
       w.db.close();
     }
   });
+
+  it("A row admitted to an agent while the checked stop's liveness probe is paused is seen at the stop's final step: nothing is detached or killed, the agent keeps the row and its slot goes back to `live`.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.sessions.updateBinding(s1.nodeId, { attachmentType: "tmux", tmuxSession: s1.session, tmuxPane: "%1" });
+      // The real checked stop, over a tmux whose liveness probe waits for the test.
+      const commands: string[] = [];
+      let named: string | undefined;
+      let probing!: () => void;
+      const probed = new Promise<void>((resolve) => { probing = resolve; });
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      const adapter = new TmuxAdapter(async (command) => {
+        commands.push(command);
+        if (command.includes("has-session")) { probing(); await released; return ""; }
+        if (command.includes("list-panes")) { named = /=([^:']+):/.exec(command)?.[1] ?? named; return "%1|0|/tmp|120|40|1"; }
+        if (command.startsWith("tmux show-environment")) {
+          const bound = w.db.prepare("SELECT node_id FROM bindings WHERE tmux_session = ?").get(named) as { node_id: string } | undefined;
+          return `OPENRIG_NODE_ID=${bound?.node_id ?? ""}`;
+        }
+        if (command.startsWith("tmux display-message")) return "$7|4242|1700000000";
+        if (command.includes("detach-client") || command.includes("kill-session")) return "";
+        throw new Error(`unexpected tmux command: ${command}`);
+      });
+      adapter.deliveryGuard = w.guard;
+      const service = new SeatLifecycleService({ db: w.db, rigRepo: w.rigRepo, sessionRegistry: w.sessions, eventBus: w.bus, tmuxAdapter: adapter });
+      // As the daemon composes it (startup.ts).
+      w.stopSeat.mockImplementation(async ({ seatRef, reason, expected, recheck }) => {
+        const stopped = await service.stopSeat({ seatRef, reason, operator: null, expected, ...(recheck ? { recheck } : {}) });
+        if (stopped.ok) return { ok: true };
+        return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
+      });
+
+      const run = w.cycle(job.jobId);
+      await probed;
+      // the row arrives while the stop's probe is paused, after every earlier check
+      const q = await w.row(s1.session);
+      release();
+      const notes = await run;
+
+      expect(commands.some((c) => c.includes("has-session"))).toBe(true);
+      expect(commands.filter((c) => c.includes("detach-client") || c.includes("kill-session"))).toEqual([]);
+      expect(w.latestOf(s1.nodeId)?.status).toBe("running");
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: s1.session });
+      expect(notes.drains).toEqual([{
+        slotNumber: 1, session: s1.session, phase: "live", outcome: "returned", code: "work_arrived", snapshotId: w.captures[0]!.snapshotId,
+      }]);
+      expect(w.phases(m)).toEqual(["live"]);
+    } finally {
+      w.db.close();
+    }
+  });
 });
 
 describe("seat-pool drain: the capture and the confirmed stop (#3395 Piece 1)", () => {
@@ -243,6 +318,32 @@ describe("seat-pool drain: the capture and the confirmed stop (#3395 Piece 1)", 
       await w.cycle(job.jobId);
       expect(w.captures).toHaveLength(1);
       expect(w.stopSeat).toHaveBeenCalledTimes(1);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("The drain refreshes the agent's resume metadata before the capture, and a refresh that fails still captures and stops: refresh, capture, then stop.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      const session = w.latestOf(s1.nodeId)!;
+      w.refreshing.fails = true;
+
+      const notes = await w.cycle(job.jobId);
+      expect(w.refresh).toHaveBeenCalledTimes(1);
+      expect(w.refresh).toHaveBeenCalledWith({ rigId: m.rigId, nodeId: s1.nodeId, sessionId: session.id });
+      expect(w.captures).toHaveLength(1);
+      // the refresh had finished before the capture, and the capture came before the stop
+      expect(w.captures[0]).toMatchObject({ refreshesBefore: 1, stopsBefore: 0 });
+      expect(w.stopSeat).toHaveBeenCalledTimes(1);
+      expect(notes.drains).toEqual([{
+        slotNumber: 1, session: s1.session, phase: "drained", outcome: "drained", snapshotId: w.captures[0]!.snapshotId,
+        stop: { cause: "drain", result: "stopped" },
+      }]);
+      expect(w.latestOf(s1.nodeId)?.status).toBe("stopped");
     } finally {
       w.db.close();
     }

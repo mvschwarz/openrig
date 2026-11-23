@@ -2608,9 +2608,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       now: () => new Date(),
       drain: {
         lifecycle: (nodeIds, fn) => deliveryGuard.lifecycle(nodeIds, fn),
+        // The refresh rig down runs before its snapshot, for the session the drain stops.
+        refresh: async ({ rigId, sessionId }) => {
+          await resumeMetadataRefresher.refresh(sessionRegistry.getLatestLiveSessions(rigId).filter((s) => s.sessionId === sessionId));
+        },
         capture: (rigId) => ({ snapshotId: snapshotCapture.captureSnapshot(rigId, "auto-rehydrate").id }),
-        stopSeat: async ({ seatRef, reason, expected }) => {
-          const stopped = await seatPoolStops.stopSeat({ seatRef, reason, operator: null, expected });
+        stopSeat: async ({ seatRef, reason, expected, recheck }) => {
+          const stopped = await seatPoolStops.stopSeat({ seatRef, reason, operator: null, expected, ...(recheck ? { recheck } : {}) });
           if (stopped.ok) return { ok: true, ...(stopped.alreadyDown ? { alreadyDown: true as const, ...(stopped.message ? { message: stopped.message } : {}) } : {}) };
           return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
         },

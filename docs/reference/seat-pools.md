@@ -70,10 +70,17 @@ Under `drain: true`, nothing is moved.
   - then, under the agent's lifecycle lease, reads the agent again: a row or a held message that reached it, or a
     wake since the evaluation read it, sends the slot back to `live` and nothing is stopped; an agent relaunched since
     then is left alone;
+  - refreshes the agent's resume metadata, as `rig down` does before its snapshot. The refresh is best-effort: one
+    that fails still captures and stops;
   - captures an `auto-rehydrate` snapshot of the rig while the agent still runs, right before the stop. A capture that
     fails stops nothing: the slot stays `draining` for that evaluation and goes back to `live` in the next;
   - stops the agent with the checked seat stop (the seat stop given an expected node and session), which stops it
-    only while its latest session is still the one the evaluation read.
+    only while its latest session is still the one the evaluation read. Right before each of its effects, after its
+    liveness probe, the stop reads again the job, the rig and model holds, the pool block, and the agent's rows, held
+    messages and activity; stopping again after an earlier attempt also needs the pool to still have surplus. What
+    keeps the agent stops nothing: an agent that got work or woke goes back to `live`; otherwise the slot stays
+    `draining` for that evaluation and goes back to `live` in the next, while an earlier attempt stays on record and
+    the stop is tried again later.
 
   What the stop returned goes in the notes as `stop.result`, never two at once:
 

@@ -92,10 +92,17 @@ export type SeatPoolSeatStop =
 export interface SeatPoolDrainEffects {
   /** The lifecycle lease on these nodes (SeatDeliveryGuard.lifecycle): the drain re-reads, captures and stops under it. */
   lifecycle<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T>;
+  /** Refresh the agent's resume metadata, as `rig down` does before its snapshot (ResumeMetadataRefresher.refresh).
+   *  Best-effort: the drain captures and stops after a refresh that fails. */
+  refresh(input: { rigId: string; nodeId: string; sessionId: string }): Promise<void>;
   /** Capture an `auto-rehydrate` snapshot of the rig (SnapshotCapture.captureSnapshot). Throws when it can't. */
   capture(rigId: string): { snapshotId: string };
-  /** The checked stop: stop the seat only while its latest session is still `expected.sessionId`. */
-  stopSeat(input: { seatRef: string; reason: string; expected: { nodeId: string; sessionId: string } }): Promise<SeatPoolSeatStop>;
+  /** The checked stop: stop the seat only while its latest session is still `expected.sessionId`. `recheck` runs at the
+   *  stop's final step before each effect, after its liveness probe; a refusal it returns stops nothing more. */
+  stopSeat(input: {
+    seatRef: string; reason: string; expected: { nodeId: string; sessionId: string };
+    recheck?: () => { ok: false; code: "selection_changed"; message: string } | null;
+  }): Promise<SeatPoolSeatStop>;
 }
 
 /**
@@ -569,6 +576,52 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           };
         };
         const stopReason = (what: string) => `seat pool ${job.jobId}: ${what}`;
+        const phaseNow = (slot: SeatPoolSlot): SeatPoolPhase =>
+          deps.slots.forModel(modelNodeId).find((s) => s.slotId === slot.slotId)?.phase ?? "draining";
+        /** What keeps an agent from being stopped now, read again at the checked stop's final step before each effect
+         *  (after its liveness probe): the job, the rig and model holds, the current block, the agent's work and activity,
+         *  and, for a retry (`idleSince` null), whether the pool still has surplus. Null when the stop may go on. */
+        const keeps = (slotNumber: number, nodeId: string, idleSince: string | null): string | null => {
+          if (!active()) { held = JOB_STOPPED; return "job_stopped"; }
+          const modelNow = seatPoolModelOfJob(deps.db, job);
+          if (!modelNow.found) {
+            held = modelNow.cause === "node_gone"
+              ? { cause: "model node gone", message: "held: model node gone" }
+              : { cause: "model has no canonical session", message: "held: model has no canonical session" };
+            return "model_held";
+          }
+          const holdNow = readSeatPoolHold(deps.db, rigId);
+          if (holdNow.stoppedSeq !== null) {
+            held = { cause: "rig stopped", seq: holdNow.stoppedSeq, message: `held: rig stopped (event ${holdNow.stoppedSeq})` };
+            return "rig_stopped";
+          }
+          if (blockChangedNow()) return "pool_block_changed";
+          const now = readSeatPoolState(deps, model, deps.slots.forModel(modelNodeId));
+          const agent = now.agents.find((a) => a.slotNumber === slotNumber);
+          if (!agent || agent.phase !== "draining") return "slot_moved_on";
+          // An agent that no longer runs keeps nothing: the stop only confirms it is gone.
+          if (!agent.running) return null;
+          if (agent.openRows > 0 || agent.heldCount > 0) return "work_arrived";
+          if (!agent.idleAtPrompt || (idleSince !== null && woken(nodeId, idleSince))) return "woken";
+          if (idleSince === null) {
+            // A stop already attempted is finished only while the pool still has surplus, the draining agents counted as
+            // serving.
+            const serving = now.agents.map((a) => (a.phase === "draining" ? { ...a, phase: "live" as const } : a));
+            if (planSeatPool(spec, { ...now, agents: serving }, deps.now().getTime()).surplus === 0) return "no_surplus";
+          }
+          return null;
+        };
+        /** The recheck the checked stop runs, and the code it refused with (the stop itself reports `selection_changed`). */
+        const recheckOf = (slotNumber: number, nodeId: string, idleSince: string | null) => {
+          const refused: { code: string | null } = { code: null };
+          const recheck = () => {
+            const code = keeps(slotNumber, nodeId, idleSince);
+            if (code === null) return null;
+            refused.code = code;
+            return { ok: false as const, code: "selection_changed" as const, message: `The seat pool drain stops nothing: ${code} right before the stop.` };
+          };
+          return { refused, recheck };
+        };
 
         for (const r of restops) {
           if (!active()) { held = JOB_STOPPED; break; }
@@ -587,10 +640,16 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               if (agent.running && (agent.openRows > 0 || agent.heldCount > 0 || !agent.idleAtPrompt)) {
                 return { ...step, phase: "draining", outcome: "draining", code: agent.openRows > 0 || agent.heldCount > 0 ? "work_arrived" : "woken" };
               }
+              const { refused, recheck } = recheckOf(r.slot.slotNumber, r.nodeId, null);
               const stop = await effects.stopSeat({
                 seatRef: r.session, reason: stopReason("the drain's stop was unconfirmed; stopping again"),
-                expected: { nodeId: r.nodeId, sessionId: r.sessionId },
+                expected: { nodeId: r.nodeId, sessionId: r.sessionId }, recheck,
               });
+              // Refused at the stop's final step before any effect: the earlier attempt stays on record, and the slot stays
+              // `draining` until a later cycle finishes it.
+              if (refused.code !== null && !stop.ok && stop.partialEffect !== true) {
+                return { ...step, phase: phaseNow(r.slot), outcome: "draining", code: refused.code };
+              }
               return settle(r, stop, undefined, true);
             }));
           } catch (error) {
@@ -627,6 +686,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               // The block again, under the lease: one changed or unreadable while the lease was awaited ends this cycle's
               // effects before any capture. Nothing was stopped, so the slot goes back to `live` in a later cycle.
               if (blockChangedNow()) return { ...step, phase: "draining", outcome: "draining", code: "pool_block_changed" };
+              // The agent's resume metadata, refreshed as `rig down` does before its snapshot. Best-effort: a refresh that
+              // fails still captures and stops.
+              try {
+                await effects.refresh({ rigId, nodeId: t.nodeId, sessionId: t.sessionId });
+              } catch {
+                // best-effort, as in teardown
+              }
               // The capture, while the agent still runs, right before the stop. A capture that fails stops nothing.
               let snapshotId: string;
               try {
@@ -642,10 +708,19 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
                 const phase = deps.slots.forModel(modelNodeId).find((s) => s.slotId === t.slot.slotId)?.phase ?? "draining";
                 return { ...step, phase, outcome: "skipped", code: "slot_moved_on" };
               }
+              const { refused, recheck } = recheckOf(t.slot.slotNumber, t.nodeId, t.idleSince);
               const stop = await effects.stopSeat({
                 seatRef: t.session, reason: stopReason(`idle since ${t.idleSince}; drained`),
-                expected: { nodeId: t.nodeId, sessionId: t.sessionId },
+                expected: { nodeId: t.nodeId, sessionId: t.sessionId }, recheck,
               });
+              // Refused at the stop's final step before any effect: nothing was stopped, and the attempt record goes. An
+              // agent that got work or woke serves again; otherwise the slot goes back to `live` in a later cycle.
+              if (refused.code !== null && !stop.ok && stop.partialEffect !== true) {
+                if (refused.code === "work_arrived" || refused.code === "woken") {
+                  return { ...step, phase: moveTo(t.slot, "live", null), outcome: "returned", code: refused.code, snapshotId };
+                }
+                return { ...step, phase: moveTo(t.slot, "draining", null), outcome: "draining", code: refused.code, snapshotId };
+              }
               return settle(t, stop, snapshotId);
             }));
           } catch (error) {
