@@ -553,7 +553,12 @@ def cut_notice(name, state, rows, shown, daemon_cut):
 
 
 def unresolved_note(row):
-    return f" — UNRESOLVED ON THIS HOST: {row['unresolved']}" if row.get("unresolved") else ""
+    """Why a row's scope did not resolve here, or that it resolved only under a fallback missions root (so it may be
+    another project's mission of the same name)."""
+    fallback = row.get("missionsRootFallback")
+    if row.get("unresolved"):
+        return f" — UNRESOLVED ON THIS HOST: {row['unresolved']}" + (f" (through a fallback missions root: {fallback})" if fallback else "")
+    return f" — RESOLVED ONLY THROUGH A FALLBACK MISSIONS ROOT: {fallback}" if fallback else ""
 
 
 def scope_label(row):
@@ -591,23 +596,32 @@ def render_held_and_next(evidence):
     return "\n".join(output)
 
 
-def scope_choice(row):
+def scope_choice(row, root, extra_roots):
+    """One named mission (and slice) with its folder and, when it has one, the command that reads it: the agent runs it
+    as its own call, without this run's --work-root, so a folder outside workspace.root names the known root holding it."""
     name = ", ".join(row["missions"]) + (f" / {row['slice']}" if row.get("slice") else "")
     where = row.get("slicePath") or row.get("missionPath")
-    return f"- {name}" + (f" — {where}" if where else "") + unresolved_note(row)
+    line = f"- {name}" + (f" — {where}" if where else "") + unresolved_note(row)
+    if not where:
+        return line
+    work_root = work_root_for(where, root, extra_roots)
+    extra_root = f" --work-root {shlex.quote(str(work_root))}" if work_root != root else ""
+    return f"{line}\n  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {shlex.quote(where)}"
 
 
 def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
-    """Nothing in progress: held (blocked) and pending rows are context, never current work. Returns (trace, choices):
-    the work trace of the one mission every row resolves to (of its slice, when that is the same for every row too), or
-    else no trace and lines naming the missions the rows do name, for the agent to choose from. Missions are compared by
-    resolved directory, never by name, and only across the daemon's whole lists: a cut list, a row naming no mission or
-    one that did not resolve leaves the choice to the agent. Held rows come first only in the listing."""
+    """Nothing in progress: held (blocked) and pending rows are context, never current work. Returns (trace, choices,
+    open): the work trace of the one mission every row resolves to (of its slice, when that is the same for every row
+    too), or else no trace and lines naming the missions the rows do name, each with the command that reads it, for the
+    agent to choose from; open is true when one of them has no folder, so only the generic route can reach it. Missions
+    are compared by resolved directory, never by name, and only across the daemon's whole lists: a cut list, a row naming
+    no mission, one that did not resolve or one found only under a fallback missions root leaves the choice to the agent.
+    Held rows come first only in the listing."""
     held, following = evidence.get("held") or [], evidence.get("next") or []
     rows = [*held, *following]
     named = [row for row in rows if row.get("missions")]
     if not named:
-        return None, []
+        return None, [], False
     missions = {row.get("missionPath") for row in rows}
     slices = {row.get("slicePath") for row in rows}
     if any(evidence.get(flag) for flag in ("heldTruncated", "nextTruncated", "heldAndNextTruncated")):
@@ -618,6 +632,8 @@ def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
         why = "the daemon did not say which folders the rows' missions resolve to"
     elif None in missions:
         why = "a row's mission did not resolve to one directory here"
+    elif any(row.get("missionsRootFallback") for row in named):
+        why = "a row's mission resolved only through a fallback missions root"
     elif len(missions) > 1:
         why = "the rows name different missions"
     else:
@@ -632,11 +648,13 @@ def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
                 "work: using it does not resume a task.")
         traced = render_work(Path(start), work_root_for(start, root, extra_roots), depth, failures, packet=packet)
         head, _, rest = traced.partition("\n")
-        return "\n".join([head, note, rest]), []
-    choices = list(dict.fromkeys(scope_choice(row) for row in named))
+        return "\n".join([head, note, rest]), [], False
+    choices = list(dict.fromkeys(scope_choice(row, root, extra_roots) for row in named))
     more = [f"- … and {len(choices) - CHOICES_SHOWN} more"] if len(choices) > CHOICES_SHOWN else []
+    open_choice = any(not (row.get("slicePath") or row.get("missionPath")) for row in named)
     return None, [f"Held and pending work is context, not current work, and does not settle one mission ({why}). "
-                  "Choosing one does not resume a task. The missions it names:", *choices[:CHOICES_SHOWN], *more]
+                  "Choosing one does not resume a task. The missions it names, each with the command that reads it:",
+                  *choices[:CHOICES_SHOWN], *more], open_choice
 
 
 def work_start_route(start_root, extra_root=""):
@@ -673,8 +691,8 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
         traced = render_work(start, work_root_for(start, root, extra_roots), depth, failures, packet=True)
         head, _, rest = traced.partition("\n")
         return "\n".join([head, *notes, rest])
-    held_trace, held_choices = (held_context(evidence, root, depth, failures, extra_roots, packet=True)
-                                if not candidates and not unknown else (None, []))
+    held_trace, held_choices, _ = (held_context(evidence, root, depth, failures, extra_roots, packet=True)
+                                   if not candidates and not unknown else (None, [], False))
     if held_trace:
         return held_trace
 
@@ -848,10 +866,12 @@ def main():
                     sections.append(gap(f"## WORK TRACE\nTRACE GAP — held and pending {error}"))
             # Nothing in progress: held and pending work as context, traced when it settles one mission, else listed
             # for the agent to choose from above the broad orientation below.
-            held_trace, held_choices = held_context(held, root, args.depth, failures, extra_roots, args.packet) if held else (None, [])
+            held_trace, held_choices, open_choice = (held_context(held, root, args.depth, failures, extra_roots, args.packet)
+                                                     if held else (None, [], False))
             if held_choices:
-                missions_root = held.get("missionsRoot") or str(root / "missions")
-                sections.append("\n".join(["## WORK — name it", NOTHING_IN_PROGRESS, *held_choices, *work_start_route(missions_root)]))
+                # Each choice with a folder carries its own command; the generic one is only for a mission without one.
+                generic = work_start_route(held.get("missionsRoot") or str(root / "missions")) if open_choice else []
+                sections.append("\n".join(["## WORK — name it", NOTHING_IN_PROGRESS, *held_choices, *generic]))
             if explicit:
                 sections.append(render_work(Path(explicit), work_root_for(explicit, root, extra_roots), args.depth, failures, packet=args.packet))
             elif evidence is not None:

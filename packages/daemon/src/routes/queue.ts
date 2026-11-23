@@ -1559,16 +1559,21 @@ export function queueRoutes(): Hono {
         .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
         .map((tag) => tag.slice("project:".length).trim()))];
       if (projectIds.length === 0) return { root: missionsRoot };
+      // Whether another root could hold a same-named mission when the configured root stands in for the row's project:
+      // an unreadable catalogue can't say, and a readable one can only if it lists project roots. With no catalogue
+      // configured the configured root is the only one, so the stand-in is no ambiguity (the reasons are unchanged).
+      const otherRoots = catalogStatus === "unavailable" || (catalogStatus === "usable" && projectMissionsRoots.size > 0);
       if (projectIds.length !== 1) {
-        return { root: missionsRoot, reason: `multiple project tags (${projectIds.join(", ")}); used configured root` };
+        return { root: missionsRoot, reason: `multiple project tags (${projectIds.join(", ")}); used configured root`, ambiguous: otherRoots };
       }
       const projectId = projectIds[0]!;
       if (catalogStatus !== "usable") {
-        return { root: missionsRoot, reason: `project:${projectId} could not be used because the workspace catalog is ${catalogStatus === "missing" ? "not configured" : "unavailable"}; used configured root` };
+        return { root: missionsRoot, reason: `project:${projectId} could not be used because the workspace catalog is ${catalogStatus === "missing" ? "not configured" : "unavailable"}; used configured root`, ambiguous: otherRoots };
       }
       const project = projectMissionsRoots.get(projectId);
-      if (!project) return { root: missionsRoot, reason: `project:${projectId} is not in the project catalogue; used configured root` };
-      if (project.error || !project.root) return { root: missionsRoot, reason: `project:${projectId} is unavailable in the project catalogue; used configured root` };
+      if (!project) return { root: missionsRoot, reason: `project:${projectId} is not in the project catalogue; used configured root`, ambiguous: otherRoots };
+      // The row's own project is catalogued but its root can't be read: its mission may be there.
+      if (project.error || !project.root) return { root: missionsRoot, reason: `project:${projectId} is unavailable in the project catalogue; used configured root`, ambiguous: true };
       return { root: project.root };
     };
     // Deliberately NOT position.asDestination.recent: that is a capped, mixed-state display

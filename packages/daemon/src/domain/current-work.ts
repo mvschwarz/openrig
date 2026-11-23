@@ -152,6 +152,10 @@ export interface CurrentWorkRow {
 export interface MissionsRootResolution {
   root: string | null;
   reason?: string;
+  /** The root stands in for the row's own project root, and another root could hold a mission of the same name: the
+   *  catalogue lists other project roots, or it, or the row's project in it, can't be read. Unset when the configured
+   *  root is the only root a row's mission can live in (no catalogue configured), whatever the reason says. */
+  ambiguous?: boolean;
 }
 
 export type MissionsRootResolver = string | null | ((row: CurrentWorkRow) => string | null | MissionsRootResolution);
@@ -750,6 +754,10 @@ export interface RowScope {
   slicePath: string | null;
   /** Why a mission or slice the row names did not resolve here; null when everything it names did. */
   unresolved: string | null;
+  /** Why the row's tags were resolved under a root that stands in for its project's own while another root could hold
+   *  a mission of the same name (MissionsRootResolution.ambiguous); null otherwise, including when no catalogue is
+   *  configured and the configured root is the only one. Kept even when the mission resolved there. */
+  missionsRootFallback: string | null;
 }
 
 /** One project's mission directories, bounded as missionsOnHost is. */
@@ -876,11 +884,11 @@ function scopeOf(row: CandidateRow, missionsRoot: MissionsRootResolver, resolved
   const missions = tagValues(tags, MISSION_TAG);
   const slices = tagValues(tags, SLICE_TAG);
   const slice = missions.length === 1 && slices.length === 1 ? slices[0]! : null;
-  const scope: RowScope = { missions, slice, missionPath: null, slicePath: null, unresolved: null };
+  const scope: RowScope = { missions, slice, missionPath: null, slicePath: null, unresolved: null, missionsRootFallback: null };
   if (missions.length === 0) return scope;
   if (missions.length > 1) return { ...scope, unresolved: `${missions.length} mission tags; none is resolved on its own` };
   const root = resolveMissionsRoot(missionsRoot, row);
-  const key = JSON.stringify([root.root, root.reason, missions[0], slice]);
+  const key = JSON.stringify([root.root, root.reason, root.ambiguous === true, missions[0], slice]);
   const known = resolvedScopes.get(key);
   if (known) return known;
   const resolved = resolveTagged(root.root, missions[0]!, slice);
@@ -889,7 +897,8 @@ function scopeOf(row: CandidateRow, missionsRoot: MissionsRootResolver, resolved
   const result: RowScope = { ...scope,
     missionPath: slicePath ? path.dirname(path.dirname(slicePath)) : resolved.workNodePath,
     slicePath,
-    unresolved: resolved.unresolved ? [root.reason, resolved.unresolved].filter(Boolean).join("; ") : null };
+    unresolved: resolved.unresolved,
+    missionsRootFallback: root.ambiguous ? root.reason ?? "another root could hold a mission of the same name" : null };
   resolvedScopes.set(key, result);
   return result;
 }
