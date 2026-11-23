@@ -2357,14 +2357,15 @@ export class PodRigInstantiator {
    *  latest operator choice. Keep those choices authoritative across a restart. */
   private persistedMember(node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number], recipeMember: RigSpecPodMember): RigSpecPodMember {
     // A seat moved with `rig seat set-runtime` runs on the node's runtime; its recipe still names the one it was
-    // materialized for. The model, effort, advisor and Codex profile the recipe authored belong to that earlier runtime,
-    // so a moved seat keeps only the node's (what the move chose), as runtime-switch-materials drops them.
+    // materialized for. The model, effort, advisor and Codex profile the recipe authored belong to that earlier runtime
+    // (runtime-switch-materials drops them), so a moved seat takes these from the node, where the move stored its own.
+    // One the node doesn't hold resolves from today's agent spec, as for any seat.
     const runtime = node.runtime ?? recipeMember.runtime;
     const moved = runtime !== recipeMember.runtime;
     return {
       ...recipeMember,
       runtime,
-      ...(moved ? { model: undefined, effort: undefined, advisor: undefined, codexConfigProfile: undefined } : {}),
+      ...(moved ? { model: undefined, effort: undefined, advisor: node.advisor ?? undefined, codexConfigProfile: undefined } : {}),
       launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
       // #3253: an unreadable stored value stays as stored (undefined keeps it, {} would clear it).
       processLimits: node.processLimitsError ? undefined : node.processLimits ? { ...node.processLimits } : {},

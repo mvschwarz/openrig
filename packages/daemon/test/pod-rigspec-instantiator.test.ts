@@ -1463,7 +1463,9 @@ edges: []
       for (const id of ["review", "handoff"]) put(nodePath.join(plugin, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: ${id}\n---\n${id}`);
       fs.symlinkSync(nodePath.join(plugin, "skills", "handoff", "SKILL.md"), nodePath.join(plugin, "skills", "review", "linked.md"));
       const rigRoot = nodePath.join(root, "rig");
-      put(nodePath.join(rigRoot, "agents", "impl", "agent.yaml"), `name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: claude-only\n      source: { kind: local, path: ${plugin} }\nprofiles:\n  default:\n    uses:\n      plugins: [claude-only]\n`);
+      const agentPath = nodePath.join(rigRoot, "agents", "impl", "agent.yaml");
+      const agentText = `name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: claude-only\n      source: { kind: local, path: ${plugin} }\nprofiles:\n  default:\n    uses:\n      plugins: [claude-only]\n`;
+      put(agentPath, agentText);
       const fixture = setup(undefined, undefined, undefined, undefined, undefined,
         { fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: (p: string) => fs.existsSync(p) } });
       const result = await fixture.inst.instantiate(`
@@ -1489,7 +1491,19 @@ edges: []
       const before = await fixture.inst.seatSkillSelection(rigId, nodeId);
       fixture.db.prepare("UPDATE nodes SET runtime = 'claude-code', model = NULL, effort = NULL, advisor = NULL, codex_config_profile = NULL WHERE id = ?").run(nodeId);
       expect(fixture.rigRepo.getNodeLaunchRecipe(nodeId)!.rigSpec.pods[0]!.members[0]).toMatchObject({ runtime: "codex", model: "gpt-6-astra" });
-      return { ...fixture, rigId, nodeId, before };
+      return { ...fixture, rigId, nodeId, before, agentPath, agentText };
+    }
+    /** Its session ends and a restore launches it fresh from the recipe: on Claude, never Codex. The Claude launch's binding. */
+    async function launchFresh(f: Awaited<ReturnType<typeof movedSeat>>) {
+      for (const session of f.sessionRegistry.getSessionsForRig(f.rigId)) f.sessionRegistry.markDetached(session.id);
+      f.sessionRegistry.clearBinding(f.nodeId);
+      vi.mocked(f.adapter.launchHarness).mockClear();
+      vi.mocked(f.codexAdapter.launchHarness).mockClear();
+      const fresh = await f.inst.launchPersistedFresh(f.rigId, f.nodeId);
+      expect(fresh.status, JSON.stringify(fresh)).toBe("launched");
+      expect(f.codexAdapter.launchHarness).not.toHaveBeenCalled();
+      expect(f.adapter.launchHarness).toHaveBeenCalledTimes(1);
+      return vi.mocked(f.adapter.launchHarness).mock.calls[0]![0];
     }
     const pluginSkipped = (out: Awaited<ReturnType<PodRigInstantiator["seatSkillSelection"]>>) =>
       out.ok && out.selection.warnings.some((w) => w.startsWith("plugin_skill_skipped: plugin claude-only"));
@@ -1503,21 +1517,21 @@ edges: []
     });
 
     it("launches fresh on its new runtime, without the old runtime's model or effort", async () => {
-      const { db, sessionRegistry, inst, adapter, codexAdapter, rigId, nodeId } = await movedSeat();
-      // Its session ends; a restore launches it fresh from the recipe.
-      for (const session of sessionRegistry.getSessionsForRig(rigId)) sessionRegistry.markDetached(session.id);
-      sessionRegistry.clearBinding(nodeId);
-      vi.mocked(adapter.launchHarness).mockClear();
-      vi.mocked(codexAdapter.launchHarness).mockClear();
-      const fresh = await inst.launchPersistedFresh(rigId, nodeId);
-      expect(fresh.status, JSON.stringify(fresh)).toBe("launched");
-      expect(codexAdapter.launchHarness).not.toHaveBeenCalled();
-      expect(adapter.launchHarness).toHaveBeenCalledTimes(1);
-      const binding = vi.mocked(adapter.launchHarness).mock.calls[0]![0];
+      const f = await movedSeat();
+      const binding = await launchFresh(f);
       expect(binding.model).toBeUndefined();
       expect(binding.effort).toBeUndefined();
-      expect(db.prepare("SELECT runtime, model, effort FROM nodes WHERE id = ?").get(nodeId)).toEqual({ runtime: "claude-code", model: null, effort: null });
-      db.close();
+      expect(f.db.prepare("SELECT runtime, model, effort FROM nodes WHERE id = ?").get(f.nodeId)).toEqual({ runtime: "claude-code", model: null, effort: null });
+      f.db.close();
+    });
+
+    it("launches fresh with the advisor its move stored, though the agent spec names another since", async () => {
+      const f = await movedSeat();
+      f.db.prepare("UPDATE nodes SET advisor = 'advisor-at-move' WHERE id = ?").run(f.nodeId);
+      fs.writeFileSync(f.agentPath, `${f.agentText}defaults:\n  advisor: advisor-now\n`);
+      expect((await launchFresh(f)).advisor).toBe("advisor-at-move");
+      expect(f.db.prepare("SELECT advisor FROM nodes WHERE id = ?").get(f.nodeId)).toEqual({ advisor: "advisor-at-move" });
+      f.db.close();
     });
   });
 
