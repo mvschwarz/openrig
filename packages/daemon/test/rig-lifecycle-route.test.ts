@@ -6,6 +6,7 @@ import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delive
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { noticeRosterReady, rosterReadyNoticeId } from "../src/domain/roster-ready-notice.js";
 
 describe("Rig lifecycle routes", () => {
   let db: Database.Database;
@@ -18,6 +19,25 @@ describe("Rig lifecycle routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each(["nodes/infra.server", "pods/infra"])("%s removal ignores its roster notice but still protects ordinary work", async target => {
+    migrate(db, ALL_MIGRATIONS);
+    const rig = setup.rigRepo.createRig("notice-removal");
+    const expanded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "infra", label: "infra",
+      members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+    if (!expanded.ok) throw new Error(JSON.stringify(expanded));
+    const session = expanded.nodes[0]!.sessionName;
+    const queue = new QueueRepository(db, setup.eventBus);
+    expect(await noticeRosterReady(queue, rig.id, [session])).toEqual([]);
+    const work = await queue.create({ sourceSession: "other@notice-removal", destinationSession: session, body: "real work", nudge: false });
+    const blocked = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json()).activeQitemIds).toEqual([work.qitemId]);
+    db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = ?").run(work.qitemId);
+    const removed = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
+    expect(removed.status).toBe(200);
+    expect(queue.getById(rosterReadyNoticeId(rig.id, session))?.state).toBe("pending");
   });
 
   it.each([

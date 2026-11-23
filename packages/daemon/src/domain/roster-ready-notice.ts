@@ -2,14 +2,18 @@ import { createHash } from "node:crypto";
 import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import type { QueueRepository } from "./queue-repository.js";
 
+export function rosterReadyNoticeId(rigId: string, session: string): string {
+  const key = createHash("sha256").update(`${rigId}\0${session}`).digest("hex").slice(0, 20);
+  return `qitem-roster-ready-${key}`;
+}
+
 /** One durable notice per seat in this newly built rig. A failed notice does not change launch status. */
 export async function noticeRosterReady(queue: Pick<QueueRepository, "create">, rigId: string, sessions: string[]): Promise<string[]> {
   const warnings: string[] = [];
   for (const session of sessions) {
-    const key = createHash("sha256").update(`${rigId}\0${session}`).digest("hex").slice(0, 20);
     try {
       await queue.create({
-        qitemId: `qitem-roster-ready-${key}`,
+        qitemId: rosterReadyNoticeId(rigId, session),
         sourceSession: OPENRIG_SENDER,
         destinationSession: session,
         wakeTrigger: "openrig",
