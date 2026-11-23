@@ -130,13 +130,27 @@ const SEAT_NAMES_TIMEOUT_MS = 2_000;
  *  whose member name is a person's id is treated as that person. One read (`/api/ps?seats=true`), bounded by
  *  SEAT_NAMES_TIMEOUT_MS. Best effort: none when the daemon can't be read in time, or doesn't list seat names. */
 export async function seatsReadAsPerson(isPerson: (session: string) => boolean): Promise<string[]> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const { DaemonClient } = await import("../client.js");
-    const rigs = await new DaemonClient().get<Array<{ seats?: unknown }>>("/api/ps?seats=true", { timeoutMs: SEAT_NAMES_TIMEOUT_MS });
-    if (rigs.status !== 200 || !Array.isArray(rigs.data)) return [];
-    return rigs.data.flatMap((rig) => Array.isArray(rig.seats)
-      ? rig.seats.filter((seat): seat is string => typeof seat === "string" && isPerson(seat)) : []);
+    // The request's timer starts after client preflight. Bound the whole optional lookup as well, so a slow owner or
+    // sender-identity probe cannot extend the person's wait; abort prevents a later business request after the bound.
+    return await Promise.race([
+      (async () => {
+        const { DaemonClient } = await import("../client.js");
+        const rigs = await new DaemonClient().get<Array<{ seats?: unknown }>>("/api/ps?seats=true", {
+          timeoutMs: SEAT_NAMES_TIMEOUT_MS, signal: controller.signal,
+        });
+        if (rigs.status !== 200 || !Array.isArray(rigs.data)) return [];
+        return rigs.data.flatMap((rig) => Array.isArray(rig.seats)
+          ? rig.seats.filter((seat): seat is string => typeof seat === "string" && isPerson(seat)) : []);
+      })(),
+      new Promise<string[]>((resolve) => {
+        timer = setTimeout(() => { controller.abort(); resolve([]); }, SEAT_NAMES_TIMEOUT_MS);
+      }),
+    ]);
   } catch { return []; }
+  finally { clearTimeout(timer); }
 }
 
 /** Default queue-row half of the remove guard: non-terminal rows addressed to the human,

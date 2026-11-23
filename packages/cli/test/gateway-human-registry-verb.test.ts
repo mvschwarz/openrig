@@ -9,6 +9,8 @@ import { createProgram } from "../src/index.js";
 import { humansDir, loadHumanRegistry } from "@openrig/daemon/gateway-human-registry";
 import { gatewayRoutes } from "../../daemon/src/routes/gateway.js";
 import { REGISTRATION_OFFER } from "../src/person-registration-offer.js";
+import { seatsReadAsPerson } from "../src/commands/gateway.js";
+import * as localOrigin from "../src/local-origin.js";
 
 // M1 A3 pt2 / A4b relocate — `rig gateway human add` verb integration. The verb lazy-imports
 // the relocated daemon surface; these tests drive the real command end-to-end.
@@ -139,10 +141,11 @@ describe("rig gateway human add verb (post-relocate)", () => {
   });
 
   /** A stand-in daemon answering `/api/ps?seats=true` with `rigs` (null: never answers it); the paths it was asked. */
-  async function fakeDaemon(rigs: unknown[] | null): Promise<{ asked: string[]; close: () => Promise<void> }> {
+  async function fakeDaemon(rigs: unknown[] | null, holdHealth = false): Promise<{ asked: string[]; close: () => Promise<void> }> {
     const asked: string[] = [];
     const server = createServer((req, res) => {
-      if (req.url?.startsWith("/api/")) asked.push(req.url);
+      if (req.url?.startsWith("/api/") || (holdHealth && req.url === "/healthz")) asked.push(req.url);
+      if (holdHealth && req.url === "/healthz") return;
       if (req.url === "/api/ps?seats=true" && rigs === null) return; // holds the request open
       const body = req.url === "/api/ps?seats=true" ? rigs : null;
       res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
@@ -196,6 +199,20 @@ describe("rig gateway human add verb (post-relocate)", () => {
     } finally { await stalled.close(); }
     expect(error).not.toHaveBeenCalled();
     expect(process.exitCode).toBeUndefined();
+  }, 10_000);
+
+  it("includes a slow client preflight in the warning's two-second wait", async () => {
+    const daemon = await fakeDaemon(null, true);
+    // A seat using an explicit endpoint first asks /healthz for the endpoint's identity (up to a second).
+    // Keep that real client/network path: its request timeout alone would make the whole lookup take about three seconds.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "reader@local");
+    vi.spyOn(localOrigin, "readLocalOrigin").mockReturnValue("test-origin");
+    try {
+      const started = performance.now();
+      expect(await seatsReadAsPerson(() => true)).toEqual([]);
+      expect(performance.now() - started).toBeLessThan(2_600);
+      expect(daemon.asked).toEqual(["/healthz", "/api/ps?seats=true"]);
+    } finally { vi.unstubAllEnvs(); await daemon.close(); }
   }, 10_000);
 
   it("A6 v3: an OPTIONAL handle= token parses alongside a ':'-bearing secretsRef (inbound-resolvable)", async () => {
