@@ -99,6 +99,26 @@ describe("a Herdr view's writable tile pins its seat before each attach", () => 
     }
   });
 
+  it("after the complete unpin, a size the person fixes is theirs: focus, blur, close and the next tile leave it", async () => {
+    const seat = seatOn("owner");
+    const tile = tileOn(seat);
+    expect(await eventually(seat.clients, seat.session)).toBe(seat.session);
+    const w = `=${seat.session}:`;
+    // The documented unpin: the window's setting and OpenRig's record together.
+    tmux(seat.socket, ["set-window-option", "-t", w, "-u", "window-size", ";", "set-window-option", "-t", w, "-u", SEAT_PIN_WIDTH_OPTION,
+      ";", "set-window-option", "-t", w, "-u", SEAT_PIN_HEIGHT_OPTION]);
+    expect([seat.option(SEAT_PIN_WIDTH_OPTION), seat.option(SEAT_PIN_HEIGHT_OPTION)]).toEqual(["", ""]);
+    tmux(seat.socket, ["resize-window", "-t", w, "-x", "90", "-y", "27"]); // the person's own fixed size (manual)
+    for (const step of [tile.focusIn, tile.focusOut, tile.close]) {
+      step();
+      await pause(600);
+      expect([seat.size(), seat.option("window-size")]).toEqual(["90x27", "manual"]);
+    }
+    tileOn(seat); // the next Herdr tile: a manual window without the record is someone else's
+    expect(await eventually(seat.clients, seat.session)).toBe(seat.session);
+    expect([seat.size(), seat.option(SEAT_PIN_WIDTH_OPTION)]).toEqual(["90x27", ""]);
+  });
+
   it("after an unpin, a temporary window pin (a web terminal's or a readable capture's) holds the window without the hooks", async () => {
     const seat = seatOn("temporary");
     const tile = tileOn(seat);

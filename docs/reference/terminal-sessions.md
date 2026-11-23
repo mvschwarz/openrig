@@ -117,17 +117,21 @@ A Herdr tile's pin is OpenRig's own: the window is `manual` with the seat's size
 recorded in its `@openrig-pin-width` and `@openrig-pin-height` options, and
 hooks on the seat's session fit it to a focused client and give that size back on blur or
 detach. The pin stays after the view closes, since a Herdr restart brings tiles
-back without a new open. To unpin a seat, run
-`tmux set-window-option -t <window> -u window-size` (with the daemon's server
-flags): the hooks then do nothing, also while a browser terminal or a readable
-capture pins the window for a while, and the seat follows its clients until a
-Herdr tile next attaches to it, which pins it again at its size then. A seat an
+back without a new open. To unpin a seat, drop the window's setting and
+OpenRig's record together (with the daemon's server flags):
+`tmux set-window-option -t <window> -u window-size \; set-window-option -t <window> -u @openrig-pin-width \; set-window-option -t <window> -u @openrig-pin-height`.
+The hooks then do nothing, also while a browser terminal or a readable capture
+pins the window for a while, or after you fix its size yourself, and the seat
+follows its clients until a Herdr tile next attaches to it, which pins it again
+at its size then. Unsetting `window-size` alone leaves the record, so a size you
+fix later would be taken for OpenRig's pin. A seat an
 older tile had already shrunk is pinned at that size; to pin it at another
 size, set the record and the size together:
 `tmux set-window-option -t <window> @openrig-pin-width 160 \; set-window-option -t <window> @openrig-pin-height 50 \; resize-window -t <window> -x 160 -y 50`.
 A Herdr tile leaves a window someone else made `manual` (no `@openrig-pin-width`)
 as it is, hooks included. While a seat is pinned, a readable capture reads it as
-it is instead of resizing it for the read (and names the unpin command), and a
+it is instead of resizing it for the read (and names the command that drops
+`window-size`; unpin with the command above), and a
 browser terminal's `terminal.fixed_geometry` doesn't fix its size: both treat a
 `manual` window they didn't pin as a fixed size. Unpin the seat to get them
 back. cmux, `--window`, herdr-app cells and SSH tiles don't pin, and they size
