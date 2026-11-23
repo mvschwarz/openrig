@@ -2180,6 +2180,17 @@ describe("MCP instruction resources", () => {
     });
   });
 
+  it("canonicalizes configured resource URIs for SDK list-then-read", async () => {
+    const client = await connectInstructions({ instructions: { resources: [
+      { uri: "https://example.com", name: "site-guide", mimeType: "text/markdown", text: "# Site guide" },
+    ] } });
+    const listed = (await client.listResources()).resources.find(resource => resource.name === "site-guide");
+    expect(listed).toBeDefined();
+    const read = await client.readResource({ uri: listed!.uri });
+    expect(listed).toMatchObject({ uri: "https://example.com/", name: "site-guide", mimeType: "text/markdown" });
+    expect(read).toEqual({ contents: [{ uri: "https://example.com/", mimeType: "text/markdown", text: "# Site guide" }] });
+  });
+
   it("composes endpoint introductions without broadening read-only guidance or sharing resources", async () => {
     const access: McpAccess = {
       principal: "reader", owner: false, rigs: ["team"], roots: [], readOnly: true,

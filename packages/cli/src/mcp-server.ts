@@ -1124,7 +1124,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     contents: [{ uri: uri.href, mimeType: "text/plain", text: coreInstructions }],
   }));
   for (const { uri, name, mimeType, text } of options.instructions?.resources ?? []) {
-    server.registerResource(name, uri, { mimeType }, async requested => ({
+    server.registerResource(name, new URL(uri).toString(), { mimeType }, async requested => ({
       contents: [{ uri: requested.href, mimeType, text }],
     }));
   }
