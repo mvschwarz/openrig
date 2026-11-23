@@ -147,15 +147,17 @@ native Herdr tiles. A temporary readable capture uses
 when the capture finishes. It does not unset a manually fixed window it did not
 pin.
 
-Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, and
-pre-reflow 0.7.11 viewers can retain the old mirrored display. Changing saved
-argv cannot change that running client. Close only the owned Herdr viewer pane
+Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, kept
+writable 0.7.10 viewers (every writable Herdr viewer from before the pin) size
+their seat instead of pinning it, and pre-reflow 0.7.11 viewers can retain the
+old mirrored display. Changing saved argv cannot change that running client, so
+a following canvas or ensure-viewer that finds one keeps it and asks for this
+step. Close only the owned Herdr viewer pane
 and open a fresh view with `rig terminal open <view> --provider herdr`; the
 agent's tmux session and conversation keep running. For a retained `--follow`
 canvas, first select `--no-follow`, then close its owned viewer panes and open
 a fresh ordinary view. Continuing that old following canvas is not an automatic
-live-client migration. Existing 0.7.10 sizing clients and read-only viewers do
-not need this step.
+live-client migration. Read-only viewers do not need this step.
 
 ## Desktop windows and previews
 
