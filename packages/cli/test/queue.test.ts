@@ -1231,7 +1231,7 @@ describe("rig queue CLI", () => {
 
     it("accepts the current daemon marker for a timed park", async () => {
       const id = "qitem-create-current-forwarder-blocked";
-      const { deps } = makeDeps({ routes: {
+      const { deps, calls } = makeDeps({ routes: {
         "POST /api/queue/create": { status: 201, data: {
           qitemId: id,
           sourceSession: STUB_SENDER,
@@ -1244,8 +1244,19 @@ describe("rig queue CLI", () => {
       } });
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
-      await program.parseAsync(["node", "rig", "queue", "create", "--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--id", id,
+        "--destination", "bob@rig",
+        "--body", "Wait",
+        "--summary", "Wait",
+        "--blocked-on", "external:condition",
+        "--wake-after", "15m",
+        "--json",
+      ]);
 
+      const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
+      expect(request.body).toMatchObject({ blockedOn: "external:condition", wakeAfterSeconds: 900, nudge: false });
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({ state: "blocked", blockedOn: "external:condition" });
       expect(result).toHaveProperty("parkWarning", null);
