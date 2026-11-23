@@ -36,8 +36,8 @@ export const READ_THROUGH_TIMEOUT_MS = 5_000;
 // `/*` matches one-or-more tail segments. v1 = the MVP read screens
 // (topology / project / library / dashboard-ps) exactly.
 //
-// DELIBERATE EXCLUSIONS (recorded, not oversights): /api/queue/* (queue is
-// the MH-3 lane — MH-1's queue-negative boundary, read included for now);
+// DELIBERATE EXCLUSIONS (recorded, not oversights): other /api/queue/*
+// reads (only the explicit open-human-updates GET below is included);
 // /api/files/* (local FS discovery; the twin derives remote missions from
 // the host-keyed slice list instead); /api/slices/:name/proof-asset/*
 // (binary — the raw transport is text-only by design);
@@ -68,6 +68,7 @@ export const READ_THROUGH_ALLOWLIST = [
   // target keep its origin host — the detail read crosses the edge with the
   // same GET discipline as the reads above (origin shape stays the law).
   "/api/scopes/slice",
+  "/api/queue/open-human-updates",
 ] as const;
 
 export function isReadThroughPath(path: string): boolean {
