@@ -1,5 +1,6 @@
 import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
+import { isLaunchWrapperRuntime, sameLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
@@ -166,6 +167,10 @@ export interface SeatRefusal {
     | "cwd_persistence_failed"
     | "cwd_configuration_changed"
     | "cwd_destination_conflict"
+    | "invalid_launch_wrapper"
+    | "launch_wrapper_unsupported_runtime"
+    | "launch_wrapper_configuration_changed"
+    | "launch_wrapper_persistence_failed"
     | "missing_reason"
     | "permission_selection_refused"
     | "no_session"
@@ -243,6 +248,16 @@ interface SetCwdInput {
   reason: string;
   operator?: string | null;
 }
+
+export type SetLaunchWrapperResult =
+  | { ok: true; seat: SeatDescriptor; from: string[] | null; to: string[] | null; changed: boolean; effect: "next_launch" }
+  | SeatRefusal;
+
+type SetLaunchWrapperInput = SeatSettingTarget & {
+  argv: unknown;
+  reason: string;
+  operator?: string | null;
+};
 
 export type SetPolicyResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; changed: boolean; effect: string }
@@ -668,6 +683,51 @@ export class SeatLifecycleService {
     }
     if (persisted) this.eventBus.notifySubscribers(persisted);
     return { ok: true, seat, from, to, changed, effect: "next_launch", warnings };
+  }
+
+  /** Save only this seat's wrapper and audit event; its running occupant is untouched. */
+  async setLaunchWrapper(input: SetLaunchWrapperInput): Promise<SetLaunchWrapperResult> {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    const resolved = this.resolveSettingTarget(input);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const node = this.rigRepo.getRig(seat.rigId)?.nodes.find(candidate => candidate.id === seat.nodeId);
+    if (!node) return { ok: false, code: "seat_not_found", message: "The seat no longer exists.", guidance: SEAT_LOOKUP_GUIDANCE };
+    let argv: string[];
+    try {
+      argv = validateLaunchWrapper(input.argv);
+    } catch (error) {
+      return { ok: false, code: "invalid_launch_wrapper", message: (error as Error).message };
+    }
+    if (!isLaunchWrapperRuntime(node.runtime)) {
+      return { ok: false, code: "launch_wrapper_unsupported_runtime", message: "A launch wrapper requires a pi, codex, claude-code or supported community-harness seat." };
+    }
+    const from = node.launchWrapper ?? null;
+    const to = argv.length > 0 ? argv : null;
+    const changed = !sameLaunchWrapper(from, to);
+    let persisted: PersistedEvent | null = null;
+    try {
+      const refusal = this.db.transaction((): SeatRefusal | null => {
+        const current = this.resolveSettingTarget(input);
+        const currentNode = this.rigRepo.getRig(seat.rigId)?.nodes.find(candidate => candidate.id === node.id);
+        if ("code" in current || current.nodeId !== node.id || !currentNode
+          || currentNode.runtime !== node.runtime || !sameLaunchWrapper(currentNode.launchWrapper, from)) {
+          return { ok: false, code: "launch_wrapper_configuration_changed", message: "The seat's configuration changed; the launch wrapper was not changed." };
+        }
+        if (changed) {
+          if (!this.rigRepo.setNodeLaunchWrapper(node.id, to)) throw new Error("No node row was updated.");
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.launch_wrapper_changed", rigId: seat.rigId,
+            nodeId: node.id, logicalId: seat.logicalId, from, to, reason: input.reason.trim(), operator: input.operator ?? null });
+        }
+        return null;
+      })();
+      if (refusal) return refusal;
+    } catch (error) {
+      return { ok: false, code: "launch_wrapper_persistence_failed", message: `The launch wrapper was not changed: ${(error as Error).message}` };
+    }
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return { ok: true, seat, from, to, changed, effect: "next_launch" };
   }
 
   /** The runtime home a seat's next launch uses, with the occupant, original conversation and revision a recording is

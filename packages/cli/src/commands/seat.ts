@@ -924,7 +924,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-statusline-throttle" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-launch-wrapper" | "record-runtime-home" | "set-effort" | "set-statusline-throttle" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -1600,6 +1600,49 @@ A seat can switch itself (its CLI may end when it retires; the daemon finishes).
       }
       for (const warning of (data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
       if (data["recoveryPending"] === true) process.exitCode = 1;
+    });
+
+  cmd
+    .command("set-launch-wrapper")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--argv-file <path>", "JSON array of wrapper argument strings")
+    .option("--clear", "Remove the seat's stored launch wrapper")
+    .requiredOption("--reason <text>", "Audit reason for the future launch wrapper")
+    .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
+    .option("--json", "JSON output for agents")
+    .description("Save or clear an existing seat's wrapper for its next launch or handover")
+    .addHelpText("after", `
+Saves only this seat's launch wrapper and an audit event. The running process is
+untouched; the seat's next fresh launch or rebuild handover uses the saved wrapper.
+Choose exactly one of --argv-file <path> or --clear. The file contains a JSON array
+of strings, such as ["/usr/local/bin/wrapper", "--flag"]. Its first argument must
+be an absolute executable path or a bare command on the daemon PATH. An empty
+array or --clear removes the stored wrapper, so later launches use no wrapper.
+
+Example:
+  rig seat set-launch-wrapper dev@project --argv-file wrapper.json --reason "select launch environment"`)
+    .action(async (seat: string, opts: { argvFile?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if (Number(opts.argvFile !== undefined) + Number(opts.clear === true) !== 1) {
+        console.error("Choose exactly one of --argv-file <path> or --clear.");
+        process.exitCode = 1;
+        return;
+      }
+      let wrapper: unknown;
+      if (opts.argvFile !== undefined) {
+        try {
+          wrapper = JSON.parse(readFileSync(opts.argvFile, "utf8"));
+          if (!Array.isArray(wrapper) || !wrapper.every(arg => typeof arg === "string")) throw new Error("Expected an array of strings.");
+        } catch {
+          console.error(`Cannot read a JSON array of argument strings from ${opts.argvFile}.`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+      const choice = opts.clear ? { clear: true } : { wrapper };
+      await runLifecycleVerb("set-launch-wrapper", seat, { ...choice, reason: opts.reason, operator: opts.operator }, opts, data => {
+        console.log(`Launch wrapper ${data["changed"] === false ? "unchanged" : data["to"] === null ? "cleared and audited" : "recorded and audited"}.`);
+        console.log("The next fresh launch or rebuild handover uses the saved wrapper. The running process is untouched.");
+      });
     });
 
   cmd

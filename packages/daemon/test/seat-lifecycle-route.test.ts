@@ -65,6 +65,77 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
       reason: "isolate planning", operator: "operator@project" });
   });
 
+  it("set-launch-wrapper accepts wrapper and argv, clears to NULL and leaves the running seat alone", async () => {
+    const { node, sessionName } = seedSeat();
+    const sessions = db.prepare("SELECT * FROM sessions").all(), bindings = db.prepare("SELECT * FROM bindings").all();
+    const wrapper = ["wrapper", "--flag"];
+    const response = await setup.app.request(`/api/seat/set-launch-wrapper/${encodeURIComponent(sessionName)}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "sender@rig" },
+      body: JSON.stringify({ wrapper, reason: "select wrapper", operator: "body@rig" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, from: null, to: wrapper, changed: true, effect: "next_launch" });
+    const same = await post("set-launch-wrapper", sessionName, { argv: wrapper, reason: "same choice" });
+    expect(same.status).toBe(200);
+    expect(await same.json()).toMatchObject({ ok: true, changed: false });
+    const cleared = await post("set-launch-wrapper", sessionName, { clear: true, reason: "clear wrapper" });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ ok: true, from: wrapper, to: null, changed: true, effect: "next_launch" });
+    expect(db.prepare("SELECT launch_wrapper FROM nodes WHERE id = ?").get(node.id)).toEqual({ launch_wrapper: null });
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'node.launch_wrapper_changed' ORDER BY seq").all() as { payload: string }[];
+    expect(events.map(row => JSON.parse(row.payload))).toMatchObject([
+      { reason: "select wrapper", operator: "sender@rig", from: null, to: wrapper },
+      { reason: "clear wrapper", operator: null, from: wrapper, to: null },
+    ]);
+    expect(db.prepare("SELECT * FROM sessions").all()).toEqual(sessions);
+    expect(db.prepare("SELECT * FROM bindings").all()).toEqual(bindings);
+    expect(tmux().killSession).not.toHaveBeenCalled();
+    expect(tmux().createSession).not.toHaveBeenCalled();
+    expect(tmux().sendText).not.toHaveBeenCalled();
+  });
+
+  it("set-launch-wrapper supports the immutable node route and explicit operator", async () => {
+    const { node } = seedSeat();
+    const res = await setup.app.request(`/api/seat/set-launch-wrapper/node/${node.id}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ argv: ["wrapper"], reason: "select wrapper", operator: "operator@rig" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, seat: { nodeId: node.id }, to: ["wrapper"] });
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'node.launch_wrapper_changed'").get() as { payload: string };
+    expect(JSON.parse(event.payload).operator).toBe("operator@rig");
+  });
+
+  it.each([undefined, null, "wrapper", [1], ["./wrapper"], ["wrapper", "bad\narg"]].map(wrapper => ({ wrapper })))(
+    "set-launch-wrapper returns 400 for invalid argv $wrapper", async ({ wrapper }) => {
+      const { sessionName } = seedSeat();
+      const res = await post("set-launch-wrapper", sessionName, { wrapper, reason: "select wrapper" });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, code: "invalid_launch_wrapper" });
+    },
+  );
+
+  it.each(["null", "[]", "{broken", '{"wrapper": ["wrapper"]}', '{"clear": true, "reason": 42}'])(
+    "set-launch-wrapper rejects missing reason or malformed input %s", async body => {
+      seedSeat();
+      const res = await setup.app.request("/api/seat/set-launch-wrapper/dev-impl%40seat-rig", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, code: "missing_reason" });
+    },
+  );
+
+  it("set-launch-wrapper returns 409 for an unsupported runtime and 404 for a missing seat", async () => {
+    const { node, sessionName } = seedSeat();
+    db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = ?").run(node.id);
+    const unsupported = await post("set-launch-wrapper", sessionName, { wrapper: ["wrapper"], reason: "select wrapper" });
+    expect(unsupported.status).toBe(409);
+    expect(await unsupported.json()).toMatchObject({ ok: false, code: "launch_wrapper_unsupported_runtime" });
+    const missing = await post("set-launch-wrapper", "ghost@seat-rig", { wrapper: ["wrapper"], reason: "select wrapper" });
+    expect(missing.status).toBe(404);
+  });
+
   // R3 (#2829 review): the stop route records sender ELSE body --operator, dropping daemon: from either.
   it("stop records the body --operator when there is no transport sender", async () => {
     const stopSeat = vi.spyOn(SeatLifecycleService.prototype, "stopSeat").mockResolvedValue({ ok: true } as never);
