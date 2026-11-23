@@ -123,22 +123,19 @@ export async function daemonHumanReadiness(entityId: string): Promise<HumanReadi
   }
 }
 
+/** How long add waits for the seat names before registering without the warning. */
+const SEAT_NAMES_TIMEOUT_MS = 2_000;
+
 /** The seats on this daemon whose session names `isPerson` reads as a registered person, for add's warning: a seat
- *  whose member name is a person's id is treated as that person. Best effort: none when the daemon can't be read. */
+ *  whose member name is a person's id is treated as that person. One read (`/api/ps?seats=true`), bounded by
+ *  SEAT_NAMES_TIMEOUT_MS. Best effort: none when the daemon can't be read in time, or doesn't list seat names. */
 export async function seatsReadAsPerson(isPerson: (session: string) => boolean): Promise<string[]> {
   try {
     const { DaemonClient } = await import("../client.js");
-    const client = new DaemonClient();
-    const rigs = await client.get<Array<{ rigId?: string }>>("/api/ps");
+    const rigs = await new DaemonClient().get<Array<{ seats?: unknown }>>("/api/ps?seats=true", { timeoutMs: SEAT_NAMES_TIMEOUT_MS });
     if (rigs.status !== 200 || !Array.isArray(rigs.data)) return [];
-    const seats: string[] = [];
-    for (const rig of rigs.data) {
-      if (!rig.rigId) continue;
-      const nodes = await client.get<Array<{ canonicalSessionName?: string | null }>>(`/api/rigs/${encodeURIComponent(rig.rigId)}/nodes`);
-      if (nodes.status !== 200 || !Array.isArray(nodes.data)) continue;
-      for (const node of nodes.data) if (node.canonicalSessionName && isPerson(node.canonicalSessionName)) seats.push(node.canonicalSessionName);
-    }
-    return seats;
+    return rigs.data.flatMap((rig) => Array.isArray(rig.seats)
+      ? rig.seats.filter((seat): seat is string => typeof seat === "string" && isPerson(seat)) : []);
   } catch { return []; }
 }
 

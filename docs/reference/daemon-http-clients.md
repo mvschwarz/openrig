@@ -323,6 +323,9 @@ What reads these declarations:
 
 ## Route details
 
+- **Every seat's name in one read:** `GET /api/ps?seats=true` adds `seats`, the rig's seat session names, to each
+  entry of the usual `/api/ps` body, from the same read. Use it instead of reading each rig's nodes when only the
+  names are needed. The default body has no `seats`, and neither does a daemon from before this option.
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
   rig's queue items (any whose source or destination seat is in the rig) updated at or after that time: open items
   (`pending`, `in-progress`, `blocked`) first, then the rest by latest update. `limit` defaults to 100 and has no

@@ -138,16 +138,23 @@ describe("rig gateway human add verb (post-relocate)", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
-  it("warns when a seat's member name is the new person's id, since that seat is then treated as the person", async () => {
+  /** A stand-in daemon answering `/api/ps?seats=true` with `rigs` (null: never answers it); the paths it was asked. */
+  async function fakeDaemon(rigs: unknown[] | null): Promise<{ asked: string[]; close: () => Promise<void> }> {
+    const asked: string[] = [];
     const server = createServer((req, res) => {
-      const body = req.url === "/api/ps" ? [{ rigId: "r1" }]
-        : req.url === "/api/rigs/r1/nodes" ? [{ canonicalSessionName: "mike@team" }, { canonicalSessionName: "ops-lead@team" }, { canonicalSessionName: null }]
-        : null;
+      if (req.url?.startsWith("/api/")) asked.push(req.url);
+      if (req.url === "/api/ps?seats=true" && rigs === null) return; // holds the request open
+      const body = req.url === "/api/ps?seats=true" ? rigs : null;
       res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
       res.end(JSON.stringify(body ?? {}));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    return { asked, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  }
+
+  it("warns when a seat's member name is the new person's id, since that seat is then treated as the person", async () => {
+    const daemon = await fakeDaemon([{ rigId: "r1", seats: ["mike@team", "ops-lead@team"] }, { rigId: "r2", seats: [] }]);
     try {
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
       const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -159,13 +166,37 @@ describe("rig gateway human add verb (post-relocate)", () => {
           + "That's intended for the person's own pane; otherwise rename the seat or choose another id.",
       ]);
       expect(process.exitCode).toBeUndefined();
+      // One read for every rig's seats, not a node read per rig.
+      expect(daemon.asked).toEqual(["/api/ps?seats=true"]);
       // No seat shares the name: nothing is said.
       error.mockClear();
       const other = createProgram(); other.exitOverride();
       await other.parseAsync(["node", "rig", "gateway", "human", "add", "ana", "--display-name", "Ana", "--binding", "slack:main:vault://slack/ana:primary", "--delivery-class", "B"]);
       expect(error).not.toHaveBeenCalled();
-    } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+    } finally { await daemon.close(); }
   });
+
+  it("registers without the warning when the daemon lists no seat names or doesn't answer in time", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const add = async (id: string) => {
+      const program = createProgram(); program.exitOverride();
+      await program.parseAsync(["node", "rig", "gateway", "human", "add", id, "--display-name", id, "--binding", `slack:main:vault://slack/${id}:primary`, "--delivery-class", "B"]);
+      expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true, entityId: id });
+    };
+    // A daemon that doesn't list seat names (an earlier version): the person is registered, nothing is said.
+    const older = await fakeDaemon([{ rigId: "r1" }]);
+    try { await add("mike"); } finally { await older.close(); }
+    // A daemon that holds the read: add stops waiting at its bound and still registers the person.
+    const stalled = await fakeDaemon(null);
+    try {
+      const started = Date.now();
+      await add("ana");
+      expect(Date.now() - started).toBeLessThan(4_500);
+    } finally { await stalled.close(); }
+    expect(error).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  }, 10_000);
 
   it("A6 v3: an OPTIONAL handle= token parses alongside a ':'-bearing secretsRef (inbound-resolvable)", async () => {
     const program = createProgram();
