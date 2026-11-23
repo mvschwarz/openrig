@@ -1193,6 +1193,8 @@ export interface QueueDestinationAdvisory {
   message: string;
 }
 
+export { buildQueueTransfer } from "./queue-transfer-export.js";
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly deliveryDrains: RigDeliveryDrainStore;
@@ -4600,6 +4602,18 @@ export class QueueRepository {
     return "park_timer_target_terminal";
   }
 
+  /** A usage-limit blocker's timer is a time event with no recipient: the blocker is addressed to `wake-ladder@<rig>`,
+   *  which no seat carries, so an input delivery can never succeed (#3704). When every row this job currently wakes is
+   *  such a blocker, its due fire is recorded here, before transport: the blocker resolves once and its dependents are
+   *  released. Returns the job's terminal reason, or null to keep the send path. */
+  fireUsageLimitTimerWithoutDelivery(jobId: string): string | null {
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
+    if (targets.length === 0
+      || !targets.every(({ qitemId }) => this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG))) return null;
+    this.recordWatchdogWakeAttempt(jobId, "no-recipient");
+    return "usage_limit_expiry_fired";
+  }
+
   /** OPR.0.7.0.12 — the current park's recorded continuation, bounded (see the transition log). */
   currentParkContinuation(qitemId: string): string | null {
     return this.transitionLog.currentParkContinuation(qitemId);
@@ -5509,21 +5523,21 @@ export class QueueRepository {
    *  about this seat's own prompt that nobody holds is left out: with no operator seat to carry it, the alert falls back
    *  to the seat itself, and the escalation is the wake, not the content, so it is never that seat's work. One its owner
    *  explicitly holds (blocked) stays, so that hold and its wake are diagnosed as before; so does a row whose tags aren't
-   *  a JSON array. */
-  listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }> {
+   *  a JSON array. Each row carries its blocker and last update, so a hold is shown with what it waits on and its age. */
+  listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null; blockedOn: string | null; updatedAt: string }> {
     const addresses = this.resolveSessionAddresses(destinationSession);
     const slots = addresses.map(() => "?").join(",");
     const ownPrompt = addresses.flatMap((address) => [`prompt-destination:${address}`, `consumed-prompt-destination:${address}`]);
     const rows = this.db.prepare(
-      `SELECT qitem_id, state${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
+      `SELECT qitem_id, state, blocked_on, ts_updated${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
         WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress', 'blocked')
           AND NOT CASE WHEN state != 'blocked' AND json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN
             EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
             AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value IN (${ownPrompt.map(() => "?").join(",")}))
           ELSE 0 END ELSE 0 END
         ORDER BY ts_created DESC LIMIT ?`,
-    ).all(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null }>;
-    return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null }));
+    ).all(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null; blocked_on: string | null; ts_updated: string }>;
+    return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null, blockedOn: r.blocked_on, updatedAt: r.ts_updated }));
   }
 
   list(opts: QueueListOptions & { compact: true }): CompactQueueItem[];

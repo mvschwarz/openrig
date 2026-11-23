@@ -1212,3 +1212,121 @@ describe("TerminalSessionBroker - window sizing after the last viewer", () => {
     expect(window).toEqual({ own: null, recorded: "" });
   });
 });
+
+// ---- the pane's size, told to a viewer that asked for it ---------------------
+
+describe("pane size for a viewer that asked (geometry)", () => {
+  type SizedSub = FakeSub & { sizes: Array<[number, number]>; order: string[] };
+  function makeSizedSub(): SizedSub {
+    const sub = makeSub();
+    const sizes: Array<[number, number]> = [];
+    const order: string[] = [];
+    return {
+      ...sub,
+      sizes,
+      order,
+      send: (d: string) => { sub.received.push(d); order.push("output"); },
+      geometry: (cols: number, rows: number) => { sizes.push([cols, rows]); order.push(`size ${cols}x${rows}`); },
+    };
+  }
+
+  it("is told the size once at join, before the history replay and the screen", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: async () => "screen",
+      getPaneCursorPosition: async () => ({ x: 0, y: 0, width: 132, height: 41 }),
+    }), { pollMs: 10 }));
+    const first = makeSub();
+    await broker.attach(first);
+    fs.appendFileSync(broker.pipeOutputPath!, "plain history\n");
+    await vi.waitFor(() => expect(first.received.join("")).toContain("plain history"), { timeout: 1000 });
+
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    expect(sized.order).toEqual(["size 132x41", "output", "output"]);
+    expect(sized.received[0]).toBe("plain history\n");
+  });
+
+  it("a viewer that didn't ask gets no size, and the liveness tick reads no size for it", async () => {
+    const getPaneCursorPosition = vi.fn(async () => ({ x: 0, y: 0, width: 132, height: 41 }));
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ getPaneCursorPosition }), { pollMs: 10, livenessMs: 10 }));
+    await broker.attach(makeSub());
+    await new Promise((r) => setTimeout(r, 80));
+    expect(getPaneCursorPosition).toHaveBeenCalledOnce(); // the seed's own cursor read, as before
+  });
+
+  it("a size change is sent once, on the liveness tick", async () => {
+    let size = { x: 0, y: 0, width: 80, height: 24 };
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ getPaneCursorPosition: async () => size }), {
+      pollMs: 10, livenessMs: 10,
+    }));
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sized.sizes).toEqual([[80, 24]]);
+
+    size = { x: 3, y: 2, width: 100, height: 30 };
+    await vi.waitFor(() => expect(sized.sizes).toEqual([[80, 24], [100, 30]]), { timeout: 1000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sized.sizes).toEqual([[80, 24], [100, 30]]);
+  });
+
+  it("an unreadable size sends nothing and keeps the viewer attached", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: async () => "screen",
+      getPaneCursorPosition: async () => { throw new Error("tmux unavailable"); },
+    }), { pollMs: 10, livenessMs: 10 }));
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sized.sizes).toEqual([]);
+    expect(sized.closed).toEqual([]);
+    expect(broker.subscriberCount).toBe(1);
+    expect(sized.received.join("")).toContain("screen");
+  });
+
+  it("with fixed geometry on, the size told is the pinned 90x27", async () => {
+    let size = { width: 200, height: 50 };
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      readWindow: async () => ({ id: "@2", userOption: "" }),
+      getWindowLocalOption: async () => null,
+      resizeWindow: async (_target: string, cols: number, rows: number) => { size = { width: cols, height: rows }; return { ok: true }; },
+      getPaneCursorPosition: async () => ({ x: 0, y: 0, ...size }),
+    }), { fixedGeometry: true, pollMs: 10 }));
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    expect(sized.sizes).toEqual([[90, 27]]);
+  });
+
+  it("a viewer that leaves and rejoins is told the size again", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      getPaneCursorPosition: async () => ({ x: 0, y: 0, width: 80, height: 24 }),
+    }), { pollMs: 10 }));
+    await broker.attach(makeSub()); // keeps the broker alive across the detach
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    broker.detach(sized);
+    await broker.attach(sized);
+    expect(sized.sizes).toEqual([[80, 24], [80, 24]]);
+  });
+
+  it("a viewer that leaves while scrolling back to live is told nothing more, neither a size nor the screen", async () => {
+    let hold: Promise<void> | null = null;
+    let release = () => {};
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: async () => { if (hold) await hold; return "screen"; },
+      getPaneCursorPosition: async () => ({ x: 0, y: 0, width: 80, height: 24 }),
+    }), { pollMs: 10 }));
+    await broker.attach(makeSub()); // keeps the broker alive across the detach
+    const sized = makeSizedSub();
+    await broker.attach(sized);
+    await broker.scroll(sized, 5);
+    hold = new Promise((r) => { release = r; });
+    const back = broker.scroll(sized, 0); // the repaint waits on tmux
+    broker.detach(sized);
+    const told = sized.order.length;
+    release();
+    await back;
+    expect(sized.order.length).toBe(told);
+    expect(sized.sizes).toEqual([[80, 24]]);
+  });
+});

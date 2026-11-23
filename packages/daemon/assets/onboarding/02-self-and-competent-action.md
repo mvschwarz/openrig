@@ -37,6 +37,12 @@ Compose aggressively while reading. Use shell tools, the database, source, and e
 to make larger questions answerable. Be deliberate when mutating. Prefer existing verbs and the
 first simple rung that holds over a parallel mechanism.
 
+Your pane is not a machine of your own. By default every seat runs in its user's default tmux server
+(with `terminal.tmux_server: isolated`, one server per OpenRig home), and inside a pane an unnamed
+`tmux` command reaches that pane's server. Run tmux experiments on their own socket, with `-L <name>`
+or `-S <path>` on every command, and never run `tmux kill-server` without one: from a seat, it ends
+every agent on that server.
+
 Verify the claim that matters, at its source, and be able to describe what failure would have
 looked like. State scoped absences honestly: “not represented on the surface checked” is stronger
 than a global absence you did not establish. If another seat must act, transfer durable work rather
