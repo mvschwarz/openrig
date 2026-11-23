@@ -2630,6 +2630,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         watchdogJobsRepoInstance.findContextUsageForSession(s, occupantGeneration),
       resolvePreDeliveryTerminalReason: ({ jobId }) =>
         queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      fireWithoutDelivery: ({ jobId }) => queueRepoInstance.fireUsageLimitTimerWithoutDelivery(jobId),
       resolveQueueWait: (input) => queueRepoInstance.evaluateWaitReminder(input),
       onWakeAttempt: ({ jobId, deliveryStatus, retryAt, queuedQitemId, targetSession }) => {
         queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt, { queuedQitemId, targetSession });
