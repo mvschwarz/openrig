@@ -30,6 +30,20 @@ describe("transcript redaction keeps identifiers", () => {
     }
   });
 
+  it("runs in linear time on repeated key headers and long runs of spaces", () => {
+    // A lazy scan from each BEGIN line to an END line that never comes is quadratic: about 2 s here.
+    const started = performance.now();
+    redactTranscriptContent("-----BEGIN " + "PRIVATE KEY-----" + ("-----BEGIN " + "PRIVATE KEY-----a").repeat(20_000));
+    redactTranscriptContent("aws_secret_access_key" + " ".repeat(200_000) + "x");
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it("keeps the named context in front of a masked value", () => {
+    expect(redactTranscriptContent("aws_secret_access_key = " + "wJalr" + "X".repeat(35))).toBe("aws_secret_access_key = [REDACTED]");
+    expect(redactTranscriptContent("https://deploy:" + "hunter2hunter2" + "@git.example.com/r.git")).toBe("https://[REDACTED]@git.example.com/r.git");
+    expect(redactTranscriptContent(`a ${privateKey} b`)).toBe("a [REDACTED] b");
+  });
+
   it("is the rule the CLI's restore packets import", () => {
     expect(surface.TRANSCRIPT_SECRET_PATTERNS).toBe(TRANSCRIPT_SECRET_PATTERNS);
     expect(surface.redactTranscriptContent).toBe(redactTranscriptContent);

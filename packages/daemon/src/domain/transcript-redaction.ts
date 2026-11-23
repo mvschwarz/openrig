@@ -7,7 +7,9 @@
 // a restored seat or a reading agent needs, so no pattern here matches a bare run of hex or a path.
 // An earlier rule masked any 40-character base64-shaped run, which erased exactly those.
 
-/** Explicit credential shapes, each a known token or key format rather than a length rule. */
+/** Explicit credential shapes, each a known token or key format rather than a length rule. A pattern's first
+ *  capture group, when it has one, is the visible context kept in front of `[REDACTED]`. Every pattern runs in
+ *  linear time on transcript-sized text: bounded repeats where classes overlap, and no lazy scan or lookbehind. */
 export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/g, // OpenAI and Anthropic API keys
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, // GitHub tokens
@@ -20,22 +22,23 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bxapp-[A-Za-z0-9-]{10,}/g, // Slack app-level tokens
   /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/g, // Slack incoming webhook URLs
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
-  /(?<=\baws_secret_access_key["']?\s*[=:]\s*["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named
+  /(\baws_secret_access_key["']?\s{0,8}[=:]\s{0,8}["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named
   /\bAIza[0-9A-Za-z_-]{35}/g, // Google API keys
   /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JSON Web Tokens
-  // Private keys: the whole block, or everything after a BEGIN line whose END was cut off.
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*)/g,
-  /(?<=\bhttps?:\/\/)[^\s/@:]+:[^\s/@]+(?=@)/g, // a user and password in a URL
+  // Private keys: the BEGIN line, its base64 body and the END line when it's there (a body cut off before its END
+  // line still goes). The body class has no "-", so a match can't run on into another key or the END line.
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[A-Za-z0-9+/=\s]*(?:-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
+  /(\bhttps?:\/\/)[^\s/@:]+:[^\s/@]+(?=@)/g, // a user and password in a URL
 ];
 
 /**
- * Replace each credential match with the literal `[REDACTED]`, keeping everything around it.
- * Pure function; no side effects.
+ * Replace each credential match with the literal `[REDACTED]`, keeping everything around it, and the pattern's
+ * first capture group when it has one. Pure function; no side effects.
  */
 export function redactTranscriptContent(text: string): string {
   let out = text;
   for (const pattern of TRANSCRIPT_SECRET_PATTERNS) {
-    out = out.replace(pattern, "[REDACTED]");
+    out = out.replace(pattern, (_match, kept: unknown) => `${typeof kept === "string" ? kept : ""}[REDACTED]`);
   }
   return out;
 }
