@@ -385,7 +385,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const result = await svc.assignmentPlan({ rig, provider: provider as AccountRefProvider, label, includeOverrides: c.req.query("includeOverrides") === "1",
       ...(accountHome !== undefined ? { accountHome } : {}), daemon: getSelfHostId() ?? LOCAL_HOST_ID }, seatRestartOf(c), claudeSeatOf(c),
     successorDryRun(c));
-    return c.json(result, result.ok ? 200 : result.code === "reference_unusable" ? 409 : 404);
+    return c.json(result, result.ok ? 200 : result.code === "reference_unusable" || result.code === "rig_ambiguous" ? 409 : 404);
   });
 
   // #3625 slice 3: apply the plan the person saw (named by its digest), one seat at a time. 200 with each seat's result

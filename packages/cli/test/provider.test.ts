@@ -879,9 +879,21 @@ describe("rig provider status shows each seat against its rig's assignment (#362
     expect(logs[logs.indexOf("h@fleet: unchanged: still as the apply of team left its home") + 1]).toBe("  the login active in /homes/a isn't read: if it was switched since (by hand, rig provider switch, or another rig's apply on the same home), this plan doesn't see it and won't move this seat again");
     expect(logs).toContain("r@fleet: unchanged, already on team");
     // An unchanged seat that restarts with its switched home shows its restart's precheck when it's unsafe.
-    const x = logs.indexOf("x@fleet: unchanged, already on team");
+    const x = logs.indexOf("x@fleet: unchanged, already on team; activity idle");
     expect(logs.slice(x + 1, x + 3)).toEqual(["  precheck UNSAFE: seat_restart_refused", "  pane_unverified: no bound pane"]);
     expect(logs[logs.indexOf("r@fleet: unchanged, already on team") + 1]).not.toMatch(/precheck/);
+  });
+
+  it("the text plan shows a busy seat that restarts with its switched home: its restart note and what it's doing", async () => {
+    const restarts = "already on team; moves with its home: the switch makes team the active login of /homes/a, which this seat runs on, so it restarts with it";
+    const plan = { daemon: "host-a", rig: "fleet", rigId: "rig-fleet", provider: "codex", account: { label: "team", reference: "the login team saved in /homes/a" }, includeOverrides: false,
+      rows: [{ seat: "busy@fleet", runtime: "codex", current: "saved login team (seat registry)", effect: "unchanged", activity: "running",
+        precheck: { safe: true, reasons: [] }, notes: [restarts] }],
+      codexHomes: [], digest: "0123456789ab", note: "" };
+    const { logs } = await run(["assign", "fleet", "--provider", "codex", "--account", "team"], deps(() => ({ ok: true, plan })));
+    const at = logs.indexOf("busy@fleet: unchanged, already on team; activity running");
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(logs[at + 1]).toBe(`  ${restarts}`);
   });
 
   it("--host doesn't combine with --all-hosts or --hosts, and asks nothing", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { shellArg } from "../../adapters/shell-quote.js";
 import type { ClaudeSeatTokenRef } from "../claude-seat-token.js";
 import type { AppliedAccount, AssignmentIntent, AssignmentResultKind } from "./provider-account-assignments.js";
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
@@ -12,6 +13,8 @@ import type { SeatAccountConfiguration } from "./provider-types.js";
 /** What the daemon knows about one seat, on any rig (other rigs matter for Codex seats sharing a home). */
 export interface PlanSeatFacts {
   session: string;
+  /** The seat's rig: two rigs can share a name, so a rig is told apart by its id. */
+  rigId: string;
   rigName: string;
   runtime: string;
   /** The seat's configured account (`configuredSeatAccounts`): what its next launch uses, not proof of its login. */
@@ -38,7 +41,10 @@ export interface PlanSeatFacts {
 export interface AssignmentPlanInput {
   /** Where the plan applies: this daemon's host id. */
   daemon: string;
+  /** The rig's name, as it's shown. */
   rig: string;
+  /** The rig's id: its seats are the ones with this id, whatever other rig shares its name. */
+  rigId: string;
   account: AccountRef;
   seats: PlanSeatFacts[];
   includeOverrides: boolean;
@@ -78,12 +84,14 @@ export interface PlanRow {
 export interface PlanHomePeer {
   seat: string;
   rig: string;
+  rigId: string;
   effect: string;
 }
 
 export interface AssignmentPlan {
   daemon: string;
   rig: string;
+  rigId: string;
   provider: AccountRefProvider;
   account: { label: string; kind: AccountRef["kind"]; reference: string };
   includeOverrides: boolean;
@@ -105,11 +113,11 @@ const NOTHING_CHANGED = "A plan only: nothing was changed. Apply exactly this pl
  *  carry the busy note), precheck messages, the last results and the stored assignment. */
 export function planDigest(plan: Omit<AssignmentPlan, "digest">): string {
   const material = {
-    daemon: plan.daemon, rig: plan.rig, provider: plan.provider, account: plan.account, includeOverrides: plan.includeOverrides,
+    daemon: plan.daemon, rig: plan.rig, rigId: plan.rigId, provider: plan.provider, account: plan.account, includeOverrides: plan.includeOverrides,
     accountHome: plan.accountHome ?? null,
     rows: plan.rows.map((r) => [r.seat, r.runtime, r.current, r.effect, r.override ?? null,
       r.precheck ? [r.precheck.safe, [...r.precheck.reasons].sort()] : null, r.continuity ?? null]),
-    codexHomes: plan.codexHomes.map((h) => [h.home, h.seats.map((s) => [s.seat, s.rig, s.effect])]),
+    codexHomes: plan.codexHomes.map((h) => [h.home, h.seats.map((s) => [s.seat, s.rigId, s.effect])]),
   };
   return createHash("sha256").update(JSON.stringify(material)).digest("hex").slice(0, 12);
 }
@@ -230,7 +238,7 @@ function continuity(seat: PlanSeatFacts, input: AssignmentPlanInput, check: Plan
 export async function planAssignment(input: AssignmentPlanInput, check: (seat: PlanSeatFacts) => Promise<PlanCheck>): Promise<AssignmentPlan> {
   const { account } = input;
   const runtime = RUNTIME_OF[account.provider];
-  const inRig = input.seats.filter((s) => s.rigName === input.rig);
+  const inRig = input.seats.filter((s) => s.rigId === input.rigId);
 
   // First what each seat would do, then which Codex homes switch in place: a seat on a switching home moves with it,
   // whatever its own choice, because the switch changes that home's active login.
@@ -295,12 +303,12 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
   for (const home of switching) { const key = input.resolveHome?.(home) ?? home; if (!keys.has(key)) keys.set(key, home); }
   for (const [key, home] of [...keys].sort(([a], [b]) => a.localeCompare(b))) {
     codexHomes.push({ home, seats: input.seats.filter((s) => s.runtime === "codex" && s.codexHome !== null && (input.resolveHome?.(s.codexHome) ?? s.codexHome) === key)
-      .map((s) => ({ seat: s.session, rig: s.rigName,
-        effect: s.rigName === input.rig ? "would restart" : `not restarted; needs rig seat restart ${s.session}` })) });
+      .map((s) => ({ seat: s.session, rig: s.rigName, rigId: s.rigId,
+        effect: s.rigId === input.rigId ? "would restart" : `not restarted; needs rig seat restart ${shellArg(s.session)}` })) });
   }
 
   const plan: Omit<AssignmentPlan, "digest"> = {
-    daemon: input.daemon, rig: input.rig, provider: account.provider,
+    daemon: input.daemon, rig: input.rig, rigId: input.rigId, provider: account.provider,
     account: { label: account.label, kind: account.kind, reference: describeAccountRef(account) },
     includeOverrides: input.includeOverrides, ...(input.accountHome ? { accountHome: input.accountHome } : {}),
     rows, codexHomes,

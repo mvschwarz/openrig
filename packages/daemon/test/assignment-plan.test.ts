@@ -11,7 +11,7 @@ const CODEX: AccountRef = { provider: "codex", label: "team", kind: "codex_saved
 function seat(session: string, over: Partial<PlanSeatFacts> = {}): PlanSeatFacts {
   const runtime = over.runtime ?? "claude-code";
   return {
-    session, rigName: "fleet", runtime,
+    session, rigId: `id-${over.rigName ?? "fleet"}`, rigName: "fleet", runtime,
     configured: { source: "default_login", home: runtime === "codex" ? "/homes/a" : "/home/u/.claude", homeNote: "n" },
     claudeRef: null, ownHome: null, codexHome: runtime === "codex" ? "/homes/a" : null,
     running: runtime === "claude-code" ? true : null, activity: "idle",
@@ -21,7 +21,7 @@ function seat(session: string, over: Partial<PlanSeatFacts> = {}): PlanSeatFacts
 const SAFE: PlanCheck = { safe: true };
 
 function plan(input: Partial<AssignmentPlanInput> & Pick<AssignmentPlanInput, "account" | "seats">, precheck = vi.fn(async (_s: PlanSeatFacts): Promise<PlanCheck> => SAFE)) {
-  return { result: planAssignment({ daemon: "host-a", rig: "fleet", includeOverrides: false, platform: "linux", ...input }, precheck), precheck };
+  return { result: planAssignment({ daemon: "host-a", rig: "fleet", rigId: "id-fleet", includeOverrides: false, platform: "linux", ...input }, precheck), precheck };
 }
 
 describe("the assignment plan", () => {
@@ -146,9 +146,9 @@ describe("the assignment plan", () => {
     ] }).result;
     expect(p.rows.map((r) => r.seat)).toEqual(["c1@fleet", "c2@fleet"]);
     expect(p.codexHomes).toEqual([{ home: "/homes/a", seats: [
-      { seat: "c1@fleet", rig: "fleet", effect: "would restart" },
-      { seat: "c2@fleet", rig: "fleet", effect: "would restart" },
-      { seat: "peer@other", rig: "other", effect: "not restarted; needs rig seat restart peer@other" },
+      { seat: "c1@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" },
+      { seat: "c2@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" },
+      { seat: "peer@other", rig: "other", rigId: "id-other", effect: "not restarted; needs rig seat restart peer@other" },
     ] }]);
     // A seat's own choice can't keep it off a home that switches: it moves with the home, and the row says so.
     const reg = { source: "registry" as const, profileRef: "other", recordedAt: "t", profileSaved: true };

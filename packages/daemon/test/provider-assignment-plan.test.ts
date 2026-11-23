@@ -14,6 +14,7 @@ import { ProviderServiceImpl } from "../src/domain/provider/provider-service-imp
 import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
 import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
 import type { SeatRestart } from "../src/domain/provider/provider-service.js";
+import { applyAssignment } from "../src/domain/provider/assignment-apply.js";
 
 // The account-home dry run computes paths under OPENRIG_HOME: a scratch path, never the real one. Set before any import.
 const scratchHome = vi.hoisted(() => (process.env.OPENRIG_HOME = `${process.env.TMPDIR ?? "/tmp"}/assignment-plan-openrig-${process.pid}`));
@@ -91,6 +92,31 @@ describe("the daemon's assignment plan", () => {
     const elsewhere = path.join(dir, "elsewhere");
     fs.mkdirSync(elsewhere);
     expect(await effectAfter(elsewhere)).toBe("kept_override");
+  });
+
+  it("a seat already on the target's saved login, brought in with --include-overrides on a move to a prepared home, records the login it has and follows the next assignment", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    fs.writeFileSync(path.join(codexHome, "auth-profiles", "next.json"), CONTENT, { mode: 0o600 });
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    expect(refs.add({ provider: "codex", label: "next", codexHome, login: "next" }).ok).toBe(true);
+    seat("fleet", "c1", "codex", "c1@fleet");
+    // The seat registry gives c1 the saved login "team" in the daemon's Codex home: its own choice, and the target's login.
+    fs.writeFileSync(path.join(codexHome, "auth-seat-registry.tsv"), "seat\trig\truntime\tcwd\tauth_profile\tupdated_ts\nc1@fleet\tfleet\tcodex\t/w\tteam\t2026-11-21T06:00:00Z\n", { mode: 0o600 });
+    const prepared = path.join(dir, "prepared");
+    fs.mkdirSync(prepared);
+    const svc = service();
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: true, accountHome: prepared, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request);
+    if (!planned.ok) throw new Error(planned.message);
+    // It isn't moved to the prepared home: it's already on the account.
+    expect(planned.plan.rows.map((r) => [r.seat, r.effect])).toEqual([["c1@fleet", "unchanged"]]);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, {});
+    expect(applied.ok && applied.report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "unchanged"]]);
+    // It records the reference it has, the saved login in the home that login is saved in, not the prepared home.
+    expect(new ProviderAccountAssignmentsRepository(db).results("rig-fleet", "codex")[0]!.applied).toMatchObject({ codexHome, codexLogin: "team" });
+    // So it follows the rig's assignment: the next one moves it, rather than keeping it as its own choice.
+    const next = await svc.assignmentPlan({ rig: "fleet", provider: "codex", label: "next", includeOverrides: false, daemon: "host-a" });
+    expect(next.ok ? next.plan.rows.map((r) => [r.seat, r.effect]) : next.message).toEqual([["c1@fleet", "change"]]);
   });
 
   it("a Codex seat an apply moved to a prepared home is on the account only as that apply left it: its home's login wasn't checked", async () => {
@@ -185,6 +211,39 @@ describe("the daemon's assignment plan", () => {
     expect(await effectAfter(elsewhere)).toBe("kept_override");
   });
 
+  it("two rigs share a name and a Codex home: the plan and apply restart only the chosen rig's seats; the other rig's seat is an outside peer", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    // Both rigs are named fleet and run on the daemon's Codex home, with different members.
+    for (const [rigId, ids] of [["rig-a", ["a1", "a2"]], ["rig-b", ["b1"]]] as const) {
+      db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'fleet')").run(rigId);
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      for (const id of ids) {
+        db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, 'codex', '/w', ?)").run(id, rigId, `dev.${id}`, `pod-${rigId}`);
+        db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, 'running', 'ready')").run(`sess-${id}`, id, `${id}@fleet`);
+      }
+    }
+    const plan = vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never);
+    const planned = await service().assignmentPlan({ rig: "rig-a", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" }, { plan, run: vi.fn() });
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.rows.map((r) => [r.seat, r.effect, r.precheck?.safe])).toEqual([["a1@fleet", "change", true], ["a2@fleet", "change", true]]);
+    expect(planned.plan.codexHomes).toEqual([{ home: codexHome, seats: [
+      { seat: "a1@fleet", rig: "fleet", rigId: "rig-a", effect: "would restart" },
+      { seat: "a2@fleet", rig: "fleet", rigId: "rig-a", effect: "would restart" },
+      { seat: "b1@fleet", rig: "fleet", rigId: "rig-b", effect: "not restarted; needs rig seat restart b1@fleet" },
+    ] }]);
+
+    // The apply of that plan: one switch of the home, the chosen rig's other seat restarts on it, and the other rig's seat
+    // is reported with its restart command, never restarted.
+    const switchSeat = vi.fn(async () => ({ outcome: "succeeded" as const, message: "switched" }));
+    const restartPeer = vi.fn(async () => ({ ok: true as const, outcome: "restarted_account_unverified", message: "restarted" }));
+    const report = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat, restartPeer, activityOf: () => "idle", save: () => {}, now: () => "t" });
+    expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["a1@fleet", "switched"], ["a2@fleet", "switched"]]);
+    expect(switchSeat.mock.calls.map(([s]) => s)).toEqual(["a1@fleet"]);
+    expect(restartPeer.mock.calls.map(([s]) => s)).toEqual(["a2@fleet"]);
+    expect(report.otherRigPeers).toEqual([{ seat: "b1@fleet", rig: "fleet", home: codexHome, command: "rig seat restart b1@fleet --keep-conversation" }]);
+  });
+
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
@@ -205,8 +264,8 @@ describe("the daemon's assignment plan", () => {
     expect(plan.mock.calls.map(([s]) => s)).toEqual(["c1@fleet"]);
     expect(result.plan.rows[0]!.precheck).toMatchObject({ safe: false, reasons: ["seat_restart_refused"] });
     expect(result.plan.codexHomes).toEqual([{ home: codexHome, seats: [
-      { seat: "c1@fleet", rig: "fleet", effect: "would restart" },
-      { seat: "p1@other", rig: "other", effect: "not restarted; needs rig seat restart p1@other" },
+      { seat: "c1@fleet", rig: "fleet", rigId: "rig-fleet", effect: "would restart" },
+      { seat: "p1@other", rig: "other", rigId: "rig-other", effect: "not restarted; needs rig seat restart p1@other" },
     ] }]);
   });
 
@@ -274,6 +333,17 @@ describe("GET /api/provider/assignment-plan", () => {
     a.route("/api/provider", providerRoutes());
     return a;
   }
+
+  it("a rig name two rigs share is 409 rig_ambiguous with both ids, and nothing changes", async () => {
+    new ProviderAccountRefsRepository(db).add({ provider: "claude", label: "max-2", tokenFile: privateFile("token") });
+    seat("fleet", "a", "claude-code", "a@fleet");
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-fleet-2', 'fleet')").run();
+    const before = everything();
+    const res = await app().request("/api/provider/assignment-plan?rig=fleet&provider=claude&account=max-2");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, code: "rig_ambiguous", candidates: ["rig-fleet", "rig-fleet-2"] });
+    expect(everything()).toBe(before);
+  });
 
   it("answers the plan for a rig, and changes nothing: no seat, reference or other row, and no file", async () => {
     const token = privateFile("token");

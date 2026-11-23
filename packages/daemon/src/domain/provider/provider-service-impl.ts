@@ -36,6 +36,7 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
+import { shellArg } from "../../adapters/shell-quote.js";
 import { assignmentStanding, planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
 import { applyAssignment } from "./assignment-apply.js";
 import { ProviderAccountAssignmentsRepository, type AssignmentResult } from "./provider-account-assignments.js";
@@ -275,8 +276,33 @@ export class ProviderServiceImpl implements ProviderService {
    *  per-seat precheck it runs reads the seat (a Codex seat's restart plan stops nothing). */
   async assignmentPlan(input: AssignmentPlanRequest, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch,
     successorCheck?: (seat: string, accountHome: string) => Promise<PlanCheck>): Promise<AssignmentPlanResult> {
-    const planned = await this.planFor(input, { seatRestart, claudeSeat, successorCheck });
+    const rig = this.resolveRig(input.rig);
+    if (!rig.ok) return rig;
+    const planned = await this.planFor(input, rig, { seatRestart, claudeSeat, successorCheck });
     return planned.ok ? { ok: true, plan: planned.plan } : planned;
+  }
+
+  /** #3625: the one rig a plan or apply is for: the rig with this id, else the one active rig with this name. A name two
+   *  active rigs share is refused with their ids, as the other rig-name commands do: never the first match, never both. */
+  private resolveRig(handle: string): { ok: true; id: string; name: string }
+    | { ok: false; code: "unknown_rig"; message: string } | { ok: false; code: "rig_ambiguous"; message: string; candidates: string[] } {
+    const byId = this.deps.db.prepare("SELECT id, name FROM rigs WHERE id = ?").get(handle) as { id: string; name: string } | undefined;
+    if (byId) return { ok: true, ...byId };
+    const hasArchive = (this.deps.db.prepare("PRAGMA table_info(rigs)").all() as Array<{ name: string }>).some((c) => c.name === "archived_at");
+    const named = this.deps.db.prepare(`SELECT id, name FROM rigs WHERE name = ?${hasArchive ? " AND archived_at IS NULL" : ""} ORDER BY created_at`)
+      .all(handle) as Array<{ id: string; name: string }>;
+    if (named.length === 1) return { ok: true, ...named[0]! };
+    if (named.length > 1) {
+      return { ok: false, code: "rig_ambiguous", candidates: named.map((r) => r.id),
+        message: `'${handle}' matches ${named.length} rigs (${named.map((r) => r.id).join(", ")}). Nothing was done; pass one of these ids instead.` };
+    }
+    return { ok: false, code: "unknown_rig", message: `There's no rig named ${handle} with seats on this daemon (rig ps lists them).` };
+  }
+
+  /** The plan command again, as the person copies it into a shell. */
+  private reviewCommand(input: AssignmentPlanRequest): string {
+    return `rig provider assign ${shellArg(input.rig)} --provider ${input.provider} --account ${shellArg(input.label)}`
+      + `${input.includeOverrides ? " --include-overrides" : ""}${input.accountHome ? ` --account-home ${shellArg(input.accountHome)}` : ""}`;
   }
 
   /** #3625 slice 3: the plan again, and if its digest is the one the person saw, each seat through the existing switch.
@@ -285,19 +311,21 @@ export class ProviderServiceImpl implements ProviderService {
   async applyAssignment(input: AssignmentApplyRequest, tools: AssignmentApplyTools): Promise<AssignmentApplyResult> {
     // The rig is held before the plan is computed again: its prechecks wait, and an apply that ran meanwhile would leave
     // this one comparing the reviewed digest with seats read before that apply changed them.
-    const rigKey = (this.deps.db.prepare("SELECT id FROM rigs WHERE name = ?").get(input.rig) as { id: string } | undefined)?.id ?? `name:${input.rig}`;
+    const rig = this.resolveRig(input.rig);
+    if (!rig.ok) return rig;
+    const rigKey = rig.id;
     if (applying.has(rigKey)) {
       return { ok: false, code: "apply_in_progress", message: `An assignment is already being applied to rig ${input.rig} on this daemon. Nothing changed; its results show in the plan as they land.` };
     }
     applying.add(rigKey);
     try {
-      const planned = await this.planFor(input, tools);
+      const planned = await this.planFor(input, rig, tools);
       if (!planned.ok) return planned;
       const { plan, account, rigId, nodeOf } = planned;
       if (plan.digest !== input.digest) {
         return { ok: false, code: "plan_changed", digest: plan.digest,
           message: `The plan for rig ${input.rig} changed since plan ${input.digest} was shown (it's ${plan.digest} now): a seat, its account, a precheck or a shared home is different. `
-            + `Nothing changed. Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+            + `Nothing changed. Review it again with ${this.reviewCommand(input)}.` };
       }
       // The label was read before the prechecks were awaited. If it was removed and added again meanwhile naming another
       // reference, the plan's digest is of the earlier one: refuse before any seat changes. Nothing is awaited from here to
@@ -307,7 +335,7 @@ export class ProviderServiceImpl implements ProviderService {
       if (!current || current.kind !== account.kind || current.file !== account.file || current.codexHome !== account.codexHome || current.login !== account.login) {
         return { ok: false, code: "plan_changed",
           message: `The account ${input.label} ${current ? "names another reference" : "was removed"} since this apply computed its plan. Nothing changed. `
-            + `Review it again with rig provider assign ${input.rig} --provider ${input.provider} --account ${input.label}.` };
+            + `Review it again with ${this.reviewCommand(input)}.` };
       }
       const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
       const now = () => (this.deps.now ?? (() => new Date().toISOString()))();
@@ -355,10 +383,10 @@ export class ProviderServiceImpl implements ProviderService {
   /** #3625: what the plan and status know about each seat's account choices, one per entry. A seat whose configuration is
    *  still what an apply gave it follows its rig's assignment, so it isn't the seat's own override: this is the one
    *  definition both read. `resultOf` gives the seat's latest result where it counts. */
-  private assignmentFacts(entries: Array<{ nodeId: string; seat: ProviderSeat }>, configured: Array<SeatAccountConfiguration | null | undefined>,
+  private assignmentFacts(entries: Array<{ nodeId: string; rigId: string; seat: ProviderSeat }>, configured: Array<SeatAccountConfiguration | null | undefined>,
     resultOf: (nodeId: string, seat: ProviderSeat) => AssignmentResult | undefined): Array<Omit<PlanSeatFacts, "running" | "activity">> {
     const homes = this.homes();
-    return entries.map(({ nodeId, seat }, index) => {
+    return entries.map(({ nodeId, rigId, seat }, index) => {
       const own = Object.hasOwn(RUNTIME_HOME_VAR, seat.runtime) ? seatRuntimeHome(this.deps.db, nodeId, seat.runtime as HomeRuntime) : {};
       const claudeRef = seat.runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, nodeId) : null;
       const seatConfigured = configured[index] ?? null;
@@ -374,7 +402,7 @@ export class ProviderServiceImpl implements ProviderService {
         || (seat.runtime === "codex" && seatConfigured?.source === "default_login" && a.codexLogin !== null && a.codexHome !== null
           && resolvedHome(own.home ?? homes.codexHome) === resolvedHome(a.codexHome)));
       return {
-        session: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime,
+        session: seat.seatSession, rigId, rigName: seat.rigName, runtime: seat.runtime,
         configured: seatConfigured, claudeRef, ownHome,
         codexHome: seat.runtime === "codex" ? own.home ?? homes.codexHome : null,
         ...(follows ? { followsAssignment: true, ...(a?.label ? { appliedLabel: a.label } : {}), appliedAccount: a?.account ?? null } : {}),
@@ -422,7 +450,7 @@ export class ProviderServiceImpl implements ProviderService {
     });
   }
 
-  private async planFor(input: AssignmentPlanRequest, tools: AssignmentApplyTools): Promise<
+  private async planFor(input: AssignmentPlanRequest, rig: { id: string; name: string }, tools: AssignmentApplyTools): Promise<
     | { ok: true; plan: AssignmentPlan; account: AccountRef; rigId: string; nodeOf: Map<string, { nodeId: string; runtime: string }> }
     | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string }> {
     const { seatRestart, claudeSeat, successorCheck } = tools;
@@ -437,24 +465,24 @@ export class ProviderServiceImpl implements ProviderService {
       : { provider: "claude", label: account.label, tokenFile: account.file! });
     if (problem) return { ok: false, code: "reference_unusable", message: `${input.label}'s reference no longer checks out: ${problem.message.replace(/ Nothing was stored\.$/, "")}` };
     const entries = this.seatEntries();
-    const inRig = entries.find(({ seat }) => seat.rigName === input.rig);
-    if (!inRig) {
+    // The rig is the one resolved by id: another rig with the same name is another rig, whose seats are outside peers.
+    const rigId = rig.id;
+    if (!entries.some((e) => e.rigId === rigId)) {
       return { ok: false, code: "unknown_rig", message: `There's no rig named ${input.rig} with seats on this daemon (rig ps lists them).` };
     }
-    const rigId = (this.deps.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(inRig.nodeId) as { rig_id: string }).rig_id;
     const assignments = new ProviderAccountAssignmentsRepository(this.deps.db);
     const results = new Map(assignments.results(rigId, input.provider).map((r) => [r.nodeId, r]));
     const configured = configuredSeatAccounts({ seats: entries.map(({ seat }) => seat), auth: readCodexAuthMetadata(this.deps.env ?? process.env),
       usage: [], claudeSamples: null, ...this.homes() }).map((c) => c.configured);
     const nodeOf = new Map<string, { nodeId: string; runtime: string }>();
-    for (const { nodeId, seat } of entries) if (seat.rigName === input.rig) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
-    const facts = this.assignmentFacts(entries, configured, (nodeId, seat) => (seat.rigName === input.rig ? results.get(nodeId) : undefined));
-    const seats = entries.map(({ nodeId, seat }, index): PlanSeatFacts => ({
+    for (const { nodeId, rigId: seatRig, seat } of entries) if (seatRig === rigId) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
+    const facts = this.assignmentFacts(entries, configured, (nodeId) => results.get(nodeId));
+    const seats = entries.map(({ seat }, index): PlanSeatFacts => ({
       ...facts[index]!,
       running: seat.runtime === "claude-code" ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
       activity: this.activityOf(seat.seatSession),
     }));
-    const plan = await planAssignment({ daemon: input.daemon, rig: input.rig, account, seats, includeOverrides: input.includeOverrides,
+    const plan = await planAssignment({ daemon: input.daemon, rig: rig.name, rigId, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
       resolveHome: resolvedHome,
       intent: assignments.intent(rigId, input.provider) },

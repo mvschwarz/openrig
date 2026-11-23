@@ -1,3 +1,4 @@
+import { shellArg } from "../../adapters/shell-quote.js";
 import type { AccountRef, AccountRefProvider } from "./provider-account-refs.js";
 import type { AppliedReference, AssignmentResultKind } from "./provider-account-assignments.js";
 import { asAppliedText, type AssignmentPlan, type PlanRow } from "./assignment-plan.js";
@@ -54,15 +55,18 @@ export interface ApplyDeps {
   now(): string;
 }
 
-const restartCommand = (seat: string) => `rig seat restart ${seat} --keep-conversation`;
+const restartCommand = (seat: string) => `rig seat restart ${shellArg(seat)} --keep-conversation`;
 
 export async function applyAssignment(plan: AssignmentPlan, account: AccountRef, deps: ApplyDeps): Promise<AssignmentApplyReport> {
   const results: ApplySeatResult[] = [];
   const reason = `rig provider assign ${plan.rig} --provider ${plan.provider} --account ${plan.account.label}`;
-  const applied: AppliedReference = account.provider === "claude"
+  // The account's own reference: its token or API-key file, or its saved login in the home it's saved in.
+  const own: AppliedReference = account.provider === "claude"
     ? { file: account.file, fileKind: account.kind === "claude_api_key_file" ? "api-key" : "token", codexHome: null, codexLogin: null }
-    : plan.accountHome ? { file: null, fileKind: null, codexHome: plan.accountHome, codexLogin: null }
     : { file: null, fileKind: null, codexHome: account.codexHome, codexLogin: account.login };
+  // What a switch or a move gives a seat: the account's reference, or the prepared home it moves to, on that home's login.
+  const applied: AppliedReference = account.provider === "codex" && plan.accountHome
+    ? { file: null, fileKind: null, codexHome: plan.accountHome, codexLogin: null } : own;
   const record = (row: PlanRow, kind: AssignmentResultKind, detail: string, recovery?: string, activity = row.activity as string) => {
     const result: ApplySeatResult = { seat: row.seat, kind, detail, ...(recovery ? { recovery } : {}), activity, at: deps.now() };
     // A seat whose own switch failed before effect is recorded again, as unknown, once another seat changes its home:
@@ -71,9 +75,12 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     if (earlier >= 0) results.splice(earlier, 1);
     results.push(result);
     // A seat the person brought in with --include-overrides that's already on the account records it too, as a switch
-    // would: it follows the rig's assignment from now on, rather than reading as its own choice again at the next one.
-    const onAccount = kind === "switched" || kind === "pending_successor" || (kind === "unchanged" && row.effect === "unchanged" && plan.includeOverrides);
-    deps.save(result, onAccount ? applied : undefined);
+    // would: it follows the rig's assignment from now on, rather than reading as its own choice again at the next one. It
+    // wasn't moved, so it records the reference it has: configured on the account, the account's own, whatever prepared
+    // home this plan names; still as an earlier apply left its home, nothing new, so that apply's record stands.
+    const reference = kind === "switched" || kind === "pending_successor" ? applied
+      : kind === "unchanged" && row.effect === "unchanged" && plan.includeOverrides && !row.asApplied ? own : undefined;
+    deps.save(result, reference);
   };
   const notAttempted = (row: PlanRow) => `not attempted: its precheck was unsafe (${row.precheck!.reasons.join(", ")})`
     + (row.precheck!.message ? `: ${row.precheck!.message}` : "");
@@ -81,7 +88,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
 
   // Codex in place: the rig's seats on each switching home, in plan order.
   const onHome = new Map<string, string>();
-  for (const group of plan.codexHomes) for (const s of group.seats) if (s.rig === plan.rig) onHome.set(s.seat, group.home);
+  for (const group of plan.codexHomes) for (const s of group.seats) if (s.rigId === plan.rigId) onHome.set(s.seat, group.home);
   const homeRows = new Map<string, PlanRow[]>();
   for (const row of plan.rows) {
     const home = onHome.get(row.seat);
@@ -201,7 +208,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
 
   const otherRigPeers = plan.codexHomes.flatMap((group) => {
     const switched = results.some((r) => onHome.get(r.seat) === group.home && (r.kind === "switched" || r.kind === "unknown"));
-    return switched ? group.seats.filter((s) => s.rig !== plan.rig).map((s) => ({ seat: s.seat, rig: s.rig, home: group.home, command: restartCommand(s.seat) })) : [];
+    return switched ? group.seats.filter((s) => s.rigId !== plan.rigId).map((s) => ({ seat: s.seat, rig: s.rig, home: group.home, command: restartCommand(s.seat) })) : [];
   });
   return { daemon: plan.daemon, rig: plan.rig, provider: plan.provider, account: { label: plan.account.label, reference: plan.account.reference },
     digest: plan.digest, results, otherRigPeers };
@@ -230,7 +237,7 @@ export function switchKind(seat: string, r: ProviderSwitchResult): [AssignmentRe
 
 /** A move to a prepared home, as one of the six kinds. */
 export function successorKind(seat: string, r: SuccessorResult): [AssignmentResultKind, string, string | undefined] {
-  const recover = `rig seat set-runtime ${seat} --recover`;
+  const recover = `rig seat set-runtime ${shellArg(seat)} --recover`;
   if (r.ok) {
     if (!r.changed) return ["unchanged", "already on the prepared home", undefined];
     if (r.recoveryPending) return ["unknown", "the successor took the seat, but finishing the switch needs recovery", recover];

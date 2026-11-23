@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyAssignment, successorKind, type ApplyDeps, type PeerRestartResult } from "../src/domain/provider/assignment-apply.js";
+import { applyAssignment, successorKind, switchKind, type ApplyDeps, type PeerRestartResult } from "../src/domain/provider/assignment-apply.js";
 import type { AssignmentPlan, PlanRow } from "../src/domain/provider/assignment-plan.js";
 import type { AccountRef } from "../src/domain/provider/provider-account-refs.js";
 import type { ProviderSwitchResult } from "../src/domain/provider/provider-service.js";
@@ -13,7 +13,7 @@ const change = (seat: string, over: Partial<PlanRow> = {}): PlanRow => ({ seat, 
   precheck: { safe: true, reasons: [] }, continuity: "in place", activity: "idle", ...over });
 
 function plan(account: AccountRef, rows: PlanRow[], over: Partial<AssignmentPlan> = {}): AssignmentPlan {
-  return { daemon: "host-a", rig: "fleet", provider: account.provider, account: { label: account.label, kind: account.kind, reference: "ref" },
+  return { daemon: "host-a", rig: "fleet", rigId: "id-fleet", provider: account.provider, account: { label: account.label, kind: account.kind, reference: "ref" },
     includeOverrides: false, rows, codexHomes: [], digest: "0123456789ab", note: "", ...over };
 }
 
@@ -68,8 +68,8 @@ describe("applying an assignment", () => {
       change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" }),
       change("on@fleet", { runtime: "codex", effect: "unchanged" }),
     ], { codexHomes: [{ home: "/homes/a", seats: [
-      { seat: "c1@fleet", rig: "fleet", effect: "would restart" }, { seat: "c2@fleet", rig: "fleet", effect: "would restart" },
-      { seat: "on@fleet", rig: "fleet", effect: "would restart" }, { seat: "p@other", rig: "other", effect: "not restarted; needs rig seat restart p@other" }] }] }), CODEX, d);
+      { seat: "c1@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" }, { seat: "c2@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" },
+      { seat: "on@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" }, { seat: "p@other", rig: "other", rigId: "id-other", effect: "not restarted; needs rig seat restart p@other" }] }] }), CODEX, d);
     expect(d.switchSeat.mock.calls.map(([s]) => s)).toEqual(["c1@fleet"]);
     expect(d.restartPeer.mock.calls.map(([s]) => s)).toEqual(["c2@fleet", "on@fleet"]);
     expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "switched"], ["c2@fleet", "switched"], ["on@fleet", "switched"]]);
@@ -78,7 +78,7 @@ describe("applying an assignment", () => {
   });
 
   it("a peer isn't recorded on the account when another switch changed the home after this apply's: during its restart, or before it", async () => {
-    const homes = ["c1@fleet", "c2@fleet", "c3@fleet"].map((seat) => ({ seat, rig: "fleet", effect: "would restart" }));
+    const homes = ["c1@fleet", "c2@fleet", "c3@fleet"].map((seat) => ({ seat, rig: "fleet", rigId: "id-fleet", effect: "would restart" }));
     const run = async (otherSwitch: "none" | "during c2" | "before peers") => {
       let last = { count: 0, seat: "" };
       const { d } = deps({});
@@ -113,7 +113,7 @@ describe("applying an assignment", () => {
     const report = await applyAssignment(plan(CODEX, [
       change("c1@fleet", { runtime: "codex" }),
       change("on@fleet", { runtime: "codex", effect: "unchanged", precheck: { safe: false, reasons: ["seat_restart_refused"], message: "pane_unverified: no bound pane" } }),
-    ], { codexHomes: [{ home: "/homes/a", seats: ["c1@fleet", "on@fleet"].map((seat) => ({ seat, rig: "fleet", effect: "would restart" })) }] }), CODEX, d);
+    ], { codexHomes: [{ home: "/homes/a", seats: ["c1@fleet", "on@fleet"].map((seat) => ({ seat, rig: "fleet", rigId: "id-fleet", effect: "would restart" })) }] }), CODEX, d);
     expect(d.restartPeer).not.toHaveBeenCalled();
     expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "switched"], ["on@fleet", "unknown"]]);
     expect(report.results[1]!.detail).toBe('/homes/a now uses "team" (switched by c1@fleet), and this seat wasn\'t restarted: its precheck was unsafe (seat_restart_refused): pane_unverified: no bound pane');
@@ -124,7 +124,7 @@ describe("applying an assignment", () => {
     const { d } = deps({}, { "c2@fleet": { ok: true, outcome: "relaunch_failed", message: "no resumed conversation", recoveryCommand: "rig launch fleet dev.c2 --snapshot-id s1" } });
     const report = await applyAssignment(plan(CODEX, [
       change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" }), change("c3@fleet", { runtime: "codex" }),
-    ], { codexHomes: [{ home: "/homes/a", seats: ["c1@fleet", "c2@fleet", "c3@fleet"].map((seat) => ({ seat, rig: "fleet", effect: "would restart" })) }] }), CODEX, d);
+    ], { codexHomes: [{ home: "/homes/a", seats: ["c1@fleet", "c2@fleet", "c3@fleet"].map((seat) => ({ seat, rig: "fleet", rigId: "id-fleet", effect: "would restart" })) }] }), CODEX, d);
     expect(d.restartPeer.mock.calls.map(([s]) => s)).toEqual(["c2@fleet", "c3@fleet"]);
     expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "switched"], ["c2@fleet", "unknown"], ["c3@fleet", "switched"]]);
     expect(report.results[1]!.recovery).toBe("rig launch fleet dev.c2 --snapshot-id s1");
@@ -138,8 +138,8 @@ describe("applying an assignment", () => {
   ] as Array<[string, ProviderSwitchResult]>)("after %s on a home, its other seats are skipped", async (_what, first) => {
     const { d } = deps({ "c1@fleet": first });
     const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" })],
-      { codexHomes: [{ home: "/homes/a", seats: [{ seat: "c1@fleet", rig: "fleet", effect: "would restart" }, { seat: "c2@fleet", rig: "fleet", effect: "would restart" },
-        { seat: "p@other", rig: "other", effect: "not restarted; needs rig seat restart p@other" }] }] }), CODEX, d);
+      { codexHomes: [{ home: "/homes/a", seats: [{ seat: "c1@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" }, { seat: "c2@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" },
+        { seat: "p@other", rig: "other", rigId: "id-other", effect: "not restarted; needs rig seat restart p@other" }] }] }), CODEX, d);
     expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["c1@fleet", "unknown"], ["c2@fleet", "unknown"]]);
     expect(report.results[0]!.recovery).toBe("rig seat restart c1@fleet --keep-conversation");
     expect(report.results[1]!.detail).toMatch(/^skipped: home outcome unknown/);
@@ -149,7 +149,7 @@ describe("applying an assignment", () => {
     expect(report.otherRigPeers.map((p) => p.seat)).toEqual(["p@other"]);
   });
 
-  const homeA = (...seats: string[]) => ({ codexHomes: [{ home: "/homes/a", seats: seats.map((seat) => ({ seat, rig: "fleet", effect: "would restart" })) }] });
+  const homeA = (...seats: string[]) => ({ codexHomes: [{ home: "/homes/a", seats: seats.map((seat) => ({ seat, rig: "fleet", rigId: "id-fleet", effect: "would restart" })) }] });
 
   it.each([
     ["before", ["bad@fleet", "c1@fleet"]],
@@ -204,5 +204,18 @@ describe("applying an assignment", () => {
     expect(successorKind("s", { ok: true, changed: true, recoveryPending: true })).toEqual(["unknown", expect.any(String), "rig seat set-runtime s --recover"]);
     expect(successorKind("s", { ok: false, code: "runtime_switch_unsupported", message: "no pane" })).toEqual(["failed_before_effect", "runtime_switch_unsupported: no pane", undefined]);
     expect(successorKind("s", { ok: false, code: "runtime_switch_failed", message: "m", recoveryPending: true, guidance: "rig seat set-runtime s --recover" })[0]).toBe("unknown");
+  });
+
+  it("a printed recovery command quotes a seat name with a space, so it's one argument when it's pasted", async () => {
+    const refused = { outcome: "failed_safely", reasons: ["login_changed_seat_not_restarted"], message: "m" } as ProviderSwitchResult;
+    expect(switchKind("blue team@fleet", refused)[2]).toBe("rig seat restart 'blue team@fleet' --keep-conversation");
+    expect(successorKind("blue team@fleet", { ok: true, changed: true, recoveryPending: true })[2]).toBe("rig seat set-runtime 'blue team@fleet' --recover");
+    // A plain name stays as it is.
+    expect(switchKind("dev@fleet", refused)[2]).toBe("rig seat restart dev@fleet --keep-conversation");
+    // A seat in another rig on a home the apply switched is reported with its command, quoted the same way.
+    const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex", continuity: "in place" })], { codexHomes: [{ home: "/homes/a", seats: [
+      { seat: "c1@fleet", rig: "fleet", rigId: "id-fleet", effect: "would restart" },
+      { seat: "blue team@other", rig: "other", rigId: "id-other", effect: "not restarted; needs rig seat restart 'blue team@other'" }] }] }), CODEX, deps({}).d);
+    expect(report.otherRigPeers.map((p) => p.command)).toEqual(["rig seat restart 'blue team@other' --keep-conversation"]);
   });
 });

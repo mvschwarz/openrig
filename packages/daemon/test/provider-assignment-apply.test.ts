@@ -147,6 +147,36 @@ describe("applying an assignment on the daemon", () => {
     expect(model.bindings.find((b) => b.seatSession === "hook@fleet")!.assignment?.applied).toMatchObject({ kind: "switched", activity: "running" });
   });
 
+  it("two local rigs share a name: the plan and apply act on the one rig named exactly, and the name alone is refused with both ids", async () => {
+    // Two rigs both named fleet, with different members.
+    for (const [rigId, id] of [["rig-a", "a"], ["rig-b", "b"]] as const) {
+      db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'fleet')").run(rigId);
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, 'claude-code', '/w', ?)").run(id, rigId, `dev.${id}`, `pod-${rigId}`);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, 'stopped', 'ready')").run(`sess-${id}`, id, `${id}@fleet`);
+    }
+    const claude = stoppedClaude();
+    const before = everything();
+    const ambiguous = { ok: false, code: "rig_ambiguous", candidates: ["rig-a", "rig-b"] };
+    expect(await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude))
+      .toMatchObject(ambiguous);
+    expect(await svc.applyAssignment(request("max-2", "0123456789ab"), { claudeSeat: claude })).toMatchObject(ambiguous);
+    expect(everything()).toBe(before);
+
+    // By its id: only that rig's seat is in the plan, under the rig's name as it's shown.
+    const planned = await svc.assignmentPlan({ rig: "rig-b", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+    if (!planned.ok) throw new Error(planned.message);
+    expect([planned.plan.rig, planned.plan.rigId, planned.plan.rows.map((r) => r.seat)]).toEqual(["fleet", "rig-b", ["b@fleet"]]);
+    const applied = await svc.applyAssignment(request("max-2", planned.plan.digest, { rig: "rig-b" }), { claudeSeat: claude });
+    expect(applied.ok && applied.report.results.map((r) => [r.seat, r.kind])).toEqual([["b@fleet", "switched"]]);
+    // Only the chosen rig changed, and its assignment and result are stored under its own id.
+    expect(readClaudeSeatTokenRef(db, "b")).toMatchObject({ label: "max-2" });
+    expect(readClaudeSeatTokenRef(db, "a")).toBeNull();
+    const assignments = new ProviderAccountAssignmentsRepository(db);
+    expect([assignments.intent("rig-a", "claude"), assignments.results("rig-a", "claude")]).toEqual([null, []]);
+    expect([assignments.intent("rig-b", "claude")?.label, assignments.results("rig-b", "claude").map((r) => r.seat)]).toEqual(["max-2", ["b@fleet"]]);
+  });
+
   it("a seat brought in with --include-overrides that's already on the account follows the assignment from then on", async () => {
     seat("own"); seat("mine");
     // Both chose max-2 by hand. Only "own" is brought in with --include-overrides.

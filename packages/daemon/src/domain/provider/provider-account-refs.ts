@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { accountLabelProblem, claudeSeatTokenFileProblem, claudeSeatTokenRefProblem } from "../claude-seat-token.js";
+import { shellArg } from "../../adapters/shell-quote.js";
 import { authList, resolveCodexHome, validateProfileName } from "../codex-auth.js";
 import { ProviderAccountAssignmentsRepository } from "./provider-account-assignments.js";
 
@@ -90,7 +91,7 @@ export function accountRefProblem(input: AccountRefInput): { code: "invalid_refe
   try { stat = fs.statSync(input.codexHome); } catch { return unusable(`the Codex home ${input.codexHome} doesn't exist`); }
   if (!stat.isDirectory()) return unusable(`${input.codexHome} isn't a directory`);
   if (!authList(resolveCodexHome({ CODEX_HOME: input.codexHome })).includes(input.login)) {
-    return unusable(`no login named ${input.login} is saved in ${input.codexHome} (rig auth list --codex-home ${input.codexHome} lists them)`);
+    return unusable(`no login named ${input.login} is saved in ${input.codexHome} (rig auth list --codex-home ${shellArg(input.codexHome)} lists them)`);
   }
   // rig auth switch copies only a 0600 saved login, so a looser one would be refused when it's used. authList has already
   // refused a symlink or hard link here, so this looks at the saved file itself, without reading it.

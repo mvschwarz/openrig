@@ -1067,8 +1067,8 @@ that machine. Only the command and its output cross the connection.`);
   type PlanRow = { seat: string; runtime: string; current: string; effect: "change" | "unchanged" | "kept_override" | "not_affected";
     override?: string; precheck?: { safe: boolean; reasons: string[]; message?: string }; continuity?: string; activity: string; notes?: string[];
     lastResult?: { kind: string; label: string; detail: string; at: string }; asApplied?: true };
-  type Plan = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; includeOverrides: boolean;
-    accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; effect: string }> }>;
+  type Plan = { daemon: string; rig: string; rigId?: string; provider: string; account: { label: string; reference: string }; includeOverrides: boolean;
+    accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; rigId?: string; effect: string }> }>;
     intent?: { label: string; reference: string; requestedBy: string | null; at: string }; digest: string; note: string };
   type ApplyReport = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; digest: string;
     results: Array<{ seat: string; kind: string; detail: string; recovery?: string; activity: string; at: string }>;
@@ -1084,9 +1084,12 @@ that machine. Only the command and its output cross the connection.`);
       const last = row.lastResult ? `  last applied: ${kindWords(row.lastResult.kind)} (${row.lastResult.label}, ${row.lastResult.at}): ${row.lastResult.detail}` : null;
       if (row.effect === "not_affected") { console.log(`${row.seat}: not affected (${(row.notes ?? []).join("; ")})`); continue; }
       if (row.effect === "unchanged") {
-        console.log(row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
-          : `${row.seat}: unchanged, already on ${plan.account.label}`);
-        if (row.asApplied) for (const note of row.notes ?? []) console.log(`  ${note}`);
+        // A seat on a home this plan switches restarts with it (its note says so): what it's doing shows, as for a seat that
+        // changes.
+        const restarts = row.precheck !== undefined;
+        console.log((row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
+          : `${row.seat}: unchanged, already on ${plan.account.label}`) + (restarts ? `; activity ${row.activity}` : ""));
+        for (const note of row.notes ?? []) console.log(`  ${note}`);
         // A seat that restarts with its switched home: its restart was checked.
         if (row.precheck && !row.precheck.safe) {
           console.log(`  precheck UNSAFE: ${row.precheck.reasons.join(", ")}`);
@@ -1198,7 +1201,7 @@ status shows each seat against it. It exits 1 when any seat failed or is unknown
       // switch, and so does each other seat of this rig on a Codex home that switches, since it restarts on it.
       const shown = res.data.plan;
       const changing = shown ? new Set([...shown.rows.filter((r) => r.effect === "change").map((r) => r.seat),
-        ...shown.codexHomes.flatMap((h) => h.seats.filter((s) => s.rig === shown.rig).map((s) => s.seat))]).size : 1;
+        ...shown.codexHomes.flatMap((h) => h.seats.filter((s) => (shown.rigId ? s.rigId === shown.rigId : s.rig === shown.rig)).map((s) => s.seat))]).size : 1;
       type ApplyResponse = { status: number; data: { ok: boolean; report?: ApplyReport; code?: string; message?: string; digest?: string } };
       let applied: ApplyResponse;
       try {

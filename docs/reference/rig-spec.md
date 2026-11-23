@@ -906,7 +906,8 @@ rig provider account remove budget --provider claude
 - A label is your name for a reference, not proof of the login a running seat uses.
 
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
-and changes nothing. In this run, team-dev and team-qa are running on the default login, and team-review has its own
+and changes nothing. The rig is named by its id, or by a name only one rig has: a name two rigs share is refused with
+both ids (`rig_ambiguous`), and nothing is done. In this run, team-dev and team-qa are running on the default login, and team-review has its own
 token file. The paths and the host id are shortened; a digest belongs to its own plan, so yours will differ:
 
 ```text
@@ -933,7 +934,8 @@ The rows read like this:
   work in flight, including background commands. A Claude seat that was already switched in place reads its activity
   as unknown until its next fresh launch: that relaunch keeps an earlier occupant generation, so its hooks aren't
   counted (#3677).
-- **`unchanged`** means the seat is already on the account.
+- **`unchanged`** means the seat is already on the account. One on a Codex home the plan switches restarts with it:
+  the row says so, and shows what the seat is doing.
 - **`kept (seat override)`** means the seat has its own choice of account: its own token or API-key file, its own home,
   or a saved login in the Codex seat registry. It's kept unless you add `--include-overrides`. A seat you bring in that
   way that's already on the account follows the assignment from then on.
@@ -942,7 +944,7 @@ The rows read like this:
 Codex seats have two extra cases:
 - **In place, on Linux only.** A Codex seat switches in place by changing its Codex home's active login, so every seat
   on that home moves with it. The plan lists each home's seats: this rig's "would restart", and a seat in another rig
-  shows the `rig seat restart` it would need. Elsewhere the row reads "unsupported in place".
+  shows the `rig seat restart` it would need, whatever its rig is named. Elsewhere the row reads "unsupported in place".
 - **To a prepared home.** `--account-home <dir>` moves the seats that aren't on the account yet to that home instead,
   as fresh successors with a handover. A seat already on the account's own saved login stays where it is. Nothing falls back to this by itself. A successor uses the login active in that home, which isn't checked
   against the account: the plan, the result and status say so.

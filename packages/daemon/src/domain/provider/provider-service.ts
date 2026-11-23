@@ -15,6 +15,7 @@ import type { AccountRefProvider } from "./provider-account-refs.js";
 
 /** #3625: a plan for moving one rig's seats of one provider to an account this daemon knows by label. */
 export interface AssignmentPlanRequest {
+  /** The rig's id, or a name only one active rig has. */
   rig: string;
   provider: AccountRefProvider;
   label: string;
@@ -26,7 +27,9 @@ export interface AssignmentPlanRequest {
 
 export type AssignmentPlanResult =
   | { ok: true; plan: AssignmentPlan }
-  | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string };
+  | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable"; message: string }
+  /** A name two active rigs share: nothing was done; `candidates` are their ids, one of which names the rig. */
+  | { ok: false; code: "rig_ambiguous"; message: string; candidates: string[] };
 
 /** #3625 slice 3: apply the plan whose digest the person saw. */
 export interface AssignmentApplyRequest extends AssignmentPlanRequest {
@@ -36,7 +39,8 @@ export interface AssignmentApplyRequest extends AssignmentPlanRequest {
 
 export type AssignmentApplyResult =
   | { ok: true; report: import("./assignment-apply.js").AssignmentApplyReport }
-  | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable" | "plan_changed" | "apply_in_progress"; message: string; digest?: string };
+  | { ok: false; code: "unknown_account" | "unknown_rig" | "reference_unusable" | "plan_changed" | "apply_in_progress"; message: string; digest?: string }
+  | { ok: false; code: "rig_ambiguous"; message: string; candidates: string[] };
 
 /** What an apply borrows from the route for one call: the seat's restart, Claude's relaunch, and the account-home switch. */
 export interface AssignmentApplyTools {
