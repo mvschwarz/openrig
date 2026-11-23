@@ -10,6 +10,8 @@ import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
+import { wireTranscriptCaptureStops } from "../src/domain/transcript-capture.js";
+import { startTranscriptRotation, stopTranscriptRotation, getActiveRotationCount } from "../src/domain/transcript-rotation.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import fs from "node:fs";
@@ -172,6 +174,19 @@ describe("RigTeardownOrchestrator", () => {
     await td.teardown(rigId);
 
     expect(tmux.killSession).toHaveBeenCalledWith("r01-dev");
+  });
+
+  it("attributes down to the exact session generation even after a reaper stop", async () => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.markIntentionallyStopped(sessionId);
+    eventBus.emit({ type: "session.stopped", rigId, nodeId, sessionId, sessionName: "r01-dev",
+      reason: "idle_reap", operator: "daemon:seat-reaper" });
+    const tmux = mockTmux();
+    tmux.probeSession = async () => ({ state: "absent" });
+    await buildTeardown(tmux).teardown(rigId);
+    const event = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='session.stopped' ORDER BY seq DESC LIMIT 1")
+      .get(nodeId) as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ sessionId, operator: "rig-teardown", reason: "rig_down" });
   });
 
   // T2: Bindings cleared
@@ -1417,7 +1432,45 @@ describe("RigTeardownOrchestrator", () => {
     expect(rigRepo.getRig(liveRig.id)).not.toBeNull();
     expect(sessionRegistry.getSessionsForRig(liveRig.id)[0]?.status).toBe("running");
     expect(sessionRegistry.getBindingForNode(liveNode.id)?.tmuxSession).toBe("r01-dev");
+
     expect(fs.readFileSync(guidance, "utf-8")).toContain("live guidance");
+  });
+
+  // #3173 review round 5: the new rig_down stop event carries the shared session name, and
+  // the transcript subscriber stops rotation by name alone — so an archived namesake's down
+  // must not emit it, or a live seat's transcript capture silently ends.
+  it("an archived namesake's down leaves the live owner's transcript rotation alone", async () => {
+    const stale = seedRig();
+    sessionRegistry.updateBinding(stale.nodeId, { tmuxSession: "r01-dev" });
+    rigRepo.archiveRig(stale.rigId);
+    const liveRig = rigRepo.createRig("test-rig");
+    const liveNode = rigRepo.addNode(liveRig.id, "dev");
+    const liveSession = sessionRegistry.registerSession(liveNode.id, "r01-dev");
+    sessionRegistry.updateStatus(liveSession.id, "running");
+    sessionRegistry.updateBinding(liveNode.id, { tmuxSession: "r01-dev" });
+    const tmux = mockTmux({ ok: false, code: "guard_target_unknown", message: "owned by live rig" });
+    tmux.probeSession = vi.fn(async () => ({ state: "present" }));
+    (tmux as unknown as { capturePaneContent: unknown }).capturePaneContent = vi.fn(async () => "");
+    wireTranscriptCaptureStops(db, eventBus);
+    startTranscriptRotation(tmux, "r01-dev", path.join(tmpDir, "live-transcript.log"), { lines: 20, pollIntervalMs: 30_000 });
+    expect(getActiveRotationCount()).toBe(1);
+    try {
+      const stoppedBefore = (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='session.stopped'").get() as { n: number }).n;
+
+      const result = await buildTeardown(tmux).teardown(stale.rigId, { delete: true });
+
+      expect(result.deleted).toBe(true);
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      // No rig_down stop event carries the shared name: the subscriber had nothing to stop.
+      const stopped = db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='session.stopped' AND json_extract(payload,'$.sessionName')='r01-dev'").get() as { n: number };
+      expect(stopped.n).toBe(stoppedBefore);
+      // The live owner's rotation survives.
+      expect(getActiveRotationCount()).toBe(1);
+      // The stale row is gone with the deleted rig; the live seat's binding survives.
+      expect(sessionRegistry.getBindingForNode(liveNode.id)?.tmuxSession).toBe("r01-dev");
+    } finally {
+      stopTranscriptRotation("r01-dev");
+    }
   });
 
   it("keeps the rig when tmux cannot confirm whether a session is absent", async () => {
