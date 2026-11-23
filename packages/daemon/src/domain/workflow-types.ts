@@ -71,6 +71,9 @@ export interface WorkflowRoleSpec {
 export interface WorkflowStepSpec {
   /** Stable step identifier within the workflow (e.g., "produce"). */
   id: string;
+  /** Optional short name a person sees for the step (e.g., "QA pass"). Display only: `id` stays the step's identity and
+   *  its display when no label is set, and `objective` stays its instruction. */
+  label?: string;
   /** Role name; resolved against `roles` map. */
   actor_role: string;
   /** Human description of the step's intent. */

@@ -209,7 +209,7 @@ export type RigEvent =
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
-  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
+  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null }
   // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
   // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
   | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
@@ -1499,6 +1499,9 @@ export interface RigSpecPodMember {
    * `sessionSource.mode: "fork"` per v0 schema (validateStarterRef).
    */
   starterRef?: StarterRefSpec;
+  /** #2829 slice 1 — opt-in queue-driven cold start: queued work targeting this
+   * dormant seat of a running rig launches just this seat's runner. Default off. */
+  coldStart?: boolean;
 }
 
 export interface RigSpecPodEdge {
@@ -1519,6 +1522,8 @@ export interface RigSpecPod {
   summary?: string;
   continuityPolicy?: ContinuityPolicySpec;
   startup?: StartupBlock;
+  /** #2829 slice 1 — pod-level default for member `cold_start`; a member's own flag wins. */
+  coldStart?: boolean;
   members: RigSpecPodMember[];
   edges: RigSpecPodEdge[];
 }
@@ -1557,9 +1562,14 @@ export interface WorkspaceSpec {
   knowledgeRoot?: string;
 }
 
+/** #80: how a rig groups its seats' systemd scopes. `rig`: beneath the rig's own slice under openrigseats.slice. */
+export type SeatSliceMode = "rig";
+
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
+  /** #80: spec `seat_slice`; absent keeps today's launch paths. */
+  seatSlice?: SeatSliceMode;
   version: string;
   name: string;
   summary?: string;

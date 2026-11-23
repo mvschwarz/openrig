@@ -38,6 +38,7 @@ export const READ_THROUGH_TIMEOUT_MS = 5_000;
 //
 // DELIBERATE EXCLUSIONS (recorded, not oversights): /api/queue/* (queue is
 // the MH-3 lane — MH-1's queue-negative boundary, read included for now);
+// except GET /api/queue/attention-aggregate, whose handler selects its host.
 // /api/files/* (local FS discovery; the twin derives remote missions from
 // the host-keyed slice list instead); /api/slices/:name/proof-asset/*
 // (binary — the raw transport is text-only by design);
