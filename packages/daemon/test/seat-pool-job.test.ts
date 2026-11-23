@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -14,8 +16,18 @@ import type { SeatPoolSpec } from "../src/domain/seat-pool-spec.js";
 import { WatchdogJobsRepository, type WatchdogJob } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
-import { makeSeatPoolPolicy } from "../src/domain/policies/seat-pool.js";
-import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { makeSeatPoolPolicy, planSeatPool } from "../src/domain/policies/seat-pool.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { nodeExecutorConfirmedStopped } from "../src/domain/node-inventory.js";
+import {
+  makeSeatPoolExecutor,
+  readSeatPoolState,
+  seatPoolQueueEffects,
+  type SeatPoolExecutorDeps,
+} from "../src/domain/seat-pool-executor.js";
+import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import {
   reconcileSeatPoolNode,
   reconcileSeatPoolsAtStartup,
@@ -29,7 +41,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 // #3395 (Piece 1): the seat-pool job, one per model member, registered by the registration module. Nothing in the
 // daemon calls that module or runs the policy yet, so these tests call the module themselves and evaluate the job with
-// an engine of their own that has the seat-pool policy.
+// an engine of their own that has the seat-pool policy, composed with the executor as startup composes it.
 
 const AT = "2026-11-18T10:00:00.000Z";
 const RIG_ROOT = "/project/rigs/pool-rig";
@@ -43,24 +55,51 @@ const BLOCK = { max: 4, min: 1, dispatch_after_s: 45, idle_grace_s: 120, cooldow
 
 type Model = { rigId: string; nodeId: string; logicalId: string; podId: string | null; session: string };
 
-/** The pool's world: the repositories, an engine that has the seat-pool policy, and the registration's deps. */
-function world(db: Database.Database = createFullTestDb()) {
-  db.exec(watchdogHistorySchema.sql); // the full test DB leaves out the engine's history table
+/** The pool's world: the repositories, an engine that has the seat-pool policy and its executor, and the
+ *  registration's deps. */
+/** Every migration: the executor reads the outbox's held messages and the engine writes its history. */
+function fullDb(): Database.Database {
+  const db = createDb();
+  migrate(db, ALL_MIGRATIONS);
+  return db;
+}
+
+function world(db: Database.Database = fullDb()) {
   const rigRepo = new RigRepository(db);
   const podRepo = new PodRepository(db);
   const slots = new SeatPoolSlotsRepository(db);
   const jobsRepo = new WatchdogJobsRepository(db);
   const history = new WatchdogHistoryLog(db);
-  const engine = new WatchdogPolicyEngine({
-    jobsRepo,
-    historyLog: history,
-    eventBus: new EventBus(db),
-    deliver: async () => ({ status: "ok" }),
-    additionalPolicies: [makeSeatPoolPolicy({
-      readBlock: (id) => rigRepo.getNodePool(id),
-      readSlots: (id) => slots.forModel(id),
-    })],
-  });
+  const bus = new EventBus(db);
+  const sessions = new SessionRegistry(db);
+  const queue = new QueueRepository(db, bus, { resolveSessionAddresses: (name) => sessions.sessionAddresses(name) });
+  const outbox = new OutboxHandler(db);
+  queue.attachOutbox(outbox);
+  const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name));
+  /** Each node's activity, as the seat activity service would give it. */
+  const activity = new Map<string, ArbitratedSeatState>();
+  const clock = { now: new Date(Date.now() + 3_600_000) }; // past every row's dispatch_after_s
+  const executorDeps: SeatPoolExecutorDeps = {
+    db, rigRepo, slots, jobsRepo, queue: seatPoolQueueEffects(queue),
+    heldCount: (id) => outbox.heldCount(id),
+    confirmedStopped: (id) => nodeExecutorConfirmedStopped(db, id),
+    seatState: (id) => activity.get(id) ?? null,
+    custody: (ids, fn) => guard.custody(ids, fn),
+    now: () => clock.now,
+  };
+  /** An engine and an executor over this database: a new pair is what a daemon restart gives. */
+  const compose = () => {
+    const executor = makeSeatPoolExecutor(executorDeps);
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: history,
+      eventBus: bus,
+      deliver: async () => ({ status: "ok" }),
+      additionalPolicies: [makeSeatPoolPolicy({ cycle: (job) => executor.cycle(job) })],
+    });
+    return { executor, engine };
+  };
+  const { engine, executor } = compose();
   const warn = vi.fn<(message: string) => void>();
   const reg = { db, rigRepo, jobsRepo, warn };
 
@@ -82,7 +121,18 @@ function world(db: Database.Database = createFullTestDb()) {
   ).all(session) as Array<{ jobId: string; state: string }>;
   const nonterminal = (session: string) => jobRows(session).filter((row) => row.state !== "terminal");
   const evaluate = async (jobId: string) => (await engine.evaluate(jobsRepo.getByIdOrThrow(jobId))).outcome;
-  return { db, rigRepo, podRepo, slots, jobsRepo, history, engine, warn, reg, model, agent, jobRows, nonterminal, evaluate };
+  return {
+    db, rigRepo, podRepo, slots, jobsRepo, history, engine, executor, executorDeps, compose, sessions, queue, activity, clock,
+    warn, reg, model, agent, jobRows, nonterminal, evaluate,
+  };
+}
+
+/** A seat idle at its prompt since `changedAt`, with nothing asked of it and no background work. */
+function idleState(nodeId: string, changedAt: string): ArbitratedSeatState {
+  return {
+    seatNodeId: nodeId, activity: "idle-at-prompt", needsInput: { count: 0 }, needsInputEvidence: null, backgroundWork: null,
+    decidedBy: null, seq: 1, changedAt, rungs: [], lastSwap: null,
+  } as unknown as ArbitratedSeatState;
 }
 
 /** The `context` of a job's spec: the model node id and the block it was last ensured with. */
@@ -271,6 +321,55 @@ describe("seat-pool job registration (#3395 Piece 1)", () => {
       expect(w.rigRepo.getNodePool(m.nodeId)).toEqual(blockBefore);
       expect(w.slots.forModel(m.nodeId)).toEqual(slotsBefore);
       expect(w.jobRows(m.session)).toEqual([{ jobId: job.jobId, state: "active" }]);
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("the seat-pool job and the operator's stop (#3395 Piece 1)", () => {
+  it("A job the operator stopped stays `stopped` across re-apply and daemon restart, takes the new spec, and makes no add, drain or move.", async () => {
+    const w = instantiatorWorld();
+    try {
+      const m = await w.materialize(BLOCK);
+      const job = jobOf(reconcileSeatPoolNode(w.reg, m.nodeId));
+      const s1 = w.agent(m, 1, "live");
+      const row = await w.queue.create({
+        sourceSession: "lead@pool-rig", destinationSession: m.session, body: "work", nudge: false, tags: [SPEC.dispatchTag!],
+      });
+
+      expect(w.jobsRepo.stop(job.jobId).state).toBe("stopped");
+      const reapplied = await w.reapply(m.rigId, m.nodeId, { ...BLOCK, max: 6 });
+      expect(reapplied).toMatchObject({ outcome: "stopped", job: { jobId: job.jobId, state: "stopped" } });
+      expect(contextOf(w.jobsRepo.getByIdOrThrow(job.jobId)).pool).toMatchObject({ max: 6 });
+
+      // s1 is free once the re-apply is done (it detaches the seats' sessions): a plan would move the row to it
+      const session = w.sessions.registerSession(s1.id, "dev-impl-s1@pool-rig");
+      w.sessions.updateStatus(session.id, "running");
+      w.activity.set(s1.id, idleState(s1.id, AT));
+      const read = readSeatPoolState(w.executorDeps, resolveSeatPoolModel(w.db, m.nodeId)!, w.slots.forModel(m.nodeId));
+      expect(planSeatPool({ ...SPEC, max: 6 }, read, w.clock.now.getTime()).intents)
+        .toContainEqual({ kind: "dispatch", qitemId: row.qitemId, from: m.session, slotNumber: 1 });
+      const slotsBefore = w.slots.forModel(m.nodeId);
+
+      // daemon restart: the start loop, then a new engine and executor over the same database
+      expect(reconcileSeatPoolsAtStartup(w.reg)).toContainEqual(expect.objectContaining({ nodeId: m.nodeId, outcome: "stopped" }));
+      const restarted = w.compose();
+      const stored = w.jobsRepo.getByIdOrThrow(job.jobId);
+      expect(stored.state).toBe("stopped");
+      expect(contextOf(stored).pool).toMatchObject({ max: 6 });
+
+      for (const engine of [w.engine, restarted.engine]) {
+        expect((await engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId))).outcome).toMatchObject({ action: "skip", reason: "job_not_active" });
+      }
+      const direct = await restarted.executor.cycle({ jobId: job.jobId, context: contextOf(stored) });
+      expect(direct).toMatchObject({ action: "skip", reason: "seat_pool_report", notes: { held: { cause: "job stopped", message: "held: job stopped" } } });
+      expect((direct as { notes?: Record<string, unknown> }).notes).not.toHaveProperty("moved");
+
+      expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("stopped");
+      expect(w.queue.getById(row.qitemId)).toMatchObject({ state: "pending", destinationSession: m.session });
+      expect(w.queue.transitionLog.listForQitem(row.qitemId).some((t) => t.actorSession === "system:queue-fallback")).toBe(false);
+      expect(w.slots.forModel(m.nodeId)).toEqual(slotsBefore);
     } finally {
       w.db.close();
     }
