@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { stringify as stringifyYaml } from "yaml";
 import { SEAT_POOL_POLICY_NAME } from "./policies/seat-pool.js";
+import type { PolicyJob } from "./policies/types.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalSessionName, parseSessionName, validateSessionName } from "./session-name.js";
 import { serializePoolBlock, type SeatPoolSpec } from "./seat-pool-spec.js";
@@ -14,8 +15,9 @@ import {
 
 // #3395 (Piece 1): registering the `seat-pool` watchdog job, one per model member that has a `pool` block.
 //
-// Nothing in the daemon calls this module yet: the job stays unarmed until the activation change, which calls the
-// ensure on launch and re-apply and the start loop at daemon start, and hands the policy to the watchdog engine.
+// Only the seat-pool executor calls this module, through `seatPoolModelOfJob`; nothing calls the ensure yet: the job
+// stays unarmed until the activation change, which calls the ensure on launch and re-apply and the start loop at daemon
+// start, and hands the policy to the watchdog engine.
 //
 // The job's identity is the model's canonical session, with no generation, registered by `daemon@kernel`; the
 // model's other canonical session names in the same rig are passed as aliases, as the idle-gate registration passes
@@ -95,6 +97,28 @@ export function resolveSeatPoolModel(db: Database.Database, nodeId: string): Sea
   const aliases = [...new Set([...recorded.map((r) => r.session_name), sessionName])]
     .filter((candidate) => isCanonicalInRig(candidate, row.rig_name!));
   return { nodeId: row.node_id, rigName: row.rig_name, sessionName, aliases };
+}
+
+/** The model a job acts for, or why it has none. */
+export type SeatPoolJobModel =
+  | { found: true; modelNodeId: string; rigId: string; model: SeatPoolModel }
+  /** The job's spec names no model node; `modelNodeId` is the spec's value as written (null when absent). */
+  | { found: false; modelNodeId: unknown; cause: "no_model_node_id" }
+  | { found: false; modelNodeId: string; cause: "node_gone" | "no_canonical_session" };
+
+/**
+ * The model a seat-pool job acts for: the node named by its spec's `context.model_node_id`, resolved the way the
+ * ensure resolves it (resolveSeatPoolModel). The executor finds the model only through this, never by reading the spec
+ * or the job's target itself.
+ */
+export function seatPoolModelOfJob(db: Database.Database, job: Pick<PolicyJob, "context">): SeatPoolJobModel {
+  const id = job.context["model_node_id"];
+  if (typeof id !== "string" || id === "") return { found: false, modelNodeId: id ?? null, cause: "no_model_node_id" };
+  const node = db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(id) as { rig_id: string } | undefined;
+  if (!node) return { found: false, modelNodeId: id, cause: "node_gone" };
+  const model = resolveSeatPoolModel(db, id);
+  if (!model) return { found: false, modelNodeId: id, cause: "no_canonical_session" };
+  return { found: true, modelNodeId: id, rigId: node.rig_id, model };
 }
 
 function isCanonicalInRig(sessionName: string, rigName: string): boolean {

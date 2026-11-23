@@ -82,7 +82,17 @@ doesn't follow a replaced session or a restarted tmux server; reopen the view.
 
 Writable tiles attach immediately, as in 0.7.10. Their visible terminal sizes
 the agent's PTY under tmux's normal client sizing policy, and resizing the
-terminal reflows new output. Read-only tiles remain observers: they neither
+terminal reflows new output. A Herdr view's local writable tiles
+(`--provider herdr`, `rig terminal open --all`, and Herdr's following views and
+viewers) pin the seat at its own size instead, so watching never resizes an
+agent. Before each attach, including a re-attach after the seat's session is
+replaced and after a Herdr restart, the tile pins the seat at the size it has
+then. A tile sizes the agent only while it has keyboard focus (Herdr passes
+focus in and out to the tile), and the agent goes back to its own size when the
+focus or the tile leaves. Focus reaches tmux
+only with its server option `focus-events` on (`tmux set -s focus-events on`,
+which OpenRig doesn't change); without it the agent simply keeps its size, and a
+tile smaller than it shows the part around the cursor. Read-only tiles remain observers: they neither
 resize nor type into another seat. An ordinary tmux detach ends the writable
 tile without stopping the agent. A replacement with a different managed seat
 identity is not followed. If no replacement returns in time, or a
@@ -103,6 +113,31 @@ A deliberate `window-size manual` setting remains an explicit fixed-size choice.
 drops the window's own setting (`tmux set-window-option -t <window> -u window-size`
 with the daemon's server flags, to run on the daemon's host), for when you want it
 to follow its inherited sizing again.
+A Herdr tile's pin is OpenRig's own: the window is `manual` with the seat's size
+recorded in its `@openrig-pin-width` and `@openrig-pin-height` options, and
+hooks on the seat's session fit it to a focused client and give that size back on blur or
+detach. The pin stays after the view closes, since a Herdr restart brings tiles
+back without a new open. To unpin a seat, drop the window's setting and
+OpenRig's record together (with the daemon's server flags):
+`tmux set-window-option -t <window> -u window-size \; set-window-option -t <window> -u @openrig-pin-width \; set-window-option -t <window> -u @openrig-pin-height`.
+The hooks then do nothing, also while a browser terminal or a readable capture
+pins the window for a while, or after you fix its size yourself, and the seat
+follows its clients until a Herdr tile next attaches to it, which pins it again
+at its size then. Unsetting `window-size` alone leaves the record, so a size you
+fix later would be taken for OpenRig's pin. A seat an
+older tile had already shrunk is pinned at that size; to pin it at another
+size, set the record and the size together:
+`tmux set-window-option -t <window> @openrig-pin-width 160 \; set-window-option -t <window> @openrig-pin-height 50 \; resize-window -t <window> -x 160 -y 50`.
+A Herdr tile leaves a window someone else made `manual` (no `@openrig-pin-width`)
+as it is, hooks included. While a seat is pinned, a readable capture reads it as
+it is instead of resizing it for the read (and names the command that drops
+`window-size`; unpin with the command above), and a
+browser terminal's `terminal.fixed_geometry` doesn't fix its size: both treat a
+`manual` window they didn't pin as a fixed size. Unpin the seat to get them
+back. cmux, `--window`, herdr-app cells and SSH tiles don't pin, and they size
+a seat no Herdr tile has pinned as before. A pinned seat stays pinned for every
+client, so their tiles, and a person's own `tmux attach`, fit it only while
+focused, until it's unpinned.
 OpenRig's temporary layout and readable-capture pins release by unsetting the
 window's local `window-size` option; they do not restore an old local override.
 With the last pin released, the window inherits the global policy again.
@@ -120,15 +155,17 @@ A browser terminal that connects with `?geometry=1` learns the pane's columns
 and rows, and the pinned 90 by 27 when `terminal.fixed_geometry` is on; see
 [Writing a daemon client](daemon-http-clients.md#route-details).
 
-Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, and
-pre-reflow 0.7.11 viewers can retain the old mirrored display. Changing saved
-argv cannot change that running client. Close only the owned Herdr viewer pane
+Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, kept
+writable 0.7.10 viewers (every writable Herdr viewer from before the pin) size
+their seat instead of pinning it, and pre-reflow 0.7.11 viewers can retain the
+old mirrored display. Changing saved argv cannot change that running client, so
+a following canvas or ensure-viewer that finds one keeps it and asks for this
+step. Close only the owned Herdr viewer pane
 and open a fresh view with `rig terminal open <view> --provider herdr`; the
 agent's tmux session and conversation keep running. For a retained `--follow`
 canvas, first select `--no-follow`, then close its owned viewer panes and open
 a fresh ordinary view. Continuing that old following canvas is not an automatic
-live-client migration. Existing 0.7.10 sizing clients and read-only viewers do
-not need this step.
+live-client migration. Read-only viewers do not need this step.
 
 ## Desktop windows and previews
 
@@ -220,7 +257,7 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 ## HTTP API
 
 - `POST /api/terminal/open`: `{ view, provider?: "herdr", session?: string, expectedPlan?: string }`.
-- `POST /api/terminal/open-all` (bearer auth): `{ provider?: "herdr", session?: string, viewportColumns?: number, reuseLive?: boolean }`.
+- `POST /api/terminal/open-all` (bearer auth): `{ provider?: "herdr", session?: string, viewportColumns?: number, reuseLive?: boolean }`. `reuseLive` defaults to true: a rig whose view is still open with live tiles is focused, not opened again; `false` opens a copy.
 - `POST /api/terminal/close-all` (bearer auth): `{ provider?: "herdr" | "tmux", session?: string }`. Maps a corrupt ownership ledger (`corrupt_ledger`) to HTTP 500 without overwriting ledger files.
 - `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>` (optional `&bulk=1` for `rig:<id>` bulk partitioning).
 - `GET /api/terminal/status?provider=herdr&session=<name>`.
@@ -496,7 +533,8 @@ writable tile attaches with plain tmux when it opens (see
 [Replacing a seat's session](#replacing-a-seats-session)): keys and paste go
 through tmux as in any attached client, tmux's prefix works (prefix then `[` to
 scroll back, for example), and the tile sizes the window while it's the active
-client. If the seat's tmux server restarts, a tile shows the seat again only
+client (in a Herdr view, while it has keyboard focus; see
+[Replacing a seat's session](#replacing-a-seats-session)). If the seat's tmux server restarts, a tile shows the seat again only
 when the same managed seat returns. The printed manual attach commands are
 `tmux attach -t` for a writable tile and `tmux attach -r -t` for a read-only
 one, with a local seat's tmux server (`-L <name>` or `-S <path>`) when it

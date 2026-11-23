@@ -493,7 +493,7 @@ export function assessNativeResumeProbe(
       return {
         status: "attention_required",
         code: "login_required",
-        detail: "Codex is waiting for you to sign in or configure provider credentials before the session can become interactive.",
+        detail: "Codex needs you to sign in or configure provider credentials. Open this seat's terminal and complete Codex's sign-in prompt.",
       };
     }
     if (/requires a newer version of Codex/i.test(paneContent.replace(/\s+/g, " "))) {
@@ -1114,7 +1114,7 @@ function looksLikeCodexLoginPrompt(paneContent: string): boolean {
     });
     const labels = legacyChooser
       ? ["Sign in with ChatGPT", "Sign in with Device Code", "Provide your own API key"]
-      : ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock"];
+      : ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock", "Sign in another way"];
     return choices.length >= 2 && (!legacyChooser || choices.length === labels.length)
       && choices.filter(choice => choice.selected).length === 1
       && choices.every((choice, index) => choice.number === index + 1

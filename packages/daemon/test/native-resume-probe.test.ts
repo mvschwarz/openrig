@@ -18,7 +18,7 @@ const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.t
 const legacyFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-0.162.1.txt", import.meta.url), "utf8");
 const apiKeyLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-api-key-login.txt", import.meta.url), "utf8");
 const narrowFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-80x24.txt", import.meta.url), "utf8");
-const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]
+const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.171.0.txt"]
   .map(name => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
 describe("Codex first-login readiness", () => {

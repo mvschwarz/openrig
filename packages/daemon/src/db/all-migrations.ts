@@ -4,10 +4,12 @@ import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js
 import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
+import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { providerAccountRefsSchema } from "./migrations/187_provider_account_refs.js";
 import { providerAccountAssignmentsSchema } from "./migrations/188_provider_account_assignments.js";
+import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -370,6 +372,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeStatuslineThrottleSchema,
   workflowBoundPodSchema,
   seatPoolSchema,
+  queueTransferStagingSchema,
   remoteControlObservationsSchema,
   sessionStopAttemptSchema,
   nodeKeepAliveSchema,
@@ -377,4 +380,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsScanIndexesSchema,
   providerAccountRefsSchema,
   providerAccountAssignmentsSchema,
+  rigSeatSliceSchema,
 ];

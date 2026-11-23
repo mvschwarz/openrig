@@ -155,7 +155,13 @@ type TimedNativeProof = NativeProcessObservation & { observedAt: string };
 /** Both completion and periodic checks use the same unavailable-observation mapping. */
 export function tmuxUnavailableIdentity(input: {
   nodeId: string; runtime: string | null; sessionName: string; registeredPane: string | null; observedAt: string;
+  db?: Database.Database; retainStopped?: boolean;
 }): SeatIdentityVerdict {
+  const stopped = input.db && input.retainStopped !== false && nodeSessionConfirmedMissing(input.db, input.nodeId)
+    ? new SeatIdentityStore(input.db).getForNode(input.nodeId) : null;
+  if (stopped?.sessionName === input.sessionName && stopped.evidence.registeredPane === input.registeredPane) {
+    return { ...stopped, reason: "session_missing_tmux_unavailable", observedAt: input.observedAt };
+  }
   return { nodeId: input.nodeId, verdict: input.runtime === "codex" ? "mismatch" : "tmux_unavailable",
     evidenceSource: null, reason: "tmux_unavailable", sessionName: input.sessionName, observedAt: input.observedAt,
     evidence: { registeredPane: input.registeredPane, observedPid: null, observedCommand: null, matchedLayer: null } };
@@ -445,11 +451,8 @@ export class SeatIdentityReconciler {
     // An unreadable sample cannot undo positive absence for this same session, pane and occupant.
     // A session this sweep listed or probed present, or a positively matched recorded process, undoes it
     // (retainStopped=false).
-    if (retainStopped && nodeSessionConfirmedMissing(this.db, seat.node_id)) {
-      return { ...this.store.getForNode(seat.node_id)!, reason: "session_missing_tmux_unavailable", observedAt };
-    }
     return tmuxUnavailableIdentity({ nodeId: seat.node_id, runtime: seat.runtime,
-      sessionName: seat.session_name, registeredPane: seat.tmux_pane, observedAt });
+      sessionName: seat.session_name, registeredPane: seat.tmux_pane, observedAt, db: this.db, retainStopped });
   }
 
   private async computeVerdict(
@@ -495,7 +498,7 @@ export class SeatIdentityReconciler {
       // Pane IDs can outlive their stored association after a move or server restart.
       // Only observed membership in the exact session proves this executor exited.
       const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
-      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, this.now().toISOString(), !liveSessions.has(seat.session_name));
+      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, this.now().toISOString(), !liveSessions.has(seat.session_name) && !currentPanes?.length);
       return {
         ...base, verdict: "pane_missing", evidenceSource: "pane_process", reason: "pane_exited",
         evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: batched.command, matchedLayer: null },

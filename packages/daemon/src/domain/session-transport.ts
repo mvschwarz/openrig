@@ -1507,6 +1507,12 @@ function currentMenuKeyHint(lines: string[]): boolean {
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
 const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
 const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$|^\s*tab to queue(?: message)?(?:\s*$|\s{2,}| · )/;
+// A person can choose the status line's items with Codex's `/statusline` (0.170.0: model, approval mode, context,
+// limits, version and more; its default is model, current dir and thread name, which CODEX_STATUS_LINE matches), so a
+// chosen row needn't carry a path: a reporter's 0.170.0 seat drew `GPT-6.2-Sol xhigh · Approve for me · Context 72% used
+// · weekly 31% left · 0.170.0`. Such a row counts only with at least two items (Codex joins them with ` · `) and a known
+// hint row under it. A one-item row, or one with no hint row, still needs the path shape above.
+const CODEX_CHOSEN_STATUS_LINE = /^ {2}[^\s·›»❯>][^·]* · \S/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
@@ -1518,7 +1524,10 @@ function codexFooterSeparator(lines: string[], allowNativePath = false): number 
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
-  if (last < 0 || footer.length > 2 || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)))
+  const chosenStatusLine = footer.length === 2 && CODEX_CHOSEN_STATUS_LINE.test(footer[0]!) && !CODEX_HINT_ROW.test(footer[0]!)
+    && !composerNumberedChoicePattern(composerPromptClassForRuntime("codex")).test(footer[0]!.trimStart());
+  if (last < 0 || footer.length > 2
+    || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)) || chosenStatusLine)
     || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
   return separator >= 1 && !lines[separator]!.trim() ? separator : -1;
