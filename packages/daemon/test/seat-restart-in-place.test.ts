@@ -2130,7 +2130,7 @@ describe("rig provider assign's plan over a Codex seat", () => {
       : `now names the seat in rig r (${(w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(otherNode) as { rig_id: string }).rig_id}), not the one this restart was for; nothing was restarted`);
     expect(result!.recovery).toBeUndefined();
     expect(result!.detail).not.toContain("rig seat restart");
-    expect(result!.detail).toContain("It has no restart command");
+    expect(result!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone.");
     const saved = new ProviderAccountAssignmentsRepository(w.db).results(rigId, "codex");
     expect(saved.map((r) => [r.nodeId, r.kind])).toEqual([[w.node.id, "unknown"]]);
   });

@@ -276,10 +276,10 @@ describe("the daemon's assignment plan", () => {
     expect([switchSeat.mock.calls.map(([s]) => s), restartPeer.mock.calls.map(([s]) => s)]).toEqual([["a1@fleet"], ["a3@fleet"]]);
     // No restart command is given by that name, for this rig's seat or the other rig's: it could reach the other seat.
     const a2 = report.results.find((r) => r.seat === "a2@fleet")!;
-    expect([a2.recovery, a2.detail]).toEqual([undefined, expect.stringContaining("It has no restart command: a restart reaches a seat by its session name, and another seat has this one.")]);
+    expect([a2.recovery, a2.detail]).toEqual([undefined, expect.stringContaining("It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone.")]);
     expect(planned.plan.codexHomes[0]!.seats.find((s) => s.rigId === "rig-b")!.effect).toBe("not restarted; another seat has its session name, so a restart by that name could reach that one instead");
     expect(report.otherRigPeers).toEqual([{ seat: "a2@fleet", rig: "fleet", home: codexHome,
-      why: "It has no restart command: a restart reaches a seat by its session name, and another seat has this one" }]);
+      why: "It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone" }]);
 
     // With --account-home, the successor's dry run isn't asked about it either, and its move is never attempted.
     const prepared = path.join(dir, "prepared");
@@ -382,6 +382,44 @@ describe("the daemon's assignment plan", () => {
     expect(b.precheck?.message).toContain("b@fleet reaches the seat in rig rig-old (archived), not this one");
   });
 
+  // Found in review of #3679: a seat's result row references its node, so an apply whose seat was removed while it ran
+  // threw on saving that row, after other seats had changed, and reported nothing.
+  it("a seat removed while the apply runs is still reported, with no command; the apply finishes and saves the other seats' results", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    seat("fleet", "k1", "codex", "a@fleet");
+    seat("fleet", "k2", "codex", "b@fleet");
+    const nodeOf = (s: string) => (db.prepare("SELECT node_id FROM sessions WHERE session_name = ?").get(s) as { node_id: string }).node_id;
+    const removed = nodeOf("a@fleet");
+    // a@fleet's removal holds its lease first: the pinned restart then finds no seat, as restartInPlace reports it.
+    const run = vi.fn<SeatRestart["run"]>(async (s) => {
+      if (s !== "a@fleet") return { ok: true, codexHome, outcome: "restarted_account_unverified", message: "restarted", activity: { state: "idle" }, peers: [] } as never;
+      new RigRepository(db).deleteNode(removed);
+      return { ok: false, code: "seat_name_shared", message: '"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.' } as never;
+    });
+    const seatRestart = { plan: vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never), run };
+    const svc = new ProviderServiceImpl({ db, listRigs: () => new RigRepository(db).listRigs(), env: { HOME: dir, CODEX_HOME: codexHome }, platform: "linux",
+      codexLogins: { list: () => ["team"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart);
+    if (!planned.ok) throw new Error(planned.message);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
+    if (!applied.ok) throw new Error(applied.message);
+    // a@fleet left the home unknown, so b@fleet is skipped with its own restart step (its name still reaches it alone).
+    expect(run.mock.calls.map(([s]) => s)).toEqual(["a@fleet"]);
+    const [a, b] = applied.report.results;
+    expect(a).toMatchObject({ seat: "a@fleet", kind: "unknown" });
+    expect(a!.recovery).toBeUndefined();
+    expect(a!.detail).toContain('"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.');
+    expect(a!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone.");
+    expect(a!.detail).not.toContain("rig seat restart");
+    expect(b).toMatchObject({ seat: "b@fleet", kind: "unknown", recovery: "rig seat restart b@fleet --keep-conversation" });
+    const assignments = new ProviderAccountAssignmentsRepository(db);
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeOf("b@fleet")) as { rig_id: string }).rig_id;
+    expect(assignments.results(rigId, "codex").map((r) => [r.seat, r.kind])).toEqual([["b@fleet", b!.kind]]);
+  });
+
   it("an outside peer whose session name a seat in a third rig has, on another home, gets no restart command", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
@@ -406,7 +444,7 @@ describe("the daemon's assignment plan", () => {
     const report = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat: vi.fn(async () => ({ outcome: "succeeded" as const, message: "switched" })),
       restartPeer: vi.fn(), activityOf: () => "idle", save: () => {}, now: () => "t" });
     expect(report.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: codexHome,
-      why: "It has no restart command: a restart reaches a seat by its session name, and another seat has this one" }]);
+      why: "It has no restart command: a restart reaches a seat by its session name, and that name no longer reaches this seat alone" }]);
   });
 
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {

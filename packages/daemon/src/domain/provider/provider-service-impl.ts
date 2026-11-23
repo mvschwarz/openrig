@@ -413,11 +413,17 @@ export class ProviderServiceImpl implements ProviderService {
         homeSwitches: homeSwitchesOf,
         activityOf: (seat) => this.activityOf(seat),
         save: (result, applied) => {
+          // A seat removed while the apply ran (its removal held the seat's lease first) is still in the report, but saves
+          // no result: its row would go with the node. Its rig removed with it saves no intent either.
+          const nodeId = nodeOf.get(result.seat)!.nodeId;
+          const exists = (table: "nodes" | "rigs", id: string) => !!this.deps.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
+          if (!exists("rigs", rigId)) return;
           if (!stored && tookEffect(result.kind, result.seat)) {
             assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });
             stored = true;
           }
-          assignments.saveResult({ rigId, provider: input.provider, nodeId: nodeOf.get(result.seat)!.nodeId, seat: result.seat,
+          if (!exists("nodes", nodeId)) return;
+          assignments.saveResult({ rigId, provider: input.provider, nodeId, seat: result.seat,
           label: input.label, kind: result.kind, detail: result.detail, recovery: result.recovery ?? null, activity: result.activity, at: result.at,
           ...(applied ? { applied: { ...applied, account: { kind: account.kind, file: account.file, codexHome: account.codexHome, login: account.login } } } : {}) });
         },
