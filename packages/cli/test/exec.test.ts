@@ -152,8 +152,16 @@ describe("rig exec", () => {
     const peer = withEnv(h, { OPENRIG_SESSION_NAME: "reviewer@studio" });
     const listed = await rig(peer, ["list", "--json"]);
     expect(JSON.parse(listed.out)).toMatchObject([{ runId: original.runId, owner: SEAT, state: "finished", hasSession: true }]);
+    const resources = await rig(peer, ["resource", "list", "--kind", "exec-run", "--json"]);
+    expect(JSON.parse(resources.out)).toMatchObject([{
+      kind: "exec-run", id: original.runId,
+      details: { owner: SEAT, resumeCommand: `rig exec run qitem-task --resume-from ${original.runId}` },
+    }]);
     const outside = await rig(withEnv(h, { OPENRIG_SESSION_NAME: "reviewer@elsewhere" }), ["list", "--json"]);
     expect(JSON.parse(outside.out)).toEqual([]);
+    const outsideResources = await rig(withEnv(h, { OPENRIG_SESSION_NAME: "reviewer@elsewhere" }),
+      ["resource", "list", "--kind", "exec-run", "--json"]);
+    expect(JSON.parse(outsideResources.out)).toEqual([]);
     const resume = ["run", "qitem-task", "--resume-from", original.runId];
     expect((await rig(peer, resume)).code).toBe(1);
     const next = await rig(withEnv(h, { FAKE_ACP_SAVED_SESSION: original.sessionId! }), resume);

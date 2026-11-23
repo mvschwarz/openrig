@@ -6,7 +6,8 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claimRow, execCommand } from "../../src/commands/exec.js";
+import { claimRow, execCommand, execRunResourceSource } from "../../src/commands/exec.js";
+import { resourceCommand } from "../../src/commands/resource.js";
 import { fileQueue } from "./exec-file-queue.js";
 
 const entry = fileURLToPath(new URL("./exec-connector-entry.ts", import.meta.url));
@@ -15,7 +16,9 @@ const queue = fileQueue(process.env.EXEC_QUEUE_FILE!);
 const connector = process.env.EXEC_TEST_CONNECTOR;
 const winner = process.env.EXEC_TEST_WINNER;
 const stall = Number(process.env.EXEC_TEST_STALL_MS ?? 0);
-await execCommand({
+if (process.argv[2] === "resource") {
+  await resourceCommand([execRunResourceSource]).parseAsync(process.argv.slice(3), { from: "user" });
+} else await execCommand({
   queue: async () => queue,
   connectorCommand: (runId) => connector === "die" ? [process.execPath, "-e", "process.exit(3)"]
     : [process.execPath, "--import", "tsx", connector === "instant" ? instant : entry, runId],

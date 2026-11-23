@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../client.js";
 import { daemonStatusGuard, getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { sessionRigOf } from "../session-name.js";
+import type { ResourceSource } from "./resource.js";
 import { describeUsage, runAcpAssignment, type AcpOutcomeKind, type AcpQueue, type AcpUsage } from "../acp/connector.js";
 import type { JsonRpcErrorObject } from "../acp/json-rpc-stdio.js";
 import { findRunProcesses, RUN_MARKER } from "../acp/run-processes.js";
@@ -207,6 +209,33 @@ function writeRun(run: ExecRun): void {
   writeFileSync(tmp, `${JSON.stringify(run)}\n`);
   renameSync(tmp, runPath(run.runId));
 }
+
+function listExecRuns(rig: string) {
+  let names: string[];
+  try { names = readdirSync(runsDir()); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return [];
+  }
+  return names.filter((name) => /^exec-[a-z0-9-]+\.json$/i.test(name))
+    .flatMap((name) => {
+      const run = readRun(name.slice(0, -5));
+      if (!run || sessionRigOf(run.self) !== rig) return [];
+      const { runId, qitemId, self, harness, state, requestedAt, endedAt, outcome, summary } = run;
+      return [{ runId, qitemId, owner: self, harness, state, requestedAt, endedAt, outcome, summary,
+        hasSession: Boolean(run.sessionId) }];
+    }).sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+}
+
+export const execRunResourceSource: ResourceSource = {
+  kind: "exec-run",
+  list: (rig) => listExecRuns(rig).map((run) => ({
+    id: run.runId,
+    summary: `${run.qitemId}  ${run.owner}  ${run.harness}  ${run.state}${run.outcome ? `/${run.outcome}` : ""}`,
+    details: { ...run, ...(run.endedAt && run.hasSession && rowRun(run.qitemId) === run.runId
+      ? { resumeCommand: `rig exec run ${run.qitemId} --resume-from ${run.runId}` } : {}) },
+  })),
+};
 
 function topClaim(qitemId: string): { generation: number; runId?: string } | undefined {
   let names: string[];
@@ -440,26 +469,13 @@ export function execCommand(deps: ExecDeps = {}): Command {
     .option("--json", "JSON output")
     .action((opts: { json?: boolean }) => {
       const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-      const group = seat?.slice(seat.indexOf("@") + 1);
-      if (!seat?.includes("@") || !group) {
+      const rig = seat && sessionRigOf(seat);
+      if (!rig) {
         console.error("Run rig exec list from a managed seat.");
         process.exitCode = 1;
         return;
       }
-      let names: string[];
-      try { names = readdirSync(runsDir()); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        names = [];
-      }
-      const runs = names.filter((name) => /^exec-[a-z0-9-]+\.json$/i.test(name))
-        .flatMap((name) => {
-          const run = readRun(name.slice(0, -5));
-          if (!run || run.self.slice(run.self.indexOf("@") + 1) !== group) return [];
-          const { runId, qitemId, self, harness, state, requestedAt, endedAt, outcome, summary } = run;
-          return [{ runId, qitemId, owner: self, harness, state, requestedAt, endedAt, outcome, summary,
-            hasSession: Boolean(run.sessionId) }];
-        }).sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+      const runs = listExecRuns(rig);
       console.log(opts.json ? JSON.stringify(runs, null, 2) : runs.length
         ? runs.map((run) => `${run.runId}  ${run.qitemId}  ${run.owner}  ${run.harness}  ${run.state}${run.outcome ? `/${run.outcome}` : ""}${run.hasSession ? "  session recorded" : ""}`).join("\n")
         : "No temporary worker runs for this rig on this host.");

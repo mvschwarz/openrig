@@ -155,6 +155,7 @@ rig exec run <row> --harness claude [--wait]     # start it; --wait waits here f
 rig exec run <row> --cwd /workspace -- cursor-agent acp
 rig exec status <runId|row>                      # state, outcome, usage and cost, and what still runs
 rig exec list [--json]                           # recorded runs for this seat's rig on this host
+rig resource list --kind exec-run --json        # the same runs in the shared resource list
 rig exec run <row> --resume-from <runId>          # continue the last recorded ACP session
 rig exec cancel <runId>
 ```
