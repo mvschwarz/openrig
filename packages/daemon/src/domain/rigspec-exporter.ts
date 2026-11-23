@@ -464,6 +464,7 @@ export class RigSpecExporter {
       ...(cultureFile ? { cultureFile } : {}),
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
+      ...(this.rigRepo.getRigSeatSlice(rigId) ? { seatSlice: "rig" as const } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
       ...(startupLayers?.defaultOnboardingPack !== undefined ? { defaultOnboardingPack: startupLayers.defaultOnboardingPack } : {}),

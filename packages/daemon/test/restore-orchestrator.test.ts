@@ -2143,6 +2143,59 @@ describe("RestoreOrchestrator", () => {
     expect(freshLaunch).toHaveBeenCalledWith(rig.id, live.id, expect.anything());
   });
 
+  // A seat whose pod was recreated too keeps its continuity state under the live pod's id; the snapshot's pod id finds
+  // no row there.
+  it("a recreated seat in a recreated pod whose continuity recovery owns it is skipped, not launched over", async () => {
+    const seeded = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "conv-1", restorePolicy: "resume_if_possible" });
+    const snap = updateSnapshotData(seeded, (data) => { data.nodes[0].podId = "snapshot-pod"; });
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(snap.data.nodes[0]!.id);
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("live-pod", snap.rigId, "Dev");
+    const live = rigRepo.addNode(snap.rigId, "worker", { role: "worker", runtime: "claude-code", podId: "live-pod" });
+    db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES (?, ?, ?)").run("live-pod", live.id, "restoring");
+    const tmux = mockTmux();
+    const result = await createOrchestrator({ tmux }).restore(snap.id);
+    expect(result.ok && result.result.warnings.some(w => w.includes("continuity state is 'restoring', skipping"))).toBe(true);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  // The sessions a restore reports as it registers them name the seat's live node, where they were registered: daemon
+  // start's automatic restore adopts each into the seat's keep_alive incident, and that budget row is the live node's.
+  it("a recreated seat's launched session is reported on its live node", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "conv-1", restorePolicy: "resume_if_possible" });
+    const { live } = recreate(snap, "claude-code");
+    const launched: Array<[string, string]> = [];
+    await createOrchestrator({ claude: mockClaudeResume() })
+      .restore(snap.id, { onSessionLaunched: (nodeId, sessionId) => launched.push([nodeId, sessionId]) });
+    expect(launched.length).toBeGreaterThan(0);
+    expect(launched.every(([nodeId]) => nodeId === live.id)).toBe(true);
+  });
+
+  it("a recreated seat's fresh replacement session is reported on its live node", async () => {
+    const rig = rigRepo.createRig("recreated-replacement-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-recreated-replacement", rig.id, "Dev");
+    const saved = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-recreated-replacement" });
+    const session = sessionRegistry.registerSession(saved.id, "r44-design");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(saved.id);
+    const live = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-recreated-replacement" });
+    const freshLaunch = vi.fn(async (_rigId: string, _nodeId: string, opts?: { onSessionRegistered?: (sessionId: string) => void }) => {
+      opts?.onSessionRegistered?.("replacement-session");
+      return { status: "failed" as const, error: "recipe unavailable" };
+    });
+    const adapter = { runtime: "claude-code", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })), launchHarness: vi.fn(async () => ({ ok: true as const })) };
+    const launched: Array<[string, string]> = [];
+    await createOrchestrator({ freshLaunch, freshLaunchAvailable: () => true }).restore(snap.id, {
+      adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.design"],
+      onSessionLaunched: (nodeId, sessionId) => launched.push([nodeId, sessionId]) });
+    expect(freshLaunch).toHaveBeenCalled();
+    expect(launched).toContainEqual([live.id, "replacement-session"]);
+  });
+
   // The replay of a recreated seat's saved startup context runs startup on its live node, where its launch registered the
   // session. On the snapshot's id, startup's runtime check finds no session there and ends attention_required.
   it("a recreated seat with a saved startup context resumes through the replay on its live node", async () => {

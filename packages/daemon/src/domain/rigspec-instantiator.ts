@@ -732,6 +732,8 @@ export class PodRigInstantiator {
         }
         // The rig's culture and startup layers, for seats added later (both rig-create sites; an expansion keeps them).
         if (!opts?.targetRigId) this.persistRigStartupLayers(materializedRigId, rigSpec, rigRoot);
+        // #80: the rig's seat grouping, read at each seat launch (both pod-aware rig-create sites; an expansion keeps it).
+        if (!opts?.targetRigId && rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(materializedRigId, rigSpec.seatSlice);
 
         // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
         // this is ONE of TWO rig-persist sites (materializeValidatedSpec + instantiate); missing
@@ -1586,6 +1588,8 @@ export class PodRigInstantiator {
           }
         }
         const rig = this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        // Grouping must persist with creation, so a missing migration leaves no partial rig.
+        if (rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(rig.id, rigSpec.seatSlice);
         opts?.recordCreated?.(rig.id);
         return rig;
       });
@@ -2356,8 +2360,16 @@ export class PodRigInstantiator {
   /** The recipe supplies the authored source, while the retained node row is the
    *  latest operator choice. Keep those choices authoritative across a restart. */
   private persistedMember(node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number], recipeMember: RigSpecPodMember): RigSpecPodMember {
+    // A seat moved with `rig seat set-runtime` runs on the node's runtime; its recipe still names the one it was
+    // materialized for. The model, effort, advisor and Codex profile the recipe authored belong to that earlier runtime
+    // (runtime-switch-materials drops them), so a moved seat takes these from the node, where the move stored its own.
+    // One the node doesn't hold resolves from today's agent spec, as for any seat.
+    const runtime = node.runtime ?? recipeMember.runtime;
+    const moved = runtime !== recipeMember.runtime;
     return {
       ...recipeMember,
+      runtime,
+      ...(moved ? { model: undefined, effort: undefined, advisor: node.advisor ?? undefined, codexConfigProfile: undefined } : {}),
       launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
       // #3253: an unreadable stored value stays as stored (undefined keeps it, {} would clear it).
       processLimits: node.processLimitsError ? undefined : node.processLimits ? { ...node.processLimits } : {},
