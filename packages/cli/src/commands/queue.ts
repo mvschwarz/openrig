@@ -688,7 +688,8 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
   if (!remote) return { reader: client, options, remote: undefined, targetEstablished: true };
   // Check the selected daemon's own host ID before registry lookup so a --host
   // naming this daemon stays local even when hosts.yaml maps it to another URL.
-  if (await daemonSelfHostId(client) === remote) {
+  const selfId = await daemonSelfHostId(client);
+  if (selfId === remote) {
     return { reader: client, options, remote: undefined, targetEstablished: true };
   }
   const registry = loadHostRegistry();
@@ -701,6 +702,9 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
         return { error: `from host '${remote}' (${why})` };
       }
       if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
+        if (typeof selfId === "string" && selfId.trim().length > 0) {
+          return { reader: client, options, remote: undefined, targetEstablished: false };
+        }
         return { reader: client, options, remote: undefined, targetEstablished: true };
       }
       const bearer = resolveRemoteBearer(match.host);

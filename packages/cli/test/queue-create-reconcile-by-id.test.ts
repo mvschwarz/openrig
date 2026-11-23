@@ -352,6 +352,35 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(process.exitCode ?? 0).toBe(0);
   });
 
+  it("refuses a matching registry URL for read-back when the selected daemon reports a different non-empty host ID", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${LOCAL}\n`);
+    const { calls, error } = await run("dev@rig-b", [FORWARD_UNKNOWN], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW },
+    }, ["--host", "vps-b"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([]);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    expect(stderr.join("\n")).toContain("The CLI could not establish the queue for requested host 'vps-b'. The write outcome is still unknown. Keep this ID for recovery.");
+    expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ error: "remote_queue_write_failed", outcome: "indeterminate", qitemId: ID });
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("refuses a matching registry URL for --verify when the selected daemon reports a different non-empty host ID", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${LOCAL}\n`);
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
+    }, ["--host", "vps-b", "--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([]);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ delivery: { outcome: "indeterminate" } });
+  });
+
   it("keeps delivery unknown when a matching selected-endpoint row cannot be tied to the requested host", async () => {
     const receiptFactory = vi.fn((base: string) => {
       throw new Error(`receipt reader must reuse the selected client for ${base}`);
