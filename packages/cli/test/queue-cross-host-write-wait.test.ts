@@ -32,10 +32,14 @@ function makeDeps(replies: Reply[]): { deps: QueueDeps; requests: Request[] } {
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: () => ({
         get: vi.fn(async () => ({ status: 200, data: {} })),
-        post: vi.fn(async (p: string, _body: unknown, options?: RequestOptions) => {
+        post: vi.fn(async (p: string, body: unknown, options?: RequestOptions) => {
           requests.push({ path: p, options });
           const reply = replies.shift() ?? { status: 500, data: { error: "unrouted" } };
           if (reply instanceof Error) throw reply;
+          if (p === "/api/queue/create" && reply.status === 201 && reply.data && typeof reply.data === "object"
+            && body && typeof body === "object" && typeof (body as { qitemId?: unknown }).qitemId === "string") {
+            return { ...reply, data: { ...(reply.data as Record<string, unknown>), qitemId: (body as { qitemId: string }).qitemId } };
+          }
           return reply;
         }),
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
