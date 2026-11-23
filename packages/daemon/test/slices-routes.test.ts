@@ -3711,14 +3711,25 @@ describe("GET /api/slices observed queue counts", () => {
       row("wal-blocked", "blocked", scope("blocked-slice"));
       const { app, indexer } = route("alpha", false);
 
-      const injectMidCountThrow = () =>
-        vi.spyOn(indexer, "countQueueRowsCooperatively").mockImplementationOnce(async (rows, countRow) => {
-          expect(rows.length).toBeGreaterThan(0);
-          countRow(rows[0]!);
+      const injectMidCountThrow = () => {
+        const counted: QueueCountRow[] = [];
+        const spy = vi.spyOn(indexer, "countQueueRowsCooperatively").mockImplementationOnce(async (rows, countRow) => {
+          if (rows.length > 0) {
+            const first = rows[0]!;
+            countRow(first);
+            counted.push({ state: first.state, tags: first.tags });
+          }
           throw new Error("injected cooperative count failure");
         });
+        return { spy, counted };
+      };
+      const expectCountedBlockedRow = (counted: QueueCountRow[]) => {
+        expect(counted, "a matching queue row must be counted before the mid-count throw").toHaveLength(1);
+        expect(counted[0]?.state).toBe("blocked");
+        expect(counted[0]?.tags).toContain("slice:blocked-slice");
+      };
 
-      const spyAll = injectMidCountThrow();
+      const faultAll = injectMidCountThrow();
       try {
         const res = await app.request("/api/slices");
         expect(res.status).toBe(200);
@@ -3727,31 +3738,34 @@ describe("GET /api/slices observed queue counts", () => {
           ["blocked-slice", null, "unknown"],
           ["none-slice", null, "unknown"],
         ]);
-        expect(spyAll).toHaveBeenCalledTimes(1);
+        expect(faultAll.spy).toHaveBeenCalledTimes(1);
+        expectCountedBlockedRow(faultAll.counted);
       } finally {
-        spyAll.mockRestore();
+        faultAll.spy.mockRestore();
       }
 
-      const spyBlocked = injectMidCountThrow();
+      const faultBlocked = injectMidCountThrow();
       try {
         const res = await app.request("/api/slices?derived=blocked");
         expect(res.status).toBe(200);
         const body = await res.json() as { slices: Entry[] };
         expect(body.slices.map((s) => s.name)).toEqual([]);
-        expect(spyBlocked).toHaveBeenCalledTimes(1);
+        expect(faultBlocked.spy).toHaveBeenCalledTimes(1);
+        expectCountedBlockedRow(faultBlocked.counted);
       } finally {
-        spyBlocked.mockRestore();
+        faultBlocked.spy.mockRestore();
       }
 
-      const spyUnknown = injectMidCountThrow();
+      const faultUnknown = injectMidCountThrow();
       try {
         const res = await app.request("/api/slices?derived=unknown");
         expect(res.status).toBe(200);
         const body = await res.json() as { slices: Entry[] };
         expect(body.slices.map((s) => s.name).sort()).toEqual(["blocked-slice", "none-slice"]);
-        expect(spyUnknown).toHaveBeenCalledTimes(1);
+        expect(faultUnknown.spy).toHaveBeenCalledTimes(1);
+        expectCountedBlockedRow(faultUnknown.counted);
       } finally {
-        spyUnknown.mockRestore();
+        faultUnknown.spy.mockRestore();
       }
 
       // After the transient fault clears, the next request returns normal observed counts.
