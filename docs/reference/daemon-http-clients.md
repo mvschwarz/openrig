@@ -133,6 +133,16 @@ All of them are server-sent events (`text/event-stream`):
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
 
+## Recorded lineage for a queue row
+
+`GET /api/queue/<qitemId>/lineage` uses the same read authority as the ordinary queue-row read. It needs no app request and makes no changes. It returns `rootId`, `nodes`, `edges`, `scope: "this-daemon"`, `status` (`available`, `partial` or `unknown`), `partial`, `partialReasons`, `unresolved`, and `limits`.
+
+Edges keep `reply-to`, `handed-off-from` and `blocked-on` distinct. Each edge runs from the referenced row to the row that records the relationship; `sourceQitemId` names that recording row. No relationship is inferred from a shared sender or a timestamp. The read follows recorded ancestors and descendants through the same graph traversal used by app request results, bounded to 100 nodes, 100 related edges per row and 20 handoff hops. Edges can name rows outside the returned node set when a limit or an unavailable row prevents traversal.
+
+A cycle, limit, missing or erased row, or a handed-to address without a recorded successor makes the result partial and names the reason. Unresolved references retain their recorded values; this route does not fetch another host. `available` means only that the bounded local traversal found no such gap, never that all hosts were searched. A missing or erased root returns 404 with `status: "unknown"` and no row content.
+
+A node's terminal state is `completion.status: "closed-as-recorded"`; other nodes say `open`. The graph's overall `completion.status` is always `unknown`: a closed record does not establish that the person's goal succeeded.
+
 ## People, asks and updates without Slack
 
 `GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
