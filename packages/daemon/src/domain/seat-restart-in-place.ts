@@ -1234,15 +1234,19 @@ export function procCmdlineArgv(raw: Buffer | string): string[] | null {
 export interface DarwinProcessReads {
   /** The exact launch argv and environment from KERN_PROCARGS2 (readNativeProcessLaunch); null when unreadable. */
   launch(pid: number): Promise<{ argv: string[]; env: Record<string, string> } | null>;
-  /** `lsof -a -p <pid> -d cwd,txt -Ffn` output. */
+  /** `lsof -a -p <pid> -d cwd,txt -Ffn` output, run in a UTF-8 locale. */
   lsof(pid: number): Promise<string>;
   isDirectory(path: string): boolean;
 }
 
+// lsof prints only what isprint(3)/iswprint(3) call printable in its own locale, and escapes the rest (`\xc3\xa9` for é).
+// A daemon started with no locale (launchd, a supervisor, a CI runner) would escape every accented name, so lsof is given
+// a UTF-8 locale of its own: en_US.UTF-8 ships with every macOS.
 const darwinReads: DarwinProcessReads = {
   launch: readNativeProcessLaunch,
   async lsof(pid) {
-    return (await execFileAsync("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd,txt", "-Ffn"], { timeout: 2000, maxBuffer: 64 * 1024 })).stdout;
+    return (await execFileAsync("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd,txt", "-Ffn"],
+      { timeout: 2000, maxBuffer: 64 * 1024, env: { ...process.env, LC_ALL: "en_US.UTF-8" } })).stdout;
   },
   isDirectory(path) { try { return fs.statSync(path).isDirectory(); } catch { return false; } },
 };
@@ -1264,7 +1268,8 @@ export async function darwinProcessFacts(pid: number, reads: DarwinProcessReads 
       else if (line.startsWith("n") && fd === "txt" && exe === null) exe = line.slice(1);
     }
   } catch { /* unknown: the restart refuses where it needs the cwd */ }
-  // lsof escapes a name it can't print, so only a path that is that directory is the cwd.
+  // lsof still escapes a name that isn't printable UTF-8 (a control character, an invalid byte), so only a path that is
+  // that directory is the cwd.
   if (cwd !== null && !reads.isDirectory(cwd)) cwd = null;
   return { cwd, exe, env, argv: launch.argv };
 }

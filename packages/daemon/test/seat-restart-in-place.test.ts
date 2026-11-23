@@ -1263,6 +1263,9 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     const home = path.join(dir, "odd home", ".codex");
     const args = ["-e", "setTimeout(() => {}, 30000)", "my repo/.git"];
     const child = spawn(process.execPath, args, { stdio: "ignore", cwd: dir, env: { HOME: "/Users/nobody here", CODEX_HOME: home, PATH: "/usr/bin:/bin" } });
+    // A daemon with no locale, as on a CI runner or under launchd: lsof would escape the é unless the reader gives it one.
+    const locale = Object.fromEntries(["LC_ALL", "LC_CTYPE", "LANG"].map((key) => [key, process.env[key]]));
+    for (const key of Object.keys(locale)) delete process.env[key];
     try {
       let facts: ProcessFacts | null = null;
       // Until exec completes, the launch record is the parent's; wait for the child's own.
@@ -1273,6 +1276,7 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
       expect(facts).toEqual({ cwd: fs.realpathSync(dir), exe: expect.stringMatching(/node/), env: { CODEX_HOME: home, HOME: "/Users/nobody here" },
         argv: [process.execPath, ...args] });
     } finally {
+      for (const [key, value] of Object.entries(locale)) if (value !== undefined) process.env[key] = value;
       child.kill();
       fs.rmSync(dir, { recursive: true, force: true });
     }
