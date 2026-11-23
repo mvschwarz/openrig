@@ -294,6 +294,8 @@ export interface WorkflowInstance {
   startedSpec?: StartedWorkflowSpec | null;
   /** #2730 (migration 154): the root objective it was started with. null for instances from before it: not recorded. */
   rootObjective?: string | null;
+  /** Optional operator-visible title for this particular run. */
+  runTitle?: string | null;
 }
 
 export interface WorkflowFrontierBinding {
