@@ -24,6 +24,7 @@ import {
   classifyPaneRuntimeMatch,
 } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { nodeSessionConfirmedMissing } from "../src/domain/node-inventory.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 interface TmuxState {
@@ -461,6 +462,103 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     const v = new SeatIdentityStore(db).getForNode("n1");
     expect(v?.verdict).toBe("tmux_unavailable");
     db.close();
+  });
+
+  it("a nonempty fresh pane list disables retained session absence despite the earlier session snapshot", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+      db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00'").run();
+      let paneSeen = false;
+      const tmux = {
+        ...makeTmux({ sessions: ["other@rig"] }),
+        readAllPaneProcesses: vi.fn(async () => paneSeen
+          ? new Map([["%1", { pid: null, command: "claude", dead: true }]]) : new Map()),
+        listPanes: vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+      };
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
+      await rec.reconcileAll();
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(true);
+
+      paneSeen = true;
+      await rec.reconcileAll();
+      expect(tmux.listPanes).toHaveBeenCalledWith("s1@rig", true);
+      expect(new SeatIdentityStore(db).getForNode("n1")).toMatchObject({
+        verdict: "tmux_unavailable", reason: "tmux_unavailable",
+      });
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(false);
+    } finally { db.close(); }
+  });
+
+  it("clears retained stopped evidence when a live listing has an unreadable pid", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+      db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00'").run();
+      const state: TmuxState = { sessions: ["other@rig"] };
+      const rec = new SeatIdentityReconciler({ db, tmux: makeTmux(state), now: NOW });
+      await rec.reconcileAll();
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(true);
+
+      state.sessions = ["s1@rig"];
+      await rec.reconcileAll();
+      expect(new SeatIdentityStore(db).getForNode("n1")).toMatchObject({
+        verdict: "tmux_unavailable", reason: "tmux_unavailable",
+      });
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(false);
+    } finally { db.close(); }
+  });
+
+  it("clears retained stopped evidence when an unreadable probe has a recorded process", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+      db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00'").run();
+      const store = new SeatIdentityStore(db);
+      store.upsert({ nodeId: "n1", verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: "s1@rig", observedAt: NOW().toISOString() });
+      const state: TmuxState = { sessions: ["other@rig"] };
+      let processAlive = false;
+      const census = vi.fn(async () => ({ rows: processAlive
+        ? [{ pid: 4242, ppid: 4241, command: "claude", startedAt: "Wed Jan  1 00:00:00 2025" }] : [], permissionHiddenPids: [] }));
+      const tmux = { ...makeTmux(state), probeSession: vi.fn(async () => ({
+        state: "transport_unavailable" as const, cause: "error connecting to /tmp/tmux-501/default (Permission denied)",
+      })) };
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, readProcessTableCensus: census });
+      await rec.reconcileAll();
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(true);
+
+      state.sessions = [];
+      processAlive = true;
+      census.mockClear();
+      await rec.reconcileAll();
+      expect(new SeatIdentityStore(db).getForNode("n1")).toMatchObject({
+        verdict: "tmux_unavailable", reason: "tmux_unavailable",
+      });
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(false);
+      expect(census).toHaveBeenCalledTimes(1);
+    } finally { db.close(); }
+  });
+
+  it("clears retained stopped evidence when the listing fails but the seat's own probe finds its session", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+      db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00'").run();
+      const state: TmuxState = { sessions: ["other@rig"] };
+      const tmux = { ...makeTmux(state), probeSession: vi.fn(async () => ({ state: "present" as const })) };
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
+      await rec.reconcileAll();
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(true);
+
+      state.throwListSessions = true;
+      await rec.reconcileAll();
+      expect(new SeatIdentityStore(db).getForNode("n1")).toMatchObject({
+        verdict: "tmux_unavailable", reason: "tmux_unavailable",
+      });
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(false);
+    } finally { db.close(); }
   });
 
   it("non-running seats are pruned; only running tmux-bound seats get verdicts", async () => {

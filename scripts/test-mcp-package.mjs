@@ -69,14 +69,23 @@ try {
   `);
   run(process.execPath, [path.join(consumer, "import.mjs")]);
   fs.writeFileSync(path.join(consumer, "consumer.ts"), `
-    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess } from "@openrig/cli/mcp.js";
+    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution } from "@openrig/cli/mcp.js";
     const options: McpHttpOptions = { daemonUrl: "http://127.0.0.1:1", host: "127.0.0.1", port: 0, tokenFile: "local.json" };
     // @ts-expect-error a typed endpoint port must not degrade to any through the package declarations
     const invalidPort: McpHttpOptions = { ...options, port: "not-a-port" };
     const scope: McpAccess = { principal: "local", owner: false, rigs: ["team"], roots: [], workspace: false };
     // @ts-expect-error typed access must not degrade to any either
     const invalidAccess: McpAccess = { ...scope, owner: "yes" };
-    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer(options);
+    const resolver: CallerResolver = async ({ bearer, instance, methods, signal }) => {
+      const metadata: readonly string[] = methods;
+      const answer: CallerResolution = { ok: true, seat: "guest@team", principal: { source: "local-authority", id: "guest" }, access: scope };
+      void bearer; void instance; void metadata; void signal;
+      return answer;
+    };
+    // @ts-expect-error an incomplete resolved caller must not degrade to any
+    const invalidResolver: CallerResolver = async () => ({ ok: true, seat: "guest@team" });
+    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000 });
+    void invalidResolver;
     const error: Error = new McpHttpConfigError("configuration");
     void endpoint; void error; void invalidPort; void invalidAccess;
   `);

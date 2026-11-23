@@ -80,7 +80,11 @@ jobs:
       - run: npm run test:repo
 
   linux-seat-environment:
-    if: ${{ github.event_name != 'push' }}
+    # Runs on push to main too. This is the only job that proves the Linux seat-isolation posture
+    # (/proc seat environments, canonical-input limits under `unshare --net`, no ambient
+    # credentials), and a merge to main is exactly where a change that passed on macOS can land
+    # without ever having been run under that confinement. The two 90-minute suites below stay
+    # off push so a merge does not pay for the whole matrix twice.
     # Cover /proc seat environments and Linux canonical-input limits that macOS cannot exercise.
     runs-on: ubuntu-latest
     timeout-minutes: 20

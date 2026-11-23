@@ -344,6 +344,36 @@ describe("SeatAttentionReconciler", () => {
     });
   });
 
+  it("clear-attention retains confirmed session absence when tmux cannot be read", async () => {
+    const rig = rigRepo.createRig("r-stopped-rebind");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@r-stopped-rebind");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%old" });
+    while (Date.now() <= decodeTime(session.id)) await new Promise((resolve) => setTimeout(resolve, 1));
+    new SeatIdentityStore(db).upsert({
+      nodeId: node.id, verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      sessionName: session.sessionName, observedAt: new Date().toISOString(),
+      evidence: { registeredPane: "%old", observedPid: null, observedCommand: null, matchedLayer: null },
+    });
+    expect(getNodeInventory(db, rig.id)[0]!.sessionStatus).toBe("detached");
+    const paneReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
+      tmux: {
+        listPanes: vi.fn(async () => { throw new Error("can't find session: worker@r-stopped-rebind"); }),
+        getPanePid: vi.fn(async () => null), getPaneCommand: vi.fn(async () => null),
+      },
+    });
+
+    expect((await paneReconciler.clearAttention(session.sessionName)).ok).toBe(false);
+    expect(new SeatIdentityStore(db).getForNode(node.id)).toMatchObject({
+      verdict: "pane_missing", reason: "session_missing_tmux_unavailable", evidenceSource: "tmux_session",
+      evidence: { registeredPane: "%old" },
+    });
+    expect(getNodeInventory(db, rig.id)[0]!).toMatchObject({ sessionStatus: "detached", storedSessionStatus: "running" });
+  });
+
   // Audit event emitted with distinct clearedBy
   it("emits seat.attention_cleared event on evidence-gated clear", async () => {
     const { rigId, nodeId } = seedAttentionSeat("r9", "worker@r9");

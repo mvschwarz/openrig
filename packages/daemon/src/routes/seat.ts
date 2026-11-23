@@ -484,6 +484,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     nodeLauncher: c.get("nodeLauncher" as never) as import("../domain/node-launcher.js").NodeLauncher,
     startupOrchestrator: (c.get("startupOrchestrator" as never) as import("../domain/startup-orchestrator.js").StartupOrchestrator | undefined) ?? undefined,
+    armContinuity: (c.get("armSeatContinuity" as never) as import("../domain/seat-lifecycle-service.js").SeatLifecycleDeps["armContinuity"]) ?? undefined,
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,

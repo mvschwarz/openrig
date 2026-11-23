@@ -36,6 +36,14 @@ it("unnamed roster: named rosters and other validation stay unchanged", () => {
   }
   for (const name of [null, 42, {}, "   "]) expect(() => parseRoster({ ...authored, name })).toThrow("version 1");
 });
+it.each([[undefined, "production"], ["", "production"], ["Production", "Production"]])("roster show displays %s as %s", async (name, heading) => {
+  const p = folder();
+  writeFileSync(join(p, "production.json"), JSON.stringify({ ...authored, name }));
+  const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+  await new Command().addCommand(rosterCommand({ folder: () => p, inventory: async () => inventory() }))
+    .parseAsync(["roster", "show", "production"], { from: "user" });
+  expect(logs.mock.calls[0]![0]).toBe(`${heading} — Make a film\nCurator: lead@studio (host-a)`);
+});
 it("shows a hosted member's last call only for a roster row on this host; another host's same-named seat is unknown", () => {
   const home = mkdtempSync(join(tmpdir(), "roster-presence-"));
   folders.push(home);
