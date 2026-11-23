@@ -18,7 +18,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ClaudeFragmentEntry, ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -640,6 +640,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
+      if (verification.warnings) tokenWarnings.push(...verification.warnings);
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
     }
 
@@ -940,7 +941,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         const focus = claudeTrustPromptFocus(paneContent);
         const key = focus === "yes" && !trustEntered ? "Enter" : focus === "no" && !trustMoved ? "Down" : null;
         if (!key) {
-          if (slowStart && !trustMoved && !trustEntered) {
+          // A prompt still being drawn (its heading, no options yet) keeps the wait, as the gated-grants backstop's does.
+          if (slowStart && !trustMoved && !trustEntered && !claudeTrustPromptDrawing(paneContent)) {
             slowStart = false;
             break;
           }
@@ -980,7 +982,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // the occupant), not on every poll. A shell label can't tell Claude having exited from the launch script not having
       // started it yet, and the occupant can change while we wait, so the process tree decides.
       const windowEnd = attempt === windowAttempts - 1;
-      if (booting && (windowEnd || (slowStart && (attempt - windowAttempts + 1) % checkEvery === 0))) {
+      // Claude's process with nothing drawn yet gets the longer wait at the window's end too: its trust dialog can be drawn
+      // after the quick window. In the longer wait it sleeps and polls (above), as it does after a boot.
+      const processOnly = probe.status === "resumed" && probe.foregroundOnly === true;
+      if (windowEnd ? booting || processOnly : booting && slowStart && (attempt - windowAttempts + 1) % checkEvery === 0) {
         if (await this.paneReturnedToShell(binding, await this.tmux.getPaneCommand(tmuxSession))) {
           // Provably back at its shell: the final check reports it. If it isn't by then, the seat is kept.
           if (slowStart) { attempts = attempt + 1; break; }
@@ -1005,11 +1010,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
 
     if (finalProbe.status === "resumed") {
-      return { ok: true };
+      return finalProbe.foregroundOnly ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
     const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
 
-    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
+    // A gate Claude draws once its process is up (workspace trust, project MCP approval) waits on a person, as the resume
+    // adapter reads it. A different occupant keeps main's result, as below, and so does a shell that's provably back and
+    // idle: the gate's text above it is what Claude left when it exited.
+    let returned: boolean | undefined;
+    const returnedToShell = async () => returned ??= await this.paneReturnedToShell(binding, finalCommand);
+    const gate = finalProbe.code === "trust_gate" || finalProbe.code === "mcp_gate";
+    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required"
+      || (gate && !await returnedToShell() && await this.paneOccupant(binding, false) !== "another")) {
       return {
         ok: false,
         probe: probeEvidence,
@@ -1030,7 +1042,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    if (await this.paneReturnedToShell(binding, finalCommand)) {
+    if (await returnedToShell()) {
       const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
       const lookup = notFound || !mayShowWrappedLookupRefusal(finalContent) ? null
         : claudeWrappedLookupLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);

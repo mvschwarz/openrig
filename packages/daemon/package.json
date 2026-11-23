@@ -5,6 +5,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./queue-transfer-export": { "types": "./dist/queue-transfer-export-surface.d.ts", "import": "./dist/queue-transfer-export-surface.js" },
+    "./queue-transfer-staging": { "types": "./dist/queue-transfer-staging-surface.d.ts", "import": "./dist/queue-transfer-staging-surface.js" },
     "./terminal-viewer-guard": { "types": "./dist/terminal-viewer-guard-surface.d.ts", "import": "./dist/terminal-viewer-guard-surface.js" },
     "./tmux-server-start": { "types": "./dist/tmux-server-start-surface.d.ts", "import": "./dist/tmux-server-start-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },

@@ -2429,7 +2429,7 @@ export class PodRigInstantiator {
   }
 
   seatClaudeFragments: ResolveClaudeFragments = async (rigId, nodeId) => {
-    const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId);
+    const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId, "current");
     if (!resolved.ok) return resolved;
     const input = { ...resolved, fsOps: this.deps.fsOps };
     const result = planProjection(input);
@@ -2438,7 +2438,7 @@ export class PodRigInstantiator {
   };
 
   /** Resolve the saved launch recipe against the current spec for skills, Claude fragments and continuity. */
-  private async resolvePersistedSeatConfig(rigId: string, nodeId: string) {
+  private async resolvePersistedSeatConfig(rigId: string, nodeId: string, runtimeSource: "recipe" | "current" = "recipe") {
     const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) return { ok: false as const, reason: `node ${nodeId} not found` };
     const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
@@ -2446,6 +2446,7 @@ export class PodRigInstantiator {
     const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
     if (!context) return { ok: false as const, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
     const member = this.persistedMember(node, context.member);
+    if (runtimeSource === "current" && node.runtime !== null) member.runtime = node.runtime;
     const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
     if (!resolved.ok) return { ok: false as const, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
     const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
@@ -2482,7 +2483,7 @@ export class PodRigInstantiator {
     });
   }
 
-  /** Store the rig culture file and rig startup block the spec declares, with the absolute root they resolve against. */
+  /** Store the rig's authored startup layers, with the absolute root their paths resolve against. */
   private persistRigStartupLayers(rigId: string, rigSpec: PodRigSpec, rigRoot: string): void {
     const podStartupFiles: Record<string, StartupFile[]> = Object.create(null);
     const podStartupActions: Record<string, import("./types.js").StartupBlock["actions"]> = Object.create(null);
@@ -2493,11 +2494,13 @@ export class PodRigInstantiator {
     const hasPodFiles = Object.keys(podStartupFiles).length > 0;
     const hasMemberStartupFiles = rigSpec.pods.some(pod => pod.members.some(member => (member.startup?.files.length ?? 0) > 0));
     const hasPodActions = Object.keys(podStartupActions).length > 0;
-    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles && !hasPodActions && !hasMemberStartupFiles) return;
+    if (rigSpec.defaultOnboardingPack === undefined && !rigSpec.cultureFile && !rigSpec.startup
+      && !hasPodFiles && !hasPodActions && !hasMemberStartupFiles) return;
     this.deps.rigRepo.setRigStartupLayers(rigId, {
       root: nodePath.resolve(rigRoot),
       cultureFile: rigSpec.cultureFile,
       startup: rigSpec.startup,
+      defaultOnboardingPack: rigSpec.defaultOnboardingPack,
       ...(hasPodFiles ? { podStartupFiles } : {}),
       ...(hasPodActions ? { podStartupActions } : {}),
     });
@@ -2555,10 +2558,16 @@ export class PodRigInstantiator {
    *  decided as a pair: a spec that declares either one supplies both (an undeclared one is absent), resolved against
    *  the spec's root; a spec that declares neither gets both as stored when the rig was created, against that root.
    *  Expand, add-member and first-start retry launch from a synthetic spec that declares neither, so an added seat gets
-   *  the rig's layers as an original seat did. */
+   *  the rig's layers as an original seat did. The onboarding override always belongs to the target rig. */
   private rigStartupLayers(rigSpec: PodRigSpec, rigRoot: string, rigId: string): RigStartupLayers {
-    if (rigSpec.cultureFile || rigSpec.startup) return { root: rigRoot, cultureFile: rigSpec.cultureFile, startup: rigSpec.startup };
-    return this.deps.rigRepo.getRigStartupLayers(rigId) ?? { root: rigRoot };
+    const saved = this.deps.rigRepo.getRigStartupLayers(rigId);
+    if (rigSpec.cultureFile || rigSpec.startup) {
+      return {
+        root: rigRoot, cultureFile: rigSpec.cultureFile, startup: rigSpec.startup,
+        defaultOnboardingPack: saved?.defaultOnboardingPack,
+      };
+    }
+    return saved ?? { root: rigRoot };
   }
 
   /** The spec as the startup layering sees it: carrying the rig layers the seat launches with, and only those there
@@ -3406,7 +3415,7 @@ export class PodRigInstantiator {
       appliesOn: ["fresh_start", "restore"],
     });
 
-    if (this.deps.onboardingEnabledResolver?.() ?? true) {
+    if (rigLayers.defaultOnboardingPack ?? this.deps.onboardingEnabledResolver?.() ?? true) {
       const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
       files.push(
         {
