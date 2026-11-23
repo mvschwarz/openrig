@@ -578,10 +578,8 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         const stopReason = (what: string) => `seat pool ${job.jobId}: ${what}`;
         const phaseNow = (slot: SeatPoolSlot): SeatPoolPhase =>
           deps.slots.forModel(modelNodeId).find((s) => s.slotId === slot.slotId)?.phase ?? "draining";
-        /** What keeps an agent from being stopped now, read again at the checked stop's final step before each effect
-         *  (after its liveness probe): the job, the rig and model holds, the current block, the agent's work and activity,
-         *  and, for a retry (`idleSince` null), whether the pool still has surplus. Null when the stop may go on. */
-        const keeps = (slotNumber: number, nodeId: string, idleSince: string | null): string | null => {
+        /** What holds the pool now: the job, the model and rig holds, and the current block. Null when none does. */
+        const holdsNow = (): string | null => {
           if (!active()) { held = JOB_STOPPED; return "job_stopped"; }
           const modelNow = seatPoolModelOfJob(deps.db, job);
           if (!modelNow.found) {
@@ -596,6 +594,14 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             return "rig_stopped";
           }
           if (blockChangedNow()) return "pool_block_changed";
+          return null;
+        };
+        /** What keeps an agent from being stopped now, read again at the checked stop's final step before each effect
+         *  (after its liveness probe): the job, the rig and model holds, the current block, the agent's work and activity,
+         *  and, for a retry (`idleSince` null), whether the pool still has surplus. Null when the stop may go on. */
+        const keeps = (slotNumber: number, nodeId: string, idleSince: string | null): string | null => {
+          const holding = holdsNow();
+          if (holding !== null) return holding;
           const now = readSeatPoolState(deps, model, deps.slots.forModel(modelNodeId));
           const agent = now.agents.find((a) => a.slotNumber === slotNumber);
           if (!agent || agent.phase !== "draining") return "slot_moved_on";
@@ -693,6 +699,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               } catch {
                 // best-effort, as in teardown
               }
+              // The job, the holds and the block again after the refresh, which can take a while: one that holds the pool
+              // now captures nothing and stops nothing. Nothing was stopped, so the slot goes back to `live` in a later cycle.
+              const heldAfterRefresh = holdsNow();
+              if (heldAfterRefresh !== null) return { ...step, phase: "draining", outcome: "draining", code: heldAfterRefresh };
               // The capture, while the agent still runs, right before the stop. A capture that fails stops nothing.
               let snapshotId: string;
               try {

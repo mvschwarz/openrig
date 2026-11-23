@@ -391,6 +391,30 @@ describe("seat-pool drain: the capture and the confirmed stop (#3395 Piece 1)", 
     }
   });
 
+  it("A `rig down` that begins while the drain refreshes the agent's resume metadata holds it before the capture: nothing is captured or stopped, and the slot stays `draining` with no attempt on record.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      let stopped: number | undefined;
+      // the hold begins while the refresh runs, after every earlier check
+      w.refresh.mockImplementationOnce(async () => { stopped = w.bus.emit({ type: "rig.stopped", rigId: m.rigId }).seq; });
+
+      const notes = await w.cycle(job.jobId);
+      expect(w.refresh).toHaveBeenCalledTimes(1);
+      expect(w.captures).toEqual([]);
+      expect(w.stopSeat).not.toHaveBeenCalled();
+      expect(w.latestOf(s1.nodeId)?.status).toBe("running");
+      expect(notes.held).toEqual({ cause: "rig stopped", seq: stopped, message: `held: rig stopped (event ${stopped})` });
+      expect(notes.drains).toEqual([{ slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "rig_stopped" }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+      expect(w.slots.stopOutcome(w.slots.forModel(m.nodeId)[0]!.slotId)).toBeNull();
+    } finally {
+      w.db.close();
+    }
+  });
+
   it("The drain refreshes the agent's resume metadata before the capture, and a refresh that fails still captures and stops: refresh, capture, then stop.", async () => {
     const w = drainWorld();
     try {
