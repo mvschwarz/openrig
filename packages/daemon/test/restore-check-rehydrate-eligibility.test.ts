@@ -7,6 +7,7 @@ import { createApp } from "../src/server.js";
 import { createRestoreCheckService } from "../src/routes/restore-check.js";
 import * as eligibility from "../src/domain/rehydrate-eligibility.js";
 import * as preconditions from "../src/domain/restore-preconditions.js";
+import { chooseRestoreSnapshot } from "../src/domain/existing-rig-restore.js";
 
 describe("restore-check current-state eligibility correction", () => {
   let setup: ReturnType<typeof createTestApp>;
@@ -256,5 +257,66 @@ describe("restore-check current-state eligibility correction", () => {
     const ctx = startupContextCheck(await check(rig.name));
     expect(ctx).toMatchObject({ status: "red", remediation: "No command records startup context for this seat yet. To see what restore would do for it, preview with: rig up unmoved --existing --plan (read-only; it records nothing)." });
     expect(ctx.remediation).not.toContain("--fresh");
+  });
+
+  // After a reboot that follows a restore, one seat's current row can carry no token while its siblings' rows do. That
+  // seat's current occupant is still known, so current state stands in: restore keeps its row and null token and stops
+  // it for a decision, and the siblings resume from their own rows. Both selection paths and restore-check decide
+  // through the one eligibility rule.
+  const WAITING = "node dev.moved has no persisted startup context or resume token: restore keeps its current session and leaves it unstarted, waiting for a decision";
+  const BLOCKED = "node dev.moved is pod-aware but has no persisted startup context or resume token";
+  function seedPartial(name: string, shape: "known" | "ambiguous" | "relaunch-fresh" | "no-eligible-seat" = "known") {
+    const rig = seedMoved(name, false);
+    const moved = setup.rigRepo.getRig(rig.id)!.nodes.find((node) => node.logicalId === "dev.moved")!;
+    const lead = setup.rigRepo.addNode(rig.id, "dev.lead", { runtime: "codex", cwd: home, podId: `pod-${name}` });
+    const leadRow = setup.sessionRegistry.registerSession(lead.id, `dev-lead@${name}`);
+    setup.sessionRegistry.updateStatus(leadRow.id, "stopped");
+    if (shape !== "no-eligible-seat") setup.db.prepare("UPDATE sessions SET resume_type='codex_id',resume_token='fixture-lead-token' WHERE id=?").run(leadRow.id);
+    if (shape === "ambiguous") {
+      // A second current row that never recorded a token: which one is the seat's occupant can't be told.
+      setup.sessionRegistry.updateStatus(setup.sessionRegistry.registerSession(moved.id, `dev-moved@${name}`).id, "stopped");
+    }
+    if (shape === "relaunch-fresh") setup.db.prepare("UPDATE sessions SET restore_policy='relaunch_fresh' WHERE node_id=?").run(moved.id);
+    return { rig, moved };
+  }
+  const plans = async (rigId: string, rigName: string) => Promise.all([
+    app.request(`/api/rigs/${rigId}/up`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan: true }) }),
+    app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: rigName, plan: true }) }),
+  ]);
+
+  it("a seat with no startup context or token whose current occupant is known waits for a decision instead of blocking its rig", async () => {
+    const { rig, moved } = seedPartial("partial");
+    const live = setup.rigRepo.getRig(rig.id)!;
+    const before = changes();
+    expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, live)).toEqual({ ok: true, blockers: [], awaitingDecision: [WAITING] });
+    // `rig up --existing` and daemon start choose here; the choice is current state (no snapshot to restore from).
+    expect(chooseRestoreSnapshot(setup, rig.id)).toMatchObject({ ok: true, snapshot: null });
+    // `rig start`'s id-based route and the name-based route forecast the same: the lead resumes, dev.moved waits.
+    for (const response of await plans(rig.id, rig.name)) {
+      expect(response.status).toBe(200);
+      const forecast = await response.json() as { wouldCaptureCurrentState: boolean; nodes: Array<{ logicalId: string; intendedAction: string; occupantSessionId: string | null }> };
+      expect(forecast.wouldCaptureCurrentState).toBe(true);
+      expect(Object.fromEntries(forecast.nodes.map((node) => [node.logicalId, node.intendedAction]))).toEqual({ "dev.lead": "resume-original", "dev.moved": "awaiting-decision" });
+      expect(forecast.nodes.find((node) => node.logicalId === "dev.moved")!.occupantSessionId)
+        .toBe(setup.sessionRegistry.getSessionsForRig(rig.id).find((session) => session.nodeId === moved.id)!.id);
+    }
+    // restore-check says a restore can be attempted, and names the seat it would leave waiting.
+    const input = (await check(rig.name)).checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions"));
+    expect(input).toMatchObject({ status: "yellow", evidence: expect.stringContaining(`It would not start every seat: ${WAITING}.`) });
+    expect(changes()).toEqual(before);
+  });
+
+  it.each([
+    ["its current occupant is ambiguous", "ambiguous"],
+    ["its restore policy starts it fresh", "relaunch-fresh"],
+    ["no other seat is eligible", "no-eligible-seat"],
+  ] as const)("a seat with no startup context or token still blocks its rig when %s", async (_label, shape) => {
+    const { rig } = seedPartial(`blocked-${shape}`, shape);
+    const result = eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!);
+    expect(result.ok).toBe(false);
+    expect(result.blockers).toContain(BLOCKED);
+    expect(result.awaitingDecision).toBeUndefined();
+    expect(chooseRestoreSnapshot(setup, rig.id)).toMatchObject({ ok: false, status: 404, body: { code: "no_snapshot", blockers: expect.arrayContaining([BLOCKED]) } });
+    for (const response of await plans(rig.id, rig.name)) expect(response.status).toBe(404);
   });
 });

@@ -1,11 +1,15 @@
 import type Database from "better-sqlite3";
-import { freshSeatLaunchCommand, resolveActiveOccupantRow, resolveActiveSnapshotSession } from "./active-occupant.js";
+import { deriveRehydrateOccupantsByNode, freshSeatLaunchCommand, resolveActiveOccupantRow, resolveActiveSnapshotSession } from "./active-occupant.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
+import { effectiveRestorePolicy } from "./restore-policy.js";
 import type { RigWithRelations, Session, Snapshot, SnapshotData } from "./types.js";
 
 export interface CurrentStateRehydrateEligibility {
   ok: boolean;
   blockers: string[];
+  /** Seats a current-state restore leaves unstarted, waiting for a decision, instead of blocking the rig on them
+   *  (present only when there are any). */
+  awaitingDecision?: string[];
 }
 
 /**
@@ -108,6 +112,10 @@ export function stoppedSnapshotReason(logicalId: string, rigName: string): strin
  * This is intentionally conservative. It does not claim provider continuity by
  * itself; it only says the existing restore orchestrator has enough persisted
  * input to attempt a normal restore from an on-demand snapshot.
+ *
+ * Both selection paths that fall back to an auto-rehydrate capture (`rig start`'s
+ * POST /api/rigs/:id/up and chooseRestoreSnapshot for `rig up --existing` and
+ * daemon start) decide here, and restore-check reports the same answer.
  */
 export function assessCurrentStateRehydrateEligibility(
   db: Database.Database,
@@ -138,6 +146,15 @@ export function assessCurrentStateRehydrateEligibility(
     sessionByNode.set(session.node_id, rows);
   }
 
+  // A seat with neither saved startup context nor a resume token would start blank, so it blocks, with one exception.
+  // When its current occupant resolves unambiguously, as the auto-rehydrate capture resolves it, under
+  // resume_if_possible, restore starts nothing for it: the capture keeps that row and its null token, and restore stops
+  // the seat as awaiting-decision before any launch while the other seats resume from their own current rows. No token
+  // comes from an older row, and the occupant match is unchanged. With no other eligible seat the blocker stays:
+  // restoring that rig would start nothing.
+  const seatBlockers: Array<{ logicalId: string; blocker: string; awaitsDecision: boolean }> = [];
+  let eligibleSeats = 0;
+  let awaitsDecision: ((node: RigWithRelations["nodes"][number]) => boolean) | undefined;
   for (const node of rig.nodes) {
     const runtime = node.runtime ?? "";
     const isAgentRuntime = runtime.length > 0 && runtime !== "terminal";
@@ -149,15 +166,48 @@ export function assessCurrentStateRehydrateEligibility(
     );
 
     // A resume token is enough for a pod-aware seat too: restore resumes it with an empty plan and names the gap.
-    if (node.podId && !hasStartupContext && !hasResumeToken) {
-      blockers.push(`node ${node.logicalId} is pod-aware but has no persisted startup context or resume token`);
+    const blocker = node.podId && !hasStartupContext && !hasResumeToken
+      ? `node ${node.logicalId} is pod-aware but has no persisted startup context or resume token`
+      : isAgentRuntime && !hasStartupContext && !hasResumeToken
+        ? `node ${node.logicalId} has runtime ${runtime} but no startup context or resume token`
+        : null;
+    if (!blocker) {
+      eligibleSeats++;
       continue;
     }
-
-    if (isAgentRuntime && !hasStartupContext && !hasResumeToken) {
-      blockers.push(`node ${node.logicalId} has runtime ${runtime} but no startup context or resume token`);
-    }
+    awaitsDecision ??= tokenlessResumeOccupants(db, rig);
+    seatBlockers.push({ logicalId: node.logicalId, blocker, awaitsDecision: awaitsDecision(node) });
   }
+  const waiting = eligibleSeats > 0 ? seatBlockers.filter((seat) => seat.awaitsDecision) : [];
+  blockers.push(...seatBlockers.filter((seat) => !waiting.includes(seat)).map((seat) => seat.blocker));
 
-  return { ok: blockers.length === 0, blockers };
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    ...(waiting.length > 0 ? { awaitingDecision: waiting.map((seat) =>
+      `node ${seat.logicalId} has no persisted startup context or resume token: restore keeps its current session and leaves it unstarted, waiting for a decision`) } : {}),
+  };
+}
+
+/** Whether a seat's current occupant, resolved exactly as the auto-rehydrate capture resolves it, is unambiguous, has
+ *  no resume token, and restores under resume_if_possible: restore then stops the seat as awaiting-decision before any
+ *  launch (the orchestrator's pre-launch stop, which restore-plan-preview forecasts). Read once per rig, and only for a
+ *  rig with a seat that would otherwise block. */
+function tokenlessResumeOccupants(db: Database.Database, rig: RigWithRelations): (node: RigWithRelations["nodes"][number]) => boolean {
+  const nodeIds = rig.nodes.map((node) => node.id);
+  // Every row of the rig's seats, as capture records them: the occupant ladder skips superseded and exited rows
+  // itself, and the restore policy reads the seat's whole recorded history.
+  const rows = db.prepare(
+    `SELECT id, node_id AS nodeId, status, restore_policy AS restorePolicy, resume_token AS resumeToken
+       FROM sessions WHERE node_id IN (${nodeIds.map(() => "?").join(",") || "NULL"})`
+  ).all(...nodeIds) as Array<{ id: string; nodeId: string; status: string | null; restorePolicy: string | null; resumeToken: string | null }>;
+  const occupants = deriveRehydrateOccupantsByNode(rows, nodeIds, readFreshOccupantRelations(db, rig.rig.id));
+  return (node) => {
+    const state = occupants[node.id];
+    const occupant = state?.kind === "resolved" ? rows.find((row) => row.id === state.sessionId) : undefined;
+    if (!occupant || occupant.resumeToken) return false;
+    const recordedSessions = rows.filter((row) => row.nodeId === node.id);
+    return effectiveRestorePolicy({ savedRuntime: node.runtime, currentRuntime: node.runtime, recordedSessions }, occupant.restorePolicy)
+      === "resume_if_possible";
+  };
 }

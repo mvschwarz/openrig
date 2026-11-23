@@ -485,8 +485,9 @@ export class RestoreCheckService {
       const input = this.deps.getRestoreInputs(rig.rigId);
       if ("unavailable" in input) throw new Error(input.unavailable);
       if ("currentStateRehydrate" in input) {
-        const { ok, blockers } = input.currentStateRehydrate;
+        const { ok, blockers, awaitingDecision } = input.currentStateRehydrate;
         const recorded = this.deps.getMaterializedRoster?.(rig.rigId) ?? null;
+        const waiting = awaitingDecision?.length ? ` It would not start every seat: ${awaitingDecision.join("; ")}.` : "";
         return {
           snapshot: null,
           ...(input.notRestoredNodeIds ? { notRestored: new Set(input.notRestoredNodeIds) } : {}),
@@ -495,7 +496,7 @@ export class RestoreCheckService {
             check,
             status: ok ? "yellow" : "red",
             evidence: ok
-              ? `${input.reason}; restore inputs not inspected. Current-state rehydrate is eligible to attempt: ordinary rig up would capture current state. This does not validate that future snapshot or prove native continuity.`
+              ? `${input.reason}; restore inputs not inspected. Current-state rehydrate is eligible to attempt: ordinary rig up would capture current state. This does not validate that future snapshot or prove native continuity.${waiting}`
               : `${input.reason}; current-state rehydrate is not eligible: ${blockers.join("; ")}`,
             remediation: "Inspect the rig's persisted state before choosing manual recovery",
             remediationSafe: true,
