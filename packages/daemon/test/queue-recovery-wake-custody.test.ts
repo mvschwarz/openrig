@@ -60,9 +60,9 @@ describe("closed recovery wake custody", () => {
     vi.setSystemTime(at(660));
     expect(queueRecoveryOwnsWake(db, repo.getById(f.task.qitemId))).toBe(false);
     expect((await f.evaluate()).action).toBe("send");
-    // Wake custody expires; the diagnostic episode stays settled, without another finding.
+    // Consumer custody expires; the ladder still honors the settled diagnostic episode.
     expect(findQueueRecovery(db, f.task.qitemId)).toMatchObject({ qitemId: f.recovery.qitemId, state: "done" });
-    expect(readWakeLadderBackstop(db, f.task.qitemId)?.mechanism).not.toBe("queue-recovery:resolved");
+    expect(readWakeLadderBackstop(db, f.task.qitemId)?.mechanism).toBe("queue-recovery:resolved");
     expect(repo.list({ tag: recoveryTag(f.task.qitemId) })).toHaveLength(1);
   });
 
