@@ -6,8 +6,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { buildQueueTransfer } from "../src/domain/queue-transfer-export.js";
 import { parseQueueTransfer } from "../src/domain/queue-transfer-parse.js";
-import { AUTHORIZATION_KIND, parseAuthorization } from "../src/domain/queue-transfer-records.js";
+import { ACTIVATION_KIND, AUTHORIZATION_KIND, authorizationDigest, parseAuthorization, type TransferActivation } from "../src/domain/queue-transfer-records.js";
 import { QueueTransferSource } from "../src/domain/queue-transfer-relinquish.js";
+import { mappingDigest } from "../src/domain/queue-transfer-mapping.js";
 
 let db: Database.Database;
 let repo: QueueRepository;
@@ -58,4 +59,29 @@ it("refuses claims and reopen on the fenced row but records a late terminal repo
   expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" }))
     .toThrow(expect.objectContaining({ code: "qitem_fenced" }));
   expect(repo.claim({ qitemId: "qitem-b", destinationSession: "b@old" }).state).toBe("in-progress");
+});
+
+function activation(input: ReturnType<typeof snapshot>): TransferActivation {
+  const archive = parseQueueTransfer(input.archiveText);
+  const digest = mappingDigest([]);
+  return { kind: ACTIVATION_KIND, status: "activated", replayed: false, operationId: "op", importId: "import-1",
+    transferId: archive.transferId, archiveDigest: archive.digest, authorizationDigest: authorizationDigest(input.authorization),
+    mappingDigest: digest, origin: archive.origin, destination: { hostId: "target", mappingDigest: digest },
+    recordedAt: "4", actor: "operator", sourceState: "relinquished", method: "online-handshake",
+    rows: { total: 1, created: 1, runnable: ["qitem-a"], projectedToPending: [], blocked: [], terminal: [], erased: [], remapped: [] },
+    waits: { restoredContinuations: [], transferredBlocked: [] }, unresolvedContinuations: [], remainingOnSource: [], warnings: [],
+    history: { transitionsImported: 0, wakeEvidenceImportedNotScheduled: 0, missionControlActionsImported: 0 } };
+}
+
+it.each([false, true])("reconciles a confirmed row without overwriting late reports (late=%s)", late => {
+  const input = snapshot();
+  const result = activation(input);
+  expect(() => source.reconcile({ ...input, result })).toThrow(expect.objectContaining({ code: "not_relinquished" }));
+  source.relinquish(input);
+  if (late) repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "done", closureReason: "no-follow-on" });
+  const report = source.reconcile({ ...input, result });
+  expect(report).toMatchObject({ evacuation: late ? "incomplete" : "complete", rows: [{ qitemId: "qitem-a", outcome: late ? "late_report" : "superseded" }] });
+  expect(repo.getById("qitem-a")).toMatchObject(late ? { state: "done" } : { state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
+  expect(source.reconcile({ ...input, result })).toEqual({ ...report, replayed: true });
+  expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" })).toThrow(/fenced/);
 });

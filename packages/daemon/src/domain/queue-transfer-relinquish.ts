@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { QueueRepository } from "./queue-repository.js";
-import { readQueueTransfer } from "./queue-transfer-export.js";
+import { isTerminalState, type QueueRepository, type QueueState } from "./queue-repository.js";
+import { QUEUE_TRANSFER_COLUMNS, readQueueTransfer } from "./queue-transfer-export.js";
 import { canonicalQueueJson } from "./queue-transfer-format.js";
 import { mappingDigest } from "./queue-transfer-mapping.js";
 import { assertAuthorization, assertTransferSchema, QueueTransferOperationError, transferSelection, type TransferActor } from "./queue-transfer-operation.js";
 import { parseQueueTransfer } from "./queue-transfer-parse.js";
-import { authorizationDigest, parseReceipt, RECEIPT_KIND, rowsDigest, type TransferAuthorization, type TransferReceipt } from "./queue-transfer-records.js";
+import { authorizationDigest, parseReceipt, RECEIPT_KIND, RECONCILIATION_KIND, recordDigest, rowsDigest, type TransferActivation, type TransferAuthorization, type TransferReceipt } from "./queue-transfer-records.js";
 import { SelfHostIdentityStore } from "./seat-identity-store.js";
+import { transferWireKey } from "./queue-transfer-write.js";
+import type { QueueTransition } from "./queue-transition-log.js";
 
 type RelinquishInput = { readonly archiveText: string; readonly authorization: TransferAuthorization;
   readonly intervention: string; readonly limits?: string; readonly actor: TransferActor; readonly dryRun?: boolean };
@@ -90,4 +92,87 @@ export class QueueTransferSource {
       return { receipt, archiveCurrent: true, fenced: restricted, workflowState, replayed: false };
     }).immediate();
   }
+
+  reconcile({ archiveText, result, actor }: { readonly archiveText: string; readonly result: TransferActivation; readonly actor: TransferActor }) {
+    const db = this.repo.db;
+    assertTransferSchema(db);
+    const archive = parseQueueTransfer(archiveText);
+    const host = new SelfHostIdentityStore(db).get();
+    const destinationHostId = result.destination.hostId;
+    if (host?.hostId !== archive.origin.hostId || host.mintedAt !== archive.origin.mintedAt || result.origin.hostId !== archive.origin.hostId ||
+        result.origin.mintedAt !== archive.origin.mintedAt || result.archiveDigest !== archive.digest || result.transferId !== archive.transferId) {
+      throw new QueueTransferOperationError("receipt_mismatch", 409);
+    }
+    const { replayed: _replayed, warnings, ...stableResult } = result;
+    const resultDigest = recordDigest({ ...stableResult, warnings: warnings.map(({ code, qitemId, reference, message }) =>
+      ({ code, qitemId: qitemId ?? null, reference: reference ?? null, message: message ?? null })) });
+    const recordId = `rec-${recordDigest([result.operationId, destinationHostId])}`;
+    return db.transaction(() => {
+      const prior = db.prepare<[string, string], { id: string; auth: string; map: string; recordedAt: string }>(`SELECT record_id AS id,
+        authorization_digest AS auth, mapping_digest AS map, recorded_at AS recordedAt FROM queue_transfer_ledger
+        WHERE kind = 'relinquished' AND archive_digest = ? AND destination_host_id = ?`).get(archive.digest, destinationHostId);
+      if (!prior) throw new QueueTransferOperationError("not_relinquished", 409);
+      if (prior.auth !== result.authorizationDigest || prior.map !== result.mappingDigest || prior.map !== result.destination.mappingDigest ||
+          result.sourceState !== "relinquished" || result.method !== "online-handshake") throw new QueueTransferOperationError("receipt_mismatch", 409);
+      const existing = db.prepare<[string], { receipt: string; report: string }>(`SELECT receipt_json AS receipt, result_json AS report
+        FROM queue_transfer_ledger WHERE record_id = ? AND kind = 'reconciled'`).get(recordId);
+      if (existing) {
+        if (existing.receipt !== resultDigest) throw new QueueTransferOperationError("receipt_mismatch", 409);
+        const stored: unknown = JSON.parse(existing.report);
+        return { ...parseReconciliation(stored), replayed: true };
+      }
+      const recordedAt = new Date().toISOString();
+      const created = new Set([...result.rows.runnable, ...result.rows.blocked.map(row => row.qitemId), ...result.rows.terminal]);
+      const erased = db.prepare<[string]>("SELECT 1 FROM queue_erased_ids WHERE qitem_id = ?");
+      const fields = QUEUE_TRANSFER_COLUMNS.queue_items;
+      const lookup = db.prepare<[string], Record<string, string | number | null> & { state: QueueState }>(`SELECT ${fields.join(",")} FROM queue_items WHERE qitem_id = ?`);
+      const supersede = db.prepare(`UPDATE queue_items SET state = 'canceled', ts_updated = ?, closure_reason = 'superseded',
+        closure_target = ?, blocked_on = NULL, closure_required_at = NULL WHERE qitem_id = ?`);
+      const mark = db.prepare("UPDATE queue_transfer_relinquished SET reconciled_at = ?, reconcile_outcome = ? WHERE qitem_id = ? AND record_id = ?");
+      const counts: Record<string, number> = {};
+      const lateReports: { qitemId: string; currentState: QueueState; transitions: QueueTransition[] }[] = [];
+      const rows = transferSelection(archive).map(({ qitemId, state }) => {
+        const live = lookup.get(qitemId);
+        const archived = archive.rows.find(row => row.qitemId === qitemId);
+        let outcome: string;
+        if (!live && erased.get(qitemId)) outcome = "confirmed_erased";
+        else if (live && archived && fields.some(column => (live[column] ?? null) !== (archived.wire[transferWireKey(column)] ?? null))) {
+          outcome = "late_report";
+          lateReports.push({ qitemId, currentState: live.state, transitions: this.repo.transitionLog.listForQitem(qitemId).filter(entry => entry.ts >= prior.recordedAt) });
+        } else if (live && archived && isTerminalState(state)) outcome = "confirmed_history";
+        else if (live && archived && created.has(qitemId)) {
+          outcome = "superseded";
+          const closureTarget = `${qitemId}@${destinationHostId}`;
+          supersede.run(recordedAt, closureTarget, qitemId);
+          this.repo.transitionLog.append({ ...actor, qitemId, state: "canceled", closureReason: "superseded", closureTarget,
+            transitionNote: `superseded: transferred to ${destinationHostId} as ${qitemId} (operation ${result.operationId})` });
+        } else outcome = !created.has(qitemId) && !result.rows.erased.includes(qitemId) ? "unconfirmed" : "left_to_operator";
+        mark.run(recordedAt, outcome, qitemId, prior.id);
+        counts[outcome] = (counts[outcome] ?? 0) + 1;
+        return { qitemId, outcome, ...(live ? { currentState: outcome === "superseded" ? "canceled" : live.state } : {}) };
+      });
+      const selection = archive.selection;
+      const selectedIds = new Set(selection.qitemIds);
+      const scope = selection.kind === "host" ? { kind: "host" as const }
+        : selection.kind === "rig" ? { kind: "rig" as const, names: selection.rigs }
+        : selection.kind === "mission" ? { kind: "mission" as const, names: selection.missions }
+        : selection.kind === "slice" ? { kind: "slice" as const, names: selection.slices } : null;
+      const outsideArchive = scope ? readQueueTransfer(db, scope).scope.qitemIds.filter(id => !selectedIds.has(id)) : [];
+      const evacuation = rows.every(row => ["confirmed_erased", "confirmed_history", "superseded"].includes(row.outcome)) ? "complete" : "incomplete";
+      const report = { kind: RECONCILIATION_KIND, archiveDigest: archive.digest, destinationHostId, recordedAt, counts, rows, outsideArchive,
+        lateReports, evacuation, replayed: false };
+      db.prepare(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id, origin_minted_at,
+        destination_host_id, import_id, authorization_digest, mapping_digest, actor, recorded_at, receipt_json, result_json)
+        VALUES (?, 'origin', 'reconciled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(recordId, archive.transferId, archive.digest,
+        archive.origin.hostId, archive.origin.mintedAt, destinationHostId, result.importId, prior.auth, prior.map, actor.actorSession, recordedAt, resultDigest, JSON.stringify(report));
+      return report;
+    }).immediate();
+  }
+}
+
+export function parseReconciliation(value: unknown) {
+  if (!value || typeof value !== "object" || !("evacuation" in value) || !["complete", "incomplete"].includes(String(value.evacuation))) {
+    throw new QueueTransferOperationError("reconciliation_record_invalid", 500);
+  }
+  return value;
 }
