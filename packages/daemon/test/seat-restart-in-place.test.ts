@@ -2129,4 +2129,56 @@ describe("rig provider assign's plan over a Codex seat", () => {
     const saved = new ProviderAccountAssignmentsRepository(w.db).results(rigId, "codex");
     expect(saved.map((r) => [r.nodeId, r.kind])).toEqual([[w.node.id, "unknown"]]);
   });
+
+  it("the switch's check again after waiting for the home carries the seat too: a name another rig took meanwhile is refused before any effect", async () => {
+    const { w, home } = setup();
+    const rigs = new RigRepository(w.db);
+    const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
+    const svc = new ProviderServiceImpl({ db: w.db, listRigs: () => w.db.prepare("SELECT id FROM rigs").all() as Array<{ id: string }>,
+      env: { HOME: path.dirname(home), CODEX_HOME: home }, platform: "linux",
+      codexLogins: { list: () => ["team"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: [], notChecked: [] }) });
+    // Another switch of the home (a plain rig provider switch) holds it until released.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let holding!: () => void;
+    const holds = new Promise<void>((resolve) => { holding = resolve; });
+    const other = svc.switchAccount({ seat: SEAT, toAccount: "team", forceUnsafe: false }, {
+      plan: (seat: string) => w.service.restartInPlace({ seatRef: seat, plan: true }),
+      run: async () => { holding(); await held; return { ok: false, code: "seat_not_found", message: "held" } as never; } });
+    await holds;
+    const checkedAs: Array<string | undefined> = [];
+    const seatRestart = {
+      plan: async (seat: string, nodeId?: string) => {
+        checkedAs.push(nodeId);
+        const r = await w.service.restartInPlace({ seatRef: seat, plan: true, ...(nodeId !== undefined ? { nodeId } : {}) });
+        // The plan's check, the apply's own plan, then the switch's first check, which passes; then, while the switch waits
+        // for the home, the rig is archived and another rig named r, with the same member, takes the name. The other switch
+        // then lets the home go.
+        if (checkedAs.length === 3) {
+          rigs.archiveRig(rigId);
+          const node = rigs.addNode(rigs.createRig("r").id, "dev.codex", { runtime: "codex", cwd: "/work" });
+          const registry = new SessionRegistry(w.db);
+          registry.updateStatus(registry.registerSession(node.id, SEAT).id, "running");
+          setTimeout(release, 0);
+        }
+        return r;
+      },
+      run: vi.fn(),
+    };
+    const request = { rig: "r", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart);
+    if (!planned.ok) throw new Error(planned.message);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
+    await other;
+    if (!applied.ok) throw new Error(applied.message);
+    // The switch's check and its check again after the wait both carry the selected node.
+    expect(checkedAs).toEqual([undefined, undefined, w.node.id, w.node.id]);
+    expect(seatRestart.run).not.toHaveBeenCalled();
+    expect(w.calls).toEqual([]);
+    const [result] = applied.report.results;
+    expect(result).toMatchObject({ seat: SEAT, kind: "failed_before_effect" });
+    expect(result!.detail).toMatch(/^seat_name_shared: seat_name_shared: "dev-codex@r" now names the seat in rig r \(/);
+    expect(result!.recovery).toBeUndefined();
+  });
 });
