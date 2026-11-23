@@ -12,5 +12,10 @@ export default defineConfig({
     // so the only cost is a slower surfacing of a genuine hang.
     testTimeout: 20000,
     hookTimeout: 20000,
+    // The macOS CI job (CI=true on darwin) also records its CPU, Vitest worker settings and the files its workers held
+    // at once. Observation only: the reporters before it are the ones Vitest 4.1.12 picks when none are configured.
+    ...(process.env.CI === "true" && process.platform === "darwin"
+      ? { reporters: ["default", ...(process.env.GITHUB_ACTIONS === "true" ? ["github-actions"] : []), "./test/ci-worker-observer.ts"] }
+      : {}),
   },
 });

@@ -301,7 +301,7 @@ function renderLocalBroadcastTimeout(err: Error, seatSender: string | undefined,
  *  local route does, so per-target honesty prints identically. A partial
  *  fan-out sets a non-zero exit either way. */
 function renderBroadcastResults(data: Record<string, unknown>): void {
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; outcome?: string; runnerReceipt?: { requestId: string; stage: string; reconciliation?: string; erasedAt?: string; result?: { submissionUnknown?: boolean } }; managedCompaction?: { notice?: unknown }; inputRequest?: { notice?: unknown } }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; outcome?: string; runnerReceipt?: { requestId: string; stage: string; reconciliation?: string; erasedAt?: string; result?: { submissionUnknown?: boolean } }; managedCompaction?: { notice?: unknown }; usageLimit?: { notice?: unknown }; inputRequest?: { notice?: unknown } }>) ?? [];
   for (const r of results) {
     if (r.runnerReceipt) {
       const receipt = r.runnerReceipt;
@@ -319,6 +319,7 @@ function renderBroadcastResults(data: Record<string, unknown>): void {
       console.log(`${r.sessionName ? `${r.sessionName}: ` : ""}FAILED — ${r.error ?? "unknown error"}`);
     }
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
+    if (typeof r.usageLimit?.notice === "string") console.log(`Notice: ${r.usageLimit.notice}`);
     if (typeof r.inputRequest?.notice === "string") console.log(`Notice: ${r.inputRequest.notice}`);
   }
   console.log(`${data["sent"]}/${data["total"]} delivered${heldSuffix(results)}${data["pendingNative"] ? `; ${data["pendingNative"]} native pending` : ""}${data["indeterminateNative"] ? `; ${data["indeterminateNative"]} native effect unknown` : ""}`);

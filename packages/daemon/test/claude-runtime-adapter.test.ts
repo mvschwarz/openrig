@@ -14,6 +14,7 @@ import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
 import { ObservationPass } from "../src/domain/process-observation-pass.js";
+import { CLAUDE_PROCESS_ONLY_RESUME } from "../src/domain/native-resume-probe.js";
 import { transportClaudeSettings } from "../src/adapters/claude-settings-transport.js";
 
 const probeEvidence = expect.objectContaining({
@@ -60,7 +61,8 @@ function makeBinding(cwd = "/project"): NodeBinding {
 it.each(["fresh", "resume", "fork"] as const)("delivers oversized composed Claude settings by file on %s input", async kind => {
   const stateDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-settings-"));
   const tmux = mockTmux();
-  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir });
+  // A resume of a blank pane under Claude's process runs the longer wait; this cell is about the command sent.
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir, sleep: async () => {} });
   const deny = Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`);
   const result = await adapter.launchHarness({ ...makeBinding(), claudePermissions: { deny } }, {
     name: "dev-builder@workshop", ...(kind === "resume" ? { resumeToken: "previous" } : {}),
@@ -80,7 +82,7 @@ it.each(["fresh", "resume", "fork"] as const)("delivers oversized composed Claud
 it("checks the captured settings actually sent on a provider continuation", async () => {
   const tmux = mockTmux();
   const stateDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-settings-"));
-  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir });
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir, sleep: async () => {} });
   const result = await adapter.launchHarness({ ...makeBinding(), claudeExecutable: "/native/claude",
     claudeLaunch: { args: [`--settings=${JSON.stringify({ custom: "x".repeat(131072) })}`], warnings: [] } },
   { name: "dev-builder@workshop", resumeToken: "previous" });
@@ -97,7 +99,7 @@ it("a continuation of an OpenRig settings file sends the new auto-mode block and
   const stateDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-settings-"));
   const name = "builder@fixture", context = { openrigHome: stateDir, session: name };
   const live = transportClaudeSettings(["--settings", JSON.stringify({ custom: "x".repeat(70000), autoMode: { environment: ["old"] } })], context, []);
-  const tmux = mockTmux(), adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir });
+  const tmux = mockTmux(), adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), stateDir, sleep: async () => {} });
   try {
     const result = await adapter.launchHarness({ ...makeBinding(), claudeExecutable: "/native/claude",
       claudeLaunch: { args: live, warnings: [] }, claudeAutoMode: { environment: ["new"] } }, { name, resumeToken: "same" });
@@ -1017,7 +1019,7 @@ describe("Claude Code runtime adapter", () => {
 
   it("launchHarness sends correct resume command with token", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
 
@@ -1095,9 +1097,10 @@ describe("Claude Code runtime adapter", () => {
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
 
-    // The 16 reads of the wait, then the final read accepts it as before.
-    expect(capture).toHaveBeenCalledTimes(17);
-    expect(result).toMatchObject({ ok: true });
+    // The quick window's 16 reads, then the longer wait a process alone gets (its trust dialog can be drawn after the window),
+    // then the final read accepts it as before, saying the resume rests on the process alone.
+    expect(capture.mock.calls.length).toBeGreaterThan(17);
+    expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([CLAUDE_PROCESS_ONLY_RESUME]) });
   });
 
   it("launchHarness marks a missing conversation that first shows on the read after the wait", async () => {
@@ -1199,6 +1202,56 @@ describe("Claude Code runtime adapter", () => {
       const result = await adapter.launchHarness({ ...makeBinding(), tmuxPane: "%1" }, { name: "dev-impl@test-rig", resumeToken: "abc-123" });
       return { result, reads, tmux };
     };
+
+    it("doesn't end the wait on Claude's process alone, and lets it stand with a note when the longer wait ends", async () => {
+      const { result, reads } = await run({ paneCommand: "claude" });
+      expect(result).toMatchObject({ ok: true, resumeToken: "abc-123", warnings: expect.arrayContaining([CLAUDE_PROCESS_ONLY_RESUME]) });
+      // The 30 polls the readiness bound gives, then the final read; no budget past the existing longer wait.
+      expect(reads).toBe(31);
+    });
+
+    it("gives Claude's process alone the longer wait when the first window ends, so a trust dialog drawn after it is met", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      // Claude's process from the first read, nothing drawn through the 16-read window, then its trust dialog.
+      const { result } = await run({ paneCommand: "claude", screen: (read) => (read < 20 ? "" : dialog) });
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+        error: "Claude is waiting for workspace trust approval before the session can become interactive." });
+    });
+
+    it("meets the trust dialog Claude draws after its process starts, instead of reporting a resume", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      const { result } = await run({ paneCommand: "claude", screen: (read) => (read < 2 ? "" : dialog) });
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+        error: "Claude is waiting for workspace trust approval before the session can become interactive." });
+    });
+
+    it("keeps the longer wait on Claude's process alone too, so a trust dialog drawn after it is still met", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      // The first window passes on the launch script; then Claude's process shows with nothing drawn, then its trust dialog.
+      const { result } = await run({ command: (read) => (read < 20 ? "sh" : "claude"),
+        rows: (read) => (read < 20 ? [{ ...pane, tpgid: 11 }, launchScript] : occupied), screen: (read) => (read < 23 ? "" : dialog) });
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+        error: "Claude is waiting for workspace trust approval before the session can become interactive." });
+    });
+
+    it("lets a shell proven idle keep the shell result when the trust dialog's text is left above it", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      // Claude exited (its dialog answered "No, exit", say) and its last frame stayed above the shell.
+      const { result } = await run({ rows: () => [pane], screen: () => `${dialog}\n$ ` });
+      expect(result).toEqual({
+        ok: false,
+        probe: probeEvidence,
+        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        recovery: "retry_fresh",
+      });
+    });
+
+    it("meets the project MCP approval Claude draws after its process starts the same way", async () => {
+      const approval = "new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm";
+      const { result } = await run({ paneCommand: "claude", screen: (read) => (read < 2 ? "" : approval) });
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+        error: "Claude is waiting for project MCP server approval before the session can become interactive." });
+    });
 
     it("marks the seat resumed when Claude draws its screen after the first window", async () => {
       const { result, reads } = await run({ screen: (read) => (read < 24 ? "" : tui) });
@@ -1414,8 +1467,37 @@ describe("Claude Code runtime adapter", () => {
 
         it("with nothing seen under the pane (an occupant the wait hasn't checked) is not answered either", async () => {
           const { result, tmux } = await run({ autoDrive: true, rows: () => booting, screen: (read) => (read < 20 ? "" : trust) });
-          expect(result).toEqual(timedOut);
+          // An unknown occupant at a trust prompt gets attention, as an unknown occupant does at the end of the wait.
+          expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
           expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+        });
+
+        it("drawn heading first, from this launch's own Claude, is answered once its options are drawn", async () => {
+          const heading = "Accessing workspace:\n/fixture";
+          const { result, tmux } = await run({ autoDrive: true, screen: (read) => (read < 20 ? "" : read < 22 ? heading : read < 25 ? trust : tui) });
+          expect(result).toMatchObject({ ok: true });
+          expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+        });
+
+        it("drawn one option at a time, from this launch's own Claude, is answered once both are drawn", async () => {
+          const heading = "Accessing workspace:\n/fixture";
+          const oneOption = `${heading}\n❯ 1. Yes, I trust this folder`;
+          const { result, tmux } = await run({ autoDrive: true,
+            screen: (read) => (read < 20 ? "" : read < 22 ? heading : read < 24 ? oneOption : read < 27 ? trust : tui) });
+          expect(result).toMatchObject({ ok: true });
+          expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+        });
+
+        it("takes its key from the options under the new heading, never from an earlier prompt's options above it", async () => {
+          // An earlier prompt (its focus on Yes) stayed above the shell; the new launch's heading is drawn, then its options.
+          const above = `${trust}\n$ claude --resume abc-123\nAccessing workspace:\n/fixture`;
+          const onNo = `${above}\n  1. Yes, I trust this folder\n❯ 2. No, exit`;
+          const onYes = `${above}\n❯ 1. Yes, I trust this folder\n  2. No, exit`;
+          const { result, tmux } = await run({ autoDrive: true,
+            screen: (read) => (read < 20 ? "" : read < 23 ? above : read < 25 ? onNo : read < 27 ? onYes : tui) });
+          expect(result).toMatchObject({ ok: true });
+          // After the launch command's own Enter: Down on the new prompt's "No, exit", then Enter on its "Yes".
+          expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.slice(1).map(call => call[1][0])).toEqual(["Down", "Enter"]);
         });
 
         it("from this launch's own Claude is answered, and the seat resumes", async () => {
@@ -1513,7 +1595,9 @@ describe("Claude Code runtime adapter", () => {
       // A trust prompt that shows up at read 22 ends the wait there; it is not a start in progress.
       const gate = ["Accessing workspace:", "/project", "❯ 1. Yes, I trust this folder", "  2. No, exit"].join("\n");
       const { result, reads } = await run({ screen: (read) => (read < 22 ? "" : gate) });
-      expect(result).toEqual({ ok: false, probe: probeEvidence, error: "Claude resume failed: timed out waiting for Claude to become active" });
+      // The gate waits on a person, so the launch is kept for one, with the probe's reading.
+      expect(result).toEqual({ ok: false, probe: probeEvidence, recovery: "attention_required",
+        error: "Claude is waiting for workspace trust approval before the session can become interactive.", evidence: gate });
       expect(reads).toBeLessThan(26);
     });
 
