@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,10 +24,21 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 function run(...args: string[]) {
+  const { OPENRIG_DB: _db, RIGGED_DB: _legacy, ...env } = process.env;
   return spawnSync(process.execPath, [fileURLToPath(new URL("../dist/bin-wrapper.js", import.meta.url)), "queue", "export", ...args], {
-    encoding: "utf8", timeout: 5000, env: { ...process.env, OPENRIG_HOME: home, OPENRIG_DB: join(home, "openrig.sqlite") },
+    encoding: "utf8", timeout: 5000, env: { ...env, OPENRIG_HOME: home },
   });
 }
+
+it("exports from the last launch database when db.path is not configured", () => {
+  const db = join(home, "selected.sqlite");
+  renameSync(join(home, "openrig.sqlite"), db);
+  writeFileSync(join(home, "daemon.json"), JSON.stringify({ db }));
+
+  const result = run("--whole-host", "--preview");
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ rows: [{ qitemId: "qitem-a" }] });
+});
 
 it("previews an unfrozen local archive without creating a file", () => {
   const result = run("--qitems", "qitem-a", "--preview");

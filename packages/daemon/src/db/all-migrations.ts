@@ -5,7 +5,7 @@ import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_t
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
-
+import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 
@@ -371,10 +371,11 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeStatuslineThrottleSchema,
   workflowBoundPodSchema,
   seatPoolSchema,
+  queueTransferStagingSchema,
   remoteControlObservationsSchema,
   sessionStopAttemptSchema,
   nodeKeepAliveSchema,
   queueItemsBlockedOnIndexSchema,
-queueRelayedAnswersSchema,
-queueItemsScanIndexesSchema,
+  queueRelayedAnswersSchema,
+  queueItemsScanIndexesSchema,
 ];
