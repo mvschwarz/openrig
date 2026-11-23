@@ -107,6 +107,7 @@ export class RigSpecCodec {
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
     if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
+    if (spec.defaultOnboardingPack !== undefined) doc["default_onboarding_pack"] = spec.defaultOnboardingPack;
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
     if (spec.services) doc["services"] = serializeServices(spec.services);
@@ -183,6 +184,7 @@ export class RigSpecCodec {
         if (m.pluginChannels?.length) member["plugin_channels"] = m.pluginChannels;
         if (m.env) member["env"] = { ...m.env };
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
+        if (m.keepAlive !== undefined) member["keep_alive"] = m.keepAlive;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
         // OPR.0.5.6.20 field, OPR.0.5.6.23 fix: parse carries it (schema
         // normalize), so serialize must too — same silent-erasure class.

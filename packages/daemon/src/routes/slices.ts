@@ -31,6 +31,7 @@ import {
   SliceListEntry,
   SliceStatus,
   type ConfiguredRootResolution,
+  type QueueCountRow,
   type SliceQueueDerivedState,
 } from "../domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../domain/slices/slice-detail-projector.js";
@@ -52,7 +53,17 @@ export function slicesRoutes(): Hono {
   app.get("/", async (c) => {
     const deps = getDeps(c);
     if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
-    const operation = deps.indexer.withResolvedRoots(() => {
+    const capturedRoots = typeof deps.indexer.captureConfiguredRoots === "function"
+      ? deps.indexer.captureConfiguredRoots()
+      : null;
+    const withRoots = <T>(fn: () => T): T => (
+      capturedRoots && typeof deps.indexer.withCapturedRoots === "function"
+        ? deps.indexer.withCapturedRoots(capturedRoots, fn)
+        : typeof deps.indexer.withResolvedRoots === "function"
+          ? deps.indexer.withResolvedRoots(fn)
+          : fn()
+    );
+    const gate = withRoots(() => {
       if (!deps.indexer.isReady()) {
         return c.json({
           error: "slices_root_not_configured",
@@ -78,98 +89,90 @@ export function slicesRoutes(): Hono {
       if (refresh === "1" || refresh === "true") {
         deps.indexer.invalidate();
       }
-      // ONE HTTP request is ONE composite
-      // operation: the list rebuild, the boundToWorkflow per-slice get loop,
-      // and the mission sidecar share ONE membership batch (pre-scope, each
-      // uncached get built its own 2-scan batch: 2+2N total queue scans).
-      // One request-local policy reader for every readiness in this response
-      // (the listing and the project readiness below); never across requests.
-      const readPolicy = createProofPolicyRead();
-      const listing = deps.indexer.withMembershipBatch(() => {
-        const all = deps.indexer.list();
-        let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
-        // Workflows in Spec Library v0: optional lens filter — narrow to
-        // slices bound to a workflow_instance of <name>:<version>.
-        const boundToWorkflow = c.req.query("boundToWorkflow");
-        let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
-        if (boundToWorkflow) {
-          const colonIdx = boundToWorkflow.lastIndexOf(":");
-          if (colonIdx === -1) {
-            return c.json({
-              error: "boundToWorkflow_invalid",
-              hint: "Format is boundToWorkflow=<specName>:<specVersion>",
-            }, 400);
-          }
-          const specName = boundToWorkflow.slice(0, colonIdx);
-          const specVersion = boundToWorkflow.slice(colonIdx + 1);
-          const db = deps.indexer.db;
-          const before = filtered.length;
-          filtered = filtered.filter((slice) => {
-            // Re-resolve binding per slice. The indexer's list payload
-            // doesn't carry workflowName so we do the join here. v0 cost
-            // is bounded by the slice count + a small SQL per slice (the
-            // membership batch is shared across the whole request).
-            const sliceRecord = deps.indexer.get(slice.name);
-            if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
-            const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
-            return binding.primary?.workflowName === specName
-              && binding.primary?.workflowVersion === specVersion;
-          });
-          boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
+      return { filter, derivedFilter };
+    });
+    if (gate instanceof Response) return gate;
+    const { filter, derivedFilter } = gate;
+
+    // ONE HTTP request is ONE composite
+    // operation: the list rebuild, the boundToWorkflow per-slice get loop,
+    // and the mission sidecar share ONE membership batch (pre-scope, each
+    // uncached get built its own 2-scan batch: 2+2N total queue scans).
+    // One request-local policy reader for every readiness in this response
+    // (the listing and the project readiness below); never across requests.
+    const readPolicy = createProofPolicyRead();
+    // The queue-count rows are read first, without holding the event loop. The batch prepares the count, and it runs
+    // over them after the batch, in chunks, filling the listing's count objects in place before derivedState and
+    // ?derived= filtering build the response.
+    let queueCountRows: QueueCountRow[] | null = null;
+    let queueCountReadFailed = false;
+    if (typeof deps.indexer.readQueueCountRowsCooperatively === "function") {
+      try {
+        queueCountRows = await deps.indexer.readQueueCountRowsCooperatively();
+      } catch {
+        queueCountReadFailed = true;
+      }
+    }
+    const deferredCount: { countRow?: (row: QueueCountRow) => void } = {};
+    const runBatch = <T>(fn: () => T): Promise<T> => (
+      typeof deps.indexer.withMembershipBatchCooperatively === "function"
+        ? deps.indexer.withMembershipBatchCooperatively(fn, capturedRoots ?? undefined)
+        : Promise.resolve(withRoots(() => deps.indexer.withMembershipBatch(fn)))
+    );
+    const batch = await runBatch(() => {
+      const all = deps.indexer.list();
+      let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
+      // Workflows in Spec Library v0: optional lens filter — narrow to
+      // slices bound to a workflow_instance of <name>:<version>.
+      const boundToWorkflow = c.req.query("boundToWorkflow");
+      let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
+      if (boundToWorkflow) {
+        const colonIdx = boundToWorkflow.lastIndexOf(":");
+        if (colonIdx === -1) {
+          return c.json({
+            error: "boundToWorkflow_invalid",
+            hint: "Format is boundToWorkflow=<specName>:<specVersion>",
+          }, 400);
         }
-        // Sort by lastActivityAt DESC (most recently touched first); slices
-        // without activity sort to the end.
-        filtered.sort(compareByActivityDesc);
-        const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
-        const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
-          additionalSliceRoots: projectLookup.additionalSliceRoots,
-          complete: projectLookup.complete,
-          canonicalProjectId: projectLookup.canonicalProjectId,
+        const specName = boundToWorkflow.slice(0, colonIdx);
+        const specVersion = boundToWorkflow.slice(colonIdx + 1);
+        const db = deps.indexer.db;
+        const before = filtered.length;
+        filtered = filtered.filter((slice) => {
+          // Re-resolve binding per slice. The indexer's list payload
+          // doesn't carry workflowName so we do the join here. v0 cost
+          // is bounded by the slice count + a small SQL per slice (the
+          // membership batch is shared across the whole request).
+          const sliceRecord = deps.indexer.get(slice.name);
+          if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
+          const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
+          return binding.primary?.workflowName === specName
+            && binding.primary?.workflowVersion === specVersion;
         });
-        const authored = deps.indexer.missionAuthoredStatuses();
-        // Queue-derived state (#2729) is read beside the authored status, from the
-        // same counts and with no further query. A `?derived=` filter narrows the
-        // already status-filtered rows; it never changes `status` or `rawStatus`.
-        const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
-          deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
-        if (derivedFilter) filtered = filtered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter);
-        const readPathOf = (slicePath: string): string =>
-          typeof deps.indexer.physicalPathFor === "function"
-            ? deps.indexer.physicalPathFor(slicePath)
-            : slicePath;
-        const parentRoots = new Map<string, ParentScopeNode[]>();
-        const parentWarnings: string[] = [];
-        for (const slice of filtered) {
-          if (!slice.missionId) continue;
-          const root = path.resolve(readPathOf(slice.slicePath), "..", "..", "..");
-          if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
-        }
-        const childMissions = (slicePath: string, missionId: string | null) => {
-          if (!missionId) return [];
-          const readSlicePath = readPathOf(slicePath);
-          const nodes = parentRoots.get(path.resolve(readSlicePath, "..", "..", "..")) ?? [];
-          const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === readSlicePath);
-          return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
-        };
-        return {
-          slices: filtered.map((s) => ({
-            ...s,
-            childMissions: childMissions(s.slicePath, s.missionId),
-            queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
-            derivedState: derivedStateOf(s.slicePath),
-            readiness: readSliceReadiness(readPathOf(s.slicePath), undefined, readPolicy),
-          })),
-          totalCount: filtered.length,
-          filter,
-          boundToWorkflow: boundDiagnostic,
-          parentWarnings,
-          // VM-005 (release-0.4.7): additive authored mission-status sidecar so
-          // chip surfaces can honor authored-wins precedence without a second
-          // round-trip. The `slices` array itself is byte-untouched.
-          missions: authored,
-        };
+        boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
+      }
+      // Sort by lastActivityAt DESC (most recently touched first); slices
+      // without activity sort to the end.
+      filtered.sort(compareByActivityDesc);
+      const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
+      const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
+        additionalSliceRoots: projectLookup.additionalSliceRoots,
+        complete: projectLookup.complete && !queueCountReadFailed,
+        canonicalProjectId: projectLookup.canonicalProjectId,
+        ...(queueCountRows && !queueCountReadFailed
+          ? { deferRows: (countRow: (row: QueueCountRow) => void) => { deferredCount.countRow = countRow; } }
+          : {}),
       });
-      if (listing instanceof Response) return listing;
+      const authored = deps.indexer.missionAuthoredStatuses();
+      const readPathsBySlicePath = new Map<string, string>();
+      for (const slice of filtered) {
+        readPathsBySlicePath.set(
+          slice.slicePath,
+          typeof deps.indexer.physicalPathFor === "function"
+            ? deps.indexer.physicalPathFor(slice.slicePath)
+            : slice.slicePath,
+        );
+      }
       const primaryRoot = typeof deps.indexer.configuredRootResolutions === "function"
         ? deps.indexer.configuredRootResolutions()[0]
         : undefined;
@@ -179,16 +182,77 @@ export function slicesRoutes(): Hono {
           new Error(`${fallbackCode}: cannot read primary slices root '${primaryRoot.identity}'`),
           { code: fallbackCode },
         );
-        return { listing, slicesRoot: null as string | null, primaryCaptureError: captureError, readPolicy };
+        return {
+          filtered, boundDiagnostic, queueCountsByPath, authored, readPathsBySlicePath,
+          slicesRoot: null as string | null, primaryCaptureError: captureError,
+        };
       }
       const readinessRoot = primaryRoot?.physicalPath ?? deps.indexer.slicesRoot;
-      return { listing, slicesRoot: readinessRoot, primaryCaptureError: undefined as unknown, readPolicy };
+      return {
+        filtered, boundDiagnostic, queueCountsByPath, authored, readPathsBySlicePath,
+        slicesRoot: readinessRoot, primaryCaptureError: undefined as unknown,
+      };
     });
-    if (operation instanceof Response) return operation;
-    const { listing, slicesRoot, primaryCaptureError, readPolicy } = operation;
+    if (batch instanceof Response) return batch;
+    const {
+      filtered: preDerivedFiltered,
+      boundDiagnostic,
+      queueCountsByPath,
+      authored,
+      readPathsBySlicePath,
+      slicesRoot,
+      primaryCaptureError,
+    } = batch;
     if (primaryCaptureError !== undefined || slicesRoot === null) {
       throw primaryCaptureError ?? new Error("Primary slices root capture failed");
     }
+    if (queueCountRows && deferredCount.countRow) {
+      try {
+        await deps.indexer.countQueueRowsCooperatively(queueCountRows, deferredCount.countRow);
+      } catch {
+        for (const slicePath of queueCountsByPath.keys()) queueCountsByPath.set(slicePath, null);
+      }
+    }
+    // Queue-derived state (#2729) is read beside the authored status, from the
+    // same counts and with no further query. A `?derived=` filter narrows the
+    // already status-filtered rows; it never changes `status` or `rawStatus`.
+    const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
+      deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
+    const filtered = derivedFilter
+      ? preDerivedFiltered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter)
+      : preDerivedFiltered;
+    const readPathOf = (slicePath: string): string => readPathsBySlicePath.get(slicePath) ?? slicePath;
+    const parentRoots = new Map<string, ParentScopeNode[]>();
+    const parentWarnings: string[] = [];
+    for (const slice of filtered) {
+      if (!slice.missionId) continue;
+      const root = path.resolve(readPathOf(slice.slicePath), "..", "..", "..");
+      if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
+    }
+    const childMissions = (slicePath: string, missionId: string | null) => {
+      if (!missionId) return [];
+      const readSlicePath = readPathOf(slicePath);
+      const nodes = parentRoots.get(path.resolve(readSlicePath, "..", "..", "..")) ?? [];
+      const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === readSlicePath);
+      return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
+    };
+    const listing = {
+      slices: filtered.map((s) => ({
+        ...s,
+        childMissions: childMissions(s.slicePath, s.missionId),
+        queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
+        derivedState: derivedStateOf(s.slicePath),
+        readiness: readSliceReadiness(readPathOf(s.slicePath), undefined, readPolicy),
+      })),
+      totalCount: filtered.length,
+      filter,
+      boundToWorkflow: boundDiagnostic,
+      parentWarnings,
+      // VM-005 (release-0.4.7): additive authored mission-status sidecar so
+      // chip surfaces can honor authored-wins precedence without a second
+      // round-trip. The `slices` array itself is byte-untouched.
+      missions: authored,
+    };
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
     const readiness = await readProjectReadinessAsync(slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
@@ -215,12 +279,12 @@ export function slicesRoutes(): Hono {
   //    segment; we parse the rest of the path manually for nested
   //    relative paths like "screenshots/foo.png" or
   //    "headed-browser/screenshots/bar.png".
-  app.get("/:name/proof-asset/*", (c) => {
+  app.get("/:name/proof-asset/*", async (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
     if ("response" in selected) return selected.response;
     const { deps, qualified } = selected;
-    let slice = qualified ? null : deps.indexer.get(name);
+    let slice = qualified ? null : await deps.indexer.getCooperatively(name);
     if (!qualified && (!slice || !slice.proofPacket)) {
       return c.json({ error: "proof_packet_not_found" }, 404);
     }
@@ -234,7 +298,7 @@ export function slicesRoutes(): Hono {
     if (!relPath || relPath.includes("..")) {
       return c.json({ error: "proof_asset_path_invalid" }, 400);
     }
-    slice ??= deps.indexer.get(name);
+    slice ??= await deps.indexer.getCooperatively(name);
     if (!slice || !slice.proofPacket) {
       return c.json({ error: "proof_packet_not_found" }, 404);
     }
@@ -252,7 +316,7 @@ export function slicesRoutes(): Hono {
 
   // 3) Doc serving for the Docs tab — markdown content of a single file
   //    inside the slice folder. Path-traversal guarded by the projector.
-  app.get("/:name/doc/*", (c) => {
+  app.get("/:name/doc/*", async (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name, { includeEvidenceRoot: false });
     if ("response" in selected) return selected.response;
@@ -265,18 +329,20 @@ export function slicesRoutes(): Hono {
     if (!relPath || relPath.includes("..")) {
       return c.json({ error: "doc_path_invalid" }, 400);
     }
+    // readDoc's get() then answers from the record this caches.
+    await deps.indexer.getCooperatively(name);
     const content = deps.projector.readDoc(name, relPath);
     if (content === null) return c.json({ error: "doc_not_found" }, 404);
     return c.json({ relPath, content });
   });
 
   // 4) Dynamic `/:name` LAST so the literal routes above are not shadowed.
-  app.get("/:name", (c) => {
+  app.get("/:name", async (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
     if ("response" in selected) return selected.response;
     const { deps } = selected;
-    const slice = deps.indexer.get(name);
+    const slice = await deps.indexer.getCooperatively(name);
     if (!slice) return c.json({ error: "slice_not_found", name }, 404);
     const payload = deps.projector.project(slice);
     return c.json(payload);

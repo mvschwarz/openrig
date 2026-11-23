@@ -138,7 +138,7 @@ import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
-import { SliceIndexer, deriveSliceQueueState } from "../src/domain/slices/slice-indexer.js";
+import { SliceIndexer, deriveSliceQueueState, type QueueCountRow } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
 import * as slicesRoutesModule from "../src/routes/slices.js";
@@ -1779,6 +1779,49 @@ describe("GET /api/slices observed queue counts", () => {
     expect((await list(app, "?filter=done")).map((s) => s.name)).toEqual(["delivered"]);
     expect((await list(app, "?filter=active")).map((s) => s.name)).toEqual(["live"]);
     expect((await list(app, "?filter=closed")).map((s) => s.name).sort()).toEqual(["deferred", "superseded"]);
+  });
+
+  it("on a WAL file, reads the count rows before the batch, off the main handle, with the same counts", async () => {
+    db.close();
+    db = createDb(path.join(root, "openrig.sqlite"));
+    migrate(db, ALL_MIGRATIONS);
+    addSlice("alpha", "shipping", "shared");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (const state of states) row("selected-" + state, state, ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("other-project", "failed", ["project:beta", "mission:shipping", "slice:shared"]);
+    // Several windows' worth of rows the count doesn't take.
+    for (let i = 0; i < 600; i++) row(`noise-${i}`, "done", null, "x".repeat(200));
+    const sql: string[] = [];
+    const original = db.prepare;
+    (db as unknown as { prepare: (s: string) => unknown }).prepare = (s: string) => { sql.push(s); return original.call(db, s); };
+    let entries: Entry[];
+    try { entries = await list(route("alpha").app); } finally { (db as unknown as { prepare: typeof original }).prepare = original; }
+    expect(entries[0]!.queueCounts).toEqual({ pending: 1, "in-progress": 1, done: 1, blocked: 1, failed: 1, denied: 1, canceled: 1, "handed-off": 1 });
+    expect(sql.filter((statement) => statement.startsWith("SELECT state, tags FROM queue_items"))).toEqual([]);
+  });
+
+  it("counts the prefetched rows in chunks the event loop runs between, with the statement's counts", async () => {
+    db.close();
+    db = createDb(path.join(root, "openrig.sqlite"));
+    migrate(db, ALL_MIGRATIONS);
+    addSlice("alpha", "shipping", "shared");
+    addSlice("alpha", "shipping", "other");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (let i = 0; i < 400; i++) row(`tagged-${i}`, states[i % 8]!, ["project:alpha", "mission:shipping", `slice:${i % 3 ? "shared" : "other"}`]);
+    const { indexer } = route("alpha", true);
+    const entries = indexer.list();
+    const statement = indexer.observedQueueCounts(entries);
+    let countRow: ((row: QueueCountRow) => void) | undefined;
+    const deferred = indexer.observedQueueCounts(entries, undefined, { deferRows: (count) => { countRow = count; } });
+    const rows = await indexer.readQueueCountRowsCooperatively();
+    let turns = 0, stopped = false;
+    const spin = () => { if (stopped) return; turns++; setImmediate(spin); };
+    setImmediate(spin);
+    await indexer.countQueueRowsCooperatively(rows!, countRow!, 0);
+    stopped = true;
+    expect(turns).toBeGreaterThan(1);
+    expect([...deferred]).toEqual([...statement]);
+    expect([...statement.values()].some((counts) => (counts?.done ?? 0) > 0)).toBe(true);
   });
 
   it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {
@@ -3615,6 +3658,118 @@ describe("GET /api/slices observed queue counts", () => {
       { label: "null counts", counts: null },
     ])("derives unknown from $label", ({ counts }) => {
       expect(deriveSliceQueueState(counts)).toBe("unknown");
+    });
+
+    it("applies derivedState and ?derived= after cooperative WAL counting and degrades to unknown if the cooperative count read fails", async () => {
+      db.close();
+      db = createDb(path.join(root, "openrig-derived-wal.sqlite"));
+      migrate(db, ALL_MIGRATIONS);
+      addSlice("alpha", "shipping", "blocked-slice", "active");
+      addSlice("alpha", "shipping", "none-slice", "active");
+      row("wal-blocked", "blocked", scope("blocked-slice"));
+      const { app, indexer } = route("alpha", false);
+
+      const allEntries = await list(app);
+      expect(allEntries.map((s) => [s.name, s.derivedState, s.queueCounts]).sort()).toEqual([
+        ["blocked-slice", "blocked", { ...ZERO, blocked: 1 }],
+        ["none-slice", "none", ZERO],
+      ]);
+      expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual(["blocked-slice"]);
+      expect((await list(app, "?derived=none")).map((s) => s.name)).toEqual(["none-slice"]);
+
+      // A fault in the cooperative pre-read must degrade counts to unknown without failing GET /api/slices.
+      const spy = vi.spyOn(indexer, "readQueueCountRowsCooperatively").mockRejectedValueOnce(new Error("SQLITE_BUSY: injected WAL read error"));
+      try {
+        const degraded = await list(app);
+        expect(degraded.map((s) => [s.name, s.queueCounts, s.derivedState]).sort()).toEqual([
+          ["blocked-slice", null, "unknown"],
+          ["none-slice", null, "unknown"],
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+      const spyFilter = vi.spyOn(indexer, "readQueueCountRowsCooperatively").mockRejectedValueOnce(new Error("SQLITE_BUSY: injected WAL read error"));
+      try {
+        expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual([]);
+      } finally {
+        spyFilter.mockRestore();
+      }
+      const spyUnknown = vi.spyOn(indexer, "readQueueCountRowsCooperatively").mockRejectedValueOnce(new Error("SQLITE_BUSY: injected WAL read error"));
+      try {
+        expect((await list(app, "?derived=unknown")).map((s) => s.name).sort()).toEqual(["blocked-slice", "none-slice"]);
+      } finally {
+        spyUnknown.mockRestore();
+      }
+    });
+
+    it("keeps the whole WAL cooperative list operation bound to the captured physical root when a symlink root retargets before the walk", async () => {
+      db.close();
+      db = createDb(path.join(root, "openrig-retarget-wal.sqlite"));
+      migrate(db, ALL_MIGRATIONS);
+
+      const oldRoot = path.join(root, "alpha", "missions");
+      const newRoot = path.join(root, "beta", "missions");
+      const alias = path.join(root, "wal-walk-alias");
+
+      write(path.join(oldRoot, "shipping", "SPEC.md"), nodeBytes("M.OLD", "active", "Old Mission"));
+      write(path.join(oldRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.OLD\n  status: active\n");
+      write(path.join(oldRoot, "shipping", "slices", "01-old", "SPEC.md"), nodeBytes("OPR.OLD", "active", "Old Slice"));
+
+      write(path.join(newRoot, "shipping", "SPEC.md"), nodeBytes("M.NEW", "closed", "New Mission"));
+      write(path.join(newRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.NEW\n  status: closed\n");
+      write(path.join(newRoot, "shipping", "slices", "02-new", "SPEC.md"), nodeBytes("OPR.NEW", "closed", "New Slice"));
+
+      row("wal-old-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-old"]);
+      row("wal-new-pending", "pending", ["project:beta", "mission:shipping", "slice:02-new"]);
+
+      fs.symlinkSync(oldRoot, alias, "dir");
+      const { app, indexer } = route("alpha", false, alias);
+
+      const origIsReady = indexer.isReady.bind(indexer);
+      let retargetOnce = true;
+      const readySpy = vi.spyOn(indexer, "isReady").mockImplementation(() => {
+        if (retargetOnce) {
+          retargetOnce = false;
+          fs.rmSync(alias);
+          fs.symlinkSync(newRoot, alias, "dir");
+        }
+        return origIsReady();
+      });
+      try {
+        const firstRes = await app.request("/api/slices?derived=blocked");
+        expect(firstRes.status).toBe(200);
+        const firstBody = await firstRes.json() as {
+          slices: Entry[];
+          missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        };
+        expect(firstBody.slices.map((s) => s.name)).toEqual(["01-old"]);
+        expect(firstBody.slices[0]).toMatchObject({
+          slicePath: path.join(alias, "shipping", "slices", "01-old"),
+          rawStatus: "active",
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect(firstBody.missions["shipping"]?.authoredStatus).toBe("active");
+        expect(firstBody.missions["shipping"]?.readiness?.historicalStatus).toBe("active");
+
+        const secondRes = await app.request("/api/slices?derived=pending");
+        expect(secondRes.status).toBe(200);
+        const secondBody = await secondRes.json() as {
+          slices: Entry[];
+          missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        };
+        expect(secondBody.slices.map((s) => s.name)).toEqual(["02-new"]);
+        expect(secondBody.slices[0]).toMatchObject({
+          slicePath: path.join(alias, "shipping", "slices", "02-new"),
+          rawStatus: "closed",
+          queueCounts: { ...ZERO, pending: 1 },
+          derivedState: "pending",
+        });
+        expect(secondBody.missions["shipping"]?.authoredStatus).toBe("closed");
+        expect(secondBody.missions["shipping"]?.readiness?.historicalStatus).toBe("closed");
+      } finally {
+        readySpy.mockRestore();
+      }
     });
   });
 

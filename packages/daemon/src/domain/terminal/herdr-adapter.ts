@@ -464,6 +464,8 @@ export function extractWorkspaceLabels(result: HerdrResult | null | undefined): 
 export class HerdrAdapter implements TerminalProvider {
   readonly name = "herdr";
   readonly panesPerPage = HERDR_PANES_PER_PAGE;
+  /** A view shows many seats at once, and watching one must not resize its agent. */
+  readonly pinsWritableSeats = true;
   private readonly transport: HerdrTransport;
   private readonly newLaunchToken: () => string;
   private readonly tabPrefix: string;

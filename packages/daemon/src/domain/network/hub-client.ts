@@ -20,10 +20,15 @@ export interface HubItem {
 export type HubErrorKind = "revoked" | "unavailable" | "refused";
 
 export class HubError extends Error {
-  constructor(readonly kind: HubErrorKind, message: string) {
+  /** `code`: the hub's own error code, when this client read one. `grant_authority_unavailable` (a 503) means the hub
+   *  was reached; a network answers it on purpose while it's still setting up a new connection's participant. */
+  constructor(readonly kind: HubErrorKind, message: string, readonly code?: string) {
     super(message);
   }
 }
+
+/** The hub's 503 body for a grant authority that can't answer (`packages/cli/src/mcp-http.ts`), as the SDK quotes it. */
+const GRANT_UNAVAILABLE_BODY = /"error"\s*:\s*"grant_authority_unavailable"/;
 
 export interface HubSession {
   listOwned(state: "pending" | "in-progress", limit: number): Promise<HubItem[]>;
@@ -49,7 +54,8 @@ export function hubFailure(error: unknown): HubError {
     return new HubError("unavailable", `The hub redirected the connection somewhere else, and the participant's token isn't sent there (${error.message.slice(0, 300)}). Connect the binding to the hub's own URL.`);
   }
   const message = error instanceof Error ? error.message : String(error);
-  return new HubError("unavailable", `The hub couldn't be reached: ${message.slice(0, 300)}`);
+  const grantUnavailable = error instanceof StreamableHTTPError && error.code === 503 && GRANT_UNAVAILABLE_BODY.test(error.message);
+  return new HubError("unavailable", `The hub couldn't be reached: ${message.slice(0, 300)}`, grantUnavailable ? "grant_authority_unavailable" : undefined);
 }
 
 function parsed(result: { isError?: boolean; content?: unknown }): unknown {

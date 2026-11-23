@@ -29,8 +29,8 @@ it.each(["proof", "slices"])("serves another event-loop turn during the %s proje
   app.use("*", async (c, next) => {
     c.set("sliceIndexer" as never, { isReady: () => true, slicesRoot: missions,
       withResolvedRoots: (fn: () => unknown) => fn(),
-      withMembershipBatch: (fn: () => unknown) => fn(), list: () => [],
-      observedQueueCounts: () => new Map(), missionAuthoredStatuses: () => ({}),
+      withMembershipBatch: (fn: () => unknown) => fn(), withMembershipBatchCooperatively: async (fn: () => unknown) => fn(), list: () => [],
+      observedQueueCounts: () => new Map(), readQueueCountRowsCooperatively: async () => null, missionAuthoredStatuses: () => ({}),
     } as never);
     c.set("sliceDetailProjector" as never, {} as never);
     c.set("proofSourceWatch" as never, { observation: () => ({ state: sourceReady ? "watching" : "unavailable", revision: "fixture" }) } as never);

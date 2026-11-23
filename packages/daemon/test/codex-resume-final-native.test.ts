@@ -11,6 +11,11 @@ import { shellQuote } from "../src/adapters/shell-quote.js";
 const run = promisify(exec);
 const runFile = promisify(execFile);
 
+// Native fixture delivery can be delayed by suite contention. Keep its wall-clock
+// wait separate from Codex's injected budget; allow both waits and teardown.
+const fixtureWaitMs = 15_000;
+const nativeTestTimeoutMs = fixtureWaitMs * 3;
+
 // Controlled provider-shaped output, not an authenticated Codex invocation.
 // The actual terminal process receives the real production resume command.
 async function finalObservation(output: string) {
@@ -44,14 +49,18 @@ async function finalObservation(output: string) {
     const capture = vi.spyOn(adapter, "capturePaneContent").mockImplementation(async (target, lines) => {
       captures++;
       if (captures === 1) {
-        await expect.poll(() => nativeCapture(target, lines), { timeout: 5000 }).toContain("fixture waiting for final observation");
+        await expect.poll(() => nativeCapture(target, lines), {
+          timeout: fixtureWaitMs, message: "waiting for the native fixture to start",
+        }).toContain("fixture waiting for final observation");
       }
       if (captures === 3) {
         // Two loop observations exercise a retry before the final read.
         expect(sleep).toHaveBeenCalledExactlyOnceWith(200);
         // Release output only at that final boundary, avoiding timer races.
         fs.writeFileSync(gate, output);
-        await expect.poll(() => nativeCapture(target, lines), { timeout: 5000 }).toContain(output);
+        await expect.poll(() => nativeCapture(target, lines), {
+          timeout: fixtureWaitMs, message: "waiting for fixture output before the final resume observation",
+        }).toContain(output);
       }
       return nativeCapture(target, lines);
     });
@@ -75,22 +84,22 @@ describe.skipIf(process.platform === "win32")("native terminal final Codex resum
   it("retains a late access-token refusal as recoverable attention with evidence", async () => {
     const output = "Your access token could not be refreshed. Please sign in again.";
     expect(await finalObservation(output)).toMatchObject({ ok: false, code: "attention_required", evidence: expect.stringContaining(output) });
-  }, 15_000);
+  }, nativeTestTimeoutMs);
 
   it("retains a late incompatible-client notice as recoverable attention", async () => {
     const output = "This model requires a newer version of Codex.";
     expect(await finalObservation(output)).toMatchObject({ ok: false, code: "attention_required", evidence: expect.stringContaining(output) });
-  }, 15_000);
+  }, nativeTestTimeoutMs);
 
   it("retains a late missing saved session as a fresh-retry outcome", async () => {
     expect(await finalObservation("Error: No saved session found for that token.")).toMatchObject({
       ok: false, code: "retry_fresh", message: "Codex resume failed: no saved session found for the requested token",
     });
-  }, 15_000);
+  }, nativeTestTimeoutMs);
 
   it("still accepts a ready interactive prompt arriving at the final read", async () => {
     expect(await finalObservation("OpenAI Codex (v0.0.0)\n› Ask Codex to do anything")).toMatchObject({ ok: true });
-  }, 15_000);
+  }, nativeTestTimeoutMs);
 
   it("keeps the launch for attention while the staging wrapper holds the foreground, never claiming readiness", async () => {
     // The production launch stages this fixture via /bin/sh, so native tmux labels the pane with that wrapper while
@@ -99,5 +108,5 @@ describe.skipIf(process.platform === "win32")("native terminal final Codex resum
       ok: false, code: "attention_required",
       message: "Codex resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Codex.",
     });
-  }, 15_000);
+  }, nativeTestTimeoutMs);
 });
