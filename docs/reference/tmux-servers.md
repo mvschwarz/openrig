@@ -227,7 +227,9 @@ in the restoration rules above. The command talks to the daemon, not to tmux, so
 run it from any terminal that wasn't on the lost server.
 
 `rig seat launch <seat> --fresh --reason "<why>"` can also reopen a dead server
-whose socket file remains, one seat at a time. That is a deliberate blank
+whose socket file remains, one seat at a time, unless the seat's recorded process
+is still running: then it refuses, launches nothing and asks you to end that process
+first, because the server may only have lost its socket. That is a deliberate blank
 replacement, not a resume: the seat starts a new conversation and none of its
 earlier ones is resumed. `--reason` is required. Use it when you want that seat to
 start over, not to get its conversation back.
