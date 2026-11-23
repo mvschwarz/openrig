@@ -318,6 +318,68 @@ describe("the daemon's assignment plan", () => {
     expect(planned.plan.rows.map((r) => [r.seat, r.precheck?.reasons])).toEqual([["a@fleet", ["seat_name_shared"]]]);
     expect(planned.plan.rows[0]!.precheck!.message).toContain("a@fleet reaches the seat in rig rig-old (archived), not this one");
     expect(restartPlan).not.toHaveBeenCalled();
+
+    // A move to a prepared home goes through the successor, whose dry run and run use the seat-ref resolver: it skips the
+    // archived rig, so the name reaches k1 and the move is checked and runs.
+    const prepared = path.join(dir, "prepared");
+    const successorCheck = vi.fn(async () => ({ safe: true, reasons: [], message: "would move" }));
+    const successor = vi.fn(async () => ({ ok: true as const, changed: true }));
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: false, accountHome: prepared, daemon: "host-a" };
+    const moving = await svc.assignmentPlan(request, undefined, claudeSeat, successorCheck);
+    if (!moving.ok) throw new Error(moving.message);
+    expect(moving.plan.rows.map((r) => [r.seat, r.precheck?.safe])).toEqual([["a@fleet", true]]);
+    expect(successorCheck).toHaveBeenCalledWith("a@fleet", prepared);
+    const moved = await svc.applyAssignment({ ...request, digest: moving.plan.digest, requestedBy: null }, { claudeSeat, successorCheck, successor });
+    if (!moved.ok) throw new Error(moved.message);
+    expect(successor).toHaveBeenCalledWith("a@fleet", prepared);
+    expect(moved.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "pending_successor"]]);
+  });
+
+  it("a seat restarted on a switched home is checked with the restart's own lookup when it runs; its plan stays Claude-first, as its precheck is", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    seat("fleet", "k1", "codex", "a@fleet");
+    seat("fleet", "k2", "codex", "b@fleet");
+    // The Claude relaunch's lookup, as the route has it: the newest session row with the name, any rig, a Claude seat only.
+    const claudeSeat = { seat: (s: string) => {
+      const row = db.prepare(`SELECT n.id, n.rig_id, n.runtime, r.name FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`).get(s) as { id: string; rig_id: string; runtime: string; name: string } | undefined;
+      return row?.runtime === "claude-code" ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: "dev.k2", running: true, pane: null } : null;
+    } } as never;
+    // An archived rig, also named fleet, whose Claude seat has b@fleet's name, registered while the apply runs (as a@fleet
+    // restarts), after the plan's checks.
+    const registerArchived = () => {
+      db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-old', 'fleet')").run();
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES ('pod-old', 'rig-old', 'dev', 'Dev')").run();
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES ('c2', 'rig-old', 'dev.k2', 'claude-code', '/w', 'pod-old')").run();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES ('sess-z', 'c2', 'b@fleet', 'running', 'ready')").run();
+      new RigRepository(db).archiveRig("rig-old");
+    };
+    const run = vi.fn<SeatRestart["run"]>(async (s) => {
+      if (s === "a@fleet") registerArchived();
+      return { ok: true, codexHome, outcome: "restarted_account_unverified", message: "restarted", activity: { state: "idle" }, peers: [] } as never;
+    });
+    const seatRestart = { plan: vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never), run };
+    const svc = new ProviderServiceImpl({ db, listRigs: () => new RigRepository(db).listRigs(), env: { HOME: dir, CODEX_HOME: codexHome }, platform: "linux",
+      codexLogins: { list: () => ["team", "next"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart, claudeSeat);
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.rows.map((r) => [r.seat, r.precheck?.safe])).toEqual([["a@fleet", true], ["b@fleet", true]]);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart, claudeSeat });
+    if (!applied.ok) throw new Error(applied.message);
+    // a@fleet switched the home; b@fleet is restarted on it through the seat-ref resolver, which skips the archived rig.
+    expect(run.mock.calls.map(([s]) => s)).toEqual(["a@fleet", "b@fleet"]);
+    // The next plan checks b@fleet with its precheck, which asks the Claude lookup first: that finds the archived Claude
+    // seat, so the row is refused by name rather than given that seat's verdict.
+    fs.writeFileSync(path.join(codexHome, "auth-profiles", "next.json"), CONTENT, { mode: 0o600 });
+    expect(refs.add({ provider: "codex", label: "next", codexHome, login: "next" }).ok).toBe(true);
+    const again = await svc.assignmentPlan({ ...request, label: "next" }, seatRestart, claudeSeat);
+    if (!again.ok) throw new Error(again.message);
+    const b = again.plan.rows.find((r) => r.seat === "b@fleet")!;
+    expect(b.precheck?.reasons).toEqual(["seat_name_shared"]);
+    expect(b.precheck?.message).toContain("b@fleet reaches the seat in rig rig-old (archived), not this one");
   });
 
   it("an outside peer whose session name a seat in a third rig has, on another home, gets no restart command", async () => {

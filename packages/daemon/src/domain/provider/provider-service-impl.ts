@@ -311,12 +311,12 @@ export class ProviderServiceImpl implements ProviderService {
     return { ok: false, code: "unknown_rig", message: `There's no rig named ${handle} with seats on this daemon (rig ps lists them).` };
   }
 
-  /** #3625: the seat a seat tool reaches by this session name. A Claude seat's switch finds it with the Claude relaunch's own
-   *  lookup (every session row, archived rigs' and older ones included, the newest first). A Codex seat's restart, and the
-   *  successor and its dry run, use the seat-ref resolver: active rigs only, refusing a name more than one seat has. */
+  /** #3625: the seat a seat tool reaches by this session name. An in-place switch and its precheck (pass `claudeSeat`) ask
+   *  the Claude relaunch's own lookup first, for a seat of any runtime (every session row, archived rigs' and older ones
+   *  included, the newest first): a seat it finds is the one they act on, so it must be this one. A Codex seat's restart,
+   *  and the successor and its dry run (no `claudeSeat`), use the seat-ref resolver: active rigs only, refusing a name more
+   *  than one seat has. */
   private seatReachedBy(session: string, runtime: string, claudeSeat?: ClaudeSeatRelaunch): SeatReached {
-    // The precheck and the switch ask the Claude relaunch's lookup first, for a seat of any runtime: a seat it finds is the
-    // one they act on, so it must be this one.
     const claude = claudeSeat?.seat(session);
     if (claude) {
       const archived = this.deps.db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(claude.rigId) as { archived_at: string | null } | undefined;
@@ -378,14 +378,16 @@ export class ProviderServiceImpl implements ProviderService {
         || (kind === "unchanged" && !keptOverride.has(seat));
       // Checked again just before each effect, with the lookup that effect uses: the plan's check was awaited, and a session
       // registered since could give the name another seat.
-      const elsewhere = (seat: string): string | null => {
+      // Each effect is checked with its own lookup: the switch with the Claude relaunch's first, a restart or a successor
+      // with the seat-ref resolver's.
+      const elsewhere = (seat: string, inPlace = false): string | null => {
         const node = nodeOf.get(seat)!;
-        const r = this.seatReachedBy(seat, node.runtime, tools.claudeSeat);
+        const r = this.seatReachedBy(seat, node.runtime, inPlace ? tools.claudeSeat : undefined);
         return "nodeId" in r && r.nodeId === node.nodeId ? null : unreachedSeat(seat, r);
       };
       const report = await applyAssignment(plan, account, {
         switchSeat: async (seat) => {
-          const why = elsewhere(seat);
+          const why = elsewhere(seat, true);
           if (why) return { outcome: "failed_safely", reasons: ["seat_name_shared"], message: why };
           return this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat);
         },
@@ -526,7 +528,11 @@ export class ProviderServiceImpl implements ProviderService {
     // Every tool that reads or changes a seat finds it by its session name: two rigs with the same name and member, or an
     // archived or older generation of one, can give that name another seat. So each seat is checked against the lookup its
     // switch or restart uses, and one that doesn't reach it alone isn't read and is refused before any effect.
-    const reached = new Map(entries.filter((e) => e.rigId === rigId).map((e) => [e.nodeId, this.seatReachedBy(e.seat.seatSession, e.seat.runtime, claudeSeat)]));
+    // A move to a prepared home goes through the successor, whose dry run and run use the seat-ref resolver; an in-place
+    // switch and its precheck ask the Claude relaunch's lookup first.
+    const moves = !!input.accountHome && account.provider === "codex";
+    const reached = new Map(entries.filter((e) => e.rigId === rigId).map((e) =>
+      [e.nodeId, this.seatReachedBy(e.seat.seatSession, e.seat.runtime, moves ? undefined : claudeSeat)]));
     const notReached = (nodeId: string, session: string): PlanCheck | null => {
       const r = reached.get(nodeId);
       return !r || ("nodeId" in r && r.nodeId === nodeId) ? null : { safe: false, reasons: ["seat_name_shared"], message: unreachedSeat(session, r) };
