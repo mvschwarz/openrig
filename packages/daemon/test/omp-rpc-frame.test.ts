@@ -8,7 +8,7 @@ import os from "node:os";
 import nodePath from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { OMP_MAX_REASSEMBLED_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit, type OmpFrameResult } from "../src/adapters/omp-rpc-frame.js";
-import { RunnerCore, type RunnerIo } from "../src/adapters/pi-runner.js";
+import { MAX_UNANCHORED_REFRESH_HOLD_TURNS, prepareRunnerSidecar, RunnerCore, type RunnerIo } from "../src/adapters/pi-runner.js";
 import type { PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
 
 const MiB = 1024 * 1024;
@@ -177,7 +177,7 @@ describe("OMP v2 frame decoder", () => {
   });
 });
 
-function ompRunner(opts: { catchUpSince?: string; runtime?: "omp" | "pi" } = {}) {
+function ompRunner(opts: { catchUpSince?: string; runtime?: "omp" | "pi"; readLastEntryId?: (path: string) => string | null } = {}) {
   const rpc: Record<string, unknown>[] = [];
   const mirror: string[] = [];
   const sidecars: PiRunnerState[] = [];
@@ -188,12 +188,13 @@ function ompRunner(opts: { catchUpSince?: string; runtime?: "omp" | "pi" } = {})
     postActivity: () => {},
     writeSidecar: (state) => { sidecars.push(state); },
     sessionFileExists: () => true,
+    ...(opts.readLastEntryId ? { readLastEntryId: opts.readLastEntryId } : {}),
     now: () => "2026-10-14T12:00:00Z",
   };
   const core = new RunnerCore(io, { sessionName: "omp-worker@rig", launchId: "attempt-1" }, { runtime: opts.runtime ?? "omp", catchUpSince: opts.catchUpSince });
   const line = (frame: unknown) => core.handlePiLine(JSON.stringify(frame));
   const cursor = () => sidecars.at(-1)?.lastEntryId;
-  return { core, rpc, mirror, line, cursor };
+  return { core, rpc, mirror, sidecars, line, cursor };
 }
 
 describe("OMP runner over protocol v2 (#1275)", () => {
@@ -221,9 +222,9 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     for (const frame of chunk(entriesReply("pi-runner-catch-up", restored))) line(frame);
     expect(cursor()).toBe(restored.at(-1)!.id);
     line({ type: "agent_end", isTerminal: true });
-    expect(rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
-    const all = [...history(3 * MiB), { type: "message", id: "turn-1", parentId: restored.at(-1)!.id }];
-    for (const frame of chunk(entriesReply("pi-runner-cursor-refresh", all), "rpc-2")) line(frame);
+    expect(rpc.at(-1)).toEqual({ type: "get_entries", since: restored.at(-1)!.id, id: "pi-runner-cursor-refresh" });
+    const delta = [{ type: "message", id: "turn-1", parentId: restored.at(-1)!.id }];
+    line(entriesReply("pi-runner-cursor-refresh", delta));
     expect(cursor()).toBe("turn-1");
     expect(mirror.filter((l) => l.includes("ERROR"))).toEqual([]);
   });
@@ -327,7 +328,7 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     const { line, mirror, rpc } = negotiated();
     const text = "word ".repeat(300_000);
     for (const frame of chunk({ type: "agent_end", isTerminal: true, messages: [{ role: "assistant", content: [{ type: "text", text }] }] })) line(frame);
-    expect(rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    expect(rpc.at(-1)).toEqual({ type: "get_entries", since: "e-1", id: "pi-runner-cursor-refresh" });
     expect(mirror.some((l) => l.includes("ERROR"))).toBe(false);
   });
 
@@ -354,6 +355,312 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     const { core, rpc } = ompRunner({ runtime: "pi", catchUpSince: "e-1" });
     core.start(READY_V2);
     expect(rpc).toEqual([{ type: "get_state", id: "pi-runner-get-state" }, { type: "get_entries", since: "e-1", id: "pi-runner-catch-up" }]);
+  });
+
+  it.each(["rpc_error", "reassembly_drop"] as const)(
+    "oversized restore catch-up reports lost replay once, then bounded refresh advances cursor and restart resumes from it (%s)",
+    (failureKind) => {
+      let tailId: string | null = "e-1";
+      const r = ompRunner({ catchUpSince: "e-1", readLastEntryId: () => tailId });
+      r.core.start(READY_V2);
+      r.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+      r.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/s.jsonl", sessionId: "s" } });
+
+      if (failureKind === "rpc_error") {
+        r.line({ type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "RPC response exceeded the transport limit" });
+      } else {
+        r.line({ type: "rpc_chunk", chunkId: "rpc-big", index: 0, count: 256, byteLength: 65 * MiB, data: Buffer.from("x").toString("base64") });
+      }
+      const initialErrors = r.mirror.filter((l) => l.includes("ERROR"));
+      const initialReplayNotices = r.mirror.filter((l) => /startup restore replay/i.test(l));
+      expect(initialErrors).toHaveLength(1);
+      expect(initialReplayNotices).toHaveLength(1);
+      if (failureKind === "rpc_error") {
+        expect(initialErrors[0]).toBe("[omp-runner] ERROR rpc: RPC response exceeded the transport limit");
+        expect(initialReplayNotices[0]).toMatch(/startup restore replay was lost/i);
+      } else {
+        expect(initialReplayNotices[0]).toMatch(/startup restore replay.*may have been lost/i);
+      }
+      expect(r.cursor()).toBe("e-1");
+
+      // While the local tail is still the oversized saved cursor, a turn end does not repeat since="e-1" or issue a full read.
+      const rpcCountAfterFailure = r.rpc.length;
+      r.line({ type: "agent_end", isTerminal: true });
+      expect(r.rpc).toHaveLength(rpcCountAfterFailure);
+
+      // Once a turn appends a new entry to the local session file, turn-end refresh queries boundedly from that tail
+      // and advances the saved cursor without claiming the earlier lost replay was recovered.
+      tailId = "e-50";
+      r.line({ type: "agent_end", isTerminal: true });
+      expect(r.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-50", id: "pi-runner-cursor-refresh" });
+      r.line({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] } });
+      expect(r.cursor()).toBe("e-50");
+      expect(r.mirror.filter((l) => l.includes("ERROR"))).toEqual(initialErrors);
+      expect(r.mirror.filter((l) => /startup restore replay/i.test(l))).toEqual(initialReplayNotices);
+      expect(r.mirror.some((l) => /recovered/i.test(l))).toBe(false);
+
+      // Next restart reads the persisted sidecar and begins catch-up from the advanced saved cursor.
+      const files: Record<string, string> = { "/state/runner-state.json": JSON.stringify(r.sidecars.at(-1)) };
+      const { catchUpSince } = prepareRunnerSidecar(
+        {
+          exists: (p) => p in files,
+          readFile: (p) => files[p]!,
+          writeFile: (p, data) => { files[p] = data; },
+        },
+        "/state/runner-state.json",
+        "attempt-2",
+        true,
+        () => "2026-10-14T12:05:00Z",
+      );
+      expect(catchUpSince).toBe("e-50");
+      const restarted = ompRunner({ catchUpSince });
+      restarted.core.start(READY_V2);
+      expect(restarted.rpc).toContainEqual({ type: "get_entries", since: "e-50", id: "pi-runner-catch-up" });
+    },
+  );
+
+  it("an unrelated dropped chunked frame does not clear a good pending turn-end refresh", () => {
+    const { line, cursor, mirror, rpc } = negotiated();
+    line(entriesReply("pi-runner-catch-up", [{ type: "message", id: "e-2" }]));
+    expect(cursor()).toBe("e-2");
+
+    line({ type: "agent_end", isTerminal: true });
+    expect(rpc.at(-1)).toEqual({ type: "get_entries", since: "e-2", id: "pi-runner-cursor-refresh" });
+
+    // An unrelated corrupted chunked frame drops while the refresh is still pending.
+    line({ type: "rpc_chunk", chunkId: "rpc-unrelated", index: 0, count: 2, byteLength: 4, data: "!!!!" });
+    expect(mirror.filter((l) => l.startsWith("[omp-runner] ERROR rpc frame:"))).toHaveLength(1);
+
+    // The pending refresh reply arrives next and still advances the durable cursor.
+    line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-3" }]));
+    expect(cursor()).toBe("e-3");
+  });
+
+  it("an unrelated oversized dropped frame does not suppress a usable refresh when the real request returns a temporary error", () => {
+    // Subcase 1: unanchored refresh with no saved cursor and no readable file tail.
+    const unanchored = ompRunner({ readLastEntryId: () => null });
+    unanchored.core.start(READY_V2);
+    unanchored.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    unanchored.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/s.jsonl", sessionId: "s" } });
+
+    unanchored.line({ type: "agent_end", isTerminal: true });
+    expect(unanchored.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+
+    // An unrelated oversized v2 frame drops while the unanchored refresh is still pending.
+    unanchored.line({ type: "rpc_chunk", chunkId: "rpc-unrelated-big", index: 0, count: 256, byteLength: 65 * MiB, data: Buffer.from("x").toString("base64") });
+    // The real unanchored refresh returns a temporary non-size error (proving the dropped frame was unrelated).
+    unanchored.line({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "temporarily busy" });
+
+    // Later turns must still be able to dispatch an unanchored refresh and advance the cursor.
+    unanchored.line({ type: "agent_end", isTerminal: true });
+    expect(unanchored.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+    unanchored.line(entriesReply("pi-runner-cursor-refresh:2", [{ type: "message", id: "e-ok-1" }]));
+    expect(unanchored.cursor()).toBe("e-ok-1");
+
+    // Subcase 2: anchored `since` refresh with an unrelated oversized drop followed by a temporary non-size error.
+    const anchored = ompRunner({ catchUpSince: "e-10", readLastEntryId: () => null });
+    anchored.core.start(READY_V2);
+    anchored.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    anchored.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/s.jsonl", sessionId: "s" } });
+    anchored.line(entriesReply("pi-runner-catch-up", []));
+
+    anchored.line({ type: "agent_end", isTerminal: true });
+    expect(anchored.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-10", id: "pi-runner-cursor-refresh" });
+    anchored.line({ type: "rpc_chunk", chunkId: "rpc-unrelated-big-2", index: 0, count: 256, byteLength: 65 * MiB, data: Buffer.from("x").toString("base64") });
+    anchored.line({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "temporarily busy" });
+
+    anchored.line({ type: "agent_end", isTerminal: true });
+    expect(anchored.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-10", id: "pi-runner-cursor-refresh:2" });
+    anchored.line(entriesReply("pi-runner-cursor-refresh:2", [{ type: "message", id: "e-11" }]));
+    expect(anchored.cursor()).toBe("e-11");
+  });
+
+  it.each(["rpc_error", "reassembly_drop"] as const)(
+    "a known-failing unanchored full refresh does not repeat every turn, then bounded tail refresh recovers (%s)",
+    (failureKind) => {
+      let tailId: string | null = null;
+      const r = ompRunner({ readLastEntryId: () => tailId });
+      r.core.start(READY_V2);
+      r.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+      r.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/s.jsonl", sessionId: "s" } });
+
+      r.line({ type: "agent_end", isTerminal: true });
+      expect(r.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+      if (failureKind === "rpc_error") {
+        r.line({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "RPC response exceeded the transport limit" });
+      } else {
+        r.line({ type: "rpc_chunk", chunkId: "rpc-full-big", index: 0, count: 256, byteLength: 65 * MiB, data: Buffer.from("x").toString("base64") });
+      }
+
+      const rpcCountAfterFailure = r.rpc.length;
+      r.line({ type: "agent_end", isTerminal: true });
+      expect(r.rpc).toHaveLength(rpcCountAfterFailure);
+
+      tailId = "e-90";
+      r.line({ type: "agent_end", isTerminal: true });
+      expect(r.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-90", id: "pi-runner-cursor-refresh:2" });
+      r.line({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [] } });
+      expect(r.cursor()).toBe("e-90");
+    },
+  );
+
+  it("an unfinished OMP turn does not issue duplicate unanchored full-history reads while keeping bounded since refreshes", () => {
+    let tailId: string | null = null;
+    const r = ompRunner({ readLastEntryId: () => tailId });
+    r.core.start(READY_V2);
+    r.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    r.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/s.jsonl", sessionId: "s" } });
+
+    const beforeTurns = r.rpc.length;
+    // Unfinished OMP turns (isTerminal === false) without an anchor must not dispatch unanchored full reads.
+    r.line({ type: "agent_end", isTerminal: false });
+    r.line({ type: "agent_end", isTerminal: false });
+    r.line({ type: "agent_end", isTerminal: false });
+    expect(r.rpc).toHaveLength(beforeTurns);
+
+    // Completed turns coalesce an already-in-flight unanchored full read instead of stacking duplicates.
+    r.line({ type: "agent_end", isTerminal: true });
+    r.line({ type: "agent_end", isTerminal: true });
+    const unanchoredDispatched = r.rpc.slice(beforeTurns).filter((cmd) => cmd.type === "get_entries" && cmd.since === undefined);
+    expect(unanchoredDispatched).toHaveLength(1);
+    expect(unanchoredDispatched[0]).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+
+    r.line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-70" }]));
+    expect(r.cursor()).toBe("e-70");
+
+    // Positive control: once a usable anchor exists, a non-terminal OMP agent_end still dispatches a bounded since refresh.
+    r.line({ type: "agent_end", isTerminal: false });
+    expect(r.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-70", id: "pi-runner-cursor-refresh:2" });
+  });
+
+  it("a corrupt chunk drop on an unanchored full refresh does not deadlock subsequent completed turns, while unrelated drops still preserve valid pending replies", () => {
+    const r = ompRunner({ readLastEntryId: () => null });
+    r.core.start(READY_V2);
+    r.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    r.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+
+    // Completed turn 1 issues an unanchored full read; its chunked reply has corrupt base64 and is dropped.
+    r.line({ type: "agent_end", isTerminal: true });
+    expect(r.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    const corruptFrames = chunk(entriesReply("pi-runner-cursor-refresh", history(2 * MiB)));
+    r.line(corruptFrames[0]);
+    r.line({ ...corruptFrames[1]!, data: "!!!!" });
+    for (const frame of corruptFrames.slice(2)) r.line(frame);
+    expect(r.cursor()).toBeUndefined();
+
+    // Completed turn 2 must not be blocked indefinitely by the dropped first full read; it dispatches a fresh full read.
+    r.line({ type: "agent_end", isTerminal: true });
+    expect(r.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+
+    // While #2 is genuinely in flight with no drop, turn 3 still coalesces instead of stacking a duplicate full read.
+    const countAfterSecond = r.rpc.length;
+    r.line({ type: "agent_end", isTerminal: true });
+    expect(r.rpc).toHaveLength(countAfterSecond);
+
+    // #2 succeeds and advances the cursor.
+    r.line(entriesReply("pi-runner-cursor-refresh:2", [{ type: "message", id: "e-80" }]));
+    expect(r.cursor()).toBe("e-80");
+
+    // Control: an unrelated corrupt drop still leaves a good pending unanchored full read intact if its own reply arrives.
+    const u = ompRunner({ readLastEntryId: () => null });
+    u.core.start(READY_V2);
+    u.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    u.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+    u.line({ type: "agent_end", isTerminal: true });
+    expect(u.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    const unrelatedCorrupt = chunk({ type: "message_end", text: "x".repeat(2 * MiB) }, "rpc-unrelated");
+    u.line(unrelatedCorrupt[0]);
+    u.line({ ...unrelatedCorrupt[1]!, data: "!!!!" });
+    u.line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-81" }]));
+    expect(u.cursor()).toBe("e-81");
+  });
+
+  it("unanchored full refresh on OMP v2 holds for three completed turns and allows a new full read on the fourth when a whole reply is lost", () => {
+    expect(MAX_UNANCHORED_REFRESH_HOLD_TURNS).toBe(3);
+    const getEntriesCalls = (rpc: Record<string, unknown>[]) => rpc.filter((cmd) => cmd.type === "get_entries");
+
+    // Case 1: slow valid reply within 3 completed turns does not cause an overlapping full read; unfinished turns do not advance the bound.
+    const slow = ompRunner({ readLastEntryId: () => null });
+    slow.core.start(READY_V2);
+    slow.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    slow.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+
+    slow.line({ type: "agent_end", isTerminal: true }); // Turn 1 -> #1
+    expect(getEntriesCalls(slow.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+    slow.line({ type: "agent_end", isTerminal: false }); // Unfinished -> ignored
+    slow.line({ type: "agent_end", isTerminal: true }); // Turn 2 -> held
+    slow.line({ type: "agent_end", isTerminal: false }); // Unfinished -> ignored
+    slow.line({ type: "agent_end", isTerminal: true }); // Turn 3 -> held
+    expect(getEntriesCalls(slow.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+    slow.line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-v2-slow" }]));
+    expect(slow.cursor()).toBe("e-v2-slow");
+    slow.line({ type: "agent_end", isTerminal: true }); // Turn 4 -> bounded since
+    expect(slow.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-v2-slow", id: "pi-runner-cursor-refresh:2" });
+
+    // Case 2: lost whole reply on OMP v2 (both silent and truncated whole-line non-JSON with no active chunk sequence)
+    // holds through turns 2 and 3 and dispatches a new full read on the 4th completed turn.
+    for (const lossKind of ["silent", "truncated_line"] as const) {
+      const lost = ompRunner({ readLastEntryId: () => null });
+      lost.core.start(READY_V2);
+      lost.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+      lost.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+
+      lost.line({ type: "agent_end", isTerminal: true }); // Turn 1 -> #1
+      expect(getEntriesCalls(lost.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      if (lossKind === "truncated_line") {
+        const truncated = '{"type":"response","id":"pi-runner-cursor-refresh"';
+        lost.core.handlePiLine(truncated);
+        expect(lost.mirror).toContain(truncated);
+        expect(lost.mirror.some((l) => l.startsWith("[omp-runner] ERROR rpc frame:"))).toBe(false);
+      }
+
+      // Unfinished OMP turns do not count toward the 3-completed-turn hold.
+      lost.line({ type: "agent_end", isTerminal: false });
+      lost.line({ type: "agent_end", isTerminal: false });
+      lost.line({ type: "agent_end", isTerminal: true }); // Turn 2 -> held
+      lost.line({ type: "agent_end", isTerminal: true }); // Turn 3 -> held
+      expect(getEntriesCalls(lost.rpc), lossKind).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+
+      lost.line({ type: "agent_end", isTerminal: true }); // Turn 4 -> #2
+      expect(getEntriesCalls(lost.rpc), lossKind).toEqual([
+        { type: "get_entries", id: "pi-runner-cursor-refresh" },
+        { type: "get_entries", id: "pi-runner-cursor-refresh:2" },
+      ]);
+
+      // #2 settles; a late reply to #1 is ignored under the existing late-reply rule.
+      lost.line(entriesReply("pi-runner-cursor-refresh:2", [{ type: "message", id: "e-v2-recovered-4" }]));
+      expect(lost.cursor(), lossKind).toBe("e-v2-recovered-4");
+      lost.line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-v2-stale-1" }]));
+      expect(lost.cursor(), lossKind).toBe("e-v2-recovered-4");
+    }
+
+    // Case 3: late reply to #1 arriving after turn 4 sent #2 (before #2 settles) still advances, then #2 advances further.
+    const late = ompRunner({ readLastEntryId: () => null });
+    late.core.start(READY_V2);
+    late.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    late.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+    late.line({ type: "agent_end", isTerminal: true }); // Turn 1 -> #1
+    late.line({ type: "agent_end", isTerminal: true }); // Turn 2 -> held
+    late.line({ type: "agent_end", isTerminal: true }); // Turn 3 -> held
+    late.line({ type: "agent_end", isTerminal: true }); // Turn 4 -> #2
+    expect(late.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+    late.line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-v2-late-1" }]));
+    expect(late.cursor()).toBe("e-v2-late-1");
+    late.line(entriesReply("pi-runner-cursor-refresh:2", [{ type: "message", id: "e-v2-fresh-2" }]));
+    expect(late.cursor()).toBe("e-v2-fresh-2");
+
+    // Control: suspected oversized drop on OMP v2 still suppresses later unanchored full reads past turn 4.
+    const big = ompRunner({ readLastEntryId: () => null });
+    big.core.start(READY_V2);
+    big.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    big.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+    big.line({ type: "agent_end", isTerminal: true });
+    big.line({ type: "rpc_chunk", chunkId: "rpc-big-v2", index: 0, count: 256, byteLength: 65 * MiB, data: Buffer.from("x").toString("base64") });
+    const countAfterDrop = big.rpc.length;
+    for (let turn = 2; turn <= 5; turn++) {
+      big.line({ type: "agent_end", isTerminal: true });
+    }
+    expect(big.rpc).toHaveLength(countAfterDrop);
   });
 });
 
@@ -402,7 +709,16 @@ async function restoreThroughRunner(v2: boolean): Promise<{ cursor: string | und
   const child = spawn(process.execPath, [
     "--import", "tsx", RUNNER, "--runtime", "omp", "--approval-mode", "always-ask", "--session-name", sessionName,
     "--state-root", nodePath.join(root, "state"), "--cwd", root, "--launch-id", "launch-1", "--session", sessionFile,
-  ], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: root, TMPDIR: os.tmpdir() }, stdio: ["pipe", "pipe", "pipe"] });
+  ], {
+    env: {
+      PATH: `${bin}:/usr/bin:/bin`,
+      HOME: root,
+      TMPDIR: os.tmpdir(),
+      ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}),
+      ...(process.env.NO_NETWORK_TRACE_FILE ? { NO_NETWORK_TRACE_FILE: process.env.NO_NETWORK_TRACE_FILE } : {}),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   let output = "";
   child.stdout.on("data", (d) => { output += d; });
   child.stderr.on("data", (d) => { output += d; });
@@ -430,5 +746,70 @@ describe("OMP restore catch-up through the real runner entry (#1275)", () => {
     const { cursor, output } = await restoreThroughRunner(false);
     expect(output).toContain("[omp-runner] ERROR rpc: RPC response exceeded the transport limit");
     expect(cursor).toBe("e-1");
+  }, 40_000);
+
+  it("unseeded OMP session uses production readLastEntryId binding on disk tail and persists the confirmed cursor", async () => {
+    root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-omp-unseeded-"));
+    const bin = nodePath.join(root, "bin");
+    const seat = nodePath.join(root, "state", "omp-unseeded");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(nodePath.join(seat, "sessions"), { recursive: true });
+    const sessionFile = nodePath.join(seat, "sessions", "s.jsonl");
+    const header = JSON.stringify({ type: "session", id: "sess-1" });
+    fs.writeFileSync(sessionFile, `${header}\n${JSON.stringify({ type: "message", id: "disk-tail-1" })}\n`);
+    const rpcLog = nodePath.join(root, "rpc.jsonl");
+    const fakeChildOmp = [
+      'const fs = require("node:fs"), readline = require("node:readline");',
+      "const argv = process.argv.slice(2), sessionFile = argv[argv.indexOf('--session') + 1];",
+      `const rpcLog = ${JSON.stringify(rpcLog)};`,
+      "const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');",
+      "out({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "readline.createInterface({ input: process.stdin }).on('line', (line) => {",
+      "  const cmd = JSON.parse(line); fs.appendFileSync(rpcLog, line + '\\n');",
+      "  if (cmd.type === 'negotiate_protocol') out({ id: cmd.id, type: 'response', command: 'negotiate_protocol', success: true, data: { protocolVersion: 2 } });",
+      "  else if (cmd.type === 'get_state') { out({ id: cmd.id, type: 'response', command: 'get_state', success: true, data: { sessionFile, sessionId: 's' } }); setImmediate(() => out({ type: 'agent_end', isTerminal: true })); }",
+      "  else if (cmd.type === 'get_entries') {",
+      "    if (!cmd.since) out({ id: cmd.id, type: 'response', command: 'get_entries', success: false, error: 'RPC response exceeded the transport limit' });",
+      "    else out({ id: cmd.id, type: 'response', command: 'get_entries', success: true, data: { entries: [], leafId: null } });",
+      "  }",
+      "}).on('close', () => process.exit(0));",
+    ].join("\n");
+    fs.writeFileSync(nodePath.join(root, "fake-unseeded-omp.cjs"), fakeChildOmp);
+    fs.writeFileSync(nodePath.join(bin, "omp"), `#!/bin/sh\nexec "${process.execPath}" "${nodePath.join(root, "fake-unseeded-omp.cjs")}" "$@"\n`, { mode: 0o755 });
+    const child = spawn(process.execPath, [
+      "--import", "tsx", RUNNER, "--runtime", "omp", "--approval-mode", "always-ask", "--session-name", "omp-unseeded",
+      "--state-root", nodePath.join(root, "state"), "--cwd", root, "--launch-id", "launch-unseeded", "--session", sessionFile,
+    ], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`,
+        HOME: root,
+        TMPDIR: os.tmpdir(),
+        ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}),
+        ...(process.env.NO_NETWORK_TRACE_FILE ? { NO_NETWORK_TRACE_FILE: process.env.NO_NETWORK_TRACE_FILE } : {}),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (d) => { output += d; });
+    child.stderr.on("data", (d) => { output += d; });
+    const exited = new Promise((r) => child.once("close", r));
+    const statePath = nodePath.join(seat, "runner-state.json");
+    const readState = () => (fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) as PiRunnerState : null);
+    try {
+      for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
+        if (child.exitCode !== null || output.includes("[omp-runner] ERROR") || readState()?.lastEntryId === "disk-tail-1") break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    } finally {
+      child.kill();
+      await exited;
+    }
+    const sent = fs.existsSync(rpcLog)
+      ? fs.readFileSync(rpcLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+      : [];
+    const refreshes = sent.filter((cmd) => cmd.type === "get_entries");
+    expect(output).not.toContain("ERROR");
+    expect(refreshes).toContainEqual({ type: "get_entries", since: "disk-tail-1", id: "pi-runner-cursor-refresh" });
+    expect(readState()?.lastEntryId).toBe("disk-tail-1");
   }, 40_000);
 });

@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { basename } from "node:path";
 import { readNativeProcessLaunch } from "./native-process-arguments.js";
 import type { ClaudeAutoMode } from "./claude-auto-mode.js";
+import { ownClaudeSettings, type ClaudeSettingsSeat } from "../adapters/claude-settings-transport.js";
 
 /** Transient argv/config selector only; no general environment values or positional startup input. */
 export interface ClaudeContinuationLaunch { args?: string[]; configDir?: string | null; warnings: string[] }
@@ -52,24 +53,24 @@ export async function captureClaudeContinuation(pid: number, executable: string,
   } catch { return { configDir, warnings: [...warnings, "The running Claude options could not be mapped from its help; using the seat's ordinary arguments."] }; }
 }
 
-/** Each `--settings` value in argv: its index, inline form, and parsed object (undefined when it's a file or not JSON). */
-function settingsValues(args: string[]): { at: number; inline: boolean; value?: Record<string, unknown> }[] {
+/** Each settings value, including this seat's own hash-verified files; foreign files remain unknown. */
+function settingsValues(args: string[], seat?: ClaudeSettingsSeat): { at: number; inline: boolean; value?: Record<string, unknown> }[] {
   const found: { at: number; inline: boolean; value?: Record<string, unknown> }[] = [];
   args.forEach((arg, at) => {
     const inline = arg.startsWith("--settings=");
     if (arg !== "--settings" && !inline) return;
     const raw = inline ? arg.slice("--settings=".length) : args[at + 1] ?? "";
     let value: Record<string, unknown> | undefined;
-    try { const parsed = JSON.parse(raw) as unknown; if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) value = parsed as Record<string, unknown>; } catch { /* a settings file */ }
+    try { const parsed: unknown = JSON.parse(ownClaudeSettings(raw, seat) ?? raw); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) value = parsed as Record<string, unknown>; } catch { /* a foreign settings file */ }
     found.push({ at, inline, ...(value ? { value } : {}) });
   });
   return found;
 }
 
 /** Sets the seat's block (null: none) in captured arguments, keeping every other settings key.
- *  Undefined when a captured --settings is a file, whose autoMode OpenRig can't see or change. */
-function withAutoMode(args: string[], block: ClaudeAutoMode | null): string[] | undefined {
-  const found = settingsValues(args);
+ *  Undefined for a foreign or changed settings file, whose autoMode OpenRig can't see or change. */
+function withAutoMode(args: string[], block: ClaudeAutoMode | null, seat?: ClaudeSettingsSeat): string[] | undefined {
+  const found = settingsValues(args, seat);
   if (found.some(entry => !entry.value)) return undefined;
   if (!found.length) return block ? [...args, "--settings", JSON.stringify({ autoMode: block })] : args;
   const result = [...args];
@@ -82,8 +83,8 @@ function withAutoMode(args: string[], block: ClaudeAutoMode | null): string[] | 
 }
 
 /** The autoMode block these final arguments send: null for none, undefined when a settings file makes it unknown. */
-export function sentClaudeAutoMode(args: string[]): ClaudeAutoMode | null | undefined {
-  const found = settingsValues(args);
+export function sentClaudeAutoMode(args: string[], seat?: ClaudeSettingsSeat): ClaudeAutoMode | null | undefined {
+  const found = settingsValues(args, seat);
   if (found.some(entry => !entry.value)) return undefined;
   const blocks = found.filter(entry => entry.value!["autoMode"] !== undefined);
   if (blocks.length > 1) return undefined;
@@ -92,9 +93,9 @@ export function sentClaudeAutoMode(args: string[]): ClaudeAutoMode | null | unde
 
 /** `autoMode` is the block this launch sends (null: none); undefined leaves captured settings as they are. */
 export function resumedClaudeArguments(launch: ClaudeContinuationLaunch | undefined, fallback: string[], conversation: string, effort?: string | null, posture?: string,
-  autoMode?: ClaudeAutoMode | null): string[] {
+  autoMode?: ClaudeAutoMode | null, seat?: ClaudeSettingsSeat): string[] {
   if (!launch?.args) return fallback;
-  const args = autoMode === undefined ? [...launch.args] : withAutoMode(launch.args, autoMode) ?? [...launch.args];
+  const args = autoMode === undefined ? [...launch.args] : withAutoMode(launch.args, autoMode, seat) ?? [...launch.args];
   // Keep restore's existing explicit seat-effort precedence.
   if (effort) {
     const at = args.findIndex(a => a === "--effort" || a.startsWith("--effort="));

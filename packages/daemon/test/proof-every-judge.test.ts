@@ -155,6 +155,63 @@ describe("#2765 switching a policy's mode", () => {
     expect(f.read().state).toBe("ready");
   });
 
+  it("#3621: adding a judge keeps existing judgments current, in either mode", () => {
+    const R3 = "review-r3@trial";
+    const f = fixture();
+    f.judge(R1, "accept");
+    f.project({ judges: [R1, R2, R3] });
+    expect(f.read().items[0]).toMatchObject({ state: "accepted", reason: `${R1} accept` });
+    expect(f.read().state).toBe("ready");
+    const every = fixture({ judges: [R1, R2], everyJudge: true });
+    every.judge(R1, "accept");
+    every.judge(R2, "accept");
+    every.project({ judges: [R1, R2, R3], everyJudge: true });
+    expect(every.read().items[0]!.judges.map(j => [j.actor, j.state])).toEqual([[R1, "accepted"], [R2, "accepted"], [R3, "pending"]]);
+    every.write(join(every.slice, "proof", `${R3}.md`), `Observed by ${R3}.\n`);
+    every.judge(R3, "accept");
+    expect(every.read().state).toBe("ready");
+  });
+
+  it("#3621: removing the judgment's actor, toggling everyJudge or changing the item still reads unknown", () => {
+    const R3 = "review-r3@trial";
+    const f = fixture();
+    f.judge(R1, "accept");
+    f.project({ judges: [R2, R3] });
+    expect(f.read().items[0]).toMatchObject({ state: "unknown", reason: "Judgment actor is outside the selected policy" });
+    f.project({ judges: [R1, R2, R3], everyJudge: true });
+    expect(f.read().items[0]).toMatchObject({ state: "unknown", reason: `${R1}: Scope, item or policy changed; record a judgment on the current revision` });
+    f.project({ judges: [R1, R3] });
+    expect(f.read().state).toBe("ready");
+    const spec = join(f.slice, "SPEC.md");
+    f.write(spec, fs.readFileSync(spec, "utf8").replace("- [ ] Prove 01-alpha.", "- [ ] <!-- proof-item: prove-01-alpha --> Prove 01-alpha."));
+    const before = f.read();
+    f.judge(R1, "accept");
+    expect(f.read().state).toBe("ready");
+    f.write(spec, fs.readFileSync(spec, "utf8").replace("Prove 01-alpha.", "A different promise."));
+    expect(before.items[0]!.id).toBe(f.read().items[0]!.id);
+    expect(f.read().items[0]).toMatchObject({ state: "unknown", reason: "Scope, item or policy changed; record a judgment on the current revision" });
+  });
+
+  it("#3621: a reject or withdraw from a judge the policy no longer lists reads unknown", () => {
+    for (const verdict of ["reject", "withdraw"] as const) {
+      const f = fixture();
+      f.judge(R1, verdict);
+      f.project({ judges: [R2] });
+      expect(f.read().items[0]).toMatchObject({ state: "unknown", reason: "Judgment actor is outside the selected policy" });
+    }
+  });
+
+  it("#3621: a receipt recorded before policyEveryJudge existed stays bound to the whole policy revision", () => {
+    const f = fixture();
+    f.judge(R1, "accept");
+    const receipt = join(f.slice, "proof", "judgments", "00000001.md"), raw = fs.readFileSync(receipt, "utf8");
+    const { id: _id, policyEveryJudge: _mode, ...payload } = YAML.parse(/^---\n([\s\S]*?)\n---/.exec(raw)![1]!);
+    f.write(receipt, `---\n${YAML.stringify({ ...payload, id: sha(payload) })}---\n\n${payload.reason}\n`);
+    expect(f.read().state).toBe("ready");
+    f.project({ judges: [R1, R2, "review-r3@trial"] });
+    expect(f.read().items[0]).toMatchObject({ state: "unknown", reason: "Scope, item or policy changed; record a judgment on the current revision" });
+  });
+
   it("refuses an everyJudge that isn't true or false, as it refuses any other policy key", () => {
     const f = fixture({ judges: [R1, R2], everyJudge: "yes" });
     expect(f.read().issues.join("\n")).toContain("proofPolicy.everyJudge must be true or false");

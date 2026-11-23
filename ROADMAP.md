@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.19
+## Released in 0.7.21
 
-[0.7.19 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.19): OpenRig 0.7.19 improves how a team brings permission prompts to a person, reports interrupted recovery, and starts again after a failed launch. It also adds optional Claude hook delivery, per-seat Linux memory limits, and a versioned interface for apps answering human questions. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
+[0.7.21 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.21): OpenRig 0.7.21 is a patch of ordinary team fixes. An agent can find a team's declared entry point when the team has no single lead. The daemon narrows one source of stalls when reading a mission's execution view. A seat pool's agents stay out of exports, and a bad pool block is named where you will see it. A Pi seat's posted usage feeds the context lane. It also fixes a run of smaller daemon, CLI, terminal, scope and skill problems. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
 
 ## How to help
 
@@ -29,7 +29,6 @@ tie. Feel free to coordinate on the issue first.
 
 ## Agents and runtimes
 
-- **Operator recovery for Pi and Oh My Pi seats** (#41).
 - **More harnesses:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
   (design discussion: #43).
 

@@ -10,7 +10,7 @@ import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
-import { CLAUDE_NOT_STATUS_LINE_ROW, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -58,6 +58,7 @@ import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptio
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
 import type { HookBridge } from "./hook-bridge.js";
+import type { WatchdogUsageLimitState } from "./watchdog-usage-limit.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -81,13 +82,29 @@ const INPUT_BOX_READ_DEADLINE_MS = 500;
 const STALE_BOUND_PANE = "The session does not have the expected bound pane";
 
 // Mid-work detection patterns (cheap heuristics)
+const WORKING_WORD_PATTERN = /Working/;
 const MID_WORK_PATTERNS = [
   /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, // spinner chars
-  /Working/,
+  WORKING_WORD_PATTERN,
   /^[✶✢✳✻✽·]\s+\S.*(?:…|\.{3})\s+\([^)]*\bthinking\)$/m,
   /esc to interrupt/,
   COMPOSER_SELECTION_SCAN_PATTERN,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
+
+// Under an empty prompt, the word alone is a finished turn's prose ("Working tree is clean; ready for an
+// assignment.", #3544). There only a status-shaped row counts: "Working" after an optional marker, then a
+// timer paren, an ellipsis that ends the line or opens the timer, or the end of the line
+// ("• Working (3s • esc to interrupt)", "✻ Working…", "⠋ Working"), or a digit timer paren later on the row,
+// as in a reasoning header clipped before "esc to interrupt" ("• Working on the test fixtures (6m 12s").
+// Prose such as "Working (as requested), …" or "Working... then I committed it." has no timer. The timer paren holds
+// only timer parts, then closes the row, opens the "• esc to interrupt" tail or is clipped: prose such as
+// "Working on the tests (2s per test), I found it." has more words in the paren. A paren clipped right after
+// its first timer digit ("• Working on the test fixtures (6") still reads live.
+const LIVE_TIMER_PAREN = String.raw`\(\s*\d+(?:[hms](?:\s+\d+[hms]?)*\s*(?:\)\s*$|[•·]|$)|\s*$)`;
+const LIVE_WORKING_ROW_PATTERN = new RegExp(String.raw`^(?:\S\s+)?Working(?:\s*${LIVE_TIMER_PAREN}` +
+  String.raw`|\s*(?:…|\.{3})\s*(?:${LIVE_TIMER_PAREN}|$)|\s*$|\b.*${LIVE_TIMER_PAREN})`);
+const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>
+  pattern === WORKING_WORD_PATTERN ? LIVE_WORKING_ROW_PATTERN : pattern);
 
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
 // Lines like '❯ Working on a task.' have text after the prompt char and
@@ -205,6 +222,12 @@ export function writtenFact(result: SendResult): WrittenFact {
   return "unknown";
 }
 
+/** The text reached the seat's input, or may have: the sends a usage-limit record describes. */
+function reachedInput(result: SendResult): boolean {
+  const fact = writtenFact(result);
+  return fact === "submitted" || fact === "text_only" || fact === "text_submit_unknown" || fact === "uncertain";
+}
+
 function trimPaneLines(paneContent: string): string[] {
   return paneContent
     .split("\n")
@@ -305,30 +328,6 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   return null;
 }
 
-// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
-// Recognize the complete input block, never a warning or historical prompt alone.
-const CLAUDE_STATUS_WARNINGS = [
-  /^✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor$/,
-  /^✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)$/,
-  /^✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai\/claude-c…$/,
-  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
-  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
-  // #1641: Claude 2.1.293's update banner, whatever installer it names.
-  /^Update available! Run: \S.*$/,
-  // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
-  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
-  /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
-  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
-  // "Restart to update" on its own row (Claude 2.1.319, #2605).
-  /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
-];
-// Claude can draw noninteractive UI rows after its mode footer. They do not
-// replace the composer and should only be skipped when they match a known row.
-const CLAUDE_STATUS_DECORATIONS = [
-  /^\d[\d,]* tokens$/,
-  /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
-  /^\/rc$/,
-];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -936,7 +935,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   const midWorkEvidence = findPatternEvidence(recentLines, [
-    ...MID_WORK_PATTERNS,
+    ...(idlePromptLine ? MID_WORK_PATTERNS_UNDER_IDLE_PROMPT : MID_WORK_PATTERNS),
     CLAUDE_LIVE_STATUS_PATTERN,
     ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
   ]);
@@ -1508,6 +1507,12 @@ function currentMenuKeyHint(lines: string[]): boolean {
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
 const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
 const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$|^\s*tab to queue(?: message)?(?:\s*$|\s{2,}| · )/;
+// A person can choose the status line's items with Codex's `/statusline` (0.170.0: model, approval mode, context,
+// limits, version and more; its default is model, current dir and thread name, which CODEX_STATUS_LINE matches), so a
+// chosen row needn't carry a path: a reporter's 0.170.0 seat drew `GPT-6.2-Sol xhigh · Approve for me · Context 72% used
+// · weekly 31% left · 0.170.0`. Such a row counts only with at least two items (Codex joins them with ` · `) and a known
+// hint row under it. A one-item row, or one with no hint row, still needs the path shape above.
+const CODEX_CHOSEN_STATUS_LINE = /^ {2}[^\s·›»❯>][^·]* · \S/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
@@ -1519,7 +1524,10 @@ function codexFooterSeparator(lines: string[], allowNativePath = false): number 
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
-  if (last < 0 || footer.length > 2 || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)))
+  const chosenStatusLine = footer.length === 2 && CODEX_CHOSEN_STATUS_LINE.test(footer[0]!) && !CODEX_HINT_ROW.test(footer[0]!)
+    && !composerNumberedChoicePattern(composerPromptClassForRuntime("codex")).test(footer[0]!.trimStart());
+  if (last < 0 || footer.length > 2
+    || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)) || chosenStatusLine)
     || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
   return separator >= 1 && !lines[separator]!.trim() ? separator : -1;
@@ -2243,6 +2251,15 @@ export interface SendResult {
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
+  /** Context, not a status: when this send started, OpenRig held a current usage-limit reading for the seat with its
+   *  stated reset (#3508's reader), and the send's text reached the seat's input or may have (submitted, written without
+   *  Enter, or uncertain). The agent isn't expected to read it before the reset. The send's own result, uncertain
+   *  delivery included, is unchanged by it, and a send that wrote nothing gets none. */
+  usageLimit?: { asOf: string; resetsAt: string; notice: string };
+  /** Context, not a status: when this send started, the seat's main session had a permission or elicitation request,
+   *  made after its latest activity report, that OpenRig hadn't seen settled. It never says a dialog is open (a hook or
+   *  host can decide one with nothing shown), and the send's own result is unchanged by it. */
+  inputRequest?: { observedAt: string; notice: string };
   /** How far the send got toward the seat's input, where that is positively known:
    *  `not_reached` — an idle wait refused the send before any write was attempted;
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
@@ -2764,10 +2781,41 @@ export class SessionTransport {
   setCompactionObserver(observer: (sessionName: string) => { stage: string; detail: string } | null): void {
     this.compactionObserver = observer;
   }
+  /** #3508's usage-limit reader, for the sender's record. It reads recorded evidence only and never captures a pane. */
+  private usageLimitObserver?: (sessionName: string) => WatchdogUsageLimitState | null;
+  setUsageLimitObserver(observer: (sessionName: string) => WatchdogUsageLimitState | null): void {
+    this.usageLimitObserver = observer;
+  }
+  /** A limit is current when it has a future stated reset and no positive activity after it was recorded, as #3508's wake reads it. */
+  private currentUsageLimit(sessionName: string): { asOf: string; resetsAt: string } | null {
+    try {
+      const state = this.usageLimitObserver?.(sessionName) ?? null;
+      if (!state?.limit || Date.parse(state.limit.resetsAt) <= this.now().getTime()) return null;
+      return Date.parse(state.clearedAt ?? "") > Date.parse(state.limit.asOf) ? null : state.limit;
+    } catch {
+      return null; // An unreadable reading never changes a send.
+    }
+  }
+
+  /** The time of a permission or elicitation request the seat's main session made after its latest activity report and
+   *  that nothing has settled, else null. An unreadable record reads as none: it never changes a send. */
+  private unsettledInputRequestAt(sessionName: string): string | null {
+    try {
+      const nodeId = this.getSessionMeta(sessionName).nodeId;
+      const at = nodeId ? this.agentActivityStore?.getUnsettledInputRequestForNode?.(nodeId, sessionName) ?? null : null;
+      if (!at) return null;
+      const latest = this.agentActivityStore?.getLatestForNode({ sessionName, now: this.now(), order: "source" });
+      return latest?.eventAt && Date.parse(at) <= Date.parse(latest.eventAt) ? null : at;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
-   * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
+   * send, had an unsettled permission or elicitation request newer than its latest activity report, or was at its
+   * recorded usage limit while the text reached its input, add a notice saying so. Each notice is context beside the
+   * send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
@@ -2781,7 +2829,15 @@ export class SessionTransport {
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
-    const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
+    // A prompt answer or a bare Enter is aimed at the prompt itself, not a message for the agent to read.
+    const interacting = opts?.dangerouslyInteract || opts?.submitOnly;
+    const limit = interacting ? null : this.currentUsageLimit(sessionName);
+    const requestAt = interacting ? null : this.unsettledInputRequestAt(sessionName);
+    const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts, limit);
+    const limited = limit && reachedInput(sent) ? { ...sent, usageLimit: { ...limit,
+      notice: `${sessionName} was at its usage limit when this send started (OpenRig recorded it at ${limit.asOf}; it resets at ${limit.resetsAt}). The message reached its input, or may have; the agent isn't expected to read it before then.` } } : sent;
+    const result = requestAt ? { ...limited, inputRequest: { observedAt: requestAt,
+      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : limited;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";
@@ -2789,7 +2845,7 @@ export class SessionTransport {
       notice: `${sessionName} was ${seen.detail} (${when}, as OpenRig's managed compaction recorded it). This doesn't mean the restore has finished; if this message matters, check the reply and follow up.` } };
   }
 
-  private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+  private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts, limit: { asOf: string; resetsAt: string } | null = null): Promise<SendResult> {
     // The seat and occupant this send is for, frozen before it runs: a later handover doesn't relabel its evidence.
     const seat = this.evidenceSeat(sessionName);
     // The text the paste actually wrote (a terminal seat's exact text, a combined wake), not the text asked for.
@@ -2803,7 +2859,7 @@ export class SessionTransport {
     let bridgeUnavailable: string | null = null;
     const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: observer, onHookBridgeUnavailable: (reason) => { bridgeUnavailable = reason; } } : opts;
     const result = await this.sendMarkingUrgent(sessionName, text, observed);
-    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire, bridgeUnavailable);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire, bridgeUnavailable, limit && reachedInput(result) ? limit : null);
     return result;
   }
 
@@ -2824,7 +2880,7 @@ export class SessionTransport {
    *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
    *  unknown. Only an outbox row that exists counts as admitted. */
   private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult,
-    wire: { text: string; at: string } | null, bridgeUnavailable: string | null): void {
+    wire: { text: string; at: string } | null, bridgeUnavailable: string | null, usageLimit: { asOf: string; resetsAt: string } | null = null): void {
     if (!this.eventBus || !seat) return;
     try {
       const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
@@ -2840,6 +2896,7 @@ export class SessionTransport {
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
         ...wireFingerprint(wire), outcome: readSendOutcome(result, writtenFact(result)),
         ...(bridgeUnavailable ? { hookBridgeUnavailable: bridgeUnavailable } : {}),
+        ...(usageLimit ? { usageLimit } : {}),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {

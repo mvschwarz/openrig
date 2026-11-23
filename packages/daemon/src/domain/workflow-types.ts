@@ -26,6 +26,12 @@ export const WORKFLOW_EXIT_KINDS = ["handoff", "waiting", "done", "failed"] as c
 export const WORKFLOW_AGENT_HARNESSES = ["claude-code", "codex"] as const;
 export type WorkflowAgentHarness = (typeof WORKFLOW_AGENT_HARNESSES)[number];
 
+/** Opt-in next-owner rule for a handoff. `same_as_previous`: on a `handoff` into a step of the same `actor_role`, with no
+ *  gate on that step and no explicit next owner, the next packet goes to the session that closed the current one, when
+ *  that session was the closed packet's destination. Otherwise owner resolution is unchanged. */
+export const WORKFLOW_NEXT_OWNER_MODES = ["same_as_previous"] as const;
+export type WorkflowNextOwnerMode = (typeof WORKFLOW_NEXT_OWNER_MODES)[number];
+
 /** OPR.0.4.6.WF2 FR-5: the structured step-level gate declaration (singular
  *  per step; arch-RULED shape — supersedes the removed `gates[]` string
  *  list). WF-2 owns the field + validation + compilation to the SHIPPED
@@ -65,6 +71,9 @@ export interface WorkflowRoleSpec {
 export interface WorkflowStepSpec {
   /** Stable step identifier within the workflow (e.g., "produce"). */
   id: string;
+  /** Optional short name a person sees for the step (e.g., "QA pass"). Display only: `id` stays the step's identity and
+   *  its display when no label is set, and `objective` stays its instruction. */
+  label?: string;
   /** Role name; resolved against `roles` map. */
   actor_role: string;
   /** Human description of the step's intent. */
@@ -96,6 +105,9 @@ export interface WorkflowStepSpec {
    *  matches; no match = structured routing failure (never a silent
    *  mis-route). Absent = today's preferred_targets[0] exactly. */
   harness?: WorkflowAgentHarness;
+  /** The next-owner rule for the handoff INTO this step (see WORKFLOW_NEXT_OWNER_MODES). Overrides the spec-level
+   *  `next_owner`; absent = the spec's value, or today's resolution. */
+  next_owner?: WorkflowNextOwnerMode;
   /** OPR.0.4.6.WF2 FR-3: pin this step to a host — "local" (or absent:
    *  full execution today) or a registered hosts.yaml id. A REMOTE pin
    *  validates as language but fails loud at instantiate with the MH-3
@@ -207,6 +219,8 @@ export interface WorkflowSpec {
   exception_routing?: WorkflowExceptionRoutingSpec;
   /** Coordination terminal-turn rule; defaults to "hot_potato". */
   coordination_terminal_turn_rule?: string;
+  /** The default next-owner rule for every step without its own `next_owner` (see WORKFLOW_NEXT_OWNER_MODES). */
+  next_owner?: WorkflowNextOwnerMode;
 }
 
 export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed" | "aborted";

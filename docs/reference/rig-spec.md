@@ -178,9 +178,11 @@ edges:
 | `summary` | string | no | — | Human-readable description. Shown in the spec library, review surfaces and `rig specs preview` (in `rig specs show` only with `--json`). |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
 | `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
+| `seat_slice` | string | no | — | Linux/systemd hosts only, opt-in. `rig` starts every seat the rig launches, with or without `process_limits`, in a systemd user scope beneath the rig's own slice, `openrigseats-<rig>.slice` under `openrigseats.slice`, so a weight you set on that slice in your user manager covers the whole rig. `rig` is the only value; omit the key to keep today's launch paths. OpenRig sets no CPU weight. See "Seat grouping by rig" below. |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `env` | map | no | — | Launch environment for every seat in the rig: `NAME: value` pairs. A member's own `env` overrides it name by name. Names match `^[A-Z_][A-Z0-9_]*$`, names starting `OPENRIG_` are reserved, and values must be non-empty strings (quote numbers and booleans). Values are not secret. See "Launch environment" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's `AGENTS.md` and a fresh Codex 0.164.0+ seat normally gets launch developer instructions; a link, a conflicting or unreadable Codex config layer, or a resume keeps the repository file. See [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences). See "Choosing the Claude instruction file" below. |
+| `default_onboarding_pack` | boolean | no | Inherit `onboarding.default_pack.enabled` | `true` includes the two built-in onboarding pages for this rig and `false` omits them. The identity and context-entry guidance still applies. OpenRig records the choice with the rig, and restores keep the saved guidance selection. |
 | `workspace` | object | no | — | The rig's workspace: `workspace_root` (required), `repos[]` of `{name, path, kind}` with `kind` one of `user`, `project`, `knowledge`, `lab` or `delivery` and unique names, an optional `default_repo` naming one of them, and an optional `knowledge_root`. Relative repo paths resolve against `workspace_root`. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
 | `startup` | StartupBlock | no | — | Rig-level startup files and actions. Applied to all members via the startup layering model. |
@@ -254,6 +256,15 @@ This field accepts only `allow` and `deny` lists of native Claude rule strings. 
 also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings,
 arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
 not establish support by every Claude version.
+
+After composition, launches and resumes keep settings of at most 64 KiB inline, byte-identical.
+Larger JSON values go through Claude's native `--settings` file form: a content-addressed 0600
+file under OpenRig's seat-specific `state/claude-settings/` storage. OpenRig publishes the complete
+file atomically and prunes older files only when their bytes still match their digest. It keeps
+the current files and files named by captured live arguments. Continuations
+can rewrite OpenRig's own unchanged files to apply the selected auto-mode block; foreign files stay
+opaque. A failed write falls back inline with a warning naming the size and failure, never a size
+refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.
 
 The initial spec records the rules on the stable seat. For an existing seat, put the
 complete replacement in a JSON file and use the existing audited permission command:
@@ -906,6 +917,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `summary` | string | no | — | Pod description. |
 | `continuity_policy` | ContinuityPolicy | no | — | Pod-level continuity/restore policy, validated and stored with the pod (see "Continuity Policy"). |
 | `startup` | StartupBlock | no | — | Pod-level startup files and actions. Applied to all members in this pod via the startup layering model. |
+| `cold_start` | boolean | no | `false` | Pod-level default for member `cold_start` (queue-driven cold start). A member's own value, including an explicit `false`, wins. See [Queue-driven cold start](#queue-driven-cold-start). |
 | `members` | Member[] | yes | — | The pod's members. It must be an array; validation doesn't refuse an empty one. |
 | `edges` | PodLocalEdge[] | no | `[]` | Edges between members within this pod. Must use unqualified member IDs (not `pod.member`). |
 
@@ -948,11 +960,62 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `plugin_channels` | list | no | — | Claude members only. Plugin channels this agent registers for, as `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch; see [Claude plugin channels](#claude-plugin-channels-runtime-claude-code). |
 | `role` | string | no | — | The seat's role, letters, digits, `_`, `.` and `-`. Not valid on terminal members. |
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
+| `cold_start` | boolean | no | `false` | Opt in to queue-driven cold start for this seat: when queued work targets the seat, its rig is running, and the seat's runner is not live, the daemon launches just this seat through the existing single-seat launch path (resuming its conversation when a resume token exists). Never fires for a seat stopped intentionally (a human `rig seat stop`, `rig down`, a removal), a seat removed from the spec, or a rig with no other live seat. A resource-reclaiming daemon stop (the idle reaper's `daemon:seat-reaper`/`idle_reap`) is revivable. A member's explicit value wins over the pod's `cold_start`. See [Queue-driven cold start](#queue-driven-cold-start). |
+| `keep_alive` | boolean | no | the AgentSpec's, else `false` | When `true`, the daemon relaunches the seat if it falls while the daemon is running, and leaves it down if it was stopped on purpose. Overrides the AgentSpec's `lifecycle.keep_alive` in either direction. See [Keep a seat running](#keep-a-seat-running-keep_alive). |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
 | `mechanic` | string | no | — | A canonical `seat@rig` session address, for `apprentice-handover`. |
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. Rebuild `artifact_set` paths are read as given, relative to the daemon's working directory, so an absolute path is the reliable form. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+
+### Queue-driven cold start
+
+A seat with `cold_start: true` (member, or pod-level default) does not keep a
+runner alive for nothing: when queued work targets the seat and the queue cannot
+deliver — the seat has no live runner — the daemon launches just that seat through
+the existing single-seat launch path, resuming its saved conversation when a resume
+token exists and never silently replacing a live conversation with a fresh one.
+
+The daemon cold-starts a seat only when all of these hold:
+
+- the seat opted in and is still in the rig's current spec (a removed seat never starts);
+- the seat's rig is running — some other seat of the rig is live (a down rig keeps
+  whole-rig restore as the operator's choice);
+- the seat's latest stop was **not** an intentional stop. Eligibility is keyed on who
+  stopped the seat, not merely that it is stopped:
+  - a human `rig seat stop`, `rig down`, or a seat removal records a deliberate end
+    state, and cold start never revives it;
+  - the only revivable stop is a resource-reclaiming daemon stop — the idle reaper (a
+    separate feature) stops a seat as operator `daemon:seat-reaper` with reason
+    `idle_reap` precisely so new work can wake it again;
+  - a seat that was never stopped intentionally (a crash, a lost session) is dormant;
+  - a rolled-back launch (`superseded` row, a failed start) is refused like an intentional
+    stop — a failed start is never auto-revived;
+- the seat's tmux session is gone (a probe that throws is not evidence of absence — the
+  seat is left alone, fail-closed).
+
+Stop attribution is tied to the exact session id, not its reusable tmux name. An old
+reaper stop cannot authorize reviving a later generation stopped by a person or `rig down`.
+A rig whose **only seat is dormant never cold-starts**: the running-rig gate requires
+a live peer. Start that seat explicitly with `rig launch`; this flag does not start down rigs.
+
+The launch is the ordinary single-seat door (`rig launch`), so it takes the
+delivery-guard lifecycle lease, rechecks stop intent, opt-in and seat identity under that
+lease, and applies the normal restore decision: a
+`resume_if_possible` seat with a usable token resumes its conversation, and a seat
+whose conversation cannot be resumed parks as `awaiting-decision` with no session
+started rather than being silently replaced by a fresh one.
+A cold start also parks as `awaiting-decision` when the snapshot's occupant is no longer
+the seat's current session: a stale snapshot never silently replaces a newer conversation.
+
+Simultaneous arrivals are coalesced into one launch, attempts are at least a minute
+apart, and a seat that fails to start three times in a row stops cold-starting
+until liveness is observed or a launch succeeds — the cap never expires by time. Refusal
+evaluations coalesce per seat within each queue drain pass, with a one-second TTL;
+the next pass checks liveness again. Once the seat is running, the queue's existing
+unroutable-wake retry delivers the waiting rows; no new scheduler is involved.
+Idle stopping and reaping are a separate feature and not part of this opt-in.
 
 ### Claude MCP loading (`runtime: claude-code`)
 
@@ -1096,7 +1159,7 @@ members:
 - **Scope and literal argv:** Local `pi`, `codex`, `claude-code` and supported community-harness members support `launch_wrapper`; legacy flat nodes support it only on `pi`, `codex` and `claude-code`. Other runtimes, including the maintained `openshell-claude` environment path, reject it, including `[]`. Community preset capability and execution requirements are defined in the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch). Each fork uses its target member's own selection. Arguments are literal strings without NUL, CR or LF; spaces, quotes, metacharacters and empty non-executable arguments are preserved.
 - **Executable resolution:** `launch_wrapper[0]` must be an absolute path or bare command name. Preflight and launch resolve it using the daemon's launch `PATH` and working directory, before adding the seat's `rig` bin directory. Relative paths containing `/`, aliases and functions are unsupported for the wrapper itself.
 - **Native child and `exec` contract:** The wrapper prefixes the resolved Codex entry, prefixes the resolved Pi child executable inside the host runner, or prefixes the real Claude executable and native arguments. Managed Claude applies it after rebuilding the environment; pinned continuations retain their executable. The wrapper must `exec` its child in place, preserving working directory, environment, signals, exit status and TTY stdio (Claude/Codex) or RPC pipes (Pi). Supervising wrappers are unsupported.
-- **Classic Claude lookup:** Wrapped classic launch supports bash, zsh, sh and dash and requires `command -v claude` to resolve to an executable file; aliases and functions refuse with `launch_wrapper unavailable; no agent started.` To keep custom flags or environment, put them in a `#!` script named `claude` on `PATH`; the wrapper runs that script ([#1477](https://github.com/mvschwarz/openrig/issues/1477)).
+- **Classic Claude lookup:** Wrapped classic launch supports bash, zsh, sh and dash and requires `command -v claude` to resolve to an executable file. OpenRig doesn't look past an alias or function named `claude`, which may carry your settings: the pane prints `OpenRig: claude is a shell function here, and a launch_wrapper needs claude to be an executable file; no agent started.` (or `shell alias`), and the seat's ready check reports that reason with the remedy. Any other lookup failure prints `launch_wrapper unavailable; no agent started.` To keep custom flags or environment, put them in a `#!` script named `claude` on `PATH`; the wrapper runs that script ([#1477](https://github.com/mvschwarz/openrig/issues/1477)).
 - **Fail-closed (never unwraps):** The selected wrapper applies across fresh launch, relaunch, rebuild, resume, fork, restore, handover and supported runtime switches. Invalid stored metadata, non-POSIX panes, unavailable wrapper support, missing session identity or an unusable wrapper refuses launch. Failures after dispatch remain visible in the pane or Pi runner's markers; OpenRig never runs unwrapped, including Pi's long-command (`launch_path_too_long`) host-runner retry.
 - **Persistence and clear:** On new seats, absent or `launch_wrapper: []` stores no wrapper. Applying an authored spec to an existing seat retains the stored selection when absent, clears it with `launch_wrapper: []`, and replaces it with a non-empty array. Recreation/import uses the incoming spec; older snapshots preserve the current selection. First-start retry refuses wrapper changes. Runtime switches carry it to supported successors; validation occurs at execution. There is no live edit verb: change the spec and use the supported create/recreate/apply flow. Export and node inventory include the configured value.
 - **Boundary:** An argv prefix is not proof of sandbox isolation, tooling availability, memory wiring or governance enforcement. Verify the wrapper and runtime independently.
@@ -1124,7 +1187,7 @@ members:
   before. `tasks_max` and `memory_max` are the only supported keys; any other key, such as a CPU limit, is refused by
   name rather than accepted and ignored.
 - **The boundary:** The seat's pane command starts in a transient `systemd-run --user --scope` of its own, in
-  `openrigseats.slice`, with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
+  `openrigseats.slice` (beneath its rig's slice there when the rig sets `seat_slice: rig`), with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
   seat's processes leave the terminal server's scope:
   a limit an operator put on that scope no longer covers this seat. The other seats, the daemon and the terminal server
   stay where they were, outside this seat's limit. Processes the seat itself starts through `systemd-run --user` land
@@ -1235,6 +1298,141 @@ members:
   `rig export` prints) with how to fix or clear it, and the `X-OpenRig-Export-Warnings` header on YAML and JSON (which
   `rig spec show --json` prints as a warning).
 
+### Keep a seat running (`keep_alive`)
+
+Set `keep_alive: true` on a member when that seat should come back by itself if it falls:
+
+```yaml
+members:
+  - id: worker
+    agent_ref: local:agents/worker
+    profile: default
+    runtime: claude-code
+    cwd: .
+    keep_alive: true
+```
+
+It's off by default. Without it, nothing relaunches a fallen seat, as before: you bring it back with `rig launch`,
+`rig up --existing` or `rig start`.
+
+- **Where it's declared:** on the member, or in an AgentSpec's `defaults.lifecycle.keep_alive` or a profile's
+  `lifecycle.keep_alive` ([AgentSpec](agent-spec.md#lifecycle-defaults)). The most specific declaration wins: the
+  member, then the profile, then the agent's defaults, and absent everywhere is off. A member can turn off what its
+  agent turns on. It's a flat key on the member, beside `restore_policy`, not a `lifecycle` block. Terminal members can
+  declare it too. The resolved value is stored with the seat when it's created and again when the spec launches it;
+  `rig export` writes `keep_alive: true` for a seat that has it, `keep_alive: false` for a member that turned off what
+  its agent turns on (in the spec last applied to the seat, a re-applied one included), and nothing for a seat that
+  declares nothing. A first-start retry keeps the seat's stored value.
+- **A fall versus a stop on purpose.** A fall is a seat whose session is gone without a stop request: its process
+  exited, crashed or was killed from outside, or the host or the daemon went down unplanned. `rig seat stop` and
+  `rig down` are stops on purpose and the seat stays down. Each records its stop request before the first step that
+  stops anything (see [Checked seat stop](checked-seat-stop.md)), so a seat a `rig down` selected but hadn't reached
+  yet, or a stop the daemon died in the middle of, also stays down. A keep_alive seat that has already fallen, or whose
+  relaunch attempt failed, is covered too: `rig down` records the request on it, and `rig seat stop` records the stop
+  instead of refusing a seat with nothing left to kill, and says the seat is now held down (unless an older session of
+  the seat is still live, which it refuses as before, pointing at `rig seat clean`). An unplanned daemon or host loss never erases a stop
+  recorded before it. A clean `rig daemon stop` isn't a stop of the seats: it changes no seat's desired state, leaves
+  running sessions running and starts no recovery. To leave a keep_alive seat down, stop it with `rig seat stop` or
+  `rig down`, not with a daemon stop.
+- **How it comes back.** The daemon checks its keep_alive seats every 30 seconds while it runs. It first reconciles the
+  seat against tmux and acts only when the session is proven gone (tmux reports it absent, or no tmux server is running):
+  an unreachable socket or another unreadable probe, or a process still running, is not a fall, and a session that ended cleanly (`exited` without a stop request) is left as it is.
+  A retry of a failed relaunch needs the same proof, whatever status that launch left. Anything the check can't settle
+  on any of the seat's sessions (a probe that proves nothing, a session tmux still shows, a recorded process still
+  running, or one it can't check because the process table can't be read) leaves the seat as it is until a later check
+  can. Only the sessions that decide the fall count: the seat's latest session, its other sessions under the same tmux
+  name and the incident's own; a session you claimed and released is its owner's and never holds the seat back. A tmux
+  socket removed by a reboot's `/tmp` cleanup is not left undecided when the process recorded for the seat's latest
+  session, observed since that session began, is no longer running: as `rig down` does, the daemon starts an empty tmux
+  server and probes again, so a seat that is really gone is proven gone. Without that proof (no such record, or one for
+  another session) the seat waits. It relaunches through the
+  same one-seat launch as `rig launch <rig> <seat>`, under the seat's `restore_policy`: it resumes the conversation when
+  it can and never asks for a fresh start of its own (only a declared `restore_policy` starts one fresh), so a seat
+  whose conversation can't be resumed waits for a person instead of silently starting blank. A live session that
+  survived is never launched a second time. Right before it starts, under the seat's lifecycle lease, the launch checks
+  again: a `rig seat stop` or `rig down` that got there first wins, and nothing is launched. A seat lost while the
+  daemon was down is recovered on the daemon's first checks after it starts, once its startup reconcile has run; a rig
+  being restored is left to its restore. Once a daemon shutdown begins, a relaunch still waiting for the seat's lease,
+  or still preparing its launch, starts nothing, and its attempt isn't counted.
+- **Not covered:** a seat attached from outside, joined as an external CLI or through a tmux session OpenRig claimed
+  rather than started (`rig attach`), is its owner's, and the daemon never relaunches it. Seats of an archived rig
+  aren't watched.
+- **Attempts, durably counted.** Each fall opens an incident with 2 attempts, the first as soon as the fall is proven
+  and the second at least 30 seconds after the first (each later wait would double). Each attempt is counted, with its
+  `seat.keep_alive.attempted` event, before its launch starts, so a daemon restart in the middle of a launch still
+  counts it; neither a daemon restart nor a launch that merely returned gives the attempts back. Any session a
+  relaunch leaves behind belongs to its incident, whatever the launch's outcome; a session a launch created just
+  before the daemon stopped, with its outcome not yet written, is taken as that launch's when the daemon is back. The
+  incident ends, and the next fall starts a new one, when a check has seen the relaunched seat run for 10 minutes,
+  when your stop of the seat is confirmed (a stop still pending keeps it, so a stop that turns out to have had no
+  effect leaves the budget as it was), or when you start it yourself, at any point of the incident. Daemon start's
+  automatic restore of a kernel isn't a start of yours: the session it brings back belongs to the incident, which goes
+  on with the attempts it has left (or, exhausted, keeps waiting for you), and the 10 minutes count again from when a
+  check sees that session running. An exhausted incident whose restored session a check has seen run for 10 minutes
+  ends too, so the next fall is recovered again. Only what a check saw counts:
+  a relaunched seat that falls while the daemon is down, before a check saw it run for 10 minutes, stays in its
+  incident. The attempts, the wait and the 10 minutes are fixed in this version; there is no setting for them yet.
+- **When the attempts run out,** or a launch ends in a way a retry can't change (`awaiting-decision`,
+  `attention_required`, `left_attached`, a refusal such as a changed selection or no usable snapshot, a failed launch
+  that left its new session running without the agent, or an older session of the seat still running behind the
+  latest one that fell), the daemon stops trying. It emits `seat.keep_alive.exhausted` once, with the last status and error, and the seat reads
+  `attention_required` in `rig ps --nodes` while it isn't running. Look at why with
+  `rig ps --nodes --rig <rig> --json --full` (`keepAliveIncident`) and the seat's terminal, then start it yourself with
+  `rig launch <rig> <seat>` (`--plan` first). A start you make opens a fresh budget for the next fall.
+- **What you can see:** node inventory (`rig ps --nodes --json --full`) shows `keepAlive: true` on a seat that declares
+  it and, while it has an incident and no stop request, `keepAliveIncident` with `attempts`, `exhausted`, `lastError`
+  and `lastAttemptAt`. A stop, pending or confirmed, clears the incident's `attention_required` at once. A
+  stop that was asked for and isn't confirmed yet shows `stopRequested: true`. Each field is absent where it doesn't
+  apply, so a seat without keep_alive or a pending stop reads as before. The events are `seat.keep_alive.attempted`,
+  `seat.keep_alive.recovered` (with the launch status) and `seat.keep_alive.exhausted` (with the last status and error);
+  each carries the rig, the seat's node and logical id, the incident id and the attempts spent.
+
+### Seat grouping by rig (`seat_slice`, Linux/systemd)
+
+Set `seat_slice: rig` at the top of a rig spec to start every seat that rig launches in a scope beneath a slice of the
+rig's own, so the systemd user manager can share the machine between rigs rather than between seats:
+
+```yaml
+version: "0.2"
+name: alpha
+seat_slice: rig
+pods: [...]
+```
+
+- **The slice names:** a grouped seat's scope goes in `openrigseats-<rig>.slice`. A dash in a slice name is nesting to
+  systemd, so that slice sits directly beneath `openrigseats.slice`, the slice the scopes of seats with
+  `process_limits` already use. The rig's name is escaped as `systemd-escape` escapes a string (systemd.unit(5),
+  "String escaping"): every byte other than an ASCII letter, digit, `:`, `_` or `.` becomes `\xNN`, and so does a
+  leading `.`. Unlike `systemd-escape`, a `/` is escaped too (`\x2f`), so a rig name never adds a level. Rig `alpha`
+  uses `openrigseats-alpha.slice`; rig `lab-b` uses `openrigseats-lab\x2db.slice` (`systemd-escape lab-b` prints the
+  escaped part). Its cgroup is `<user manager>/openrigseats.slice/openrigseats-<escaped rig>.slice/`.
+- **Every seat, with or without limits:** a seat with `process_limits` gets its scope, with the same limits, checked the
+  same way, beneath the rig's slice instead of directly in `openrigseats.slice`. A seat without limits, which otherwise
+  starts in the terminal server's process tree, gets a scope with no limit beneath the rig's slice. Fresh launches,
+  restores, relaunches, respawns and a restart in place's respawn all start the seat there. A grouped seat without limits
+  also leaves the terminal server's scope, so any limit on that scope no longer covers it.
+- **Weights are yours:** OpenRig sets no CPU weight, quota or other property on any slice; it only names the slice
+  when it starts a scope. Give the rigs their shares in your systemd user manager, at run time or in a drop-in, for
+  example `systemctl --user set-property openrigseats-alpha.slice CPUWeight=200`, or
+  `~/.config/systemd/user/openrigseats-alpha.slice.d/weight.conf` with `[Slice]` and `CPUWeight=200`. A weight takes
+  effect only where the cpu controller is delegated to the user manager (see
+  `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers`).
+- **When it takes effect:** the rig stores the setting when it is created from its spec, as it does its other top-level
+  keys, and each seat launch reads it. A seat starts beneath the rig's slice at its next launch. OpenRig never moves or
+  restarts a running seat for it. A rig created from a spec without the key keeps its seats ungrouped; to group them,
+  add the key and create the rig from the spec again (`rig up <spec>` replaces a stopped rig of that name with a new
+  one).
+- **Where grouping can't be applied:** the seat starts on today's path (the ungrouped scope in `openrigseats.slice` for a
+  seat with `process_limits`, with every limit checked and applied as without grouping; the terminal server's process
+  tree for a seat without), and the launch returns the warning `seat_slice requested, grouping not applied: <reason>`.
+  Grouping never refuses a launch. That covers a host without systemd or cgroup v2, a user manager that won't start
+  the scope (a masked slice, for example), a rig name whose slice name would exceed 255 characters, and a grouped scope
+  that fails after its check passed. The seat starts again on the ungrouped path only when its command is confirmed not
+  to have started; an unconfirmed start warns and stands, without another start. The next launch tries the rig's slice again.
+- **Status:** `rig seat status` reports `process_limits` as before; the scope it names sits beneath the rig's slice when
+  the seat is grouped. To see a seat's placement, read its pane process's cgroup (`cat /proc/<pid>/cgroup`) or
+  `systemctl --user status openrigseats-<rig>.slice`.
+
 ### Status line throttle (`runtime: claude-code`)
 
 Claude Code runs a seat's status line on each update of its conversation, and each run starts Node for OpenRig's
@@ -1322,6 +1520,9 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
   that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
   `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
   A fresh launch of the seat from its recorded launch keeps the stored block.
+- **Export and bundles:** `rig spec export` leaves the pool's agents out and writes the model member with its block;
+  an edge touching a pool agent is left out and named in a "Not carried" line. `rig bundle create` doesn't count pool
+  agents as drift, so `--allow-drift` isn't needed for them.
 - **Older daemons:** `pool` is a new member key. A daemon from 0.7.18 or earlier refuses a spec that has it, as it
   refuses any unknown member key.
 
@@ -1348,7 +1549,7 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
 - **Credentials:** Provision each seat separately, or put the provider's key variable in `recovery.provider_auth_env_allowlist` (for example `ANTHROPIC_API_KEY` or `MISTRAL_API_KEY`). The allowlist accepts the key variable of every provider in OpenRig's OMP provider map, from `anthropic` through `litellm`. A seat receives a key only when its `model` is written as `provider/id`, such as `anthropic/claude-sonnet-4-5`. Short names such as `opus` pass no key. A provider whose key is scoped to one endpoint also accepts that endpoint's variable: `anthropic`, `openai` and `litellm` each take their `<PROVIDER>_BASE_URL` — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `LITELLM_BASE_URL`. The allowlist admits each variable on its own, so an endpoint named without its key is admitted too, which suits a keyless local proxy. The launch gate admits these endpoint names for OMP seats; the match against the seat's declared `provider/id` happens at the OMP child, which forwards a matching endpoint already in the runner's environment just as it forwards a key. OMP also reads the launch directory's `.env`, so use a trusted working directory.
 - **Approval posture:** The default floor is `--approval-mode always-ask`. Because the runner is headless, OMP approval requests are cancelled and the seat stays in needing-attention after the turn ends, until the next agent run starts. A `full_bypass` permission policy selects `--approval-mode yolo`.
 - **Model errors:** Errors are printed in the pane. A completed assistant failure with a numeric `errorStatus` of 408, 429, 500, 502, 503, 504, or 529 returns to idle at terminal `agent_end`, allowing an ordinary retry. Until that terminal boundary it stays in needing-attention. Intermediate `agent_end(isTerminal:false)` events do not release attention. A statusless failed retry summary retains that classification only when its attempt matches an announced retry and its final error exactly matches the latest typed transient assistant failure in that attempt. New assistant/turn boundaries invalidate the previous failure; unmatched summaries remain runtime errors. Rejected prompts, auth/configuration failures, exhausted retries without a typed transient status, and untyped errors (including text such as `529 overloaded`) retain attention until the next agent run starts. The runner does not classify diagnostic text. A transient failure does not clear a denied approval or another unresolved runtime failure in the same turn.
-- **Restore:** OMP creates its session file after the first persisted turn. A new seat with no persisted turn has no resume token, so a restore leaves it awaiting a decision. Start it fresh with `rig seat launch <seat> --fresh --reason "<why>"`, the command `rig start` and `rig up --existing` print for that seat. After that file exists, OpenRig restores that exact session file. If a full rig restore leaves an OMP seat in `attention_required` or `failed`, `rig seat clear-attention` cannot yet reconcile it to `operator_recovered`, even with `--reason`, because restore reconciliation only verifies Claude Code and Codex processes ([#41](https://github.com/mvschwarz/openrig/issues/41)). Relaunch that seat with `rig seat launch <seat> --fresh --reason "<why>"`, or restore it manually. `rig seat launch --fresh` refuses a managed seat whose pane is still running unless you add `--stop`, which ends what is running there; add it only when you mean to replace that session. A pane that holds only a shell after a failed start (the harness never started, or returned to the shell, and the pane is an idle shell now) is replaced without `--stop`.
+- **Restore:** OMP creates its session file after the first persisted turn. A new seat with no persisted turn has no resume token, so a restore leaves it awaiting a decision. Start it fresh with `rig seat launch <seat> --fresh --reason "<why>"`, the command `rig start` and `rig up --existing` print for that seat. After that file exists, OpenRig restores that exact session file. After recovering a Pi or OMP seat whose full rig restore ended in `attention_required` or `failed`, run `rig seat clear-attention <seat>`. OpenRig records `operator_recovered` only when the pane owns the expected runner and its live RPC child, a fresh `get_state` response matches the stored session file, and the daemon confirms that identity. It sends no prompt. Missing or mismatched evidence keeps attention and names the failed check. Runners started before this recovery capability was installed need a managed relaunch before they can supply that proof. `rig seat launch --fresh` refuses a managed seat whose pane is still running unless you add `--stop`, which ends what is running there; add it only when you mean to replace that session. A pane that holds only a shell after a failed start (the harness never started, or returned to the shell, and the pane is an idle shell now) is replaced without `--stop`.
 
 ### Terminal Nodes
 
@@ -1603,9 +1804,10 @@ A seat that is still not interactive then ends `attention_required` with its
 launch and resume token kept, and the later readiness wait is skipped for it.
 That holds at every setting: at 1–3 seconds there are no extra polls, but an
 unresolved boot is still kept rather than failed. A pane that shows a Codex or
-another conversation's Claude is not waited for. `rig up` and
-`rig launch` wait 120 seconds for the daemon, so a restore of several stuck
-seats can pass that (in one measurement, about 31 seconds a seat at the
+another conversation's Claude is not waited for. `rig up` waits 120 seconds
+for the daemon by default. Use `rig up --timeout <seconds>` to change that
+wait. `rig launch` waits 120 seconds. A restore of several stuck
+seats can exceed the client wait (in one measurement, about 31 seconds a seat at the
 default, 95 for three). A client timeout and exit code 1 do not mean the
 restore was rolled back or that it should be run again; check the real state
 first with `rig ps`. Apart from this, the setting does not change the time
@@ -1741,7 +1943,8 @@ spec can pass `rig spec validate` and then fail at preflight or import. Run
 7. Terminal nodes require the exact triple: `runtime: terminal`, `agent_ref: builtin:terminal`, `profile: none`.
 8. `agent_ref` must start with `local:` (relative) or `path:` (absolute), except `builtin:terminal`.
 9. `local:` refs must be relative paths. `path:` refs must be absolute paths.
-10. `restore_policy` must be one of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`.
+10. `restore_policy` must be one of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. `keep_alive`, when
+    present, must be `true` or `false`.
 11. Pod-local edges use unqualified member IDs. Cross-pod edges use `pod.member` format.
 12. Cross-pod edges must reference different pods.
 13. Edge kinds must be one of: `delegates_to`, `spawned_by`, `can_observe`, `collaborates_with`, `escalates_to`.

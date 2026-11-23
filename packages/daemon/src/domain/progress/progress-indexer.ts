@@ -184,6 +184,7 @@ export class ProgressIndexer {
     let title: string | null = null;
     let inFrontmatter = false;
     let fence: { marker: string; length: number } | null = null;
+    let comment = false;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
@@ -193,6 +194,16 @@ export class ProgressIndexer {
       if (lineNumber === 1 && line.trim() === "---") { inFrontmatter = true; continue; }
       if (inFrontmatter) {
         if (line.trim() === "---") inFrontmatter = false;
+        continue;
+      }
+
+      // Commented work is hidden; fences inside a comment and comments inside a fence are literal.
+      if (comment) {
+        if (line.includes("-->")) comment = false;
+        continue;
+      }
+      if (!fence && /^ {0,3}<!--/.test(line)) {
+        comment = !line.includes("-->");
         continue;
       }
 

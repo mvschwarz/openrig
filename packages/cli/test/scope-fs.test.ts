@@ -18,6 +18,7 @@ import {
   readFrontmatter,
   resolveMissionsRoot,
   splitFrontmatter,
+  editFrontmatter,
   updateFrontmatter,
 } from "../src/lib/scope/scope-fs.js";
 import { ScopeCliError } from "../src/lib/scope/types.js";
@@ -190,6 +191,32 @@ describe("frontmatter parser", () => {
       expect(fs.readFileSync(file, "utf8")).toContain(unowned);
       expect(fs.readFileSync(file, "utf8").endsWith("---\nbody\n")).toBe(true);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["\u2028", "\u2029", "\r"])("keeps dashes after %j inside frontmatter", (separator) => {
+    const original = `---\ntitle: before${separator}---\nstatus: active\n---\nbody\n`;
+    const updated = editFrontmatter(original, { status: "closed" }, "README.md");
+    expect(updated).toBe(original.replace("status: active", "status: closed"));
+    expect(splitFrontmatter(updated)).toMatchObject({ frontmatter: { status: "closed" }, body: "body\n" });
+  });
+
+  describe.each(["\n", "\r\n"])("empty frontmatter (%j)", (newline) => {
+    it.each(["", "# Mission", "# Mission\n---\nKeep this section."])("updates fields while preserving body %j", (bodyText) => {
+      const dir = mktemp();
+      const file = path.join(dir, "README.md");
+      const body = bodyText ? newline + bodyText.replace(/\n/g, newline) + newline : "";
+      const opening = `--- \t${newline}`;
+      const closing = "---\t";
+      try {
+        writeFile(file, opening + closing + body);
+        updateFrontmatter(file, { stage: "wip" });
+        const expected = `${opening}stage: wip${newline}${closing}${body}`;
+        expect(fs.readFileSync(file, "utf8")).toBe(expected);
+        expect(readFrontmatter(file)).toEqual({ stage: "wip" });
+        updateFrontmatter(file, { stage: "wip" });
+        expect(fs.readFileSync(file, "utf8")).toBe(expected);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
   });
 
   it("generates minimal frontmatter when absent", () => {
