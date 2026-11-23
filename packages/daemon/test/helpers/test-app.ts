@@ -26,7 +26,6 @@ import { networkBindingsSchema } from "../../src/db/migrations/160_network_bindi
 import { networkReceiptsSchema } from "../../src/db/migrations/161_network_receipts.js";
 import { networkInstallationsSchema } from "../../src/db/migrations/163_network_installations.js";
 import { queueItemsReplyToIndexSchema } from "../../src/db/migrations/164_queue_items_reply_to_index.js";
-import { seatColdStartsSchema } from "../../src/db/migrations/167_seat_cold_starts.js";
 import { seatReapStateSchema } from "../../src/db/migrations/191_seat_reap_state.js";
 import { activityGrantsSchema } from "../../src/db/migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "../../src/db/migrations/144_environment_bindings.js";
