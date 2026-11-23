@@ -21,7 +21,11 @@ const expectedSites = new Map<string, string[]>([
   ["domain/codex-thread-id.ts", ["codex_thread_id.resolve_home"]],
   ["domain/review/gather.ts", ["review.gather.git"]],
   ["domain/tmux-option-defaults.ts", ["tmux_options.command_v"]],
-  ["domain/queue-repository.ts", ["queue.decision_revision.replies", "queue.linked_successors.build", "queue.handoff"]],
+  ["domain/queue-repository.ts", ["queue.decision_revision.replies", "queue.linked_successors.build", "queue.handoff",
+    "queue.related_to", "queue.delegated_decisions", "queue.delivered_human_updates"]],
+  ["domain/slices/slice-indexer.ts", ["slices.queue_counts_scan", "slices.membership_typed_scan", "slices.membership_term_scan"]],
+  ["domain/health-passive-ceremony.ts", ["health.lineage_rows"]],
+  ["domain/mission-control/mission-control-fleet-cli-capability.ts", ["mission_control.rig_queue_summary"]],
 ]);
 
 const pluginVendorUrl = "https://github.com/mvschwarz/openrig-plugins/releases/latest/download/openrig-core.tar.gz";

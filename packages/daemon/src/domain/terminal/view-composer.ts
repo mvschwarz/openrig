@@ -19,7 +19,7 @@
 // (ssh vs http vs unknown) is resolved through the operator's read-only hosts
 // registry via the injected `resolveHost`.
 
-import { tileAttachArgv } from "./tile-attach.js";
+import { pinnedTileAttachArgv, tileAttachArgv } from "./tile-attach.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
   AbsentSeat,
@@ -79,6 +79,8 @@ export interface ComposeContext {
   /** Effective mode of the viewing instance. Inherit keeps plain remote tmux;
    *  isolated opts SSH tiles into remote instance-aware attachment. */
   localTmuxServerMode?: "inherit" | "isolated";
+  /** The provider's local writable tiles pin their seat instead of sizing it (a Herdr view). Remote tiles are unchanged. */
+  pinWritableSeats?: boolean;
 }
 
 /** POSIX single-quote a string so session names / targets are shell-inert in the composed command. */
@@ -209,7 +211,9 @@ export function composeView(
       });
       continue;
     }
-    const attachArgv = tileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
+    const attachArgv = ctx.pinWritableSeats && !m.readOnly
+      ? pinnedTileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession)
+      : tileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
     opened.push({
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),

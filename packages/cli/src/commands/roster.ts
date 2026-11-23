@@ -10,10 +10,10 @@ import { formatCheckIn } from "../lib/check-in.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { DaemonClient } from "../client.js";
 import { realDeps } from "./daemon.js";
-import { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
+import { parseRoster, readRosters, rosterTeamName, teamPhrase, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
 
 // One roster parser, shared with the daemon (a hosted member's wake route reads the same files).
-export { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake };
+export { parseRoster, readRosters, rosterTeamName, teamPhrase, type Roster, type RosterMember, type RosterWake };
 export { formatCheckIn };
 
 type Row = Record<string, unknown>;
@@ -170,7 +170,7 @@ export function rosterCommand(deps: Deps = {}): Command {
           console.log(`${r.id} — ${r.purpose}\n  Curator: ${r.curator.seat} (${r.curator.host}); ${r.memberCount} members`);
         else {
           const members = (verb === "show" ? (result.roster as Row).members : result.matches) as Array<ReturnType<typeof enrichRosterMember> & { roster?: { id: string } }>;
-          if (verb === "show") { const r = result.roster as Roster; console.log(`${r.name} — ${r.purpose}\nCurator: ${r.curator.seat} (${r.curator.host})`); }
+          if (verb === "show") { const r = result.roster as Roster; console.log(`${r.name || r.id} — ${r.purpose}\nCurator: ${r.curator.seat} (${r.curator.host})`); }
           for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; last observed model ${formatModelObservation(m.live.modelObservation)}\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}${m.hosted ? `\n  Last call: ${m.live.lastCallAt ?? "unknown"}\n  Check-in: ${formatCheckIn(m.live.checkIn ?? {})}` : ""}\n  ${m.live.reason}`);
           if (!members.length) console.log("No matching members.");
           const obs = result.observations as { sources: Row[] };

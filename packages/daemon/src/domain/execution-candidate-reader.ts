@@ -3,6 +3,10 @@ import Database from "better-sqlite3";
 /** Rowids one statement may cover before the read yields to the event loop. Soft: one large row's conversion, native
  *  I/O or a correlated subquery on a matching row can still make a window take longer. */
 const WINDOW_ROWS = 256;
+/** A window that runs longer than this halves the next one (down to one rowid); a quicker one doubles it back toward
+ *  WINDOW_ROWS. Rows with large bodies or matching filters cost far more than small ones, so a fixed row count alone let
+ *  one window hold the loop for most of a second on a large queue. */
+const WINDOW_TARGET_MS = 16;
 
 /**
  * The main database file when the execution view's candidate read can run cooperatively on its own connection, or
@@ -32,7 +36,9 @@ export interface CooperativeRead<Row> {
  * few rows its filter matches; a cursor that yields between returned rows can scan the whole table in one step when
  * matches are rare. One read transaction keeps one snapshot for every window, and rows come back in rowid order. The
  * transaction and the connection end before returning, on every path; a read error is rethrown as-is and no partial
- * rows are returned.
+ * rows are returned. An aborted `signal` stops the read at the next window with its reason, the same way.
+ * With `onWindow`, each window's rows go to it as they're read, in order, and none are kept; its time counts toward
+ * the window's, and a throw from it ends the read like a read error. The caller then discards what it was given.
  */
 export async function readRowsCooperatively<Row>(
   file: string,
@@ -41,7 +47,9 @@ export async function readRowsCooperatively<Row>(
   binds: unknown[],
   open: (file: string) => Database.Database = (path) => new Database(path, { readonly: true, fileMustExist: true }),
   windowRows = WINDOW_ROWS,
+  opts: { signal?: AbortSignal; targetMs?: number; onWindow?: (rows: Row[]) => void } = {},
 ): Promise<CooperativeRead<Row>> {
+  const targetMs = opts.targetMs ?? WINDOW_TARGET_MS;
   let reader: Database.Database | undefined;
   let rows: Row[] = [];
   let windows = 0, longestStretchMs = 0, stretchStart = performance.now();
@@ -57,9 +65,14 @@ export async function readRowsCooperatively<Row>(
       .get() as { lo: number | null; hi: number | null };
     const window = reader.prepare(sql);
     if (lo !== null && hi !== null) {
-      for (let after = lo - 1; after < hi;) {
-        const through = Math.min(after + windowRows, hi);
-        for (const row of window.all(after, through, ...binds)) rows.push(row as Row);
+      for (let after = lo - 1, size = windowRows; after < hi;) {
+        opts.signal?.throwIfAborted();
+        const through = Math.min(after + size, hi);
+        const started = performance.now();
+        const batch = window.all(after, through, ...binds) as Row[];
+        if (opts.onWindow) opts.onWindow(batch);
+        else for (const row of batch) rows.push(row);
+        size = performance.now() - started > targetMs ? Math.max(1, Math.floor(size / 2)) : Math.min(windowRows, size * 2);
         windows++;
         after = through;
         if (after < hi) {

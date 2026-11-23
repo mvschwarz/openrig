@@ -18,7 +18,7 @@ const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.t
 const legacyFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-0.162.1.txt", import.meta.url), "utf8");
 const apiKeyLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-api-key-login.txt", import.meta.url), "utf8");
 const narrowFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-80x24.txt", import.meta.url), "utf8");
-const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]
+const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.171.0.txt"]
   .map(name => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
 describe("Codex first-login readiness", () => {
@@ -471,7 +471,22 @@ describe("native resume probe", () => {
       status: "resumed",
       code: "active_runtime",
       detail: "Claude is the active foreground process in the probe pane.",
+      foregroundOnly: true,
     });
+  });
+
+  it("reads an auto-mode composer whose header scrolled out as Claude's drawn screen, not the process alone", () => {
+    const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+      paneContent: `● Done.\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ auto mode on (shift+tab to cycle)` });
+    expect(probe).toMatchObject({ status: "resumed", code: "active_runtime" });
+    expect(probe.foregroundOnly).toBeUndefined();
+  });
+
+  it("reads the trust dialog's heading, drawn before its options, as the trust gate, not the foreground process", () => {
+    const heading = "user@host:~$ ( . '/home/user/tmp/openrig-tmux-send-launch.txt' )\n\n" + "─".repeat(80)
+      + "\n Accessing workspace:\n\n /home/user";
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: heading }))
+      .toMatchObject({ status: "inconclusive", code: "trust_gate" });
   });
 
   it("classifies a Claude workspace trust prompt as blocked, not resumed", () => {
@@ -1338,6 +1353,131 @@ describe("native resume probe", () => {
       expect(result.code).toBe("trust_gate");
     });
 
+    // A refusal counts only as the newest thing Codex printed, as Claude's login refusal counts only as its latest
+    // response. A resumed conversation replays its history, so an old refusal there isn't a current sign-in problem.
+    describe("only the current attempt's refusal counts", () => {
+      const header = "OpenAI Codex (v0.162.1)";
+      const composer = ["› Ask Codex to do anything", "  gpt-5.1 high · 100% context left · ~/project"];
+      const oldRefusal = "■ Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.";
+      const probe = (paneCommand: string, lines: string[]) =>
+        assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent: lines.join("\n") });
+      const authRefusal = {
+        status: "attention_required",
+        code: "codex_auth_refusal",
+        detail: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
+      };
+
+      it("old refusals followed by later turns and a healthy composer read as the working conversation", () => {
+        expect(probe("codex", [header, oldRefusal, "› Please continue the task", "• Continued; the tests pass.", "", ...composer]))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
+        // An earlier launch's CLI refusal, then a launch that came up.
+        expect(probe("codex", ["$ codex resume 019d-token", "Error: Your access token could not be refreshed. Please log out and sign in again.",
+          "$ codex resume 019d-token", header, ...composer])).toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+
+      it("a working conversation that quotes the refusal stays working", () => {
+        expect(probe("codex", [header,
+          "› Why did my seat print \"Your access token could not be refreshed. Please log out and sign in again.\"?",
+          "• That message is from an earlier sign-in. It read:",
+          "  Your access token could not be refreshed. Please log out and sign in again.",
+          "```text",
+          "Your access token could not be refreshed. Please sign in again.",
+          "```",
+          ...composer])).toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+
+      it("a fresh refusal still asks for sign-in: the CLI's, before the shell prompt, and the TUI's, above the composer", () => {
+        expect(probe("zsh", ["$ codex resume 019d-token",
+          "Error: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+          "user@example.test ~/project %"])).toEqual(authRefusal);
+        expect(probe("codex", [header, "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer]))
+          .toEqual(authRefusal);
+      });
+
+      it("old refusal text followed by a new model refusal reports what the pane shows without it", () => {
+        const modelRefusal = "■ The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.";
+        const tui = ["› Run the check", modelRefusal, ...composer];
+        expect(probe("codex", [header, oldRefusal, ...tui])).toEqual(probe("codex", [header, ...tui]));
+        const shell = ["$ codex -m gpt-5.5 resume 019d-token",
+          "Error: unexpected status 400 Bad Request: The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+          "user@example.test ~/project %"];
+        const withOld = probe("zsh", ["Error: Your access token could not be refreshed. Please log out and sign in again.", ...shell]);
+        expect(withOld).toEqual(probe("zsh", shell));
+        expect(withOld.code).not.toBe("codex_auth_refusal");
+      });
+
+      it("an old refusal before a turn still running stays unknown", () => {
+        expect(probe("codex", [oldRefusal, "› Please retry", "• Working (3s • esc to interrupt)"]))
+          .toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+      });
+
+      it("an input-shaped row isn't the composer without its footer, and a numbered option isn't one at all", () => {
+        // A prompt just submitted, drawn before any footer or reply.
+        const submitted = ["› Please retry"];
+        expect(probe("codex", [oldRefusal, ...submitted])).toEqual(probe("codex", submitted));
+        expect(probe("codex", [oldRefusal, ...submitted])).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+        // A model chooser's selected option starts with the same glyph.
+        const chooser = ["  Select a model", "› 1. gpt-5.1-codex-mini", "  2. gpt-5.1"];
+        expect(probe("codex", [oldRefusal, ...chooser])).toEqual(probe("codex", chooser));
+        expect(probe("codex", [oldRefusal, ...chooser]).code).toBe("model_selection_gate");
+      });
+
+      it("only a row that ends like a shell prompt may follow a refusal at the shell", () => {
+        const output = ["The model is unavailable"];
+        const withOld = probe("zsh", ["Error: Your access token could not be refreshed. Please log out and sign in again.", ...output]);
+        expect(withOld).toEqual(probe("zsh", output));
+        expect(withOld.code).toBe("returned_to_shell");
+      });
+
+      it("fences close only on their own kind and length, so a fresh refusal after one counts and a quote inside one doesn't", () => {
+        // A four-backtick block showing a three-backtick row, then a fresh refusal.
+        expect(probe("zsh", ["• Here's the snippet:", "````markdown", "```", "````",
+          "Error: Your access token could not be refreshed. Please sign in again."])).toEqual(authRefusal);
+        // A reply still drawing a tilde-fenced quote above the composer.
+        expect(probe("codex", [header, "• Codex printed this earlier:", "~~~text",
+          "Your access token could not be refreshed. Please sign in again.", "", ...composer]))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+
+      it("a refusal whose closing period wraps alone onto the next row still asks for sign-in", () => {
+        // 120 characters through "again" at a 120-column pane: the shell wraps the period onto its own row.
+        const message = "Error: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again";
+        expect(message).toHaveLength(120);
+        expect(probe("zsh", ["$ codex resume 019d-token", message, ".", "user@example.test ~/project %"])).toEqual(authRefusal);
+        // A message that already ends in its period, then a newer "." row: that row is other output, as before.
+        expect(probe("zsh", ["$ codex resume 019d-token", `${message}.`, ".", "user@example.test ~/project %"]))
+          .toMatchObject({ code: "returned_to_shell" });
+      });
+
+      it("a block left open doesn't hide a fresh refusal Codex marks as its own, and still hides an unmarked quote", () => {
+        // A reply cut off inside its block, then the user's turn and a current refusal.
+        expect(probe("codex", [header, "• Here's the start of it:", "```text", "partial output", "› Continue",
+          "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+        // The probe's window starts below a block's opener, so its closer is the first marker it sees.
+        expect(probe("codex", ["```", "• That's the whole file.", "› Continue",
+          "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+        // The same closer, with the refusal straight after the reply and no turn between.
+        expect(probe("codex", ["```", "• That's the whole file.",
+          "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+        // A quote left open that shows a transcript's prompt row, then an unmarked refusal: still a quote.
+        expect(probe("codex", [header, "• Here's what the other session showed:", "```text", "› Continue",
+          "Your access token could not be refreshed. Please sign in again.", "", ...composer]))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+
+      it("a refusal wrapped past three rows is read to its instruction, and stops at a boundary", () => {
+        expect(probe("zsh", ["$ codex resume 019d-token",
+          "Error: Your access token could not be refreshed because",
+          "you have since logged out or signed in",
+          "to another account. Please sign in ag",
+          "ain.",
+          "user@example.test ~/project %"])).toEqual(authRefusal);
+        // A blank row ends the message; a later row with the instruction doesn't complete it.
+        const later = ["Your access token could not be refreshed", "", "• Please sign in again to use the new plugins"];
+        expect(probe("codex", later)).not.toEqual(authRefusal);
+      });
+    });
+
     it("classifies the Codex hook review prompt as hook_trust_gate", () => {
       const result = assessNativeResumeProbe({
         runtime: "codex",
@@ -1444,6 +1584,24 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
 
   it("is the same gate in the variant with nothing trusted yet, whose default choice is 'No, exit'", () => {
     expect(probe(screen.replace("❯ No, continue without these permissions", "❯ No, exit"))).toMatchObject(gate);
+  });
+
+  // "Claude Code v" inside the dialog is not Claude's version header: the screen is not cut there.
+  it.each([
+    ["'No, exit'", "❯ No, exit"],
+    ["'No, continue without these permissions'", "❯ No, continue without these permissions"],
+  ])("is the same gate, focus on %s, with a pre-approved grant that reads 'Claude Code v'", (_focus, option) => {
+    const grant = screen.replace("❯ No, continue without these permissions", option)
+      .replace("Bash(git status:*)", "Bash(echo Claude Code v*)");
+    expect(grant).toContain("Bash(echo Claude Code v*)");
+    expect(probe(grant)).toMatchObject(gate);
+  });
+
+  it("is the same gate in the 'No, exit' variant with the warning scrolled out, by its 'These will apply without asking' block", () => {
+    const rows = screen.replace("❯ No, continue without these permissions", "❯ No, exit").split("\n");
+    const scrolled = rows.filter(row => !row.includes("This folder pre-approves")).join("\n");
+    expect(scrolled).not.toMatch(/pre-approves|No, continue without/);
+    expect(probe(scrolled)).toMatchObject(gate);
   });
 
   it("is the same gate when the git root is the home folder (the case item 1 deliberately does not seed)", () => {
@@ -1570,6 +1728,159 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     const plain = ["Accessing workspace:", "/some/workspace", "", "Quick safety check: Is this a project you created or one you trust?",
       "❯ 1. Yes, I trust this folder", "  2. No, exit"].join("\n");
     expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("the real plain prompt in a workspace whose path reads 'Claude Code v' is still trust_gate, never resumed", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const path = plain.replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
+    expect(path).toContain("/tmp/Claude Code v2/lab");
+    expect(probe(path)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["wrapped at a space", [" /home/agent/testes de", " Claude Code v2.1.322"]],
+    ["wrapped mid-word", [" /home/agent/labs/versoes-do-cli-claude/", " Claude Code v2.1.322 lab/seat"]],
+    ["after a dash", [" /home/agent/labs/old", " -Claude Code v2.1.322"]],
+    ["onto a row that starts with the box-rule glyph", [" /home/agent/labs/old", " ─Claude Code v2.1.322 lab"]],
+    ["onto a row that starts with a logo glyph", [" /home/agent/labs/old", " ▐Claude Code v2.1.322 lab"]],
+  ])("a workspace path with 'Claude Code v<x.y.z>' %s by a 40-column pane is still trust_gate", (_case, path) => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const from = rows.findIndex(row => row.includes("<lab>/backstop/rep"));
+    const warning = rows.findIndex(row => row.includes("⚠ This folder pre-approves"));
+    const note = rows.findIndex(row => row.includes("configuration."));
+    const plain = [...rows.slice(0, from), ...path, ...rows.slice(from + 2, warning), ...rows.slice(note + 1)].join("\n")
+      .replace(" ❯ No, continue without these", " ❯ No, exit");
+    expect(plain).not.toMatch(/pre-approves|without asking|No, continue/);
+    expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["'No, '", " No, folder/"],
+    ["'Yes, '", " Yes, folder/"],
+    ["the exact 'No, exit'", " No, exit"],
+    ["the exact 'Yes, I trust this folder'", " Yes, I trust this folder"],
+    ["the exact footer", " Enter to confirm · Esc to cancel"],
+  ])("a workspace path wrapped onto a row that reads %s before a header-like row is still trust_gate", (_case, row) => {
+    // A wrapped row that reads like an option or like the footer, even an exact one, is the dialog's text: the dialog
+    // ends at its last footer, below the path.
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const wrapped = plain.replace("<lab>/simples/repo/cadeiras/rig/seat", ["/tmp/long", row, " ─Claude Code v2.1.322 lab"].join("\n"));
+    expect(wrapped).toContain(`${row}\n ─Claude Code v2.1.322 lab`);
+    expect(probe(wrapped)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    const closed = [wrapped, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed).code).not.toBe("trust_gate");
+  });
+
+  it("a header-like row between the real options and the footer is the dialog's text: still trust_gate", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const between = plain.replace("Enter to confirm · Esc to cancel", "─Claude Code v2.1.322 lab\n Enter to confirm · Esc to cancel");
+    expect(between).toContain("─Claude Code v2.1.322 lab\n Enter to confirm");
+    expect(probe(between)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("Claude's version header drawn after the prompt still makes it history", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n").replace("<lab>/simples/repo/cadeiras/rig/seat", "/tmp/Claude Code v2/lab");
+    for (const header of [" ▐▛███▛█▄╱✦  Claude Code v2.1.323", " ▐▛███▜▌   Claude Code v2.1.322", "Claude Code v2.1.322"]) {
+      const later = [plain, "", header, "", "────────────────", "❯ ", "────────────────"].join("\n");
+      expect(probe(later).code).not.toBe("trust_gate");
+    }
+  });
+
+  it.each([
+    ["bare", "Claude Code v2.1.322"],
+    ["after the logo, as a live 2.1.323 pane draws it", " ▐▛███▛█▄╱✦  Claude Code v2.1.323"],
+    ["after the 2.1.322 logo", " ▐▛███▜▌   Claude Code v2.1.322"],
+    ["in a box border", "╭─── Claude Code v2.0.14 ───────────╮"],
+  ])("Claude's version header alone (%s) drawn after the prompt makes it history", (_form, header) => {
+    // no input frame after the header: the header alone has to end the dialog
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    expect(probe([plain, "", header].join("\n")).code).not.toBe("trust_gate");
+  });
+
+  it.each([
+    ["a grant", "   Bash(echo Claude Code v*)"],
+    ["a grant that a narrow pane wraps onto a row drawn like the header", " ─Claude Code v2.1.322 lab"],
+  ])("a backstop captured before its options, with %s reading 'Claude Code v', waits (partial), never resumed", (_case, row) => {
+    // the maintainer's case 1: captured right after the grant, before the note and the options, so no "Yes, I trust
+    // this folder" is drawn below the row and the warning above it is the backstop's only mark
+    const grants = capture.gatedGrantsScreen.map(line => line.includes("Bash(ls:*)") ? row : line);
+    const partial = grants.slice(0, grants.indexOf(row) + 1);
+    expect(partial.join("\n")).not.toMatch(/Yes, I trust this folder/);
+    const result = probe([...partial, "", "❯ "].join("\n"));
+    expect(result).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("a dialog still being drawn whose text has a row equal to the footer above a header-like row is not closed by it", () => {
+    // A1b: the plain prompt with its options drawn and its real footer not yet; the path wraps onto the footer's words
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const forged = plain.replace("<lab>/simples/repo/cadeiras/rig/seat",
+      ["/tmp/long", " Enter to confirm · Esc to cancel", " ─Claude Code v2.1.322 lab"].join("\n"));
+    const drawing = forged.replace(/\n\s*Enter to confirm · Esc to cancel\s*$/, "\n");
+    expect(drawing.match(/Enter to confirm/g)).toHaveLength(1);
+    expect(probe(drawing)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    expect(probe(forged)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    const closed = [forged, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed)).toMatchObject({ status: "resumed" });
+    // A1e: a backstop captured before its options, with a grant row equal to the footer above a header-like grant
+    const grants = capture.gatedGrantsScreen.flatMap(line => line.includes("Bash(ls:*)")
+      ? ["   Enter to confirm · Esc to cancel", " ─Claude Code v2.1.322 lab"] : [line]);
+    const partial = grants.slice(0, grants.indexOf(" ─Claude Code v2.1.322 lab") + 1);
+    expect(probe([...partial, "", "❯ "].join("\n"))).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("a complete backstop whose grant reads 'Claude Code v', with Claude's real header drawn below it, is history (closed-dialog control)", () => {
+    const grants = capture.gatedGrantsScreen.map(line => line.includes("Bash(ls:*)") ? "   Bash(echo Claude Code v*)" : line);
+    expect(probe(grants.join("\n"))).toMatchObject(gate);
+    const closed = [...grants, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed).code).not.toBe("claude_gated_grants_gate");
+    expect(probe(closed).code).not.toBe("trust_gate");
+    expect(probe(closed).status).not.toBe("inconclusive");
+  });
+});
+
+describe("Claude's version header is read by its shape (#2820 follow-up, maintainer's review of 9c93238)", () => {
+  const probe = (paneContent: string) => assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+
+  it("a legacy 'Choose a conversation' list whose last option wraps a 'Claude Code v2.1.300' title still reads as the chooser", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "     Claude Code v2.1.300 upgrade notes", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it.each([
+    ["Claude's logo", "     ▐▛███▜▌   Claude Code v2.1.322 twice"],
+    ["a box rule", "     ─── Claude Code v2.0.14 ───"],
+    ["the welcome glyph", "     ✻ Claude Code v2.1.300 welcome"],
+  ])("a legacy chooser whose last option wraps a title that starts with %s, reading like the header, still reads as the chooser", (_case, wrapped) => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. why does my pane show", wrapped, "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("a legacy chooser whose last option wraps a 'Claude Code v2.1.300' title less indented than the title still reads as the chooser", () => {
+    // only the header's shape tells this row apart: it is not indented to the title's column
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "    Claude Code v2.1.300 upgrade notes", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("a legacy chooser whose focused last option (❯) wraps a title that starts with Claude's logo still reads as the chooser", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo", "  2. project-bar",
+      "❯ 3. why does my pane show", "     ▐▛███▜▌   Claude Code v2.1.322 twice", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("the same list followed by Claude's real header is history", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "     Claude Code v2.1.300 upgrade notes", ""].join("\n");
+    expect(probe(`${chooser}\n ▐▛███▛█▄╱✦  Claude Code v2.1.323\n`).code).not.toBe("claude_resume_selection_prompt");
   });
 });
 

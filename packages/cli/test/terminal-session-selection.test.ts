@@ -55,7 +55,7 @@ describe("terminal --session", () => {
   it("previews and opens the selected session without a desktop for an explicit provider", async () => {
     const f = fixture();
     await f.run(["open", "prod", "--provider", "herdr", "--session", "prod", "--json"]);
-    expect(f.get).toHaveBeenCalledExactlyOnceWith("/api/terminal/preview?view=prod&provider=herdr&session=prod");
+    expect(f.get).toHaveBeenCalledExactlyOnceWith("/api/terminal/preview?view=prod&provider=herdr&session=prod", { headers: {} });
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "prod", provider: "herdr", session: "prod", expectedPlan: "plan-prod", reuseLive: true }, { timeoutMs: 45_000 });
     expect(f.exec).not.toHaveBeenCalled();
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, session: "prod" });
@@ -181,7 +181,7 @@ describe("terminal --session", () => {
 
   it("status selects a named session and rejects an older daemon's unscoped reply", async () => {
     const f = fixture(); await f.run(["status", "--session", "prod", "--json"]);
-    expect(f.get).toHaveBeenCalledExactlyOnceWith("/api/terminal/status?session=prod");
+    expect(f.get).toHaveBeenCalledExactlyOnceWith("/api/terminal/status?session=prod", { headers: {} });
     expect(JSON.parse(logs[0]!)).toMatchObject({ session: "prod" });
     logs.length = 0; const old = fixture({ legacy: true }); await old.run(["status", "--session", "prod", "--json"]);
     expect(process.exitCode).toBe(1); expect(JSON.parse(logs[0]!).code).toBe("terminal_session_unconfirmed");

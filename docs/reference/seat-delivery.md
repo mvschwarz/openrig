@@ -1,9 +1,9 @@
 # Per-seat terminal delivery
 
-The typing guard has six modes. `off` and `hold` are the two ends. Draft-aware adds an
+The typing guard has seven modes. `off` and `hold` are the two ends. Draft-aware adds an
 opt-in check for unfinished input without a second control or daemon-owned retry
-scheduler. Between off and hold, three interruption levels choose which automatic messages may
-type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their own mode.
+scheduler. Between off and hold, four interruption levels choose which automatic messages may
+type: `openrig-urgent`, `urgent-only`, `sends-only` and `queue-only`. Sibling seats keep their own mode.
 
 | Mode | Terminal input | When input is unavailable |
 |---|---|---|
@@ -12,9 +12,35 @@ type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their
 | `openrig-urgent` | OpenRig's own messages (watchdogs, scheduled wakes, notices) and anything marked urgent type, never over a draft | Other agents' messages are held, the sender is told, and held messages stay readable |
 | `urgent-only` | Only messages marked urgent type (`rig send --urgent`, `urgent: true` on `POST /api/transport/send`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
 | `sends-only` | Deliberate sends from people and agents type, as with `off`; a terminal member's typing isn't protected, because its shell input can't be read | OpenRig's own notices are held. A terminal member defaults to this level |
+| `queue-only` | For a seat a person types in. Deliberate sends from people and agents type, urgent or not, never over a draft; OpenRig's own notices never type, urgent ones included | A watchdog reminder reaches the seat's queue instead (below); other notices from OpenRig are held with their urgency, and held messages stay readable |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
-Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`.
+For a Claude seat you type in, the opt-in [hook bridge](#claude-hook-bridge-opt-in) can deliver ordinary messages at a turn boundary without typing into its input box; it takes effect at the next launch or restore.
+
+Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`. At `queue-only` it goes ahead: the
+level only changes how OpenRig's notices reach the seat, so managed compaction and its restore still run there, and the
+seat still compacts when its context runs out. Each write they make is checked as at `draft-aware`, so it never types
+over a person's draft or an input it can't read (it waits for a later attempt), but an active seat isn't refused the
+way `draft-aware` refuses lifecycle work. Binding reconciliation stays refused, as at every level but `off`.
+
+At `queue-only` a watchdog reminder never types. One about the seat's parked rows (a park timer, a wait, a
+`--wake-watchdog` attachment) is noted on each row of the seat whose current park that job wakes, with the reminder's
+own text unless it is the park's default wake (`park wake noted on this row: …`). The note is written before the
+delivery is recorded; a row that left its park meanwhile isn't noted, and the reminder stays due. A row of another
+seat attached to the same job gets its usual park record, naming what the reminder became. Any other reminder becomes
+one cold row in the seat's queue, from `watchdog@system`, tagged `watchdog`, `queue-only` and `watchdog-job:<job>`,
+created with no nudge; its id comes from the reminder's occurrence. A later occurrence of the same job, or a retry,
+while that row is still open (pending, or claimed and not yet closed), is recorded on it rather than making a second
+row; once it's closed the occurrence gets a new row with a derived id (`<id>-2`, `<id>-3`, …), never the closed one. A
+cold row wakes nobody: a person, or the seat's next ordinary turn, picks it up, and its waiting view says so, with no
+timed sweep promised. The stuck sweep doesn't report it as
+unclaimed, nor a wait whose notice was noted or queued as unconsumed. The parked-owner reminder isn't typed either
+(the seat's open rows already are the reminder): it's skipped, recorded once on the row as `parked-owner wake held: …;
+code queue_only_seat`, and stays out of the job's history until the seat's open rows or occupant change. An idle seat
+isn't woken for a pending gate row either. The job's history records these with the outcome `sent` and the status
+`queued_as_row`, `noted_on_parked_row` or `noted_on_queued_row`, never `ok`: in the queue, not typed. Wakes of rows
+that agents and people create and send are deliberate sends: they type, never over a draft. Wakes of rows OpenRig
+creates are OpenRig's own and are held. An older daemon reads `queue-only` as `hold`, lifecycle work included.
 
 A terminal member (`runtime: terminal`) defaults to `sends-only`, which holds OpenRig's own notices. Set one
 to `off` and those notices, such as park reminders and other watchdog messages, type into whatever the pane
@@ -24,8 +50,14 @@ a shell prompt holds them. Keep the default for a seat that may fall back to a s
 
 Runtime permissions are separate. Recipient and interactive-prompt checks still
 apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
-`--dangerously-interact --reason` remains available at every interruption level
+`--dangerously-interact --reason` remains available in every mode, `hold` included,
 and uses the existing-input check below. Direct human input remains available.
+
+An ordinary `rig send` types the message inside its From/To envelope, whose first
+line is `From:`, so a message that starts with `/` stays literal text rather than
+running as the agent's slash command. `--raw` and `--dangerously-interact` type the
+exact text, with no envelope. Claude Code (2.1.322) turns a pasted tab into four
+spaces, so tabs reach a Claude Code seat as spaces.
 
 A message sent to a busy Codex seat joins its running turn and may redirect it.
 For separate work, create a queue row instead:
@@ -86,7 +118,21 @@ status output in a transcript or file. Evidence shares the observation's
 five-minute lifetime and existing seat/actor limits, is discarded lazily on the
 next observation/status read after expiry, and is lost on restart. No rule,
 permission/configuration write, hook decision, edited input, prompt submission
-or new attention/delivery behavior is produced.
+or new attention or delivery behavior is produced. Its one other use follows.
+
+**Send context.** When a direct send starts and the seat's main session has a
+request newer than its latest activity hook, not yet settled by that session's
+later tool batch, the send's result carries an `inputRequest` notice saying so,
+and `rig send` and `rig broadcast` print it. The send goes exactly as it would
+without the request: the notice changes no readiness, refusal or timing, and a
+prompt answer (`--dangerously-interact`) gets none. The request isn't evidence
+that a dialog is open: a hook or host can decide a permission request, or
+answer an MCP elicitation, with nothing displayed, and the notice says so. A
+subagent's request, a settled or expired observation and a replaced occupant
+give no notice. Claude's `Elicitation` hook works the same way, settled by
+`ElicitationResult` or a later tool batch. Neither event changes activity or
+attention, and only the actor and time are kept: no server message, form field
+or response.
 
 Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
 is treated as main, a valid ID identifies a subagent or in-process teammate, and
@@ -95,10 +141,11 @@ no live PermissionRequest capture qualifies that convention on an installed nati
 version. A hook denial without a source-bound guard receipt has unknown origin.
 This diagnostic adds no guard collector, permission decision or attention policy.
 
-The new PermissionRequest diagnostic is optional for activity-hook readiness.
+The PermissionRequest diagnostic and the `Elicitation`/`ElicitationResult` pair
+are optional for activity-hook readiness.
 Every preexisting required event, relay asset and explicit hook-disable check
 still applies. An older installed plugin at the same manifest version retains
-its bytes and may not send this event: plugin-only delivery needs a future normal
+its bytes and may not send these events: plugin-only delivery needs a future normal
 maintainer release refresh, and managed delivery needs normal reprojection. A
 manifest or green readiness check does not prove live hook execution. Raw tool
 arguments and provider reason text are withheld; diagnostic evidence is bounded,
@@ -188,8 +235,11 @@ seat's shell. The daemon takes the recorded actor from transport identity only:
   `unattributed (no seat identity)`.
 
 Neither case takes an actor from the request body or from the target seat's name.
-`rig seat retire-held-message` still records the seat that retired a message, so
-run it from a seat's shell.
+`rig seat retire-held-message` uses the same transport-derived attribution: a
+managed seat's identity, or `unattributed (no seat identity)` from an ordinary
+terminal. Its actor never comes from the request body or the target's name.
+A reason is required. Retirement only frees active quota and preserves evidence;
+it does not deliver the message, claim native consumption or close work.
 
 ~~~sh
 rig seat set-typing-guard dev-impl@my-rig --mode draft-aware \
@@ -200,7 +250,7 @@ rig seat held-messages dev-impl@my-rig --id <outbox-id> --json
 rig seat retire-held-message dev-impl@my-rig <outbox-id> --reason "read outside the pane"
 ~~~
 
-Use exactly one of `--mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold` or the compatible
+Use exactly one of `--mode off|draft-aware|openrig-urgent|urgent-only|sends-only|queue-only|hold` or the compatible
 `--enabled true|false`: true selects hold, false selects off. There are no
 retry settings or deadlines. Activation waits for an already-started seat operation
 to finish. The API may return HTTP 202 with `pending: true`; wait for
@@ -260,7 +310,8 @@ drop everyone else's messages. A sender's newest held message retires its earlie
 ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
 <id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
 held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
-record stays readable with `--id`. Held messages are never replayed, so this changes
+record stays readable with `--id`. Held messages are never replayed (a `draft-aware`
+queue wake's bounded retry, below, delivers only an entry still held), so this changes
 no delivery. A `draft-aware` attempt takes its sender's place only once it settles
 as held; one that is then delivered leaves the held messages as they are. A queue
 wake to a `draft-aware` seat counts its sender's held message there as room, by the
@@ -274,6 +325,63 @@ watchdog's reminders (one per job), and an unattributed sender.
 
 A backlog held before this change clears at that sender's next held message to the
 seat, or at once with `rig seat retire-held-message`.
+
+### Claude hook bridge (opt-in)
+
+A Claude seat can opt in to receiving messages through its own launch-owned hooks instead of typed input. OpenRig then
+doesn't type into the seat's input box or touch a dialog to deliver.
+
+```bash
+rig seat set-hook-bridge dev-impl@my-rig --enabled true --reason "wake at turn boundaries"
+rig seat hook-bridge dev-impl@my-rig
+```
+
+**Who can opt in.** Anyone who can run the command, with a reason. From a terminal with no seat identity, the change is recorded as unattributed, as the typing guard records it.
+
+**When it takes effect.** At the seat's next launch or restore, if its Claude Code is 2.1.287 or later (the first version whose changelog shows the `asyncRewake` hooks; 2.1.306's and 2.1.322's own schemas carry them). An older Claude, or one whose version can't be read, launches unchanged with typed delivery, and `rig seat hook-bridge` says why. The launch adds three hooks to its `--settings`:
+- SessionStart and Stop run one waiter for the seat, as `asyncRewake` command hooks. Exiting 2 wakes Claude with the
+  waiter's output. The hook timeout is 7200 s.
+- UserPromptSubmit runs a quick marker that tells OpenRig a turn started.
+
+The bridge is used only for an occupant launched with it, once its waiter has armed. Until then delivery is typed as before.
+
+**Delivery at a turn boundary.**
+- A message to an opted-in seat is queued as an outbox row (result `outcome: "bridged"`). The waiter armed at the last
+  turn boundary takes the queued messages, oldest first, and writes them into the seat's context.
+- A seat mid-turn, including one at a permission prompt, gets its messages when that turn ends, or after 15 minutes, whichever comes first: a turn that ends without a Stop (an interrupt, an API error), or one running when the daemon restarted, can't hold messages longer than that, even while a waiter polls. That includes a turn the bridge's own wake started: Claude Code reports the woken input as a prompt, and the bridge counts that prompt as part of the same turn.
+- Only a plain message is bridged. A send that carries a check or action at the moment of writing (managed compaction's `/compact` and its stages, a parked-owner reminder's checks, staged or exact text, an idle or draft rule), one bound to an original conversation (an expected identity), a slash command, and every watchdog reminder are typed as before, where those checks run. A watchdog reminder stays typed until its receipts can represent a queued message.
+- Each poll checks again that the seat is still opted in, that a message was queued for that same occupant, and that the typing guard wouldn't hold it now. A message the bridge can't deliver to this occupant (the seat opted out, or the guard holds it now) is typed at once, with the admission it was queued with, and the guard then decides (a hold retains it). One queued for an occupant who has gone isn't typed (below).
+- A message queued for an occupant who has since gone isn't typed into the seat's new occupant: it ends `failed`, with `guard_delivery.state` `not-delivered` and the reason, a `transport.hook_bridge_fallback` event says so, and `rig seat hook-bridge` lists it with its reason. Its sender isn't told; a fresh send reaches the current occupant.
+- A send whose id is already settled (delivered, failed, held) isn't queued again or reported queued: it goes on as it would without the bridge.
+- What the model receives is each message exactly as OpenRig addressed it (its `From:` line names the sender), after
+  one line saying they're ordinary messages that the delivery adds no authority to.
+
+**Handed over is not read or acted on.**
+- The waiter's acknowledgement marks the row `delivered`, with `guard_delivery.state` `handed-to-hook`. It wrote the message to its hook's output and is exiting 2. Claude Code reports nothing back, so that Claude read it isn't observed.
+- A queue wake records `bridged:queued`, then how it ended at the bridge: `bridged:handed-to-hook`, the typed fallback's own result (so a refusal at a prompt is retried when the prompt clears, as for a typed wake), `failed:hook_bridge_not_delivered`, or `indeterminate:hook_bridge_claimed_unacked`.
+- The row's claim and result stay with what the agent actually does.
+- A batch whose answer was lost is handed to the same waiter, for the same seat and occupant, again at its next poll, unless the typing guard holds it by then: then it's left `indeterminate` (`claimed-unacked`), never handed out or requeued.
+- The waiter acknowledges a batch only once it has written all of it to the hook's output; a write that fails isn't acknowledged, and the batch becomes uncertain as below.
+- A batch whose waiter stopped without acknowledging it (its arm replaced, or not polled for 20 s) becomes `indeterminate`, with `guard_delivery.state` `claimed-unacked`. The bridge never resends it: it may or may not have reached the seat. `rig seat hook-bridge` lists those rows, and a `transport.hook_bridge_uncertain` event names each. A queue wake's own recovery may still send it again, saying delivery may repeat: the queue's rule for an uncertain wake.
+
+**When the bridge isn't available** (never armed, expired, or its waiter gone):
+- Messages are typed instead, as before, and the sender's result says the bridge wasn't available.
+- A waiter is live while it has polled within 20 s and its seat is idle or within 15 minutes of its turn's start; with no waiter polling, while the seat is in a turn the bridge waits on, for at most 15 minutes.
+- A new message goes behind messages already queued for the seat, even after the seat opts out, so they're typed in order. A send cancelled while it waits for the seat's lease isn't queued.
+- Messages already queued are typed in order, by one sweep at a time (every 5 s) once they've waited 20 s without a live waiter. The sweep takes back each message under the seat's delivery lease, just before typing it; one the bridge took first isn't typed, and nothing behind it overtakes it. A waiter's poll takes the same lease, so it can't take the next message while an earlier one is being typed.
+- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate. A batch a waiter had taken before the restart is named uncertain by the bridge after it, as above.
+- A waiter exits by itself shortly before its hook timeout and reports that it expired. The next turn re-arms it.
+
+**What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery. A rig's delivery drain holds the bridge's automatic deliveries (queue wakes) as it holds typed ones: while the seat's rig is drained, no waiter takes them and no fallback types them, at any point up to the moment of typing, and they're delivered in their order once the drain ends. A direct send and an explicit queue notification pass a drain, and pass any held wakes, as on the typed path. A queue wake whose row no longer wants it (claimed, closed or moved on) isn't handed over: it ends `failed` (`not-delivered`), as the typed path refuses it. If the drain can't be read, delivery goes ahead and the daemon log says so.
+The bridge only replaces how an admitted message reaches the seat. Watchdog reminders and queue wakes take the same path.
+
+**Cost.** Each wake is one model turn on the seat's own login. A burst of messages to an idle seat can cost several.
+`rig seat hook-bridge` shows the wakes since the daemon started.
+
+**Scope.**
+- Claude Code seats managed by OpenRig. Codex isn't covered.
+- Measured on Claude Code 2.1.319 to 2.1.323. Its `rewakeMessage` and `rewakeSummary` fields are internal and unused.
+- A guest-only listener doesn't serve the bridge.
 
 ## Input evidence and outcomes
 
@@ -311,7 +419,20 @@ and remain unchanged before Enter. Labels alone do not prove arbitrary content.
 Migration `100_typing_guard_modes` extends the existing guard/audit rows and
 adds receipt metadata to the original outbox rows; it creates no tables, retry
 indexes or executable requests. Combined wakes retain each original ID and body.
-A held queue wake stays on the existing queue recovery path. Interrupted historical
+A held queue wake stays on the existing queue recovery path. A row created straight to
+a `draft-aware` seat is tried again when the seat next reports idle while it's still in
+`draft-aware` mode, through the same guarded delivery and within `queue.wake_retry_cap`.
+Switching modes alone replays nothing; a retry already admitted while the seat was
+`draft-aware` goes once. Still held past that cap or
+`queue.wake_unconfirmed_window_minutes`, or held in `hold` mode past the window, the row
+gets the wake ladder's one escalation to its owner and one notice to its sender, once
+per held episode. Nothing is typed into the held seat. The sender's notice is recorded in
+the outbox (`held-sender-notice-<qitem>-<episode>`) before the owner's escalation is
+marked. If the daemon stops before sending it, or the send definitely wrote nothing, it
+stays owed, and the ladder sends it on a later tick: a failed one after the retry
+interval, up to the retry cap. One that may have reached the sender isn't sent again, and
+one being sent when the daemon stopped reads unknown at the next start. A notice whose
+row is no longer held is retired, not sent. Interrupted historical
 writes become indeterminate at startup. That history never suppresses a current
 explicit request and is not consulted to determine its result.
 
@@ -378,7 +499,7 @@ current transport result; an unknown write is not proof that nothing arrived.
 The transport still protects approval/question prompts and recipient identity. Under the default
 `transport.draft_delivery` (`deliver`), an ordinary send or work notice that meets a person's draft at a Claude Code or
 Codex prompt is pasted into it and the combined input is submitted, unless the seat's typing guard holds input
-(`draft-aware`, `openrig-urgent`, `urgent-only` or `hold`). With `refuse`, a draft refuses the send. Scheduler timing,
+(`draft-aware`, `openrig-urgent`, `urgent-only`, `queue-only` or `hold`). With `refuse`, a draft refuses the send. Scheduler timing,
 current parked-row eligibility and stop checks still apply. This changes message retries, not the idempotence of
 structured continuity actions such as creating a cutover baton.
 

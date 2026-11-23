@@ -14,7 +14,7 @@ It's the open-source system behind my AI civilization experiments.
 
 ![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
 
-**Start here:** [the guided first-use path](docs/reference/quickstart.md): install, talk to the kernel operator, then choose a team for your first useful change.
+**Start here:** [the guided first-use path](docs/reference/quickstart.md): install, talk to OpenRig's operator, then choose a team for your first useful change.
 
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
 
@@ -26,14 +26,22 @@ use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent codex
+# OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs --skill rigs --agent pi
 ```
 
-Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
-you what it will run and change before it does, install OpenRig, open the OpenRig view and pass your goal to
-OpenRig's operator.
+**OMP:** this pin installs the shared skill only. The `v0.7.21` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
+but complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in.
+
+Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already
+open), and say what you want built. The skill has your agent tell you what it will run and change before it does,
+install OpenRig, open the OpenRig view and pass your goal to OpenRig's operator. If Claude Code was already running
+when you added the skill, type `/reload-skills` first, or start
+a new session: a session doesn't see a skills folder created after it started.
 
 You need Node.js 22 or 24 (22 on Apple silicon), tmux, macOS or Linux (WSL2 on Windows), and Claude Code or Codex
 signed in. One provider is enough to start.
@@ -42,7 +50,7 @@ Already have OpenRig? Use the tag that matches `rig --version`, or upgrade first
 
 Prefer to type the commands yourself? [Install it yourself ↓](#install-it-yourself)
 
-Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then nvm's install command, for nvm v0.40.8 `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash` ([nvm's page](https://github.com/nvm-sh/nvm#install--update-script) has the newest), open a new terminal, and run `nvm install 22`. nvm itself needs no administrator password, and `npm install -g` then installs into your nvm folder. If nvm's installer says you need Apple's command line tools, run `xcode-select --install`, then its install command again. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup).
+Setting up Node.js on Linux, on a Mac where you aren't an administrator, or on Windows (WSL2)? See [Before you start](docs/reference/getting-started.md#before-you-start).
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
@@ -68,11 +76,11 @@ Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Co
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.7.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.21` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh
 ```
 
 If the last step isn't ready, the installer reports `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any reported Fix, then rerun `rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider sign-ins, sign in to each selected provider as below and continue.
@@ -367,7 +375,7 @@ Hono HTTP daemon
   SQLite + tmux + runtime adapters
 ```
 
-- **CLI**: Commands for both humans and agents to launch teams, inspect state, send messages, track owned work, and manage context.
+- **CLI**: Commands for both humans and agents to launch teams, inspect state, send messages, track tasks in the queue, and manage context.
 - **TUI**: Topology explorer, table and graph views, seat details, Specs, Projects, Terminals, Feed, and System. Navigate with the keyboard, mouse, or command bar.
 - **MCP**: Tools so agents can manage their own topology (`rig_up`, `rig_ps`, `rig_send`, `rig_chatroom_send`, etc.)
 - **Runtimes**: Native Claude Code and Codex sessions, terminal nodes, and Pi and Oh My Pi via RPC runners.
@@ -521,7 +529,7 @@ OpenRig is open source and self-hosted, with Claude Code and Codex in the same t
 - **Docs**: [openrig.dev/docs](https://openrig.dev/docs) ([documentation index for agents](https://openrig.dev/llms.txt))
 - **What's new**: [openrig.dev/whats-new](https://openrig.dev/whats-new) (every release, in plain words)
 - **Features**: [openrig.dev/features](https://openrig.dev/features)
-- **Integrations**: [openrig.dev/integrations](https://openrig.dev/integrations) (assistants, harnesses and environments, with setup and test status)
+- **Integrations**: [openrig.dev/integrations](https://openrig.dev/integrations) (coding agents, chat agents and the tools around them, with setup and test status)
 - **Blog**: [openrig.dev/blog](https://openrig.dev/blog) · [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
 - **Open Specification**: [openrig.dev/specs](https://openrig.dev/specs)
 - **Videos**: [youtube.com/@openrig](https://www.youtube.com/@openrig)

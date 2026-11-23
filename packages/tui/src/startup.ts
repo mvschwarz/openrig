@@ -163,6 +163,8 @@ export class StartupController {
       const failure = s.notice;
       await this.refresh();
       if (!confirmed) { s.notice = failure; s.detail = failure; this.changed(); }
+      // refresh() moves the page on; read it again rather than through the narrowed `s.page`.
+      else if (this.state.page === "rigs") { s.notice = daemonOnlyNotice(s.rigs); this.changed(); }
       return;
     }
     if (s.page === "rigs" && key === "k" && !s.rigs.some((r) => r.name === "kernel")) {
@@ -242,6 +244,14 @@ export class StartupController {
       this.state.notice = observed && observed.state !== "running" ? [observed.detail, ...warnings].join("\n") : notice;
     });
   }
+}
+
+/** After a daemon-only start: this start brought back no seat, and the existing way to bring one back is the rig list
+ *  here, where the kernel comes first. It says nothing about why any seat isn't running. */
+export function daemonOnlyNotice(rigs: Array<{ name: string }>): string {
+  return rigs.some((r) => r.name === "kernel")
+    ? "Daemon started; this start didn't start any seats. The kernel is listed first: choose it to see its seats and resume one."
+    : "Daemon started; this start didn't start any seats. Choose a rig, or press k to set up a kernel.";
 }
 
 export function startupLines(s: StartupState): Array<{ text: string; action?: Action }> {

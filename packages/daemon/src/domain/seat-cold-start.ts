@@ -19,8 +19,8 @@
 //   - the one revivable stop is a resource-reclaiming daemon stop: slice 2's idle reaper
 //     records itself as operator `daemon:seat-reaper` with reason `idle_reap` so new work
 //     CAN wake the seat again;
-//   - a rolled-back launch (`superseded` row, a failed start) is retryable, subject to
-//     the same failure backoff as any other attempt;
+//   - a rolled-back launch (`superseded` row, a failed start) is refused like an
+//     intentional stop — a failed start is never auto-revived (maintainer R1, 2026-11-20);
 //   - the rig is up: some OTHER seat of the same rig has a live tmux session — a down rig
 //     keeps today's whole-rig deferral semantics;
 //   - the seat's tmux session is really gone (re-probed here, not trusted from the
@@ -39,9 +39,8 @@ import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
 
 /** Minimum time between cold-start attempts for one seat. */
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
-/** Failure cap within the quiet window; observed liveness or expiry clears it. */
+/** Consecutive-failure cap; cleared only by observed liveness or a successful launch, never by time (R6). */
 export const COLD_START_MAX_CONSECUTIVE_FAILURES = 3;
-export const COLD_START_FAILURE_WINDOW_MS = 15 * 60_000;
 export const COLD_START_EVALUATION_TTL_MS = 1_000;
 
 /**
@@ -55,8 +54,8 @@ export const COLD_START_REVIVABLE_STOPS: ReadonlyArray<{ operator: string; reaso
   { operator: "daemon:seat-reaper", reason: "idle_reap" },
 ];
 
-/** Why a seat is stopped, from the daemon's own records. Only `dormant`, `failed_start` and
- *  `daemon_reclaim` may be woken; `intentional` carries the operator/reason for the log. */
+/** Why a seat is stopped, from the daemon's own records. Only `dormant` and `daemon_reclaim`
+ *  may be woken; `failed_start` and `intentional` are refused (the latter carries operator/reason for the log). */
 export type ColdStartStopIntent =
   | { kind: "dormant" }
   | { kind: "failed_start" }
@@ -103,7 +102,7 @@ function isRevivableStop(operator: string, reason: string): boolean {
  * | No row | dormant (never ran) | yes |
  * | Explicit stop + exact reaper/idle_reap attribution | daemon_reclaim | yes |
  * | Explicit stop + any other, legacy or absent attribution | intentional | no |
- * | Superseded, without explicit stop intent | failed_start | under backoff |
+ * | Superseded, without explicit stop intent | failed_start | no (refused) |
  * | Other row, without explicit stop intent (crash/lost session) | dormant | yes |
  *
  * All yes cases still require opt-in, an unchanged seat, no live target and a live peer.
@@ -170,8 +169,9 @@ export interface SeatColdStartDeps {
   deliveryGuard: Pick<SeatDeliveryGuard, "lifecycle">;
   /** The existing single-seat launch door (`rig launch`): resumes or fresh-primes per restore policy. */
   launchSingleNode: (rigId: string, logicalId: string) => Promise<ColdStartLaunchResult>;
-  /** Live tmux probe; the same adapter the queue's transport uses. */
-  hasSession: (sessionName: string) => Promise<boolean>;
+  /** Three-state tmux probe; the same adapter the queue's transport uses. Cold start may
+   * proceed only on positive absence — present and transport_unavailable both refuse. */
+  probeSession: (sessionName: string) => Promise<import("../adapters/tmux.js").SessionProbe>;
   /** Reads the seat's persisted rig spec (opt-in source of truth). */
   getNodeLaunchRecipe: (nodeId: string) => { rigSpec: RigSpec } | null;
   log?: (line: string) => void;
@@ -257,7 +257,10 @@ export class SeatColdStarter {
     const now = this.currentTime();
     try {
       if (!await this.eligible(seat, now)) return;
-      await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
+      let launchStarted = false;
+      try {
+        await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
+          launchStarted = true;
         // No await between the final eligibility read and the launch door. The door joins
         // this same lease, so a supported stop cannot commit in its launch preflight.
         const current = this.resolveSeat(seat.logicalId, seat.rigName, seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`);
@@ -265,6 +268,19 @@ export class SeatColdStarter {
           || current.logicalId !== seat.logicalId || current.boundSession !== seat.boundSession) return;
         const refusal = this.selectionRefusal(current) ?? this.ledgerRefuses(seat.nodeId, this.currentTime());
         if (refusal) { this.log(`${seat.logicalId}: not cold-starting: ${refusal}`); return; }
+        // B (#3173 review round 3): the live-peer proof ran before this lease, and we may
+        // have waited behind queued sends. A `rig down` in that window must not leave a
+        // reviving seat in a rig that was taken down — recheck the positive eligibility
+        // here, probes included.
+        if (!await this.livePeerExists(current.rigId, current.nodeId)) {
+          this.log(`${seat.logicalId}: not cold-starting: no other seat of this rig is live (rig down)`);
+          return;
+        }
+        // The awaited probes took time: the final stop and identity check happens after them.
+        const afterProbes = this.selectionRefusal(current)
+          ?? ((this.resolveSeat(seat.logicalId, seat.rigName, seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`)?.nodeId !== seat.nodeId)
+            ? "the seat changed during the probes" : null);
+        if (afterProbes) { this.log(`${seat.logicalId}: not cold-starting: ${afterProbes}`); return; }
         // Claim the attempt window BEFORE the (slow) launch. The in-memory join above covers
         // simultaneous arrivals; this row covers a second drain pass, a ladder retry, or a
         // restart mid-launch, so one dormant seat still gets exactly one launch per window.
@@ -278,6 +294,21 @@ export class SeatColdStarter {
         this.record(seat.nodeId, label, success ? "succeeded" : "failed", this.currentTime().toISOString());
         this.log(`${seat.logicalId}: ${label}`);
       });
+      } catch (err) {
+        // #3173 review: a refusal the guard raises BEFORE the launch callback runs (a draft
+        // sitting in the input box, a target that changed under us) is not a failed launch.
+        // It must not increment consecutive_failures — a seat that keeps refusing would
+        // otherwise cap itself out and stay blocked after the refusal clears.
+        const code = (err as { code?: string }).code;
+        const beforeLaunch = !launchStarted;
+        if (beforeLaunch && (code === "draft_aware_lifecycle" || code === "typing_guard_enabled"
+          || code === "guard_target_changed" || code === "guard_target_unknown")) {
+          this.record(seat.nodeId, `refused:${code}`, "refused", this.currentTime().toISOString());
+          this.log(`${seat.logicalId}: not cold-starting: ${code}`);
+          return;
+        }
+        throw err;
+      }
     } catch (err) {
       this.record(seat.nodeId, "failed:exception", "failed", this.currentTime().toISOString());
       this.log(`${seat.logicalId}: attempt threw: ${err instanceof Error ? err.message : String(err)}`);
@@ -290,18 +321,25 @@ export class SeatColdStarter {
       this.log(`${seat.logicalId}: not cold-starting: ${why}`);
       return false;
     };
-    const selection = this.selectionRefusal(seat);
-    if (selection) return refuse(selection);
+    // Opt-in first, silently: a default-off seat is the common case and must not log on
+    // every evaluation (maintainer opt). Only opted-in seats reach the logged gates below.
+    if (this.optInRefusal(seat)) return false;
+    const stop = this.stopRefusal(seat);
+    if (stop) return refuse(stop);
 
     // The queue said no receiver; verify — a live session means someone is there.
     const physical = seat.boundSession ?? `${seat.logicalId.replace(".", "-")}@${seat.rigName}`;
-    try {
-      if (await this.deps.hasSession(physical)) {
-        this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0, last_success_at=?, last_outcome='observed_running' WHERE node_id=?")
-          .run(now.toISOString(), seat.nodeId);
-        return refuse("seat's tmux session is live");
-      }
-    } catch { /* an unprobeable session is not positive liveness; continue */ }
+    const probe = await this.deps.probeSession(physical).catch(() => ({ state: "transport_unavailable" as const, cause: "probe threw" }));
+    // R5/#3173 review: only positive absence is evidence the seat is gone. Present means
+    // someone is there; a transport failure is not absence — fail closed either way.
+    if (probe.state === "present") {
+      this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0, last_success_at=?, last_outcome='observed_running' WHERE node_id=?")
+        .run(now.toISOString(), seat.nodeId);
+      return refuse("seat's tmux session is live");
+    }
+    if (probe.state !== "absent") {
+      return refuse("seat's tmux probe could not establish absence; leaving the seat alone");
+    }
 
     const ledger = this.ledgerRefuses(seat.nodeId, now);
     if (ledger === "interval") return refuse("an attempt was made recently");
@@ -309,22 +347,30 @@ export class SeatColdStarter {
 
     // The rig must be up: another seat of the same rig must be live in tmux. A down
     // rig keeps whole-rig restore semantics (the operator's/autoscaler's job).
+    if (await this.livePeerExists(seat.rigId, seat.nodeId)) return true;
+    return refuse("no other seat of this rig is live (rig down)");
+  }
+
+  /** Positive presence of another running seat of the rig, by awaited tmux probes. */
+  private async livePeerExists(rigId: string, excludeNodeId: string): Promise<boolean> {
     const peers = this.deps.db.prepare(`SELECT DISTINCT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
       WHERE n.rig_id = ? AND n.id != ? AND s.status = 'running'
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
       ORDER BY s.id DESC`)
-      .all(seat.rigId, seat.nodeId) as Array<{ session_name: string }>;
+      .all(rigId, excludeNodeId) as Array<{ session_name: string }>;
     for (const peer of peers) {
-      try { if (await this.deps.hasSession(peer.session_name)) return true; } catch { /* try the next peer */ }
+      const peerProbe = await this.deps.probeSession(peer.session_name).catch(() => null);
+      if (peerProbe?.state === "present") return true; /* otherwise try the next peer */
     }
-    return refuse("no other seat of this rig is live (rig down)");
+    return false;
   }
 
-  private selectionRefusal(seat: SeatRow): string | null {
-    // Opt-in: the seat must still be in its persisted rig spec with the flag set
-    // (member wins over pod default). No recipe — pre-recipe seat, terminal node,
-    // or a member removed from the spec (deleted seat) — never cold-starts.
+  /** Opt-in gate: the seat must still be in its persisted rig spec with the flag set
+   *  (member wins over pod default). No recipe — pre-recipe seat, terminal node, or a
+   *  member removed from the spec (deleted seat) — never cold-starts. Checked first and
+   *  silently in eligible(): a default-off seat is not noteworthy (maintainer opt). */
+  private optInRefusal(seat: SeatRow): string | null {
     const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
     const dot = seat.logicalId.indexOf(".");
     const podId = dot > 0 ? seat.logicalId.slice(0, dot) : seat.logicalId;
@@ -333,24 +379,36 @@ export class SeatColdStarter {
     const specMember = specPod?.members.find(member => member.id === memberId);
     if (!recipe || !specMember) return "seat is not in the current rig spec";
     if (!((specMember.coldStart ?? specPod?.coldStart) === true)) return "no cold_start opt-in for this seat";
+    return null;
+  }
 
-    // WHO stopped the seat decides whether new work may wake it (maintainer term 1).
+  /** WHO stopped the seat decides whether new work may wake it (maintainer term 1). */
+  private stopRefusal(seat: SeatRow): string | null {
     const stop = classifyColdStartStop(this.deps.db, seat.nodeId);
     if (stop.kind === "intentional") {
       return stop.operator
         ? `seat was stopped intentionally by '${stop.operator}'${stop.reason ? ` (${stop.reason})` : ""}`
         : "seat was stopped intentionally (no revivable daemon stop recorded)";
     }
+    if (stop.kind === "failed_start") {
+      return "seat's latest start failed (superseded launch); a failed start is never auto-revived";
+    }
     return null;
+  }
+
+  /** Combined gate for the pre-launch recheck (opt-in may have changed under the lease). */
+  private selectionRefusal(seat: SeatRow): string | null {
+    return this.optInRefusal(seat) ?? this.stopRefusal(seat);
   }
 
   /** Durable ledger: the attempt window opens at launch, then records the outcome.
    *  `in_flight` leaves the failure count alone: a crash mid-launch is neither a launch nor
    *  a proven failure, and the interval alone already prevents a second launch in the window. */
-  private record(nodeId: string, outcome: string, state: "in_flight" | "succeeded" | "failed", iso: string): void {
+  private record(nodeId: string, outcome: string, state: "in_flight" | "succeeded" | "failed" | "refused", iso: string): void {
     const existing = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     const failures = state === "succeeded" ? 0
       : state === "failed" ? (existing?.consecutive_failures ?? 0) + 1
+      : state === "refused" ? (existing?.consecutive_failures ?? 0)
       : (existing?.consecutive_failures ?? 0);
     const success = state === "succeeded";
     if (existing) {
@@ -366,11 +424,22 @@ export class SeatColdStarter {
   ledgerRefuses(nodeId: string, now: Date): "interval" | "failures" | null {
     const row = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     if (!row) return null;
-    // Queue wakes may miss an operator's successful run entirely. A bounded quiet
-    // window prevents that unobserved repair from leaving a permanent failure cap.
-    if (Date.parse(row.last_attempt_at) + COLD_START_FAILURE_WINDOW_MS <= now.getTime()) {
-      this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures=0 WHERE node_id=?").run(nodeId);
-      return null;
+    // R6: a failed or awaiting-decision attempt is never retried on a timer. The cap clears
+    // only when the seat is observed running (eligible()'s observed_running reset, which a
+    // person's manual launch also produces) or a launch succeeds — not by quiet-window expiry.
+    // A (#3173 review round 3): a session created after our last attempt means somebody
+    // relaunched the seat outside this ledger. Their fix must clear the cap, or the seat
+    // stays cold-start-blocked for good (eligibility never observes a running seat that
+    // a person launched). Times, not strings: created_at is SQLite datetime text,
+    // last_attempt_at is ISO — compare through julianday().
+    if (row.consecutive_failures > 0) {
+      const newer = this.deps.db.prepare(
+        "SELECT count(*) AS count FROM sessions WHERE node_id = ? AND created_at IS NOT NULL AND julianday(created_at) > julianday(?)",
+      ).get(nodeId, row.last_attempt_at) as { count: number };
+      if (newer.count > 0) {
+        this.deps.db.prepare("UPDATE seat_cold_starts SET consecutive_failures = 0, last_outcome = 'cleared:new_session' WHERE node_id = ?").run(nodeId);
+        row.consecutive_failures = 0;
+      }
     }
     if (row.consecutive_failures >= COLD_START_MAX_CONSECUTIVE_FAILURES) return "failures";
     if (Date.parse(row.last_attempt_at) + COLD_START_MIN_INTERVAL_MS > now.getTime()) return "interval";

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 import type { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
+import { TMUX_SERVER_SESSION_BUS } from "../src/tmux-server-start.js";
 
 // The daemon runs every `run(argv, legacy)` call as argv on POSIX. A legacy string that a shell would split
 // differently from its argv means the shell path and the argv path hand tmux different arguments. A real
@@ -56,8 +57,11 @@ function respond(cmd: string, failing: string[], composer = false): string {
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; nodeId?: string } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; nodeId?: string;
+  freshServer?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
+  // #3253: no server until `tmux -D` starts one, whose global environment holds the unusable bus address it was given.
+  let serverUp = !opts.freshServer;
   const fileOps: TmuxFileOps = {
     writeFile: async () => {},
     unlink: async () => {},
@@ -66,6 +70,11 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   };
   const adapter = new TmuxAdapter(async (cmd) => {
     execs.push(cmd);
+    if (!serverUp) {
+      if (/ -D /.test(cmd)) { serverUp = true; return ""; }
+      throw new Error(`Command failed: ${cmd}\nno server running on /tmp/tmux-1000/default`);
+    }
+    if (opts.freshServer && cmd === "tmux show-environment -g") return `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\nHOME=/h\n`;
     return respond(cmd, opts.failing ?? [], opts.composer);
   }, fileOps);
   if (opts.guard) {
@@ -102,10 +111,22 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   const calls: RunCall[] = [];
   const a = recordingAdapter(calls);
   await a.startServer();
+  // #3253: a start that made the server gives its panes the daemon's session bus back (Linux only).
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const saved = { bus: process.env.DBUS_SESSION_BUS_ADDRESS, manager: process.env.MANAGERPID };
+  Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+  process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/1 0/it's bus";
+  delete process.env.MANAGERPID;  // the start in the daemon's cgroup, whatever host runs the test
+  try { await recordingAdapter(calls, { freshServer: true }).startServer(); } finally {
+    Object.defineProperty(process, "platform", platform);
+    if (saved.bus === undefined) delete process.env.DBUS_SESSION_BUS_ADDRESS; else process.env.DBUS_SESSION_BUS_ADDRESS = saved.bus;
+    if (saved.manager === undefined) delete process.env.MANAGERPID; else process.env.MANAGERPID = saved.manager;
+  }
   await a.listSessions();
   await a.listWindows(SESSION);
   await a.listPanes(SESSION);
   await a.listPanes("=seat:1");
+  await a.serverStartTime(SESSION);
   await a.probeSession(SESSION);
   await a.hasSession(SESSION);
   await a.createSession(SESSION, "/w x", { PATH: "/a b:$HOME", Q: "it's" });

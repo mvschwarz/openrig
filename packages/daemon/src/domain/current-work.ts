@@ -254,27 +254,83 @@ export function inspectWorkNodeDirs(
   return { ok: true, matches: out, incomplete };
 }
 
+const SPEC_SETTLED_NS = 2_000_000_000n;
+const SPEC_ID_CACHE_ROOTS = 256;
+
+/** A SPEC.md's signature, as `CurrentModelReader.readFact` takes one: device, inode, size and nanosecond times. A file
+ *  changed in the last couple of seconds gets none, because a same-size edit within one coarse timestamp tick wouldn't
+ *  change it; that file is read every time until it settles. Anything but a regular file throws. */
+function specSignature(file: string): string | null {
+  const st = fs.statSync(file, { bigint: true });
+  if (!st.isFile()) throw new Error("not a regular file");
+  const changed = st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs;
+  if (BigInt(Date.now()) * 1_000_000n - changed < SPEC_SETTLED_NS) return null;
+  return [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(":");
+}
+
+/** Each root's SPEC.md frontmatter ids by directory, reused only while that file's signature is unchanged. Every call
+ *  still lists the root and stats each SPEC.md, so an edit, add, remove or rename shows on the next call. A root keeps
+ *  entries only for directories its last listing had, and the oldest root goes past the cap. */
+const specIds = new Map<string, Map<string, { signature: string; id: unknown }>>();
+
+/** How much the id cache holds (one root's entries when it's named), for tests of its bound. */
+export function workNodeIdCacheSizeForTests(root?: string): { roots: number; entries: number } {
+  let entries = 0;
+  for (const [cachedRoot, ids] of specIds) if (root === undefined || cachedRoot === root) entries += ids.size;
+  return { roots: specIds.size, entries };
+}
+
 export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
   } catch {
+    specIds.delete(root);
     return [];
   }
+  const previous = specIds.get(root);
+  const next = new Map<string, { signature: string; id: unknown }>();
   const out: Match[] = [];
   for (const dir of entries.sort()) {
+    const cached = previous?.get(dir);
     if (dir === wanted) {
       out.push({ dir, form: "directory name" });
+      if (cached) next.set(dir, cached);
       continue;
     }
-    let raw: string;
+    const file = path.join(root, dir, "SPEC.md");
+    let before: string | null = null;
     try {
-      raw = fs.readFileSync(path.join(root, dir, "SPEC.md"), "utf8");
+      before = specSignature(file);
     } catch {
-      continue;
+      // Gone, not a regular file or not statable: the read below decides, exactly as without the cache.
     }
-    if (parseFrontmatter(raw)["id"] === wanted) out.push({ dir, form: "frontmatter id" });
+    let id: unknown;
+    if (before !== null && cached?.signature === before) {
+      id = cached.id;
+      next.set(dir, cached);
+    } else {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      id = parseFrontmatter(raw)["id"];
+      // Keep it only if the file didn't change while it was read.
+      if (before !== null) {
+        try {
+          if (specSignature(file) === before) next.set(dir, { signature: before, id });
+        } catch {
+          // Changed under the read: don't keep it.
+        }
+      }
+    }
+    if (id === wanted) out.push({ dir, form: "frontmatter id" });
   }
+  specIds.delete(root);
+  if (specIds.size >= SPEC_ID_CACHE_ROOTS) specIds.delete(specIds.keys().next().value!);
+  specIds.set(root, next);
   return out;
 }
 
@@ -297,6 +353,12 @@ export type CreateScopeAdvisoryCode =
 export interface CreateScopeAdvisory {
   code: CreateScopeAdvisoryCode;
   message: string;
+}
+
+export interface CreateScopeAdvisoryContext {
+  verb: "handoff" | "handoff-and-complete";
+  tagSource: "inherited" | "explicit" | "unknown";
+  delivery?: "forwarded" | "in-process";
 }
 
 function displayScopeTag(raw: string): string | null {
@@ -357,31 +419,62 @@ export function skippedCreateScopeAdvisory(tags: string[] | null | undefined): C
   return scopeTags.length > 0 ? { status: "skipped", tags: scopeTags } : null;
 }
 
-export function toCreateScopeAdvisory(check: CreateScopeCheck): CreateScopeAdvisory {
+export function toCreateScopeAdvisory(check: CreateScopeCheck, context?: CreateScopeAdvisoryContext): CreateScopeAdvisory {
+  let advisory: CreateScopeAdvisory;
   switch (check.status) {
     case "unresolved":
-      return { code: "unresolved_scope",
+      advisory = { code: "unresolved_scope",
         message: `queue create scope check: ${displayScopeTag(check.tag) ?? check.tag} is unresolved (resolves to 0 directories); row was created.` };
+      break;
     case "ambiguous":
-      return { code: "ambiguous_scope",
+      advisory = { code: "ambiguous_scope",
         message: `queue create scope check: ${displayScopeTag(check.tag) ?? check.tag} is ambiguous (resolves to ${check.count} directories, cannot uniquely resolve); row was created.` };
+      break;
     case "empty":
-      return { code: "empty_scope",
+      advisory = { code: "empty_scope",
         message: `queue create scope check: ${check.tag} has an empty value; row was created.` };
+      break;
     case "conflict":
-      return { code: "conflicting_scope",
+      advisory = { code: "conflicting_scope",
         message: `queue create scope check: conflicting scope tags (${displayScopeTags(check.tags).join(", ")}); row was created.` };
+      break;
     case "unavailable": {
       const tags = displayScopeTags(check.tags).join(", ");
       const message = check.reason === "missing-mission"
         ? `queue create scope check unavailable (${tags}) without mission context: mission tag is missing; row was created.`
         : `queue create scope check unavailable (${tags}): could not run scope check on this host; row was created.`;
-      return { code: "scope_check_unavailable", message };
+      advisory = { code: "scope_check_unavailable", message };
+      break;
     }
     case "skipped":
-      return { code: "scope_check_skipped",
-        message: `queue create scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      if (context?.delivery === "in-process") {
+        advisory = { code: "scope_check_skipped",
+          message: `queue ${context.verb} scope check skipped for self-id re-drive (${displayScopeTags(check.tags).join(", ")}); successor was accepted in process.` };
+      } else if (context) {
+        advisory = { code: "scope_check_skipped",
+          message: `queue ${context.verb} scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      } else {
+        advisory = { code: "scope_check_skipped",
+          message: `queue create scope check skipped for cross-host write (${displayScopeTags(check.tags).join(", ")}); row was forwarded.` };
+      }
+      break;
+    default: {
+      const unreachable: never = check;
+      return unreachable;
+    }
   }
+  if (!context) return advisory;
+
+  const provenance = context.tagSource === "inherited"
+    ? "requested effective scope tags were inherited from the source item"
+    : context.tagSource === "explicit"
+      ? "requested effective scope tags came from explicit tags supplied on this handoff"
+      : "effective scope tag provenance is unknown";
+  const message = advisory.message.replace(/^queue create/, `queue ${context.verb}`);
+  return {
+    ...advisory,
+    message: `${message.slice(0, -1)}; ${provenance}.`,
+  };
 }
 
 /**
@@ -638,6 +731,17 @@ export interface WorkCandidates {
   /** Mission directories on this host, bounded, so an agent can name one without guessing. */
   missionsOnHost: string[];
   missionsOnHostTruncated: boolean;
+  /** The seat's selected project's missions, under that project's own missions root. The whoami route adds it when it
+   *  selects a healthy catalog project, so a seat whose project lives outside workspace.root can name one there. */
+  projectMissions?: ProjectMissions;
+}
+
+/** One project's mission directories, bounded as missionsOnHost is. */
+export interface ProjectMissions {
+  project: string;
+  missionsRoot: string;
+  names: string[];
+  truncated: boolean;
 }
 
 interface CandidateRow extends TaggedRow {
@@ -731,6 +835,11 @@ function listMissions(missionsRoot: string | null): { names: string[]; truncated
   } catch {
     return { names: [], truncated: false };
   }
+}
+
+/** A project's missions as the work packet lists them, read from the missions root its catalog entry resolves. */
+export function listProjectMissions(project: string, missionsRoot: string): ProjectMissions {
+  return { project, missionsRoot, ...listMissions(missionsRoot) };
 }
 
 export function deriveWorkCandidates(

@@ -114,7 +114,7 @@ export class TerminalPolicyStore {
       ...metadata, preset: saved.config.preset, label, helpers: saved.config.helpers, rules,
       rigDefault: { config: rigDefault ? parseTerminalPolicy(JSON.parse(rigDefault.config_json)) : CURRENT,
         actor: rigDefault?.actor ?? null, instruction: rigDefault?.instruction ?? "Current behaviour", appliesTo: "newly added seats only" },
-      supported: { compaction: runtime === "claude-code" ? "managed" : "not applicable", model: "saved setting; native effect unverified" },
+      supported: { compaction: runtime === "claude-code" || runtime === "pi" ? "managed" : "not applicable", model: "saved setting; native effect unverified" },
       enforced: ["managed compaction", "saved model and effort changes"],
       guidanceOnly: ["other terminal interventions", "standing instruction interpretation"],
       limits: "Cooperative caller attribution, not authentication. Unattributed callers retain current behaviour. No native permission, interruption-level or override change. OpenRig compaction authority and self behaviour remain allowed unless explicitly changed.",

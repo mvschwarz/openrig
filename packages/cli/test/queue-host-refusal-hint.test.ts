@@ -165,7 +165,7 @@ describe("queue writes refused for a host token the daemon doesn't know", () => 
       ["a remote's refusal", { status: 502, data: { error: "remote_queue_write_failed", hostId: "vps-b", failureClass: "remote-error", remoteStatus: 400, detail: "HTTP 400" } }],
       ["an auth failure", { status: 502, data: { error: "remote_queue_write_failed", hostId: "vps-b", failureClass: "auth-failed", detail: "401" } }],
       ["an internal error", { status: 500, data: { error: "internal_error", message: "boom" } }],
-      ["a 400 this list doesn't name", { status: 400, data: { error: "summary_evidence_not_persistable", message: "x" } }],
+      ["a 400 this list doesn't name", { status: 400, data: { error: "closure_fields_not_admitted", message: "x" } }],
     ];
     for (const [label, reply] of UNPROVEN) {
       it(`never says it after ${label}`, async () => {

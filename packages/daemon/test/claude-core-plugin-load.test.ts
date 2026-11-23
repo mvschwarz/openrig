@@ -32,7 +32,7 @@ import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js
 import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-plugin-env.js";
 import {
-  persistedPluginPaths, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
+  persistedPluginPaths, pluginPathsOf, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
 } from "../src/domain/claude-core-plugin-env.js";
 import { ensureSeatSkillPlugin, recordSeatSkillFollowing, recordSeatSkillWrite, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
@@ -70,7 +70,9 @@ function fakeTmux(created: Array<{ name: string; env: Record<string, string> | u
     createSession: async (name: string, _c?: string, env?: Record<string, string>) => { created.push({ name, env }); return { ok: true as const }; },
     setSessionEnv: async (_s: string, key: string, value: string) => { sessionEnvCalls.push(`set ${key}=${value}`); },
     unsetSessionEnv: async (_s: string, key: string) => { sessionEnvCalls.push(`unset ${key}`); },
-    killSession: async () => ({ ok: true as const }), listPanes: async () => [], listSessions: async () => [], listWindows: async () => [],
+    killSession: async () => ({ ok: true as const }), listSessions: async () => [], listWindows: async () => [],
+    listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+    getPanePid: async () => 4242, getPaneCommand: async () => "claude",
     hasSession: async () => false, sendText: async () => ({ ok: true as const }), sendKeys: async () => ({ ok: true as const }),
   } as unknown as TmuxAdapterType;
 }
@@ -176,6 +178,30 @@ describe("which Claude seats load the vendored plugin", () => {
       expect(pick(ids[4]!)).toBeUndefined(); // unreadable context
       expect(persistedPluginPaths(db, ids[0]!)).toEqual([vendored]);
       expect(persistedPluginPaths(db, ids[3]!)).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  // A workspace restored onto another home keeps each seat's saved selection, which names the old home's folder. A
+  // plugin selected under the OpenRig home (`openrig-home:`) is read in the home that holds pluginsDir, so a relaunch or
+  // handover still loads it; one saved as a path of its own is not rewritten.
+  it("reads a saved selection made under the OpenRig home in the running home, after the home moved", () => {
+    const { pluginsDir, vendored } = vendoredPlugins(root);
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("moved");
+      const [underHome, ownPath] = ["under-home", "own-path"].map((l) => rigRepo.addNode(rig.id, l, { runtime: "claude-code" }).id);
+      const save = (nodeId: string, entry: Record<string, string>) =>
+        db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')").run(nodeId, JSON.stringify([entry]));
+      save(underHome!, { category: "plugin", resourcePath: "openrig-home:plugins/openrig-core", absolutePath: "/old-home/.openrig/plugins/openrig-core" });
+      save(ownPath!, { category: "plugin", resourcePath: "/old-home/.openrig/plugins/openrig-core", absolutePath: "/old-home/.openrig/plugins/openrig-core" });
+      expect(seatCorePluginDir({ id: underHome!, runtime: "claude-code" }, db, undefined, pluginsDir)).toBe(vendored);
+      expect(persistedPluginPaths(db, underHome!, root)).toEqual([vendored]);
+      expect(seatCorePluginDir({ id: ownPath!, runtime: "claude-code" }, db, undefined, pluginsDir)).toBeUndefined();
+      expect(pluginPathsOf([{ category: "plugin", resourcePath: "openrig-home:plugins/openrig-core", absolutePath: "/old-home/.openrig/plugins/openrig-core" }], "/new-home/.openrig"))
+        .toEqual(["/new-home/.openrig/plugins/openrig-core"]);
     } finally {
       db.close();
     }
@@ -376,7 +402,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
   });
 
   function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>, opts: { fresh?: boolean; files?: unknown[]; realFs?: boolean;
-    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"] } = {}) {
+    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"]; armContinuity?: RestoreOrchestratorDeps["armContinuity"] } = {}) {
     const { pluginsDir } = vendoredPlugins(root);
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -430,7 +456,8 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
         const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, sessionEnv: { OPENRIG_HOME: "/state" }, pluginsDir });
         const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
           checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume: new ClaudeResumeAdapter(tmux),
-          codexResume: new CodexResumeAdapter(tmux), listProcesses, ...(opts.seatSkillSelection ? { seatSkillSelection: opts.seatSkillSelection } : {}) });
+          codexResume: new CodexResumeAdapter(tmux), listProcesses, ...(opts.seatSkillSelection ? { seatSkillSelection: opts.seatSkillSelection } : {}),
+          ...(opts.armContinuity ? { armContinuity: opts.armContinuity } : {}) });
         const project = adapter.project.bind(adapter);
         adapter.project = async (plan, b) => { projected.push(...plan.entries.map((e) => e.effectiveId)); return project(plan, b); };
         return await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter }, ...(opts.fresh ? { freshLogicalIds: ["test.c"] } : {}),
@@ -500,6 +527,27 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(seen).toBe("v2\n");
     expect(JSON.stringify(result)).toContain("Restore: test.c follows its skills' sources (on_restore: follow_source): refreshed infra-review");
     expect(JSON.stringify(result)).not.toContain("not substituted");
+  });
+
+  it("restore (fresh-primed): a seat started fresh by `rig up --existing --fresh` gets its continuity notice armed too (#3579)", async () => {
+    const armed: string[] = [];
+    const h = restoreHarness([], undefined, { fresh: true, realFs: true, armContinuity: async (_rig, nodeId) => { armed.push(nodeId); return null; } });
+    const out = await h.run();
+    expect(out.ok, JSON.stringify(out)).toBe(true);
+    const nodes = out.ok ? out.result.nodes : [];
+    expect(nodes[0]!.status).toBe("fresh-primed");
+    expect(armed).toEqual([nodes[0]!.nodeId]);
+  });
+
+  it("restore: a continuity notice that can't be armed is a warning on the restore, never a failure of the seat (#3579)", async () => {
+    const h = restoreHarness([], undefined, { fresh: true, realFs: true, armContinuity: async () => "continuity policy was not re-armed: spec unreadable" });
+    const out = await h.run();
+    expect(out.ok && out.result.nodes[0]!.status).toBe("fresh-primed");
+    expect(JSON.stringify(out)).toContain("continuity policy was not re-armed: spec unreadable");
+    const thrown = restoreHarness([], undefined, { fresh: true, realFs: true, armContinuity: async () => { throw new Error("boom"); } });
+    const second = await thrown.run();
+    expect(second.ok && second.result.nodes[0]!.status).toBe("fresh-primed");
+    expect(JSON.stringify(second)).toContain("continuity policy was not armed for test.c: boom");
   });
 
   it("restore (native resume): when today's selection can't be read, the seat keeps its saved skills and the restore says why", async () => {
@@ -608,6 +656,21 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     const own = restoreHarness([], { [PLUGIN_ENV]: OWN_LIST });
     await own.run();
     expect(own.created[0]).toMatchObject({ [PLUGIN_ENV]: OWN_LIST });
+  });
+
+  // The lost-host exercise: the snapshot was taken under /old-home, and the daemon now runs with its home at `root`.
+  it("restore onto a moved home: a plugin selected under the OpenRig home is the running home's, and the seat gets it", async () => {
+    const { vendored } = vendoredPlugins(root);
+    vi.stubEnv("OPENRIG_HOME", root);
+    try {
+      const moved = restoreHarness([{ category: "plugin", resourcePath: "openrig-home:plugins/openrig-core",
+        sourcePath: "/old-home/opt/openrig/daemon/specs/agents/shared", absolutePath: "/old-home/.openrig/plugins/openrig-core" }]);
+      await moved.run();
+      expect(moved.created).toHaveLength(1);
+      expect(moved.created[0]).toMatchObject({ [PLUGIN_ENV]: vendored });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -875,10 +938,11 @@ describe("the plugin's activity relay", () => {
     expect(posts.map((p) => p.url)).toEqual(["/api/activity/hooks"]);
   });
 
-  it("deduplicates a pinned settings interpreter with no Node on PATH", async () => {
+  // #3416: the settings relay OpenRig writes now starts with `exec`; one written by an earlier version doesn't.
+  it.each(["", "exec "])("deduplicates a pinned settings interpreter with no Node on PATH (prefix %j)", async prefix => {
     const quote = (value: string) => "'" + value.replace(/'/g, `'"'"'`) + "'";
     writeFileSync(join(project, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
-      type: "command", command: `${quote(process.execPath)} ${quote(settingsRelay)}`,
+      type: "command", command: `${prefix}${quote(process.execPath)} ${quote(settingsRelay)}`,
     }] }] } }));
     await run({ hook_event_name: "Stop" }, ["--from-plugin"], { PATH: "" });
     expect(posts).toEqual([]);

@@ -45,6 +45,7 @@ function clearEnv(): () => void {
     // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
     "OPENRIG_HOME", "RIGGED_HOME",
     "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_TERMINAL_FIXED_GEOMETRY", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -121,7 +122,9 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
 
   it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
     const expected = [
-      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms",
+      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms", "daemon.identity_poll_interval_ms",
+      // #3637 — how long a start waits for its child's readiness.
+      "daemon.start_readiness_wait_seconds",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",
@@ -149,6 +152,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines", "ui.timezone",
       "ui.enabled",
+      "ui.topology_remote_seats",
       // The legacy web client's cap on simultaneously-live terminals; the daemon store
       // resolves it, so `rig config` must accept it too.
       "ui.terminal.max_live_terminals",
@@ -354,6 +358,22 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false, draftDelivery: "deliver" });
     } finally {
       delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
+    }
+  });
+
+  it("resolves the daemon start wait from default, file and env, accepts waits above 600 up to the Node timer bound, and refuses the rest", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("daemon.start_readiness_wait_seconds")).toMatchObject({ value: 180, source: "default" });
+    expect(store.resolve().daemon.startReadinessWaitSeconds).toBe(180);
+    store.set("daemon.start_readiness_wait_seconds", "240");
+    expect(store.resolveWithSource("daemon.start_readiness_wait_seconds")).toMatchObject({ value: 240, source: "file" });
+    expect(store.resolve().daemon.startReadinessWaitSeconds).toBe(240);
+    process.env["OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS"] = "30";
+    expect(store.resolveWithSource("daemon.start_readiness_wait_seconds")).toMatchObject({ value: 30, source: "env" });
+    // Above 600 (a 15-minute start), up to the Node timer bound on the TUI's budget.
+    for (const value of ["900", "2147464"]) expect(() => store.set("daemon.start_readiness_wait_seconds", value)).not.toThrow();
+    for (const value of ["0", "2147465", "1.5", "45junk", "abc"]) {
+      expect(() => store.set("daemon.start_readiness_wait_seconds", value)).toThrow(/Invalid value for daemon\.start_readiness_wait_seconds/);
     }
   });
 
@@ -881,6 +901,13 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("ui.preview.default_lines defaults to 50", () => {
     const store = new ConfigStore(configPath);
     expect(store.get("ui.preview.default_lines")).toBe(50);
+  });
+
+  it("ui.topology_remote_seats defaults off and accepts a boolean", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("ui.topology_remote_seats")).toBe(false);
+    store.set("ui.topology_remote_seats", "true");
+    expect(store.get("ui.topology_remote_seats")).toBe(true);
   });
 
   it("ui.preview.* keys coerce numeric values from set", () => {

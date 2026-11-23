@@ -11,8 +11,8 @@ import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
-import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
-import { codexMemberEnvelope, observeCodexEnvelope, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
+import { codexMemberLaunch, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
+import { codexPolicyWarning, resolveCodexFilesystemHome, verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
@@ -40,6 +40,7 @@ interface CodexResumeOptions {
   readNetworkDefault?: CodexNetworkDefaultReader;
   /** launch.codex_login_shell: true keeps Codex's own login shells for tool commands. Absent: off. */
   codexLoginShell?: () => boolean;
+  verifyFilesystemPolicy?: CodexFilesystemVerifier;
   /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does, in the
    *  seat's own home when it has one. */
   ensureManagedConfig?: (codexHome?: string) => Promise<void>;
@@ -93,7 +94,17 @@ export class CodexResumeAdapter {
     if (wrapped && !this.options.seatLaunchEnvironment) {
       return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
-    const codexHome = seatCodexHome ?? this.options.codexHome;
+    const filesystem = codexPermissions && "filesystem" in codexPermissions ? codexPermissions : undefined;
+    const codexHome = seatCodexHome ?? this.options.codexHome ?? (filesystem ? resolveCodexFilesystemHome() : undefined);
+    let policyWarning: string | undefined;
+    if (filesystem) {
+      try {
+        const verified = await (this.options.verifyFilesystemPolicy ?? verifyCodexFilesystemPolicy)({ permissions: filesystem, cwd, codexHome, launchPath: this.options.launchPath, launchWrapper,
+          codexConfigProfile: codexConfigProfile?.trim() || undefined });
+        if (!verified.ok) return { ok: false, code: "resume_failed", message: verified.error };
+        if (!verified.verified) policyWarning = codexPolicyWarning(verified.reason);
+      } catch { policyWarning = codexPolicyWarning("Native Codex configuration reader failed"); }
+    }
 
     // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
     await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
@@ -120,15 +131,16 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const envelope = codexPermissions ? codexMemberEnvelope(codexPermissions) : undefined;
-    const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, process.env, resolvedPosture);
-    const appliedLaunch = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg("codex", envelope ? { nonInterruptive }
+    const choice = codexPermissions ? codexMemberLaunch(codexPermissions) : undefined;
+    const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = choice ? choice.observation : observeCodexSandbox(posture);
+    if (policyWarning) appliedLaunch.reason = policyWarning;
+    const postureArg = posture + operationalLaunchArg("codex", choice ? { nonInterruptive }
       : { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
     const readNetworkDefault = this.options.readNetworkDefault;
-    const networkArg = envelope ? "" : await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
+    const networkArg = choice ? "" : await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
       appliedLaunch, cwd, tmuxSessionName);
-    const workspaceArg = !envelope && teamPermissionDefault && !codexConfigProfile?.trim()
+    const workspaceArg = !choice && teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
     // The seat's own writable roots, as a launch gets them: its git metadata dirs (so it can still commit) and its topology
@@ -152,7 +164,7 @@ export class CodexResumeAdapter {
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const staged = this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...((filesystem ? codexHome : seatCodexHome) ? { codexHome: filesystem ? codexHome : seatCodexHome } : {}), ...(wrapped ? { launchWrapper: wrapped } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd;
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Codex resume preparation; no native command was sent." };
     const textResult = beforeNativeDispatch
@@ -164,7 +176,7 @@ export class CodexResumeAdapter {
 
     const result = await this.verifyResume(tmuxSessionName);
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut: daemonSupport.kind === "supported" } : appliedLaunch;
-    return result.ok ? { ...result, appliedLaunch: launchFacts } : result;
+    return result.ok ? { ...result, appliedLaunch: launchFacts, ...(policyWarning ? { warnings: [policyWarning] } : {}) } : result;
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native

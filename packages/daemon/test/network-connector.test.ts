@@ -14,7 +14,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { NetworkBindingStore, networkCredentialFile } from "../src/domain/network/network-bindings.js";
 import { Hono } from "hono";
-import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { connectMcpHub, HubError, hubFailure, type HubConnect, type HubItem, type HubSession } from "../src/domain/network/hub-client.js";
 import { networkRoutes } from "../src/routes/network.js";
 import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 
@@ -25,6 +26,7 @@ class FakeHub {
   readonly tokens: string[] = [];
   revoked = false;
   down = false;
+  settingUp = false;
   /** The next claim or close of these ids takes effect, then its answer is lost. */
   readonly loseClaimAnswer = new Set<string>();
   readonly loseCloseAnswer = new Set<string>();
@@ -46,6 +48,8 @@ class FakeHub {
     this.tokens.push(token);
     if (this.revoked) throw new HubError("revoked", "The hub refused this participant's credential.");
     if (this.down) throw new HubError("unavailable", "The hub couldn't be reached: connect ECONNREFUSED");
+    // The hub's own 503 answer while its grant authority can't serve the participant yet, as the SDK reports it.
+    if (this.settingUp) throw hubFailure(new StreamableHTTPError(503, `Error POSTing to endpoint: ${JSON.stringify({ error: "grant_authority_unavailable", message: "The grant authority can't answer now, so this request isn't served. Try again later." })}`));
     const get = (id: string) => {
       const item = this.items.get(id);
       if (!item) throw new HubError("refused", `qitem_not_found ${id}`);
@@ -126,9 +130,17 @@ describe("network connector", () => {
     // Where it came from is read before the requester's own words.
     expect(local!.body!.split("\n")[0]).toBe("From assistant@team through the network hub https://hub.example/mcp, as alex@team (hub item hub-1).");
     expect(local!.body).toContain("Summarize the release notes");
+    // After the requester's words: what goes back to them, that sharing instructions apply, and how to answer, in that order.
+    const after = local!.body!.split("\n---\n")[1]!.split("\n");
+    expect(after).toEqual([
+      "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
+      "Put in your answer only what this seat's sharing instructions allow.",
+      `Answer by closing this item with your result: rig queue update ${local!.qitemId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
+      "OpenRig returns the resolution to the hub item.",
+    ]);
     // The hub claim is custody, not pickup: the item says it's queued and not picked up.
     expect(hub.items.get("hub-1")).toMatchObject({ state: "in-progress" });
-    expect(hub.items.get("hub-1")!.notes).toEqual([`Queued for the connected local seat as ${local!.qitemId}. Not picked up yet.`]);
+    expect(hub.items.get("hub-1")!.notes).toEqual(["Queued for the connected local seat. Not picked up yet."]);
     expect(bindings.get(b.id)!.lastContactAt).not.toBeNull();
 
     await pass(b.id);
@@ -228,6 +240,65 @@ describe("network connector", () => {
     expect(bindings.get(b.id)!.lastError).toBeNull();
   });
 
+  const SETTING_UP = "The network is still finishing setup for this agent. Try again in a moment.";
+  const after = (b: { id: string }, ms: number) => new Date(Date.parse(bindings.get(b.id)!.createdAt) + ms);
+
+  it("only the hub's 503 grant_authority_unavailable answer counts as the network still setting up", () => {
+    const body = JSON.stringify({ error: "grant_authority_unavailable", message: "Try again later." });
+    expect(hubFailure(new StreamableHTTPError(503, `Error POSTing to endpoint: ${body}`))).toMatchObject({ kind: "unavailable", code: "grant_authority_unavailable" });
+    expect(hubFailure(new StreamableHTTPError(500, `Error POSTing to endpoint: ${body}`)).code).toBeUndefined();
+    expect(hubFailure(new StreamableHTTPError(503, "Error POSTing to endpoint: Service Unavailable")).code).toBeUndefined();
+    expect(hubFailure(new Error("connect ECONNREFUSED")).code).toBeUndefined();
+  });
+
+  it("a new connection the network is still setting up says so, is asked again in 5 s, and then makes contact", async () => {
+    const b = bind();
+    hub.settingUp = true;
+    let now = after(b, 1_000);
+    const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+    await service.round();
+    expect(bindings.get(b.id)).toMatchObject({ state: "active", lastContactAt: null, lastError: SETTING_UP });
+    expect(service.snapshot().bindings[0]).toMatchObject({ nextPassAt: new Date(now.getTime() + 5_000).toISOString(), backoffMs: 30_000,
+      lastPass: expect.objectContaining({ error: "unavailable", settingUp: true }) });
+    const attempts = hub.tokens.length;
+    now = new Date(now.getTime() + 4_999);
+    await service.round();
+    expect(hub.tokens.length).toBe(attempts);
+    now = new Date(now.getTime() + 1);
+    await service.round();
+    expect(hub.tokens.length).toBe(attempts + 1);
+    hub.settingUp = false;
+    hub.add("hub-setup");
+    now = new Date(now.getTime() + 5_000);
+    await service.round();
+    expect(bindings.get(b.id)!.lastError).toBeNull();
+    expect(bindings.get(b.id)!.lastContactAt).not.toBeNull();
+    expect(runs("hub-setup")).toHaveLength(1);
+    expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 30_000, nextPassAt: new Date(now.getTime() + 30_000).toISOString() });
+  });
+
+  it("a minute after connect, the same answer backs off as before, and still says setup is finishing", async () => {
+    const b = bind();
+    hub.settingUp = true;
+    const now = after(b, 60_000);
+    const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+    await service.round();
+    expect(bindings.get(b.id)!.lastError).toBe(SETTING_UP);
+    expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 60_000, nextPassAt: new Date(now.getTime() + 60_000).toISOString() });
+  });
+
+  it("a binding that has had contact keeps the hub's own words and its backoff for the same answer", async () => {
+    const b = bind();
+    await pass(b.id);
+    hub.settingUp = true;
+    const now = after(b, 1_000);
+    const service = new NetworkConnectorService({ ...deps, now: () => now }, { intervalMs: 30_000, random: () => 0.5 });
+    await service.round();
+    expect(bindings.get(b.id)!.lastError).toMatch(/^The hub couldn't be reached: .*grant_authority_unavailable/);
+    expect(service.snapshot().bindings[0]).toMatchObject({ backoffMs: 60_000 });
+    expect(service.snapshot().bindings[0]!.lastPass!.settingUp).toBeUndefined();
+  });
+
   it("a local item whose record is gone reads unknown on the hub and is never run again", async () => {
     const b = bind();
     hub.add("hub-7");
@@ -235,7 +306,7 @@ describe("network connector", () => {
     const [local] = runs("hub-7");
     db.prepare("DELETE FROM queue_items WHERE qitem_id = ?").run(local!.qitemId);
     expect(await pass(b.id)).toMatchObject({ unknown: 1 });
-    expect(hub.items.get("hub-7")!.notes.at(-1)).toBe(`This item's local record (${local!.qitemId}) is gone, so whether it ran is unknown. It won't be run again.`);
+    expect(hub.items.get("hub-7")!.notes.at(-1)).toBe("This item's local record is gone, so whether it ran is unknown. It won't be run again.");
     expect(hub.items.get("hub-7")!.state).toBe("in-progress");
     await pass(b.id);
     expect(runs("hub-7")).toHaveLength(0);
@@ -342,7 +413,7 @@ describe("network connector", () => {
     expect(hub.items.get("hub-h2")).toMatchObject({ state: "failed", closureReason: null, resolution: "The build broke." });
     expect(hub.items.get("hub-h3")).toMatchObject({ state: "done", closureReason: "denied", resolution: "Not mine to do." });
     expect(hub.items.get("hub-h4")).toMatchObject({ state: "in-progress" });
-    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe(`This item was handed on from ${local("hub-h4").qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
   });
 
   it("a disconnect while a hub answer is pending starts no local work, and work already queued stays", async () => {
@@ -376,7 +447,7 @@ describe("network connector", () => {
     expect(runs("r-gone")).toHaveLength(0);
     expect(hub.items.get("r-picked")!.notes.at(-1)).toMatch(/^Picked up by the local seat at /);
     expect(hub.items.get("r-done")).toMatchObject({ state: "done", resolution: "Finished before the reconnect." });
-    expect(hub.items.get("r-gone")!.notes.at(-1)).toBe(`This item's local record (${gone}) is gone, so whether it ran is unknown. It won't be run again.`);
+    expect(hub.items.get("r-gone")!.notes.at(-1)).toBe("This item's local record is gone, so whether it ran is unknown. It won't be run again.");
     expect(db.prepare("SELECT DISTINCT binding_id FROM network_receipts").all()).toEqual([{ binding_id: second.id }]);
     await pass(second.id);
     expect(runs("r-gone")).toHaveLength(0);
@@ -390,7 +461,7 @@ describe("network connector", () => {
     expect(await pass(b.id)).toMatchObject({ taken: 1, error: "unavailable" });
     expect(hub.items.get("hub-n1")!.notes).toEqual([]);
     await pass(b.id);
-    expect(hub.items.get("hub-n1")!.notes).toEqual([`Queued for the connected local seat as ${runs("hub-n1")[0]!.qitemId}. Not picked up yet.`]);
+    expect(hub.items.get("hub-n1")!.notes).toEqual(["Queued for the connected local seat. Not picked up yet."]);
 
     // An id used before and erased: the queue refuses it, so whether it ran is unknown.
     hub.add("hub-n2");
@@ -488,6 +559,43 @@ describe("network connector", () => {
     await pass(b.id);
     expect(hub.items.get("hub-w1")!.resolution).toBe("Closed without a stated result.");
     expect(hub.items.get("hub-w2")!.resolution).toBe("Done; the notes are in the item.");
+  });
+
+  it("a handoff-and-complete close sends the closer's own note, never the note OpenRig writes when it gives none", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    hub.add("hub-c2");
+    await pass(b.id);
+    const [c1] = runs("hub-c1");
+    const [c2] = runs("hub-c2");
+    // With no note of the closer's, the queue writes "handoff-and-complete to review@lab", which names a local seat.
+    await repo.handoffAndComplete({ qitemId: c1!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    await repo.handoffAndComplete({ qitemId: c2!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false,
+      transitionNote: "Done here; the review is a separate step." });
+    await pass(b.id);
+    expect(hub.items.get("hub-c1")!.resolution).toBe("Closed without a stated result.");
+    expect(hub.items.get("hub-c2")!.resolution).toBe("Done here; the review is a separate step.");
+  });
+
+  it("a cross-host handoff-and-complete close sends the closer's own note, never the cross-host note the queue writes", async () => {
+    const b = bind();
+    for (const id of ["hub-x1", "hub-x2", "hub-x3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    // Forwarded to another host and completed here: with no note of the closer's, the queue writes
+    // "cross-host handoff to review@lab", and adds what it overrode when a claim was made while the handoff was forwarded.
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x1").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-1@vps-b", terminalState: "done" });
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x2").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-2@vps-b", terminalState: "done", transitionNote: "Done here; the review runs on the other host." });
+    repo.claim({ qitemId: local("hub-x3").qitemId, destinationSession: "dev-impl@lab" });
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x3").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-3@vps-b", terminalState: "done", claimedAtBeforeForward: null });
+    expect(repo.closingTransition(local("hub-x3").qitemId, "done")?.transitionNote).toMatch(/^cross-host handoff to review@lab \(this overrode /);
+    await pass(b.id);
+    expect.soft(hub.items.get("hub-x1")!.resolution, "hub-x1").toBe("Closed without a stated result.");
+    expect.soft(hub.items.get("hub-x2")!.resolution, "hub-x2").toBe("Done here; the review runs on the other host.");
+    expect.soft(hub.items.get("hub-x3")!.resolution, "hub-x3").toBe("Closed without a stated result.");
   });
 
   it("a failure here is recorded as local, not as the hub's", async () => {

@@ -142,11 +142,15 @@ describe("config routes (User Settings v0)", () => {
     // + 1 retention.events_days (the history-only event types of events; default 0 = keep).
     // + 2 retention.closed_content_days, retention.closed_metadata_days (closed-work erasure; default 0 = keep).
     // + 1 retention.erasure_ledger (queue erasure's replay ledger; default empty = none).
-    // + 6 policies.seat_scale.* (the idle-seat reaper's kill switch, observe flag, threshold, cap, protected and opt-in rigs).
-    expect(Object.keys(body.settings).length).toBe(111);
+    // + 1 ui.topology_remote_seats (read a remote rig's seats in the TUI topology; default off).
     // + 1 output.rebuild_recaps (optional rebuild briefing preview; default 3).
+    // + 1 daemon.identity_poll_interval_ms (#3146 the identity reconciler's cadence; startup-only, default 5000).
+    // + 1 daemon.start_readiness_wait_seconds (#3637 how long a start waits for its child's readiness; default 180).
+    expect(Object.keys(body.settings).length).toBe(114); // main's final count + 6 policies.seat_scale keys
+    expect(body.settings["daemon.identity_poll_interval_ms"]).toMatchObject({ value: 5000, source: "default", defaultValue: 5000 });
     expect(body.settings["output.rebuild_recaps"]).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
+    expect(body.settings["ui.topology_remote_seats"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["transport.draft_delivery"]).toMatchObject({ value: "deliver", source: "default", defaultValue: "deliver" });
     expect(body.settings["retention.events_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });
     expect(body.settings["retention.closed_content_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });

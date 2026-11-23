@@ -87,8 +87,24 @@ UNKNOWN is `{ "status": "unknown", "reason": "..." }`; older daemons may yield
 its status and occupant generation. Human output and roster reports use the full
 labelled observation.
 
+Daemon node listings and `rig ps --nodes --json` also carry `remoteControl`: the Claude Code Remote Control
+session a Claude seat's own hooks last reported, as `{ "sessionId": "session_...", "observedAt": "..." }`.
+Claude Code sets `CLAUDE_CODE_BRIDGE_SESSION_ID` in its hook subprocesses while Remote Control is connected
+(documented from 2.1.199), and the activity relay reports it on the hook events it already sends; there is no
+separate watcher and no transcript read. The seat's conversation is then
+`https://claude.ai/code/<sessionId>`. It is a **last seen** observation with its time, not proof of a live
+connection: an idle seat's value ages, and a disconnect or a replaced session is learned on the next hook.
+`sessionId: null` means a later hook of the same occupant and conversation saw no session (a disconnect seen).
+`null`, or the key missing in compact JSON or from an older daemon, means no observation applies: never reported,
+a Codex seat, a Claude that doesn't set the variable, or one recorded for an earlier occupant or conversation.
+A hook that sees no variable is never taken as a disconnect on its own, and an earlier occupant's link is never
+shown as current.
+
 A member marked `"hosted": true` is a hosted member: a tool outside the terminal that reaches the team over MCP, with no node or pane.
 `rig_team` lists it with its capabilities and caveat, no pane and activity unknown, unless its seat is one of the rig's nodes.
+For a caller on an external grant, a node seat on a roster keeps its own `rig_team` entry, with that entry's label,
+capabilities, `use_when`, caveat and presence added, so an assistant can see a disconnected seat for what it is. A seat
+on no roster reads as before, and so does every seat for an internal caller.
 `show` and `find` say it's hosted rather than unmatched. See [Hosted members](hosted-members.md).
 Its entry can declare `wake.webhook`, the secret names for a trigger OpenRig rings when work lands for it
 (see [Ring it when work lands](hosted-members.md#ring-it-when-work-lands)).
@@ -97,3 +113,55 @@ an hourly schedule is `60`), or `check_in_on_request: true` when it checks in on
 its person set up, not something OpenRig observes. With neither, its check-in status reads unknown: OpenRig doesn't
 assume a cadence. A value that can't be used doesn't stop the roster loading: that member's check-in
 status reads unknown, with the reason. See [Check-in status](hosted-members.md#check-in-status).
+
+Any member can declare a `label`: how the person knows it, which an assistant can say back, such as
+`"claude (Sam's assistant, invited)"`. It's plain text of at most 200 characters, with no control characters, line or
+paragraph separators, bidirectional embeddings, overrides or isolates, word joiner or invisible operators (U+2060 to
+U+2064), byte-order mark (U+FEFF), or angle brackets. The zero-width space, the zero-width joiner and non-joiner, and
+the direction marks are allowed, as names need them. A label that breaks those rules doesn't stop the roster
+loading: it's ignored with `label_problem`, and the member is named by its seat as before. An external caller's entry
+carries that `label_problem`, so an unusable label doesn't read as absent.
+
+A member whose owner says it takes no requests declares `takes_requests: false`, with an optional `takes_requests_note`
+saying why in plain text (the label rule). `rig_team` shows it as `takesRequests: false` and `takesRequestsNote` on that
+entry, so a sender's assistant can choose another before sending. Work sent to it is still written:
+`rig_queue_create` and `rig_queue_handoff` answer as before, and add `requestsAdvisory` with the note, so the sender
+can send it elsewhere. When some rosters can't be read, or this daemon's host id isn't known yet, `requestsAdvisory`
+says whether it takes requests isn't known, and the write goes ahead. A `takes_requests` that isn't `true` or `false`,
+or a note that breaks the label rule or comes without `takes_requests: false`, doesn't stop the roster loading:
+`takes_requests_problem` says why, and an unusable note leaves the flag in place.
+
+A member can also carry `app`, which client the participant uses (such as `chatgpt`, `claude`, `claude-code`, `codex`,
+`hermes`, `openrig` or `studio`), and `kind`, what kind of participant it is (`persistent` or `shared`), as the service
+that issued its access recorded them. Each is a short lowercase token: a letter, then up to 31 lowercase letters, digits
+or hyphens. OpenRig passes the value through as recorded and doesn't keep its own list: the issuing service owns the
+values. `rig_team` shows them as `participant: { app, kind }` on that member's entry, apart from a seat's own `kind`
+(its node kind). Absent or empty is unknown; neither is inferred from a name or label. A value that isn't a token is
+dropped on its own, `participant_problem` (`participantProblem` in `rig_team`) says why, and the roster still loads.
+
+A member can also declare `lead_of`, the team it's the entry point for, as a plain name of up to 40 characters. Where
+the daemon names no single lead (no `delegates_to` root, several, or one with no session) and exactly one entry of the
+rig declares it, `rig_team` shows that entry as `lead: { session, logicalId, declared: true, team }`, with the note
+"`<team>`'s entry point: send work for that team here. It doesn't manage this network or its other participants." If
+some rosters couldn't be read, the note adds that another entry point may be declared. A lead the daemon names always
+stays the lead. With several declarations there's no lead, and the note names them. The same seat declaring the same
+team in more than one roster, under either of its names, counts once; one seat declaring two teams counts as several.
+It's context only: nothing escalates or routes to a declared lead. A value that isn't a plain name is dropped,
+`lead_of_problem` says why, and the roster still loads.
+
+The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
+rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
+external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. A version 1 roster may
+omit `name` or set it to `""`; then `rig.displayName` is omitted, without a name warning or a stand-in name. Other roster
+validation is unchanged. Older daemons still require a non-empty name. A non-empty name follows the
+label rule; one that breaks it isn't shown, and
+`rig.displayNameProblem` says why. When an external caller's default list of its own open items is empty,
+`rig_queue_list` adds a line its assistant can repeat, such as
+`No open requests are addressed to you on the team "Sam's team".` (a list of every state says `No requests …`).
+Without an authored team name, or with a name that can't be shown, there's no display name, and the line says
+`on your OpenRig team`.
+
+Labels, names and caveats are as the roster's writer last authored them, not live observations. Presence is OpenRig's
+own reading. When some rosters can't be read, or this daemon's host id isn't known yet, `rig_team` says so in
+`hostedMembersNote`: hosted members, and the roster entries of the team's seats, may be missing. The seats themselves
+are still listed.

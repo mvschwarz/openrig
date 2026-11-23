@@ -55,6 +55,9 @@ if [ "$1 $2" = "queue whoami" ]; then
 fi
 if [ "$1 $2" = "whoami --json" ]; then printf '{"identity":{"rigName":"demo","sessionName":"builder@demo"}}\\n'; exit 0; fi
 if [ "$1 $2" = "config --json" ]; then printf '{}'; exit 0; fi
+if [ "$1 $2 $3" = "scope mission show" ]; then
+  case "$4" in */release-a) if [ -n "$RIG_PARENT_REPLY" ]; then printf '%s' "$RIG_PARENT_REPLY"; else printf '{"mission":{"parentChain":[],"parentGap":null}}'; fi;; *) printf '{"mission":{"parentChain":[],"parentGap":null}}';; esac; exit 0
+fi
 if [ "$1 $2" = "scope resolve-notes" ]; then
   if [ -r "$3/NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"NOTES.md"}}\\n' "$3/NOTES.md"; exit 0; fi
   printf '{"ok":true,"resolution":null}\\n'; exit 0
@@ -72,7 +75,7 @@ exit 1
     OPENRIG_REFOCUS_NOTES_MAX_AGE_DAYS: undefined,
     RIG_CALL_LOG: calls,
   };
-  const trace = (args: string[], evidence?: unknown, extra: NodeJS.ProcessEnv = {}) => spawnSync("python3", [TRACE, ...args], {
+  const trace = (args: string[], evidence?: unknown, extra: NodeJS.ProcessEnv = {}) => spawnSync(process.env.OPENRIG_TEST_PYTHON || "python3", [TRACE, ...args], {
     encoding: "utf8", env: { ...env, ...extra }, input: evidence === undefined ? "" : JSON.stringify(evidence),
   });
   return { root, workspace, missions, topology, seat, slice, bin, env, trace,
@@ -238,6 +241,77 @@ describe("frontmatterIntent — folded and literal intents", () => {
 });
 
 describe("trace-to-root --packet — the work packet as text", () => {
+  it("keeps the age cue for old progress without a current-state section", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "PROGRESS.md"), "---\nupdated: 2020-01-02\n---\n# Progress\n\n## Notes\n\nOld work\n", "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("OLD NOTES");
+    expect(result.stdout).not.toContain("CURRENT STATE —");
+  });
+
+  it.each([
+    '"progress_rail": readme-only\n"current_state_updated": "2020-01-02T03:04:05.000Z"',
+    '{progress_rail: readme-only, current_state_updated: "2020-01-02T03:04:05.000Z"}',
+  ])("parses quoted and flow YAML metadata: %s", (frontmatter) => {
+    const w = world();
+    writeFileSync(join(w.slice, "SPEC.md"), `---\n${frontmatter}\n---\n# Slice\n\n## Current state ##\n\nReady\n`, "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout, result.stdout).toContain("PROGRESS · SPEC.md");
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Ready");
+  });
+
+  it("reports the current-state timestamp instead of the file modification time", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "PROGRESS.md"), '---\ncurrent_state_updated: "2020-01-02T03:04:05.000Z"\n---\n# Progress\n\n## Current state\n\nWaiting\n', "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Waiting");
+  });
+  it("includes a readme-only rail in the work packet", () => {
+    const w = world();
+    writeFileSync(join(w.slice, "SPEC.md"), '---\nintent: Work\nprogress_rail: readme-only\ncurrent_state_updated: "2020-01-02T03:04:05.000Z"\n---\n# Slice\n\n## Current state\n\nReady\n', "utf8");
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("PROGRESS · SPEC.md");
+    expect(result.stdout).toContain("CURRENT STATE — written 2020-01-02T03:04:05.000Z");
+    expect(result.stdout).toContain("Ready");
+  });
+  it("traces the logical parent intent, not just filesystem ancestors", () => {
+    const w = world();
+    writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
+    const reply = JSON.stringify({ mission: { parentChain: [{ id: "M.2", path: join(w.missions, "release-b"), kind: "mission", intent: "Ship B" }], parentGap: null } });
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", w.slice], undefined, { RIG_PARENT_REPLY: reply });
+    expect(result.stdout).toContain("PARENT · M.2");
+    expect(result.stdout).toContain("intent: Ship B");
+  });
+  it("selects the project workspace for a nested missions root", () => {
+    const w = world();
+    const nested = join(w.workspace, "internal", "nested");
+    const child = join(nested, "release-a");
+    const parent = join(nested, "release-b");
+    mkdirSync(child, { recursive: true }); mkdirSync(parent, { recursive: true });
+    writeFileSync(join(w.workspace, "project.yaml"), "missions:\n  root: internal/nested\n");
+    writeFileSync(join(child, "SPEC.md"), "---\nintent: Child\n---\n");
+    writeFileSync(join(child, "mission.yaml"), "metadata:\n  parent: M.2\n");
+    const reply = JSON.stringify({ mission: { parentChain: [{ id: "M.2", path: parent, kind: "mission", intent: "Parent" }], parentGap: null } });
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", child], undefined, { RIG_PARENT_REPLY: reply });
+    expect(result.stdout).toContain("PARENT · M.2");
+    expect(w.calls()).toContain(`--workspace ${w.workspace} --json`);
+  });
+  it("does not select a project above the selected work root", () => {
+    const w = world();
+    writeFileSync(join(w.root, "project.yaml"), "missions:\n  root: outside\n");
+    writeFileSync(join(w.missions, "release-a", "mission.yaml"), "metadata:\n  parent: M.2\n");
+    const reply = JSON.stringify({ mission: { parentChain: [{ id: "M.2", path: join(w.missions, "release-b"), kind: "mission", intent: "Parent" }], parentGap: null } });
+    const result = w.trace(["--trees", "work", "--packet", "--work-start", join(w.missions, "release-a")], undefined, { RIG_PARENT_REPLY: reply });
+    expect(result.stdout).toContain("PARENT · M.2");
+    expect(w.calls()).toContain(`--workspace ${w.missions} --json`);
+    expect(w.calls()).not.toContain(`--workspace ${w.root} --json`);
+  });
   it("shows one direct candidate as the work, labelled with its source, without a root fallback (W2)", () => {
     const w = world();
     const evidence = deriveWorkCandidates([{ qitemId: "q-1", state: "in-progress", tags: ["mission:release-a"] }], w.missions, nothingElse);

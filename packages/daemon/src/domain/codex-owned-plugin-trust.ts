@@ -79,10 +79,14 @@ export function codexLegacyPluginTrustPath(configPath: string): string {
 interface OwnedApproval { schema: 1; plugin: string; contentHash: string; declarations: Record<string, string> }
 export const ownedCodexApprovalPath = (configPath: string) => path.join(path.dirname(configPath), ".openrig-core-hook-trust.json");
 
-/** No native baseline is changed. Existing declarations must already be approved; only content approval may advance. */
+/**
+ * No native baseline is changed. Content approval advances for approved declarations. A declaration changed by a new
+ * shipped bundle is renewed only from OpenRig's own record (#17): every approval must still equal the recorded
+ * declaration and content. `trustedHashes` names the declarations to rewrite; `hashes` the content approvals.
+ */
 export function planOwnedCodexContentApproval(input: {
   configPath: string; content: string; layers: CodexConfigLayerRead[]; shipped: string; installed: string; freshGrant?: boolean;
-}): { hashes: Record<string, string>; approval: OwnedApproval } | undefined {
+}): { hashes: Record<string, string>; trustedHashes: Record<string, string>; approval: OwnedApproval } | undefined {
   try {
     if (codexPluginContentHash(input.shipped, true) !== codexPluginContentHash(input.installed, true)) return;
     // The trees just matched byte for byte, so approve the shipped bytes rather than a second read of the cache.
@@ -111,26 +115,41 @@ export function planOwnedCodexContentApproval(input: {
     const states = doc.hooks?.state ?? {};
     for (const [key, hash] of Object.entries(declarations)) {
       const state = states[key];
-      if (!state || (state.enabled !== undefined && state.enabled !== true) || state.trusted_hash !== hash
+      if (!state || (state.enabled !== undefined && state.enabled !== true) || typeof state.trusted_hash !== "string"
         || Object.keys(state).some(field => !["enabled", "trusted_hash", "trusted_content_hash"].includes(field))
         || findTomlTable(input.content.split("\n"), ["hooks", "state", key]) < 0
         || docs.some(layer => otherChoice(layer.doc, key, layer.path !== input.configPath))) return;
     }
     const approval: OwnedApproval = { schema: 1, plugin: CODEX_CORE_PLUGIN_KEY, contentHash, declarations };
     const hashes = Object.fromEntries(Object.keys(declarations).map(key => [key, contentHash]));
-    if (input.freshGrant) return { hashes, approval };
-    if (Object.keys(declarations).every(key => states[key].trusted_content_hash === contentHash)) return { hashes: {}, approval };
+    const changed = Object.entries(declarations).filter(([key, hash]) => states[key].trusted_hash !== hash);
+    const parseRecord = (saved: string): OwnedApproval | undefined => {
+      const previous: OwnedApproval = JSON.parse(saved);
+      return previous.schema === 1 && previous.plugin === CODEX_CORE_PLUGIN_KEY && /^sha256:[a-f0-9]{64}$/.test(previous.contentHash)
+        && Object.keys(previous.declarations).length === 6 ? previous : undefined;
+    };
+    if (changed.length > 0) {
+      // Only OpenRig's own saved record proves these approvals are its earlier grant; the legacy fallback below doesn't.
+      const saved = readRecord(ownedCodexApprovalPath(input.configPath));
+      const previous = saved === undefined ? undefined : parseRecord(saved);
+      if (input.freshGrant || !previous) return;
+      for (const key of Object.keys(declarations)) {
+        if (states[key].trusted_hash !== previous.declarations[key] || states[key].trusted_content_hash !== previous.contentHash) return;
+      }
+      return { hashes, trustedHashes: Object.fromEntries(changed), approval };
+    }
+    if (input.freshGrant) return { hashes, trustedHashes: {}, approval };
+    if (Object.keys(declarations).every(key => states[key].trusted_content_hash === contentHash)) return { hashes: {}, trustedHashes: {}, approval };
     const baseline = readRecord(codexLegacyPluginTrustPath(input.configPath));
-    if (Object.keys(declarations).every(key => (states[key].trusted_content_hash ?? baseline) === contentHash)) return { hashes, approval };
+    if (Object.keys(declarations).every(key => (states[key].trusted_content_hash ?? baseline) === contentHash)) return { hashes, trustedHashes: {}, approval };
     const saved = readRecord(ownedCodexApprovalPath(input.configPath));
-    const previous: OwnedApproval = saved === undefined ? { schema: 1, plugin: CODEX_CORE_PLUGIN_KEY,
-      contentHash: LEGACY_CONTENT, declarations: legacyDeclarations } : JSON.parse(saved);
-    if (previous.schema !== 1 || previous.plugin !== CODEX_CORE_PLUGIN_KEY || !/^sha256:[a-f0-9]{64}$/.test(previous.contentHash)
-      || Object.keys(previous.declarations).length !== 6) return;
+    const previous = saved === undefined ? { schema: 1 as const, plugin: CODEX_CORE_PLUGIN_KEY,
+      contentHash: LEGACY_CONTENT, declarations: legacyDeclarations } : parseRecord(saved);
+    if (!previous) return;
     for (const [key, hash] of Object.entries(declarations)) {
       if (previous.declarations[key] !== hash || (states[key].trusted_content_hash ?? baseline) !== previous.contentHash) return;
     }
-    return { hashes, approval };
+    return { hashes, trustedHashes: {}, approval };
   } catch { return undefined; } // Unknown ownership or config leaves native review in place.
 }
 

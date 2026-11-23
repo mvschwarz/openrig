@@ -287,6 +287,110 @@ describe("MissionProgressHeatmap (slice 13.5)", () => {
     expect(warningLegend.className).toMatch(/bg-amber-300/);
   });
 
+  it("separates closed and closed-* slices from done (complete) while preserving pre-change done-cell rendering for draft and non-closed neutral slices", async () => {
+    const rows = [
+      makeRow("doneSlice", "done"),
+      makeRow("closedSlice", "closed"),
+      makeRow("closedDeferredSlice", "closed-deferred" as SliceListEntry["status"]),
+      makeRow("draftSlice", "draft"),
+      makeRow("candidateSlice", "candidate" as SliceListEntry["status"]),
+    ];
+    const detailsByName = new Map<string, SliceDetail>([
+      ["doneSlice", makeDetail("doneSlice", [{ text: "d1", done: true }])],
+      [
+        "closedSlice",
+        makeDetail("closedSlice", [
+          { text: "c1", done: true },
+          { text: "c2", done: false },
+        ]),
+      ],
+      [
+        "closedDeferredSlice",
+        makeDetail("closedDeferredSlice", [
+          { text: "cd1", done: true },
+          { text: "cd2", done: false },
+        ]),
+      ],
+      [
+        "draftSlice",
+        makeDetail("draftSlice", [
+          { text: "dr1", done: true },
+          { text: "dr2", done: false },
+        ]),
+      ],
+      [
+        "candidateSlice",
+        makeDetail("candidateSlice", [
+          { text: "u1", done: true },
+          { text: "u2", done: false },
+        ]),
+      ],
+    ]);
+    const { findByTestId } = withRouter(
+      <MissionProgressHeatmap rows={rows} detailsByName={detailsByName} />,
+    );
+
+    const doneRow = await findByTestId("mission-progress-heatmap-row-doneSlice");
+    const closedRow = await findByTestId("mission-progress-heatmap-row-closedSlice");
+    const closedDeferredRow = await findByTestId("mission-progress-heatmap-row-closedDeferredSlice");
+    const draftRow = await findByTestId("mission-progress-heatmap-row-draftSlice");
+    const candidateRow = await findByTestId("mission-progress-heatmap-row-candidateSlice");
+
+    expect(doneRow.getAttribute("data-tone")).toBe("success");
+    expect(closedRow.getAttribute("data-tone")).toBe("neutral");
+    expect(closedDeferredRow.getAttribute("data-tone")).toBe("neutral");
+    expect(draftRow.getAttribute("data-tone")).toBe("neutral");
+    expect(candidateRow.getAttribute("data-tone")).toBe("neutral");
+
+    // Row pills keep their neutral surface styling for closed, draft, and non-closed neutral states.
+    for (const [rowEl, expectedLabel] of [
+      [closedRow, "closed"],
+      [closedDeferredRow, "closed-deferred"],
+      [draftRow, "draft"],
+      [candidateRow, "candidate"],
+    ] as const) {
+      expect(rowEl.textContent).toContain(expectedLabel);
+      expect(rowEl.innerHTML).toContain("bg-surface-lowest/55");
+    }
+
+    const doneCell = await findByTestId("mission-progress-heatmap-cell-doneSlice-0");
+    const closedDoneCell = await findByTestId("mission-progress-heatmap-cell-closedSlice-0");
+    const closedNotDoneCell = await findByTestId("mission-progress-heatmap-cell-closedSlice-1");
+    const closedDeferredDoneCell = await findByTestId("mission-progress-heatmap-cell-closedDeferredSlice-0");
+    const closedDeferredNotDoneCell = await findByTestId("mission-progress-heatmap-cell-closedDeferredSlice-1");
+    const draftDoneCell = await findByTestId("mission-progress-heatmap-cell-draftSlice-0");
+    const draftNotDoneCell = await findByTestId("mission-progress-heatmap-cell-draftSlice-1");
+    const candidateDoneCell = await findByTestId("mission-progress-heatmap-cell-candidateSlice-0");
+    const candidateNotDoneCell = await findByTestId("mission-progress-heatmap-cell-candidateSlice-1");
+
+    const legend = await findByTestId("mission-progress-heatmap-legend");
+    expect(legend.textContent).toContain("done (complete)");
+    expect(legend.textContent).toContain("done (closed)");
+    const completeLegend = await findByTestId("mission-progress-heatmap-legend-complete");
+    const closedLegend = await findByTestId("mission-progress-heatmap-legend-closed");
+    expect(completeLegend.className).toContain("border-emerald-500 bg-emerald-400");
+    expect(closedLegend.className).toContain("border-outline bg-surface-highest");
+
+    // Closed and closed-* rows render done cells with the neutral closed swatch class.
+    expect(closedDoneCell.className).toContain("border-outline bg-surface-highest");
+    expect(closedDoneCell.className).not.toMatch(/bg-emerald-400/);
+    expect(closedDeferredDoneCell.className).toContain("border-outline bg-surface-highest");
+    expect(closedDeferredDoneCell.className).not.toMatch(/bg-emerald-400/);
+    expect(closedNotDoneCell.className).toContain("border-outline-variant bg-surface-lowest/35");
+    expect(closedDeferredNotDoneCell.className).toContain("border-outline-variant bg-surface-lowest/35");
+
+    // Delivered done, draft, and non-closed neutral rows render done cells with the pre-change complete class.
+    expect(doneCell.className).toContain("border-emerald-500 bg-emerald-400");
+    expect(draftDoneCell.className).toContain("border-emerald-500 bg-emerald-400");
+    expect(draftDoneCell.className).not.toMatch(/bg-surface-highest/);
+    expect(candidateDoneCell.className).toContain("border-emerald-500 bg-emerald-400");
+    expect(candidateDoneCell.className).not.toMatch(/bg-surface-highest/);
+    expect(draftNotDoneCell.className).toContain("border-outline-variant bg-surface-lowest/35");
+    expect(draftNotDoneCell.className).not.toMatch(/bg-emerald-400/);
+    expect(candidateNotDoneCell.className).toContain("border-outline-variant bg-surface-lowest/35");
+    expect(candidateNotDoneCell.className).not.toMatch(/bg-emerald-400/);
+  });
+
   it("renders an empty-state when the mission has no scoped slices", async () => {
     const { findByTestId } = withRouter(
       <MissionProgressHeatmap rows={[]} detailsByName={new Map()} />,

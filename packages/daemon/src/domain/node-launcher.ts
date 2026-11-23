@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -5,7 +6,7 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
-import { validateSessionName, deriveSessionName } from "./session-name.js";
+import { validateSessionName, deriveSessionName, boundSessionNameProblem } from "./session-name.js";
 import {
   startTranscriptRotation,
   getTranscriptRotationOptionsFromEnv,
@@ -24,8 +25,12 @@ import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js"
 import type { Session, Binding } from "./types.js";
 
 export type LaunchResult =
-  | { ok: true; sessionName: string; session: Session; binding: Binding; warnings?: string[] }
-  | { ok: false; code: string; message: string };
+  | { ok: true; sessionName: string; session: Session; binding: Binding; warnings?: string[];
+    /** #3253: a takeover that went ahead without the seat's requested process limit (the request stays stored). */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
+  | { ok: false; code: string; message: string;
+    /** #3253: a refused launch's limit problem (`process_limits_*`), and whether a retry may succeed. */
+    retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem };
 
 interface LaunchOpts {
   /** Startup selected-history only: refuse a same-name replacement. */
@@ -55,6 +60,15 @@ interface LaunchOpts {
   /** Launch into this pane of the seat's existing session (named by `sessionName`) instead of a new session: its process
    *  is ended in place and a shell started there, so the pane and its scrollback stay. */
   keepPane?: string;
+  /** `sessionName` is the name this seat was bound to (restore keeps it). It is launched under that name even outside
+   *  OpenRig's naming pattern, as an adopted seat's own tmux session name is, when boundSessionNameProblem finds none. */
+  keepsBoundSessionName?: boolean;
+  /** #3253: how the new session treats the seat's process limit it can't apply (default "fresh": refused). A restore or
+   *  resume passes "recovery": it goes ahead without the limit, with a structured warning. */
+  processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode;
+  /** A launch from a spec: create the member's declared working folder when it isn't there yet, before the terminal
+   *  starts in it. A restore or relaunch leaves this unset, so a saved folder missing on this machine isn't recreated. */
+  createCwd?: boolean;
 }
 
 interface NodeLauncherDeps {
@@ -85,6 +99,8 @@ interface NodeLauncherDeps {
   tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
   /** How long a kept pane's process gets to exit, per signal (default: polled every 100 ms, 3 s each). */
   paneExit?: PaneCutoverTiming;
+  /** Creates a folder and its parents, for `createCwd`. When omitted (most unit tests), a launch creates no folder. */
+  createFolder?: (path: string) => void;
 }
 
 /** For a kept pane: the failures that come before its takeover sent any signal, so this attempt stopped nothing. Every
@@ -92,6 +108,17 @@ interface NodeLauncherDeps {
 export const NOTHING_STOPPED_LAUNCH_CODES: ReadonlySet<string> = new Set([
   "node_not_found", "selection_changed", "already_bound", "invalid_session_name", "address_conflict",
   "pane_not_found",
+]);
+
+/** For a new terminal: the failures that leave none, the refusals before its creation and tmux reporting that none was
+ *  created. An unconfirmed creation, a failed write and every later failure stay unknown. */
+export const NO_TERMINAL_LAUNCH_CODES: ReadonlySet<string> = new Set([
+  "node_not_found", "selection_changed", "already_bound", "invalid_session_name", "address_conflict",
+  "session_not_created",
+  // #3253: refused by the scope check before tmux is asked for a session. `process_limits_unverified` is not here: it
+  // can also come after the session was made, when its scope start isn't confirmed, and that session's removal is
+  // best effort.
+  "process_limits_unsupported", "process_limits_setup", "process_limits_invalid",
 ]);
 
 export class NodeLauncher {
@@ -106,6 +133,7 @@ export class NodeLauncher {
   private pluginsDir: string | undefined;
   private defaultSilenceWindowSeconds: number;
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
+  private createFolder: ((path: string) => void) | null;
   private paneExit: PaneCutoverTiming;
 
   constructor(deps: NodeLauncherDeps) {
@@ -132,6 +160,7 @@ export class NodeLauncher {
     this.pluginsDir = deps.pluginsDir;
     this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
     this.tmuxOptionDefaults = deps.tmuxOptionDefaults ?? null;
+    this.createFolder = deps.createFolder ?? null;
     this.paneExit = deps.paneExit ?? { pollMs: 100, timeoutMs: 3_000, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
   }
 
@@ -175,7 +204,8 @@ export class NodeLauncher {
 
     // 2. Derive or validate session name
     const sessionName = opts?.sessionName ?? deriveSessionName(rig.rig.name, logicalId);
-    if (!validateSessionName(sessionName)) {
+    const keptBoundName = opts?.keepsBoundSessionName === true && opts.sessionName !== undefined && boundSessionNameProblem(sessionName) === null;
+    if (!validateSessionName(sessionName) && !keptBoundName) {
       return {
         ok: false,
         code: "invalid_session_name",
@@ -210,6 +240,13 @@ export class NodeLauncher {
     const additionPluginDirs = seatLaunchAdditionsForLaunch(this.db, node.id).additions?.pluginDirs ?? [];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
+    // A spec's member starts in the folder it declares: one that isn't there yet is created before the terminal starts,
+    // as the kernel creates its own. A failure is named and the launch goes on, in tmux's fallback folder.
+    const cwdNotes: string[] = [];
+    if (opts?.createCwd && sessionCwd && isAbsolute(sessionCwd) && this.createFolder) {
+      try { this.createFolder(sessionCwd); }
+      catch (err) { cwdNotes.push(`${logicalId}'s working directory ${sessionCwd} couldn't be created: ${(err as Error).message}`); }
+    }
     const launchEnv = (oneOff?: SeatEnv) => compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
@@ -230,9 +267,14 @@ export class NodeLauncher {
     }
     const tmuxResult = opts?.keepPane
       ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id)
-      : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
+      // #3253: the launch mode is passed only when there is one, so a launch without it calls createSession as before.
+      : opts?.processLimitsMode
+        ? await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv, { processLimitsMode: opts.processLimitsMode })
+        : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
-      return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
+      return { ok: false, code: tmuxResult.code, message: tmuxResult.message,
+        ...(tmuxResult.retryable !== undefined ? { retryable: tmuxResult.retryable } : {}),
+        ...(tmuxResult.processLimits ? { processLimits: tmuxResult.processLimits } : {}) };
     }
     // A replacement during the awaited terminal creation must never receive
     // this attempt's new session row. The pane's present owner cannot be
@@ -245,7 +287,7 @@ export class NodeLauncher {
     if (opts?.keepPane) coreCopyNotes.push(...retireCoreCopies());
 
     // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
-    const launchWarnings: string[] = [...coreCopyNotes, ...(tmuxResult.warnings ?? [])];
+    const launchWarnings: string[] = [...coreCopyNotes, ...cwdNotes, ...(tmuxResult.warnings ?? [])];
 
     // A one-off `rig up --env` value is on the first pane's command line and, because that is how
     // `new-session -e` works, in the session environment, which a respawned pane (a handover
@@ -315,6 +357,7 @@ export class NodeLauncher {
           sessionName,
           opts?.occupantKind ?? "initial",
           occupantGeneration,
+          { keptBoundName, ...(sessionCwd ? { launchedCwd: sessionCwd } : {}) },
         );
         createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");
@@ -371,6 +414,7 @@ export class NodeLauncher {
       session: session!,
       binding: binding!,
       warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
+      ...(tmuxResult.ok && "processLimits" in tmuxResult && tmuxResult.processLimits ? { processLimits: tmuxResult.processLimits } : {}),
     };
   }
 
@@ -378,22 +422,28 @@ export class NodeLauncher {
    *  scrollback), then a shell starts in it with this launch's environment, for the runtime to launch into. Nothing is
    *  touched when the pane isn't in the session. */
   private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
-    Promise<{ ok: true; warnings?: string[] } | { ok: false; code: string; message: string }> {
+    Promise<{ ok: true; warnings?: string[]; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
+      | { ok: false; code: string; message: string; retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem }> {
     let panes: Array<{ id: string }> = [];
     try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
+    // #3253: the seat's scope is checked before the running process is ended, so the respawn after the stop reuses that
+    // check. The respawn runs in recovery mode: a limit never stops the takeover after the stop, and a warning that it
+    // went on without the limit is logged only once it has.
+    await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(nodeId);
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env, processLimitsMode: "recovery" });
     if (!respawned.ok) {
       return { ok: false, code: "pane_not_respawned", message: `The seat's process in pane ${pane} ended, but a shell couldn't start there: ${respawned.message}` };
     }
-    return { ok: true, ...(respawned.warnings ? { warnings: respawned.warnings } : {}) };
+    return { ok: true, ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
+      ...(respawned.ok && respawned.processLimits ? { processLimits: respawned.processLimits } : {}) };
   }
 
   /**

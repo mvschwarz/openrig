@@ -26,8 +26,9 @@ export {
   CANONICAL_MANIFEST_SOURCES,
   type SlackAppManifest,
   type SlackManifestBundle,
+  type SlackManifestOptions,
 } from "./domain/gateway/slack/manifest.js";
-export { FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES } from "./domain/gateway/slack/capabilities.js";
+export { FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES, PRIVATE_CHANNEL_SCOPES } from "./domain/gateway/slack/capabilities.js";
 export { runChannelOperation, channelStateDigest, type ChannelActor } from "./domain/gateway/channel-operations.js";
 export {
   verifyScopes,

@@ -124,14 +124,17 @@ describe("rig slack channel-map", () => {
 
 describe("rig slack verify with a channel map", () => {
   // Membership answers per channel; everything else is a granted-scope auth.test.
-  const slack = (members: Record<string, boolean>, infoChannels: string[]) => async (url: string) => {
+  const slack = (members: Record<string, boolean>, infoChannels: string[], privacy: Record<string, boolean> = {}, failedInfo: Record<string, string> = {}) => async (url: string) => {
     const target = new URL(url);
     if (target.pathname.endsWith("/auth.test")) {
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json", "x-oauth-scopes": DEFAULT_CONFIG.requiredScopes.join(", ") } });
     }
     const channel = target.searchParams.get("channel") ?? "";
     infoChannels.push(channel);
-    return new Response(JSON.stringify({ ok: true, channel: { is_member: members[channel] ?? false, name: `name-${channel}` } }), { status: 200, headers: { "content-type": "application/json" } });
+    const body = failedInfo[channel]
+      ? { ok: false, error: failedInfo[channel] }
+      : { ok: true, channel: { is_member: members[channel] ?? false, name: `name-${channel}`, ...(Object.hasOwn(privacy, channel) ? { is_private: privacy[channel] } : {}) } };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   };
   const map = [{ match: "my-rig", channel: "C0EXAMPLE1" }, { match: "other-rig", channel: "C0EXAMPLE1" }, { match: "pr@my-rig", channel: "C0EXAMPLE2" }];
 
@@ -146,6 +149,50 @@ describe("rig slack verify with a channel map", () => {
     expect(logs).toContain("✓ channel member (name-C0EXAMPLE2) for pr@my-rig");
     expect(logs.at(-1)).toBe("READY");
     expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it.each([false, true])("diagnoses a known private mapped channel without changing readiness or request count (%s)", async (json) => {
+    vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-local-fixture-only");
+    const { logs, run } = setup(map);
+    const asked: string[] = [];
+    await run(["verify", ...(json ? ["--json"] : [])], slack({ C0DEFAULT: true, C0EXAMPLE1: true, C0EXAMPLE2: true }, asked,
+      { C0DEFAULT: false, C0EXAMPLE1: true, C0EXAMPLE2: false }) as never);
+    expect(asked).toEqual(["C0DEFAULT", "C0EXAMPLE1", "C0EXAMPLE2"]);
+    if (json) {
+      const out = JSON.parse(logs[0]!);
+      expect(out.ready).toBe(true);
+      expect(out.member).toMatchObject({ isPrivate: false, privateScopes: { status: "not-applicable", missing: [] } });
+      expect(out.channels[1].member).toMatchObject({ isPrivate: true, privateScopes: { status: "missing", missing: ["groups:history", "groups:read"] } });
+      expect(out.channels[2].member).toMatchObject({ isPrivate: false, privateScopes: { status: "not-applicable", missing: [] } });
+    } else {
+      expect(logs).toContain("⚠ private channel C0EXAMPLE1 for my-rig, other-rig missing scopes: groups:history, groups:read. Create an app with `rig slack manifest --private-channel` and reinstall it.");
+      expect(logs.at(-1)).toBe("READY");
+    }
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it.each([false, true])("reports failed mapped-channel privacy lookup without a private-scope warning or side effect (%s)", async (json) => {
+    vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-local-fixture-only");
+    const { logs, run, home } = setup(map);
+    const asked: string[] = [];
+    await run(["verify", ...(json ? ["--json"] : [])], slack(
+      { C0DEFAULT: true, C0EXAMPLE1: true, C0EXAMPLE2: true }, asked, {}, { C0EXAMPLE1: "missing_scope" },
+    ) as never);
+    expect(asked).toEqual(["C0DEFAULT", "C0EXAMPLE1", "C0EXAMPLE2"]);
+    if (json) {
+      const out = JSON.parse(logs[0]!);
+      expect(out.ready).toBe(false);
+      expect(out.channels[1].matches).toEqual(["my-rig", "other-rig"]);
+      expect(out.channels[1].member).toMatchObject({ ok: false, isMember: false, isPrivate: null, error: "missing_scope", privateScopes: { status: "unknown", missing: [] } });
+    } else {
+      expect(logs).toContain("✗ NOT a member of channel C0EXAMPLE1 for my-rig, other-rig — invite the app");
+      expect(logs).toContain("… channel privacy unknown for C0EXAMPLE1 for my-rig, other-rig; private-channel scopes were not assessed.");
+      expect(logs.some(line => line.startsWith("⚠ private channel C0EXAMPLE1"))).toBe(false);
+      expect(logs.at(-1)).toBe("NOT ready");
+    }
+    const ledger = join(home, "state", "human-channel-operations.jsonl");
+    const rows = existsSync(ledger) ? readFileSync(ledger, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+    expect(rows.filter(row => row.action === "verify")).toEqual([]);
   });
 
   it("names the mapped channel the app is missing from and fails", async () => {

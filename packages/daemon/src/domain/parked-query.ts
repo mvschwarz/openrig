@@ -16,6 +16,7 @@
 // S19 A7 RED: unwired.
 
 import type { ArbitratedSeatState, NeedsInput } from "./activity-taxonomy.js";
+import { isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 
 /** One open obligation row from the queue's obligation face. HELD rows (state=blocked —
  *  the deliberate queue-level hold with an owner and a resolution path) are the
@@ -25,6 +26,16 @@ export interface ObligationRow {
   qitemId: string;
   state: "pending" | "in-progress" | "blocked";
   summary?: string | null;
+  /** What the row is blocked on, when the reader carries it. */
+  blockedOn?: string | null;
+  /** The row's last update, when the reader carries it: a hold's age. */
+  updatedAt?: string | null;
+}
+
+/** #1933: a hold on an `external:` typed gate with no recorded wake waits on an outside event by the owner's choice.
+ *  It is shown, never reminded; `rig queue resolve <id> --decision …` ends it. Anything else keeps today's reading. */
+function isEventOnlyHold(blockedOn: string | null | undefined, wake: ParkWakeDiagnosis | null): boolean {
+  return wake === null && typeof blockedOn === "string" && isTypedGateBlocker(blockedOn) && typedGateBlockerPrefix(blockedOn) === "external:";
 }
 
 export interface ParkWakeDiagnosis {
@@ -44,6 +55,8 @@ export interface HeldObligation extends ObligationRow {
   healthy: boolean;
   /** Present when the row is healthy because its owner's own active repeating reminder keeps waking it. */
   servedByOwnReminder?: true;
+  /** Present when the row is healthy as an event-only hold: an `external:` gate with no recorded wake (#1933). */
+  eventOnly?: true;
 }
 
 export interface ObligationRead {
@@ -130,7 +143,9 @@ export function diagnoseSeatParked(
   seat: { seatNodeId: string; sessionName: string },
 ): SeatParkedDiagnosis {
   const state = deps.getSeatState(seat.seatNodeId);
-  const scope = `destination=${seat.sessionName} state=pending,in-progress,blocked limit=${PARKED_OBLIGATION_LIMIT}`;
+  // The reader leaves out a wake escalation about this seat's own prompt that nobody holds; one its owner holds stays
+  // (queue-repository listOpenObligations).
+  const scope = `destination=${seat.sessionName} state=pending,in-progress,blocked excluding=unheld-own-prompt-alerts limit=${PARKED_OBLIGATION_LIMIT}`;
   const read = deps.listOpenObligations(seat.sessionName, PARKED_OBLIGATION_LIMIT);
   const held: HeldObligation[] = read.rows.filter((r) => r.state === "blocked").map((row) => {
     const wake = parseWake(deps.getParkWake?.(row.qitemId));
@@ -138,10 +153,13 @@ export function diagnoseSeatParked(
     // A fired reminder reads spent to the wake status, but one that is still active, aimed at this owner and
     // delivering keeps waking them: the row is waiting, not stranded.
     const served = !healthy && deps.servedByOwnReminder?.(row.qitemId) === true;
-    return { ...row, state: "blocked", wake, healthy: healthy || served, ...(served ? { servedByOwnReminder: true as const } : {}) };
+    const eventOnly = !healthy && !served && isEventOnlyHold(row.blockedOn, wake);
+    return { ...row, state: "blocked", wake, healthy: healthy || served || eventOnly,
+      ...(served ? { servedByOwnReminder: true as const } : {}), ...(eventOnly ? { eventOnly: true as const } : {}) };
   });
   const unhealthyHeld = held.filter((row) => !row.healthy);
-  const open = read.rows.filter((r) => r.state !== "blocked");
+  // A hold's blocker and age are shown with the hold; open rows keep their face as it was.
+  const open = read.rows.filter((r) => r.state !== "blocked").map(({ blockedOn: _blockedOn, updatedAt: _updatedAt, ...row }) => row);
   const complete = read.rows.length < read.limit;
 
   const obligations: SeatParkedDiagnosis["obligations"] = {
@@ -155,7 +173,10 @@ export function diagnoseSeatParked(
     held,
   };
 
-  const activityKnown = state !== null && state.activity !== "unknown";
+  // A typed usage limit is positive evidence the turn ended: the seat reads unknown (a limit is neither work nor rest),
+  // but it's stopped at its limit, so its open work is parked and reminded as an idle seat's is.
+  const limit = state?.usageLimit ?? null;
+  const activityKnown = state !== null && (state.activity !== "unknown" || limit !== null);
   const activity: SeatParkedDiagnosis["activity"] = {
     value: state?.activity ?? "unknown",
     needsInput: state?.needsInput ?? { count: 0, reason: null },
@@ -185,18 +206,19 @@ export function diagnoseSeatParked(
     };
   }
 
-  const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0;
+  const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0 || limit !== null;
   const parked = stopped && (open.length > 0 || unhealthyHeld.length > 0);
   const unconsumed = unhealthyHeld.filter((row) => row.wake?.unconsumed);
   const served = held.filter((row) => row.servedByOwnReminder).length;
+  const eventOnlyCount = held.filter((row) => row.eventOnly).length;
   const reason = parked
     ? state.needsInput.count > 0
       ? `needs-input (${state.needsInput.reason ?? "unanswered block"}) with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
-      : `idle-at-prompt with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
+      : `${limit ? `at its usage limit (${limit.resetsAt ? `resets ${limit.resetsAt}` : "no reset stated"})` : "idle-at-prompt"} with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
     : stopped
       ? held.length > 0
-        ? served > 0
-          ? `stopped with ${held.length} HELD row(s), all healthy: ${held.length - served} with a live wake, ${served} served by its own repeating reminder — not parked`
+        ? served > 0 || eventOnlyCount > 0
+          ? `stopped with ${held.length} HELD row(s), all healthy: ${held.length - served - eventOnlyCount} with a live wake${served > 0 ? `, ${served} served by its own repeating reminder` : ""}${eventOnlyCount > 0 ? `, ${eventOnlyCount} waiting on an external event (shown, not reminded)` : ""} — not parked`
           : `stopped with ${held.length} HELD row(s), all healthy with a live wake — not parked`
         : "stopped but the board is clean"
       : `working — not parked`;

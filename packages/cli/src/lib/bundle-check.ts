@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { authoredMapping, readDeclaredConfigurations, checkDeclaredConfigurations } from "./bundle-configuration.js";
+import { authoredMapping, readDeclaredConfigurations, checkDeclaredConfigurations, type DeclaredConfigurations } from "./bundle-configuration.js";
 import { authoredCompatibility } from "./bundle-source.js";
 
 interface Check {
@@ -9,6 +9,23 @@ interface Check {
   status: "pass" | "finding" | "not_checked";
   reason: string;
   path?: string;
+}
+
+function schemaNameProblem(declared: DeclaredConfigurations): string | undefined {
+  const memberName = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+  const runtimeName = /^[a-z0-9][a-z0-9-]*$/;
+  for (const [member, seat] of Object.entries(declared.seats)) {
+    if (!memberName.test(member)) return `Invalid seat name '${member}'.`;
+    for (const runtime of Object.keys(seat.runtimes)) if (!runtimeName.test(runtime)) return `Invalid runtime '${runtime}'.`;
+  }
+  for (const [name, mapping] of Object.entries(declared.presets)) {
+    if (!runtimeName.test(name)) return `Invalid preset name '${name}'.`;
+    for (const [member, runtime] of Object.entries(mapping)) {
+      if (!memberName.test(member)) return `Invalid preset member '${member}'.`;
+      if (!runtimeName.test(runtime)) return `Invalid preset runtime '${runtime}'.`;
+    }
+  }
+  return undefined;
 }
 
 /** Advisory filesystem reads only. No daemon, bundler, preflight, provider or launch. */
@@ -118,10 +135,14 @@ export async function checkBundleFolder(folder: string) {
   try {
     const declared = readDeclaredConfigurations(root);
     if (declared) {
-      const authored = authoredMapping(path.join(root, "rig.yaml"));
-      checkDeclaredConfigurations(declared, authored);
-    }
-    add("configurations", "pass", declared ? "Every declared preset resolves against the authored team." : "No alternate configurations declared; the authored team is used.");
+      const problem = schemaNameProblem(declared);
+      if (problem) { add("configurations", "finding", problem, "configurations.yaml"); }
+      else {
+        const authored = authoredMapping(path.join(root, "rig.yaml"));
+        checkDeclaredConfigurations(declared, authored);
+        add("configurations", "pass", "Every declared preset resolves against the authored team.");
+      }
+    } else add("configurations", "pass", "No alternate configurations declared; the authored team is used.");
   } catch { add("configurations", "finding", "configurations.yaml is unreadable or inconsistent with the authored team.", "configurations.yaml"); }
 
   let visitedFiles = 0;

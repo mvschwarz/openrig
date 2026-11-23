@@ -148,8 +148,9 @@ export function assessCurrentStateRehydrateEligibility(
       typeof session.resume_token === "string" && session.resume_token.length > 0
     );
 
-    if (node.podId && !hasStartupContext) {
-      blockers.push(`node ${node.logicalId} is pod-aware but has no persisted startup context`);
+    // A resume token is enough for a pod-aware seat too: restore resumes it with an empty plan and names the gap.
+    if (node.podId && !hasStartupContext && !hasResumeToken) {
+      blockers.push(`node ${node.logicalId} is pod-aware but has no persisted startup context or resume token`);
       continue;
     }
 

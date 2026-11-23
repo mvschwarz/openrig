@@ -26,7 +26,7 @@
 
 import { Hono } from "hono";
 import { parseDocument, isScalar } from "yaml";
-import { readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
+import { createProofPolicyRead, readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -38,6 +38,7 @@ import { parseWorkflowSpecRef } from "../domain/slices/slice-indexer.js";
 import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
 import { projectSpecGraph } from "../domain/workflow/slice-workflow-projection.js";
 import { resolveNodeFile } from "../domain/scope/node-file.js";
+import { readParentScope } from "../domain/scope/mission-parent.js";
 
 export function missionsRoutes(): Hono {
   const app = new Hono();
@@ -65,25 +66,39 @@ export function missionsRoutes(): Hono {
     const missionId = c.req.param("missionId");
     const allSlices = indexer.list();
     const slices = allSlices.filter((s) => s.missionId === missionId);
-    if (slices.length === 0) {
+    const fallbackPath = path.resolve(indexer.slicesRoot, missionId);
+    const parentWarnings: string[] = [];
+    let legacyNodes: ReturnType<typeof readParentScope> | undefined;
+    const legacyLinked = slices.length === 0 && path.dirname(fallbackPath) === path.resolve(indexer.slicesRoot) && !fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && (legacyNodes = readParentScope(indexer.slicesRoot, { onInvalid: (message) => parentWarnings.push(message) })).some((node) => node.kind === "mission" && node.path === fallbackPath && node.parent !== null);
+    if (slices.length === 0 && (path.dirname(fallbackPath) !== path.resolve(indexer.slicesRoot) || !resolveNodeFile(fallbackPath) || (!fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && !legacyLinked))) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
-    const missionPath = computeMissionPath(slices[0]!);
+    const missionPath = slices.length ? computeMissionPath(slices[0]!) : fallbackPath;
     const workflowSpec = readMissionWorkflowSpec(missionPath);
     const topology = computeMissionTopology(
       workflowSpec,
       c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined,
     );
-    const readiness = readMissionReadiness(missionPath);
+    // One request-local policy reader: shared proofPolicy manifests are read
+    // once for this response and never carried to the next request.
+    const readPolicy = createProofPolicyRead();
+    const readiness = readMissionReadiness(missionPath, readPolicy);
     const status = readiness.historicalStatus ?? readMissionStatus(missionPath);
+    const parentNodes = legacyNodes ?? readParentScope(path.resolve(missionPath, ".."), { onInvalid: (message) => parentWarnings.push(message) });
+    const missionNode = parentNodes.find((node) => node.kind === "mission" && node.path === missionPath);
+    const parentMatches = missionNode?.parent ? parentNodes.filter((node) => node.id === missionNode.parent) : [];
     return c.json({
       missionId,
       missionPath,
       readiness,
-      slices: slices.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath) })),
+      slices: slices.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath, undefined, readPolicy) })),
       workflow_spec: workflowSpec,
       topology,
       status,
+      parentId: missionNode?.parent ?? null,
+      parent: parentMatches.length === 1 ? parentMatches[0] : null,
+      parentWarnings,
+      childMissions: missionNode?.id && parentNodes.filter((node) => node.id === missionNode.id).length === 1 ? parentNodes.filter((node) => node.kind === "mission" && node.parent === missionNode.id) : [],
     });
   });
 
@@ -98,12 +113,12 @@ export function missionsRoutes(): Hono {
       return c.json({ error: "slices_indexer_unavailable" }, 503);
     }
     const missionId = c.req.param("missionId");
-    const allSlices = indexer.list();
-    const slices = allSlices.filter((s) => s.missionId === missionId);
-    if (slices.length === 0) {
+    // Only the folder is needed: a cold list() would rebuild queue membership for
+    // every slice before this write could run.
+    const missionPath = indexer.missionPath(missionId);
+    if (!missionPath) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
-    const missionPath = computeMissionPath(slices[0]!);
     try {
       writeMissionStatusComplete(missionPath);
     } catch (err) {

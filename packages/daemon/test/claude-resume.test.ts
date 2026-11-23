@@ -1,4 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
@@ -10,7 +14,10 @@ const CLAUDE_FLOOR_EFFECT = {
   state: "observed",
   value: "acceptEdits",
   reason: "emitted_launch_arguments",
+  claudeAutoMode: null,
 } as const;
+
+const DRAWN_CLAUDE = `Claude Code v2.1.310\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
 
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
@@ -23,8 +30,10 @@ function mockTmux(overrides?: {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
     getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "claude"),
-    capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
+    // A resumed Claude's drawn screen: Claude's process alone, with nothing drawn, only stands when the wait runs out.
+    capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => DRAWN_CLAUDE),
     getPanePid: overrides?.getPanePid ?? vi.fn(async () => null),
+    setSessionEnv: vi.fn(async () => {}),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -35,6 +44,35 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it("delivers oversized composed settings by file when restoring a Claude seat", async () => {
+    const tmux = mockTmux();
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+    const adapter = new ClaudeResumeAdapter(tmux, { openrigHome, maxWaitMs: 1, sleep: async () => {} });
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
+    args[14] = { deny: Array.from({ length: 2000 }, (_, i) => `Read(/example/restricted/${i}/${"x".repeat(70)}/**)`) };
+    const result = await adapter.resume(...args);
+    try {
+      const file = /--settings'? '([^']+\.json)'/.exec(vi.mocked(tmux.sendText).mock.calls[0]?.[1] ?? "")?.[1];
+      expect(file, JSON.stringify(result)).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(file!, "utf8")).permissions.deny).toEqual(args[14]!.deny);
+    } finally { fs.rmSync(openrigHome, { recursive: true, force: true }); }
+  });
+
+  it("checks the captured settings actually sent by a provider restore", async () => {
+    const tmux = mockTmux();
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-settings-"));
+    const adapter = new ClaudeResumeAdapter(tmux, { openrigHome, maxWaitMs: 1, sleep: async () => {} });
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "previous", "/repo"];
+    args[16] = "/native/claude";
+    args[19] = { args: ["--settings", JSON.stringify({ custom: "x".repeat(131072) })], warnings: [] };
+    const result = await adapter.resume(...args);
+    try {
+      const file = /--settings' '([^']+\.json)'/.exec(vi.mocked(tmux.sendText).mock.calls[0]?.[1] ?? "")?.[1];
+      expect(file, JSON.stringify(result)).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(file!, "utf8"))).toEqual({ custom: "x".repeat(131072) });
+    } finally { fs.rmSync(openrigHome, { recursive: true, force: true }); }
+  });
+
   it("warning-only capture on a classic resume still dispatches the ordinary command", async () => {
     const tmux = mockTmux();
     const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
@@ -60,6 +98,55 @@ describe("ClaudeResumeAdapter", () => {
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
   });
 
+  describe("a continuation from captured arguments sends and records the seat's current auto mode block", () => {
+    const running = { permissions: { allow: ["Read(/a b)"] }, autoMode: { environment: ["$defaults", "Running A"] } };
+    const saved = { environment: ["$defaults", "Saved B"] };
+    const resumeWith = async (block: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"]) => {
+      const tmux = mockTmux();
+      tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      const nativeCommand = vi.fn((_args: string[]) => "retained-launch");
+      const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
+      const adapter = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch });
+      const result = await adapter.resume("seat@rig", "claude_id", "same", "/repo", "auto", undefined, "auto", "node",
+        ...Array(8).fill(undefined), "/native/claude", undefined, undefined, { args, configDir: null, warnings: [] }, block as never);
+      const sent = nativeCommand.mock.calls[0]![0];
+      const value = sent.includes("--settings") ? sent[sent.indexOf("--settings") + 1]! : undefined;
+      return { result, sent, settings: value?.startsWith("{") ? JSON.parse(value) : value };
+    };
+
+    it("replaces the running block with the saved one and keeps the other settings", async () => {
+      const { result, settings } = await resumeWith(saved);
+      expect(settings).toEqual({ permissions: running.permissions, autoMode: saved });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
+    });
+
+    it("drops the running block after a clear and records that none was sent", async () => {
+      const { result, settings } = await resumeWith(undefined);
+      expect(settings).toEqual({ permissions: running.permissions });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: null } });
+    });
+
+    it("drops the running block when the saved one can't be read, and warns", async () => {
+      const unreadable = "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it.";
+      const { result, settings } = await resumeWith({ unreadable });
+      expect(settings).toEqual({ permissions: running.permissions });
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([unreadable]), appliedLaunch: { claudeAutoMode: null } });
+    });
+
+    it("adds the saved block when the running process had no settings", async () => {
+      const { result, settings } = await resumeWith(saved, ["--model", "opus"]);
+      expect(settings).toEqual({ autoMode: saved });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
+    });
+
+    it.each([["a saved block", saved], ["no saved block", undefined]])("records unknown when the running settings are a file, with %s", async (_label, block) => {
+      const { result, sent } = await resumeWith(block, ["--settings", "/custom/settings.json", "--model", "opus"]);
+      expect(sent).toContain("/custom/settings.json");
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("can't set or check its auto mode block")]),
+        appliedLaunch: { claudeAutoMode: { unknown: "settings_file" } } });
+    });
+  });
+
   it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
@@ -71,18 +158,19 @@ describe("ClaudeResumeAdapter", () => {
     });
     const wrapper = ["/wrapper", "--"];
     await adapter.resume("seat@rig", "claude_id", "original", "/repo", "floor", undefined, managed ? "acceptEdits" : undefined, "node",
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper);
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper, undefined, undefined, "successor-generation");
 
     if (managed) {
-      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper }, "acceptEdits");
+      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper, generation: "successor-generation" }, "acceptEdits");
       expect(command).not.toHaveBeenCalled();
     } else {
       expect(command).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec '/wrapper' '--' '/native tools/claude'"), {
-        runtime: "claude-code", nodeId: "node", launchWrapper: wrapper, claudeShellLookup: false,
+        runtime: "claude-code", nodeId: "node", generation: "successor-generation", launchWrapper: wrapper, claudeShellLookup: false,
       });
       expect(prepare).not.toHaveBeenCalled();
     }
     expect(tmux.sendShellCommand).toHaveBeenCalledOnce();
+    expect(tmux.setSessionEnv).toHaveBeenCalledWith("seat@rig", "OPENRIG_OCCUPANT_GENERATION", "successor-generation");
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
@@ -216,6 +304,40 @@ describe("ClaudeResumeAdapter", () => {
       expect(launch).toContain("--resume 'conversation'");
     });
 
+    it("composes the seat's auto mode block into the resume's --settings and records it as applied", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const block = { environment: ["$defaults", "Source control: github.com/acme's org"] };
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(12).fill(undefined), block);
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { value: "auto", claudeAutoMode: block } });
+      const launch = String(sendText.mock.calls[0]![1]);
+      expect(launch).toContain("--permission-mode auto");
+      expect(launch.replace(/'"'"'/g, "'")).toContain(`"autoMode":${JSON.stringify(block)}`);
+    });
+
+    it("resumes without a saved block that can't be read, warns, and records that none was sent", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const unreadable = "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it.";
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(12).fill(undefined), { unreadable });
+      expect(result).toMatchObject({ ok: true, warnings: [unreadable], appliedLaunch: { claudeAutoMode: null } });
+      expect(String(sendText.mock.calls[0]![1])).not.toContain("autoMode");
+    });
+
+    it("composes member rules and the auto mode block into one --settings on resume", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const block = { soft_deny: ["$defaults", "Pushing to main"] };
+      await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(6).fill(undefined), { allow: [], deny: ["Read(../peer/**)"] }, ...Array(5).fill(undefined), block);
+      const launch = String(sendText.mock.calls[0]![1]);
+      expect(launch.match(/'--settings'/g)).toHaveLength(1);
+      expect(launch).toContain('"deny":["Read(../peer/**)"]');
+      expect(launch).toContain(`"autoMode":${JSON.stringify(block)}`);
+    });
+
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
@@ -343,11 +465,11 @@ describe("ClaudeResumeAdapter", () => {
         .toMatchObject({ ok: false, code: "retry_fresh" });
     });
 
-    it("waits for Claude to become the foreground command before succeeding", async () => {
+    it("waits for Claude to become the foreground command, and accepts a foreground Claude with nothing drawn only at its final read", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()
         .mockResolvedValueOnce("zsh")
-        .mockResolvedValueOnce("claude");
+        .mockResolvedValue("claude");
       const capturePaneContent = vi.fn(async () => "");
       const adapter = new ClaudeResumeAdapter(
         mockTmux({ getPaneCommand, capturePaneContent }),
@@ -356,8 +478,63 @@ describe("ClaudeResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
-      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
-      expect(getPaneCommand).toHaveBeenCalledTimes(2);
+      // Nothing drawn: the process alone stands once the wait (two polls and the final read) runs out, and says so.
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT, warnings: [expect.stringContaining("rests on the process alone")] });
+      // Two polls in the window, then the final read.
+      expect(getPaneCommand).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps polling past a foreground Claude, so the missing conversation it then reports is retry_fresh, not success", async () => {
+      // A resume of a conversation that doesn't exist: Claude is the foreground process with nothing drawn, then
+      // prints "No conversation found" and the pane is back at its shell.
+      const getPaneCommand = vi
+        .fn<(_: string) => Promise<string | null>>()
+        .mockResolvedValueOnce("claude")
+        .mockResolvedValueOnce("claude")
+        .mockResolvedValue("zsh");
+      const capturePaneContent = vi
+        .fn<(_: string, __?: number) => Promise<string | null>>()
+        .mockResolvedValueOnce("")
+        .mockResolvedValueOnce("")
+        .mockResolvedValue("No conversation found with session ID: missing-session\nuser@example.test %");
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({ getPaneCommand, capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 3, sleep: async () => {} }
+      );
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "missing-session", "/repo");
+
+      expect(result).toEqual({
+        ok: false,
+        code: "retry_fresh",
+        message: "Claude resume failed: no conversation found for the requested session",
+      });
+      expect(getPaneCommand).toHaveBeenCalledTimes(3);
+    });
+
+    it("doesn't end the wait on Claude's process alone, and meets the trust dialog Claude draws next", async () => {
+      const dialog = readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      const capturePaneContent = vi.fn<(_: string, __?: number) => Promise<string | null>>(async () => dialog)
+        .mockResolvedValueOnce("")
+        .mockResolvedValueOnce(dialog.split("\n")[0]!);
+      const adapter = new ClaudeResumeAdapter(mockTmux({ getPaneCommand: vi.fn(async () => "claude"), capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 3, sleep: async () => {} });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
+
+      expect(result).toMatchObject({ ok: false, code: "attention_required" });
+      expect((result as { message: string }).message).toContain("workspace trust");
+    });
+
+    it("accepts Claude's process alone only when the wait runs out, and says the resume rests on it", async () => {
+      const capturePaneContent = vi.fn(async () => "");
+      const adapter = new ClaudeResumeAdapter(mockTmux({ getPaneCommand: vi.fn(async () => "claude"), capturePaneContent }),
+        { pollMs: 0, maxWaitMs: 2, sleep: async () => {} });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
+
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("rests on the process alone")] });
+      expect(capturePaneContent).toHaveBeenCalledTimes(4);
     });
 
     it("treats a live Claude TUI as success even when tmux reports a version-string foreground command", async () => {

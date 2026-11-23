@@ -1,3 +1,5 @@
+import type { AgentActivityStore } from "../agent-activity-store.js";
+import { FRESHNESS_THRESHOLD_MS } from "../context-usage-store.js";
 import { observeCodexRebuildPermissions } from "../codex-rebuild-permissions.js";
 import { realpathSync, statSync } from "node:fs";
 import type { SessionRegistry } from "../session-registry.js";
@@ -19,7 +21,7 @@ import type { EffectiveModelRead, PinnedSeat } from "./model-divergence-monitor.
 export interface ModelObservation {
   status: "observed" | "unknown";
   model: string | null;
-  source: NativeModelObservation["source"] | null;
+  source: NativeModelObservation["source"] | "runner_reported" | null;
   observedAt: string | null;
   generation: string | null;
   reason: string | null;
@@ -32,6 +34,7 @@ export function unknownModelObservation(reason: string, generation: string | nul
 
 interface Seat { nodeId: string; sessionName: string; runtime: string | null; generation: string | null }
 interface Deps {
+  runnerObservations?: Pick<AgentActivityStore, "getRunnerObservation">;
   sessions: Pick<SessionRegistry, "currentOccupantTenure" | "getBindingForNode" | "currentOccupantGenerationForSession">;
   identities: Pick<SeatIdentityStore, "getForNode">;
   context: Pick<ContextUsageStore, "readSidecar">;
@@ -43,7 +46,7 @@ interface Deps {
   now?: () => number;
 }
 type InventoryNode = { nodeId: string; canonicalSessionName: string | null; runtime: string | null; sessionStatus: string | null };
-type PendingObservation = { pane: string; finish: (pid: number | null, unavailableReason?: string) => ModelObservation };
+type PendingObservation = { pane: string | null; finish: (pid: number | null, unavailableReason?: string) => ModelObservation };
 type Selection = { ok: true; path: string; notBeforeMs?: number } | { ok: false; reason: string };
 type Binding = { tmuxSession: string | null; tmuxPane: string | null };
 /** The verified current Pi runner plus its newest own turn, read with the occupant unchanged throughout. */
@@ -184,22 +187,28 @@ export class CurrentModelReader {
    * The final query starts AFTER all record selections/reads, including cache hits. */
   async observeInventory(nodes: InventoryNode[]): Promise<ModelObservation[]> {
     const listProcesses = this.processCensus.cycleLister();
-    if (!this.deps.readAllPaneProcesses) return Promise.all(nodes.map(n => this.observe(n, listProcesses)));
+    if (!this.deps.readAllPaneProcesses) {
+      // Native readers keep their existing per-seat checks; report callbacks finish after every peer's await.
+      const observations = await Promise.all(nodes.map(n => ["claude-code", "codex", "pi"].includes(n.runtime ?? "")
+        ? this.observe(n, listProcesses) : this.prepare(n, { ...this.deps.native, listProcesses })));
+      return observations.map(p => "finish" in p ? p.finish(null) : p);
+    }
     let before: ReturnType<NonNullable<Deps["readAllPaneProcesses"]>> | undefined;
     const native = { ...this.deps.native, listProcesses, getPanePid: async (pane: string) => {
       before ??= this.deps.readAllPaneProcesses!();
       return (await before)?.get(pane)?.pid ?? null;
     } };
     const prepared = await Promise.all(nodes.map(n => this.prepare(n, native)));
-    if (!prepared.some(p => "finish" in p)) return prepared as ModelObservation[];
+    if (!prepared.some(p => "finish" in p && p.pane !== null)) return prepared.map(p => "finish" in p ? p.finish(null) : p);
     let after: Map<string, { pid: number | null }> | null = null;
     try { after = await this.deps.readAllPaneProcesses(); } catch { /* UNKNOWN, never a fallback subprocess storm. */ }
-    return prepared.map(p => "finish" in p ? p.finish(after?.get(p.pane)?.pid ?? null, after === null ? "native-read-unavailable" : "pane-unavailable") : p);
+    return prepared.map(p => "finish" in p ? p.finish(p.pane === null ? null : after?.get(p.pane)?.pid ?? null, after === null ? "native-read-unavailable" : "pane-unavailable") : p);
   }
 
   async observe(node: InventoryNode, listProcesses = this.processCensus.cycleLister()): Promise<ModelObservation> {
     const prepared = await this.prepare(node, { ...this.deps.native, listProcesses });
     if (!("finish" in prepared)) return prepared;
+    if (prepared.pane === null) return prepared.finish(null);
     let finalPid: number | null = null;
     let unavailableReason = "pane-unavailable";
     try { finalPid = await this.deps.native.getPanePid(prepared.pane); } catch { unavailableReason = "native-read-unavailable"; }
@@ -212,7 +221,21 @@ export class CurrentModelReader {
     const unknown = (reason: string) => unknownModelObservation(reason, generation);
     if (node.sessionStatus !== "running" || !node.canonicalSessionName) return unknown("seat-not-running");
     const sessionName = node.canonicalSessionName;
-    if (!["claude-code", "codex", "pi"].includes(node.runtime ?? "")) return unknown("unsupported-runtime");
+    if (!["claude-code", "codex", "pi"].includes(node.runtime ?? "")) {
+      if (!node.runtime || ["omp", "stub", "terminal"].includes(node.runtime) || !this.deps.runnerObservations) return unknown("unsupported-runtime");
+      const policy = { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: node.runtime };
+      const initial = this.deps.runnerObservations.getRunnerObservation(node.nodeId, "model", policy);
+      if (!initial.report) return unknown(initial.reason?.replaceAll("_", "-") ?? "no-data");
+      // Recheck after the caller's final await; a replacement cannot satisfy a read begun against another run.
+      return { pane: null, finish: () => {
+        if (this.deps.sessions.getBindingForNode(node.nodeId)?.tmuxSession !== sessionName) return unknown("occupant-changed-during-read");
+        const read = this.deps.runnerObservations!.getRunnerObservation(node.nodeId, "model", policy);
+        if (read.report && read.report.runId !== initial.report!.runId) return unknown("occupant-changed-during-read");
+        if (!read.report) return unknown(read.reason?.replaceAll("_", "-") ?? "no-data");
+        return { status: "observed", model: read.report.observations.model!.id, source: "runner_reported",
+          observedAt: read.report.occurredAt, generation: read.report.generation, reason: null };
+      } };
+    }
     const boot = tenure ? parseSqliteUtcMs(tenure.bootAt) : NaN;
     if (!generation || !Number.isFinite(boot) || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation) return unknown("occupant-unknown");
     const binding = this.deps.sessions.getBindingForNode(node.nodeId);

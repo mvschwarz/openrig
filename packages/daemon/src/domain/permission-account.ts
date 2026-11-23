@@ -2,10 +2,9 @@
 // (NativePermissionStore, the posture flags, the team and kernel lists). Planned, not observed: nothing here runs a
 // harness, probes Codex or reads native settings files, so what only a launch or the harness knows is listed as unknown.
 import type Database from "better-sqlite3";
-import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
+import { NativePermissionStore, noAutoModeFallback, type StoredNativePermissionSelection } from "./native-permission-store.js";
 import { claudePostureFlag, codexPostureArg, planModelAliasNotice, yoloEnabled } from "../adapters/yolo-mode.js";
-import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
-import { codexMemberEnvelope } from "./codex-member-permissions.js";
+import { codexMemberLaunch } from "./codex-member-permissions.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../adapters/kernel-authority.js";
 import { RigRepository } from "./rig-repository.js";
 import type { NodeBinding } from "./runtime-adapter.js";
@@ -51,8 +50,10 @@ function policyRefs(db: Database.Database, nodeId: string): { member: string | n
   return { ...refs, nonInterruptive };
 }
 
+/** `restore`: plan the seat's restore instead of its next fresh launch. Restore starts from the policy posture it re-reads
+ *  from the seat's saved provenance (RestoreOrchestrator.resolveRestorePosture), not the cached one a fresh launch uses. */
 export function planPermissionAccount(db: Database.Database, nodeId: string, seat: string, runtime: string | null,
-  env: NodeJS.ProcessEnv = process.env): PermissionAccount {
+  env: NodeJS.ProcessEnv = process.env, restore?: { launchPosture: NonNullable<NodeBinding["launchPosture"]> }): PermissionAccount {
   const controls = [
     `rig seat set-permissions ${seat} --mode <mode> --reason "<why>"`,
     `rig seat set-permissions ${seat} --mode inherit --reason "<why>" (clears the seat's choice)`,
@@ -79,7 +80,7 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   // choice and the team or kernel default through NativePermissionStore.apply.
   const repo = new RigRepository(db);
   const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined)?.rig_id;
-  const bindingPosture = repo.getNodePolicyProvenance(nodeId)?.launchPosture
+  const bindingPosture = restore?.launchPosture ?? repo.getNodePolicyProvenance(nodeId)?.launchPosture
     ?? (rigId ? repo.getRigPolicyProvenance(rigId)?.launchPosture : undefined) ?? "floor";
   const planned = store.apply({ nodeId, launchPosture: bindingPosture } as NodeBinding, runtime);
   const posture = planned.launchPosture;
@@ -94,11 +95,13 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   // A Codex seat's envelope replaces the posture decision with its own flags, as the launch does.
   const envelope = runtime === "codex" ? planned.codexPermissions : undefined;
   const nativeArgument = runtime === "claude-code" ? claudePostureFlag(env, posture, mode)
-    : envelope ? `${profile ? ` -p ${profile}` : ""}${codexEnvelopeArgs(codexMemberEnvelope(envelope))}`.trim()
+    : envelope ? `${profile ? ` -p ${profile}` : ""}${codexMemberLaunch(envelope).args}`.trim()
     : codexPostureArg(profile ? ` -p ${profile}` : "", env, posture).trim();
   const openRigAdds: PermissionAccount["openRigAdds"] = { claudeAllow: [], claudeAsk: [], notes: [] };
   const unknown = [NOT_READ, UNVERIFIED,
-    runtime === "codex" && envelope
+    restore
+      ? "This is the plan for restoring this seat, from the policy posture restore re-reads from its saved provenance, then the seat's own choice and the team or kernel default."
+      : runtime === "codex" && envelope
       ? "This is the saved plan for a fresh launch. Resumes, restores and handovers emit the same envelope."
       : runtime === "codex"
       ? "This is the saved plan for a fresh launch. A restore re-reads a custom policy file, and a rebuild handover can carry the previous occupant's observed Codex sandbox and approvals instead, without the extra roots or network setting."
@@ -118,8 +121,16 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     if (posture === "full_bypass" || mode === "bypassPermissions") openRigAdds.notes.push("In bypassPermissions, allow rules do not constrain access; native deny behavior remains subject to the harness's documented exceptions.");
     controls.push(`rig seat set-permissions ${seat} --rules <file.json> --reason "<why>"`);
   }
+  if (runtime === "claude-code") {
+    controls.push(`rig seat set-permissions ${seat} --auto-mode <file.json> --reason "<why>" (this seat's auto mode block)`);
+    if (planned.claudeAutoMode !== undefined) controls.push(`rig seat set-permissions ${seat} --clear-auto-mode --reason "<why>" (clears this seat's block; user and managed settings are unaffected)`);
+  }
   if (envelope) {
-    openRigAdds.notes.push(envelope.sandbox === "workspace-write"
+    if ("filesystem" in envelope) openRigAdds.notes.push(
+      "Invocation-local filesystem policy; OpenRig adds no writable directories or network grant. No shared policy file is written.",
+      "Each launch reads native configuration and refuses a legacy sandbox or a merged policy mismatch. A named codex_config_profile is unsupported with this choice.",
+      "This status describes the saved plan; native enforcement is not observed here.");
+    else openRigAdds.notes.push(envelope.sandbox === "workspace-write"
       ? "Extra writable roots for OpenRig's queue state, and git metadata folders on a fresh launch, beside the envelope's own roots."
       : "No extra writable roots: the envelope is read-only.",
     `Network access ${envelope.sandbox === "workspace-write" && envelope.network_access ? "on" : "off"}, as the envelope states; OpenRig adds no network setting of its own.`,
@@ -157,9 +168,12 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   const replacedPosture = envelope ? [bindingPosture !== "floor" ? `the policy's ${bindingPosture} posture` : null,
     yoloEnabled(env, undefined) ? "the ambient OPENRIG_YOLO setting" : null].filter((v): v is string => !!v) : [];
   // The resolver's own fallback (Codex has no auto mode), and a named Codex profile that supplies the argument under a
-  // policy or seat choice; the floor's own wording already names its profile.
+  // policy or seat choice; the floor's own wording already names its profile. A restore plans the posture it re-read,
+  // which a custom policy can have moved off the cached one the resolver explains, so its note follows the planned posture.
+  const fallbackReason = !restore ? resolved.fallbackReason
+    : runtime !== "claude-code" && posture === "auto" ? noAutoModeFallback(runtime) : undefined;
   const notes = [
-    (source === "member_policy" || source === "rig_policy") && resolved.fallbackReason ? resolved.fallbackReason : null,
+    (source === "member_policy" || source === "rig_policy") && fallbackReason ? fallbackReason : null,
     profile && source !== "floor" && nativeArgument === `-p ${profile}` ? `the named Codex profile ${profile} governs its sandbox and approvals` : null,
     replacedPosture.length ? `the envelope replaces ${replacedPosture.join(" and ")} for this seat` : null,
     envelope && profile ? `the named Codex profile ${profile} supplies only the settings the envelope doesn't state` : null,
@@ -178,6 +192,41 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   return {
     basis: "planned", runtime, source, nativeArgument, overrides, openRigAdds, unknown, controls, advisories: planNote ? [planNote] : [],
     ...(explicit ? { explicit: { mode: explicit.mode, actor: explicit.actor, reason: explicit.reason, updatedAt: explicit.updatedAt } } : {}),
-    summary: `Next launch: ${nativeArgument}, from ${where[source]}${notes}${adds}.`,
+    summary: `${restore ? "On restore" : "Next launch"}: ${nativeArgument}, from ${where[source]}${notes}${adds}.`,
   };
+}
+
+/** What a restore preview shows for one seat: its account as restore will decide it, or why it can't be read. */
+export type RestorePermissionPreview = PermissionAccount | { basis: "unknown"; runtime: string | null; summary: string };
+
+/** One seat's permission as a restore will start it, for the plan previews (`rig up --existing --plan`, `rig launch
+ *  --plan`): restore's own posture through the same NativePermissionStore.apply its launch calls. It's planned only for
+ *  the path that posture is exact for, a pod seat with saved startup context; `podAware` and `startupContext` come from
+ *  the snapshot restore reads (undefined when no saved node names the seat). Every other path, a runtime restore stops
+ *  for before launch, and a permission fact restore would refuse on read unknown with the reason, never a definite mode. */
+export function planRestorePermission(db: Database.Database, input: {
+  nodeId: string; seat: string; runtime: string | null;
+  restorePosture: () => NonNullable<NodeBinding["launchPosture"]>;
+  podAware?: boolean; startupContext?: boolean; runtimeError?: string;
+  /** The launch's own seat check (selection_changed): set, the current seat isn't the saved one, and it isn't read. */
+  seatChanged?: string;
+}, env: NodeJS.ProcessEnv = process.env): RestorePermissionPreview {
+  const unknown = (reason: string): RestorePermissionPreview => ({ basis: "unknown", runtime: input.runtime, summary: `Unknown: ${reason}` });
+  if (input.seatChanged) return unknown(`restore stops before it starts this seat. ${input.seatChanged}`);
+  if (input.runtimeError) return unknown(`restore stops for a runtime decision before it starts this seat. ${input.runtimeError}`);
+  if (input.podAware === undefined) return unknown("no saved snapshot names this seat yet, so which launch path restore takes for it isn't known.");
+  if (!input.podAware) return unknown("restore takes this seat's runtime from its resume token, which this read doesn't know.");
+  // Restore resumes such a seat's saved conversation when it holds a resume token (resumeWithoutContext), and has no
+  // fresh start for it without one, so this read can't name the path or its permission.
+  if (input.startupContext === false) return unknown("this seat has no saved startup context, so this read can't settle whether restore resumes its saved conversation or starts it fresh, or which permission that path uses.");
+  if (input.runtime === null) return unknown("this seat's runtime isn't recorded.");
+  try {
+    const launchPosture = input.restorePosture();
+    // Startup makes this decision for every runtime (StartupOrchestrator's apply) and fails the seat on its error, so a
+    // choice it would refuse, even on a runtime OpenRig sets no native argument for, reads unknown here too.
+    new NativePermissionStore(db).apply({ nodeId: input.nodeId, launchPosture } as NodeBinding, input.runtime);
+    return planPermissionAccount(db, input.nodeId, input.seat, input.runtime, env, { launchPosture });
+  } catch (error) {
+    return unknown((error as Error).message);
+  }
 }

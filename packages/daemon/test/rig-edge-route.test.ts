@@ -94,7 +94,7 @@ describe("POST and DELETE /api/rigs/:rigId/edges", () => {
     ]) {
       const refused = await add(body);
       expect(refused.status).toBe(400);
-      expect(await refused.json()).toMatchObject({ ok: false, code: "edge_cycle" });
+      expect(await refused.json()).toMatchObject({ ok: false, code: "edge_cycle", message: expect.stringContaining("launch and restore require an acyclic order") });
     }
     expect(state()).toEqual(before);
 

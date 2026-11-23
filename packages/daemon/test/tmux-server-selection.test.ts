@@ -6,13 +6,24 @@ import { inspectTmuxServer, selectTmuxServer } from "../src/domain/tmux-server-s
 import * as execution from "../src/adapters/tmux-exec.js";
 
 const PINNED_MARKER = "openrig-tmux-pinned-v1\n";
+// The isolated socket lands under the root (<root>/tmux-1000/openrig-<20 hex>), which a Unix socket path caps
+// at 108 bytes on Linux and 104 on macOS. A root under the caller's TMPDIR fails every isolation case once that
+// TMPDIR is long enough, so on POSIX the root is a short private folder under /tmp instead, unless the run keeps
+// its TMPDIR exactly (OPENRIG_TEST_KEEP_TMPDIR=1, as in the shared hermetic setup) or /tmp is not writable.
+// Resolved like the setup's TMPDIR: on macOS /tmp is a symlink to /private/tmp, and the selector reads paths canonically.
+function makeFixtureRoot(): string {
+  const underTmpdir = () => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "t")));
+  if (process.platform === "win32" || process.env.OPENRIG_TEST_KEEP_TMPDIR === "1") return underTmpdir();
+  try { return fs.realpathSync(fs.mkdtempSync("/tmp/ors-")); }
+  catch { return underTmpdir(); }
+}
 
 describe("durable tmux server selection", () => {
   let root: string;
   let home: string;
   let oldSocket: string;
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "t"));
+    root = makeFixtureRoot();
     home = path.join(root, "home");
     oldSocket = path.join(root, "personal.sock");
     inspect.mockClear();
@@ -34,6 +45,7 @@ describe("durable tmux server selection", () => {
       { env: { TMUX: "/tmp/tmux-1000/default,1,0" }, serverArgs: [] },
       { env: { TMUX: "/tmp/tmux-1000/personal,1,0" }, serverArgs: ["-L", "personal"] },
       { env: { TMUX: `${oldSocket},1,0`, TMUX_TMPDIR: root }, serverArgs: ["-S", oldSocket] },
+      { env: { TMUX_TMPDIR: root }, serverArgs: ["-S", path.join(fs.realpathSync(root), "tmux-1000", "default")] },
     ];
     for (const { env, serverArgs } of cases) {
       expect(await selectTmuxServer({ ...options(), env })).toMatchObject({
@@ -240,6 +252,19 @@ describe("durable tmux server selection", () => {
     expect(a.socketPath).not.toBe(b.socketPath);
     expect(a.socketPath).not.toBe(oldSocket);
     expect(b.socketPath).not.toBe(oldSocket);
+  });
+
+  it.for([["linux", 108], ["darwin", 104]] as const)("refuses an isolated socket path of %s's %i-byte limit and accepts one byte less", async ([platform, limit], { skip }) => {
+    // The socket is <TMUX_TMPDIR>/tmux-1000/openrig-<20 hex>: 39 bytes after TMUX_TMPDIR.
+    const padding = (bytes: number) => bytes - 39 - Buffer.byteLength(root) - 1;
+    // A kept TMPDIR can leave the root itself too long to build the shorter path under it; that says nothing about the guard.
+    if (padding(limit - 1) < 1) skip(`fixture root ${root} is too long to build a ${limit - 1}-byte socket path under it`);
+    const tmpdirOf = (bytes: number) => path.join(root, "p".repeat(padding(bytes)));
+    const at = (bytes: number, name: string) => selectTmuxServer({ ...options(), platform, home: path.join(root, name), mode: "isolated",
+      env: { TMUX: `${oldSocket},1,0`, TMUX_TMPDIR: tmpdirOf(bytes) } });
+    const accepted = await at(limit - 1, "home-a");
+    expect(Buffer.byteLength(accepted.socketPath!)).toBe(limit - 1);
+    await expect(at(limit, "home-b")).rejects.toThrow("The selected tmux socket path is too long");
   });
 
   it("ignores explicit foreign-home namesakes, while preserving owned and unmarked legacy sessions", async () => {

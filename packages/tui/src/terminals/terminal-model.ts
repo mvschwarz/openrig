@@ -23,6 +23,7 @@ export interface TerminalPreview {
   herdrApp?: { appHome?: string };
   composed: {
     id: string;
+    rigName?: string;
     pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string }>>;
     opened: Array<{ seat: string }>;
     absent: Array<{ seat: string; reason: string }>;
@@ -49,7 +50,8 @@ export async function readTerminals(client: DaemonClient, view?: string | null,
     if (!Array.isArray(listing.saved) || !Array.isArray(listing.rigs)) throw new Error("Terminal names could not be read.");
     result.catalog = [
       ...listing.saved.map(s => ({ view: `saved:${s.id}`, name: s.name, kind: "saved" as const, members: s.members.map(m => m.seat) })),
-      ...listing.rigs.map(name => ({ view: `rig:${name}`, name, kind: "derived" as const, members: [] })),
+      ...(listing.rigIdentities ?? listing.rigs.map(name => ({ id: name, name })))
+        .map(({ id, name }) => ({ view: `rig:${id}`, name, kind: "derived" as const, members: [] })),
     ].map(entry => ({ ...entry, readinessUnverified: true, ready: 0, absent: 0, degraded: 0, pages: 0 }));
     result.catalogLoaded = true;
     if (view) {
@@ -116,7 +118,8 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   const pageIndex = Math.min(Math.max(0, state.terminalPage ?? 0), Math.max(0, plan.pages.length - 1));
   const page = plan.pages[pageIndex] ?? [];
   const grid = preview.grids[pageIndex];
-  lines.push({ text: preview.view }, { text: `${plan.opened.length} attachable · ${plan.absent.length} absent · ${plan.degraded.length} degraded` });
+  const display = plan.id.startsWith("rig:") ? (plan.rigName ?? read.catalog.find(entry => entry.view === preview.view)?.name ?? preview.view) : preview.view;
+  lines.push({ text: display }, { text: `${plan.opened.length} attachable · ${plan.absent.length} absent · ${plan.degraded.length} degraded` });
   // Actions precede the diagram so explicit Open/Back remain accessible at 80×24.
   lines.push({ text: "Back to views", action: { type: "back" } });
   const herdrAppUnavailable = preview.provider === "herdr-app" && !preview.status.available;

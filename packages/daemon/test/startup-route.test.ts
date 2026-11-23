@@ -94,6 +94,45 @@ describe("startup consent and effect boundary", () => {
     const readback = await setup.app.request(`/api/startup/${rig.id}`);
     expect((await readback.json()).seats[0]).toMatchObject({ freshAllowed: false, prerequisite: expect.stringContaining("unauthenticated") });
   });
+  it("shares one in-flight provider probe between concurrent reads and keeps a fresh probe on the start choice", async () => {
+    const { rig, node } = seat();
+    let settle!: () => void;
+    vi.mocked(defaultProbeRuntimes).mockClear().mockImplementationOnce(() => new Promise((resolve) => {
+      settle = () => resolve({ codex: "ok", claudeCode: "ok" });
+    }));
+    const reads = [setup.app.request(`/api/startup/${rig.id}`), setup.app.request(`/api/startup/${rig.id}`),
+      setup.app.request("/api/startup/prerequisites")];
+    await vi.waitFor(() => expect(settle).toBeTypeOf("function"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(defaultProbeRuntimes).toHaveBeenCalledTimes(1);
+    settle();
+    const bodies = await Promise.all((await Promise.all(reads)).map((response) => response.json()));
+    expect(bodies[0].seats[0]).toMatchObject({ freshAllowed: true });
+    expect(bodies[1].seats[0]).toMatchObject({ freshAllowed: true });
+    expect(bodies[2]).toEqual({ codex: "ok", claudeCode: "ok" });
+    // Nothing is kept once the probe settles: the next read and the start choice each probe again.
+    await setup.app.request(`/api/startup/${rig.id}`);
+    expect(defaultProbeRuntimes).toHaveBeenCalledTimes(2);
+    vi.spyOn(SeatLifecycleService.prototype, "launchFresh").mockResolvedValue({ ok: true } as never);
+    await post(rig.id, startupRevision(db, node));
+    expect(defaultProbeRuntimes).toHaveBeenCalledTimes(3);
+  });
+  it("observes a rig's seats concurrently, a few at a time", async () => {
+    const rig = setup.rigRepo.createRig("wide");
+    for (let i = 0; i < 9; i++) setup.rigRepo.addNode(rig.id, `pod.seat${i}`, { runtime: "terminal" });
+    let inFlight = 0, peak = 0;
+    setup.tmuxAdapter.probeSession = vi.fn(async () => {
+      inFlight++; peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return { state: "absent" as const };
+    });
+    const body = await (await setup.app.request(`/api/startup/${rig.id}`)).json();
+    expect(body.seats).toHaveLength(9);
+    expect(body.seats.map((entry: { observed: { state: string } }) => entry.observed.state)).toEqual(Array(9).fill("stopped"));
+    expect(setup.tmuxAdapter.probeSession).toHaveBeenCalledTimes(9);
+    expect(peak).toBe(4);
+  });
   describe("a seat whose pane command reads as a shell", () => {
     function shellPane(runtime: "claude-code" | "codex", proven: boolean) {
       const { rig, node } = seat();
@@ -118,6 +157,18 @@ describe("startup consent and effect boundary", () => {
       const seen = await observed(shellPane("claude-code", true).id);
       expect(seen).toMatchObject({ state: "attention_required", detail: "The probe pane returned to a shell instead of staying inside the runtime." });
     });
+  });
+  it("observes the current Codex sign-in chooser with the action the person can take", async () => {
+    const { rig } = seat();
+    setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "present" } as never));
+    setup.tmuxAdapter.listPanes = vi.fn(async () => [{ id: "%1", index: 0, cwd: "/p", width: 80, height: 24, active: true }]) as never;
+    setup.tmuxAdapter.getPaneCommand = vi.fn(async () => "codex");
+    const frame = readFileSync(new URL("./fixtures/codex-first-login-0.171.0.txt", import.meta.url), "utf8");
+    setup.tmuxAdapter.capturePaneContent = vi.fn(async () => frame);
+    const response = await setup.app.request(`/api/startup/${rig.id}`);
+    expect((await response.json()).seats[0].observed).toMatchObject({ state: "attention_required",
+      detail: "Codex needs you to sign in or configure provider credentials. Open this seat's terminal and complete Codex's sign-in prompt." });
+    expect(setup.tmuxAdapter.sendKeys).not.toHaveBeenCalled();
   });
   it("re-probes a Codex status footer after the foreground process is verified", async () => {
     setup = createTestApp(db, {

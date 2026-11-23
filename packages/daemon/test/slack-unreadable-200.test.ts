@@ -138,6 +138,31 @@ describe("the stuck sweep on a possibly-posted ask", () => {
       expect(finding?.body).toContain("may have posted");
       expect(finding?.body).toContain("checks Slack for its marker before any resend");
       expect(finding?.body).not.toContain("transport-failed to");
+      expect(finding?.summary).toMatch(new RegExp(`^Checked on ${item.qitemId}: notification to its person is unconfirmed \\(\\d+ minutes?\\)$`));
+    } finally { db.close(); }
+  });
+
+  it("keeps a title that holds when a named failure later becomes possibly-posted", async () => {
+    const db = createDb(); migrate(db, ALL_MIGRATIONS);
+    try {
+      const repo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry });
+      const item = await repo.create(request);
+      const sweep = () => runStuckSweep({ db, queueRepo: repo, resolveOrchestrator: () => null, unclaimedAgeMinutes: 60, isRegisteredHost: () => false });
+      const findings = () => repo.list({ destinationSession: request.sourceSession }).filter((q) => q.tags.includes("stuck-sweep-finding"));
+      const title = new RegExp(`^Checked on ${item.qitemId}: notification to its person is unconfirmed \\(\\d+ minutes?\\)$`);
+      repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel",
+        transitionNote: `slack-owner-notification-transport-failed notification_key=${item.qitemId}:1 class=http-200 error=channel_not_found` });
+      await sweep();
+      const [before] = findings();
+      expect.soft(before?.summary, "after the named failure").toMatch(title);
+      expect(before?.body).toContain("channel_not_found");
+      // A later attempt's reply couldn't be read: the same finding stays open and its title still holds.
+      repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel",
+        transitionNote: `slack-owner-notification-transport-failed notification_key=${item.qitemId}:1 class=possibly-posted error=response unreadable after HTTP 200: timeout after 15000ms` });
+      await sweep();
+      expect(findings()).toHaveLength(1);
+      expect(findings()[0]).toMatchObject({ qitemId: before!.qitemId });
+      expect.soft(findings()[0]!.summary, "after it became possibly-posted").toMatch(title);
     } finally { db.close(); }
   });
 });

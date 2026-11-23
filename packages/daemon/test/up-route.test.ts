@@ -9,6 +9,8 @@ import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { buildAttentionResponse } from "../src/routes/up.js";
+import { rollupRestoreRigResult } from "../src/domain/restore-orchestrator.js";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 const VALID_SPEC = `
@@ -170,6 +172,64 @@ describe("Up API route", () => {
     expect(body.nodes[0].status).toBe("fresh-primed");
   });
 
+  // rig up --existing prints the seats restore skipped, so the route must return them.
+  it("POST /api/up restoring an existing rig returns the seats restore skipped", async () => {
+    const rig = rigRepo.createRig("skip-me");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'topology.roster_recorded', ?)")
+      .run(rig.id, JSON.stringify({ type: "topology.roster_recorded", rigId: rig.id, intendedNodeIds: [node.id] }));
+    const claimed = rigRepo.addNode(rig.id, "claimed", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@skip-me");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-restore", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "skip-me" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("restored");
+    expect(body.excludedNodes).toEqual([{ nodeId: claimed.id, logicalId: "claimed", reason: "current_seat_not_in_intended_roster" }]);
+    expect(body.rigResult).toBe("partially_restored");
+  });
+
+  // #3395 (Piece 1): a seat pool agent the pool drained is named apart from the node results.
+  it.each(["cli", "explorer"])("The `rig up` response carries a drained pool agent in `keptDown`, not in `nodeResults`, and a rig whose only other node is the model still rolls up from the model's result (%s).", async (entryPoint) => {
+    const rig = rigRepo.createRig("pool-up");
+    const model = rigRepo.addNode(rig.id, "dev.impl", { role: "worker" });
+    const agent = rigRepo.addNode(rig.id, "dev.impl-s1", { role: "worker" });
+    const sessions = [model, agent].map((node) => {
+      const session = sessionRegistry.registerSession(node.id, `${node.logicalId.replace(/\./g, "-")}@pool-up`);
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("claude_name", `tok-${node.logicalId}`, "relaunch_fresh", session.id);
+      sessionRegistry.updateStatus(session.id, "running");
+      return session;
+    });
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    for (const session of sessions) sessionRegistry.markIntentionallyStopped(session.id);
+    new SeatPoolSlotsRepository(db).insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase: "drained", at: "2026-11-18T10:00:00.000Z" });
+
+    const res = await app.request(entryPoint === "cli" ? "/api/up" : `/api/rigs/${rig.id}/up`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "pool-up" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("restored");
+    expect(body.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: "drained pool agent, not started" }]);
+    expect(body.nodes.map((node: { nodeId: string }) => node.nodeId)).toEqual([model.id]);
+    expect(body.nodes[0].status).not.toBe("failed");
+    expect(body.rigResult).toBe(rollupRestoreRigResult(body.nodes));
+  });
+
   it.each(["cli", "explorer"])("%s up selects the pre-down snapshot for plan and apply after a fresh occupant stops", async (entryPoint) => {
     const rig = rigRepo.createRig("fresh-down-up");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
@@ -206,6 +266,58 @@ describe("Up API route", () => {
     expect(await restored.json()).toMatchObject({ status: "restored", snapshotKind: "auto-pre-down" });
     expect(restoreSpy).toHaveBeenCalledWith(snapshotId, expect.any(Object));
     expect(tmuxAdapter.sendText).toHaveBeenCalledWith("r00-fresh-down-up-worker", expect.stringContaining("--resume 'fresh-native-session'"));
+  });
+
+  // A workspace restored onto another home (the lost-host exercise): `rig up <rig> --existing --cwd <dir>` launches the
+  // restored seats there for this run, and a saved directory this machine doesn't have is named with that way out.
+  // A remote `rig up --host` sends --cwd as typed: a relative one is resolved on the daemon, as a fresh launch resolves it.
+  it.each(["absolute", "relative", "none"] as const)("restores into --cwd (%s), and names a saved working directory this machine doesn't have", async (given) => {
+    const moved = "/home/lhs1116/project-that-moved";
+    expect(fs.existsSync(moved)).toBe(false);
+    const here = fs.mkdtempSync(path.join(os.tmpdir(), "restore-cwd-"));
+    const withOverride = given !== "none";
+    const cwdOverride = given === "relative" ? path.relative(process.cwd(), here) : here;
+    if (given === "relative") expect(path.isAbsolute(cwdOverride)).toBe(false);
+    // This synthetic shell stays in the requested launch directory; it does not model a fallback to "/".
+    const listPanes = tmuxAdapter.listPanes;
+    tmuxAdapter.listPanes = async session => (await listPanes(session)).map(pane => ({
+      ...pane, cwd: withOverride ? here : moved,
+    }));
+    try {
+      const rig = rigRepo.createRig("moved-home");
+      const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: moved });
+      const session = sessionRegistry.registerSession(node.id, "worker@moved-home", "fresh");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "claude_name", "moved-native-session", "hook");
+      const down = await app.request("/api/down", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rigId: rig.id, force: true }),
+      });
+      expect(down.status).toBe(200);
+      const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
+
+      const res = await app.request("/api/up", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: rig.name, ...(withOverride ? { cwdOverride } : {}) }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { status: string; warnings?: string[] };
+      expect(body.status).toBe("restored");
+      const launchedIn = (tmuxAdapter.createSession as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)?.[1];
+      const named = (body.warnings ?? []).filter((w) => w.includes("doesn't exist on this machine"));
+      if (withOverride) {
+        expect(restoreSpy).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ cwdOverride: here }));
+        expect(launchedIn).toBe(here);
+        expect(named).toEqual([]);
+      } else {
+        expect(launchedIn).toBe(moved);
+        expect(named).toEqual([`Restore: worker's working directory ${moved} doesn't exist on this machine. To launch this rig's `
+          + "seats in another directory for this run: rig up moved-home --existing --cwd <dir>."]);
+      }
+      // The saved directory stays as it was: --cwd is for this run only.
+      expect(rigRepo.getRig(rig.id)!.nodes[0]!.cwd).toBe(moved);
+    } finally {
+      fs.rmSync(here, { recursive: true, force: true });
+    }
   });
 
   it.each([[false, true, true], [true, undefined, true], [true, false, false], [false, undefined, false]] as const)("non-interruptive stored %s / option %s restores as %s; plan does not write", async (stored, option, expected) => {

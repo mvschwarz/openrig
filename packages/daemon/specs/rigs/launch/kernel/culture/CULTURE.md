@@ -70,6 +70,18 @@ machine and have things happen.
   boundaries, forensic findings, and verify-routing land as qitems
   with destinations + tags. Conversational replies use rig send.
 
+## Commands that don't stop the person
+
+Under the team's default permissions, `rig` commands and simple read-only commands such as `ls`, `cat` and `grep`
+usually run without asking. Other commands, and anything that looks like hidden shell code, can stop for the person's
+approval. So keep commands plain:
+- Run `rig` commands as they are: don't pipe their output into `python3` or another program, and don't put
+  `$VARIABLES` in them.
+- Run one `rig queue` command per tool call. Put long or multi-line text in a file with your file-writing tool and pass
+  it with `--body-file`, rather than quoting it on the command line.
+- Write files with your file-writing tool, not a shell heredoc. A file outside the project folder may still ask: tell
+  the person first.
+
 ## What the kernel is NOT
 
 - Not a place to put project work. Project rigs sit alongside the

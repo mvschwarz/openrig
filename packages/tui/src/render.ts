@@ -1,4 +1,5 @@
 import { helpScreen } from "./commands/help.js";
+import { replaceControlCharacters, stripTerminalEscapes, terminalSafeText } from "./terminal-safe-text.js";
 import { commandFocusVisible } from "./motion.js";
 import { attentionLines } from "./attention/attention-model.js";
 import { fileLines, externalLines, fileTargetForPath, referenceLines, referenceAction } from "./reading.js";
@@ -17,6 +18,7 @@ import { costLines } from "./cost/cost-model.js";
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { scopesContentLines } from "./scopes/scopes-model.js";
+import { fleetScopesLines } from "./scopes/fleet-scopes-model.js";
 import { executionContentLines, executionSliceStripLines } from "./execution/execution-model.js";
 import { navigatorDisplay } from "./navigator.js";
 import { specGraph } from "./specs/graph.js";
@@ -33,10 +35,10 @@ import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { hostLabel, hostReachabilityLabel } from "./topology/host-label.js";
 import { connectedAssistantLines } from "./connected-assistants.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
-import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
+import { columnIndex, columns, explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
-import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, sliceWhole, wrapDetailLines } from "./detail.js";
+import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, SeatEffortRead, ViewState } from "./types.js";
 
@@ -53,17 +55,51 @@ interface ContentLine {
   sticky?: { group: string; text?: string };
 }
 
-function pad(text: string | number | null | undefined, width: number): string {
+/** `text` in exactly `width` columns; a wide character that doesn't fit before the ellipsis leaves a space. */
+function fit(text: string | number | null | undefined, width: number, align: Align): string {
   const t = String(text ?? "");
-  if (t.length <= width) return t + " ".repeat(width - t.length);
   // never hard-clip mid-word: any truncation reads as an ellipsis (glance honesty)
-  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padEnd(width);
+  const shown = columns(t) <= width ? t : t.slice(0, columnIndex(t, Math.max(width - 1, 0))) + "…";
+  const fill = " ".repeat(Math.max(width - columns(shown), 0));
+  return align === "right" ? fill + shown : shown + fill;
+}
+
+function pad(text: string | number | null | undefined, width: number): string {
+  return fit(text, width, "left");
 }
 
 function padLeft(text: string | number | null | undefined, width: number): string {
-  const t = String(text ?? "");
-  if (t.length <= width) return " ".repeat(width - t.length) + t;
-  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padStart(width);
+  return fit(text, width, "right");
+}
+
+const commandGraphemes = new Intl.Segmenter();
+
+function commandViewport(draft: string, cols: number, caret = draft.length): string {
+  const prefix = "cmd ▸ ";
+  if (!draft) return `${prefix}▊`;
+  const budget = cols - columns(prefix) - 1;
+  if (budget <= 0) return `${prefix.slice(0, Math.max(0, cols - 1))}▊`;
+
+  const segments = commandGraphemes.segment(draft);
+  const point = segments.containing(caret)?.index ?? draft.length;
+  const after = draft.slice(point);
+  const afterWidth = columns(after);
+  const beforeWidth = columns(draft.slice(0, point));
+  const rightContext = Math.min(afterWidth, Math.floor(budget / 2));
+  let left = budget - rightContext - 1;
+  let start = point;
+  if (beforeWidth <= budget) {
+    start = 0;
+  } else {
+    for (let part = segments.containing(start - 1); part; part = segments.containing(start - 1)) {
+      left -= columns(part.segment);
+      if (left < 0) break;
+      start = part.index;
+    }
+  }
+  const before = (start > 0 ? "…" : "") + draft.slice(start, point);
+  const right = budget - columns(before);
+  return `${prefix}${before}▊${right > 0 ? pad(after, right) : ""}`;
 }
 
 type Align = "left" | "right";
@@ -386,6 +422,10 @@ function agentDetailLines(
   const effortReport = snap.seatEffort && snap.seatEffort.seatRef === `${agent.name}@${rig.name}`
     ? snap.seatEffort.report
     : null;
+  // A remote agent's page is a read-only view: actions that only work for a
+  // local seat (opening its terminal, cross-drilling its spec) are left out
+  // rather than offered as dead ends; identity, state and context stay.
+  const localSeat = found.host === snap.hosts[0];
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
   const attention = agent.needsAttention == null ? "unknown" : agent.needsAttention ? "needed" : "not raised";
   const rawInputSource = agent.activity?.signalSource === "runtime_hook" ? "hook"
@@ -411,11 +451,17 @@ function agentDetailLines(
           fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
           runtimeLine,
           // #1347 — four values stay distinguishable on one wrapped row. "applied"
-          // appears only for outcome `accepted`; unknowns stay unknown.
-          ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
+          // appears only for outcome `accepted`; unknowns stay unknown. The
+          // effort report is this host's read — a remote seat has none here.
+          ...(localSeat ? wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth) : []),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
+          ...(localSeat && (agent.canRun ?? !agent.live)
+            ? [fieldLine({ label: "action", value: "run ▸", link: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: agent.name } })]
+            : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
-          fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } }),
+          ...(localSeat
+            ? [fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } })]
+            : [fieldLine({ label: "terminal", value: `on ${hostLabel(found.host)} · read-only view — open it there` })]),
         ],
       },
       {
@@ -438,18 +484,31 @@ function agentDetailLines(
           local: found.host === snap.hosts[0],
         }, contentWidth),
       },
-      { title: `CURRENT WORK · ${currentRows.length}${queueIncomplete(snap) ? " sampled" : ""}`, lines: workRows(currentRows, contentWidth, queueIncomplete(snap)) },
+      // CURRENT WORK / UP NEXT / NEEDS YOU / RECENTLY FINISHED match this
+      // host's queue by session name — a remote seat's page must not show
+      // them as if they were the remote agent's; read-only identity, state
+      // and context only.
+      ...(localSeat ? [{ title: `CURRENT WORK · ${currentRows.length}${queueIncomplete(snap) ? " sampled" : ""}`, lines: workRows(currentRows, contentWidth, queueIncomplete(snap)) }] : []),
       {
         title: "QUEUE",
-        lines: [
+        lines: localSeat ? [
           ...queueSampleLines(snap, contentWidth),
           ...wrapDetailValue("depth", `${agent.assignedWorkCount == null && queueIncomplete(snap) ? `${assigned}+` : assigned} assigned · ${agent.pendingWorkCount == null && queueIncomplete(snap) ? `${pending}+` : pending} pending · ${agent.inProgressWorkCount == null && queueIncomplete(snap) ? `${inProgress}+` : inProgress} in progress · ${agent.blockedWorkCount == null && queueIncomplete(snap) ? `${blocked}+` : blocked} blocked`, contentWidth),
           ...(agent.assignedWorkCount == null ? wrapDetailValue("basis", `${visibleAssigned} rows visible in bounded list reads; complete count not served`, contentWidth) : []),
+        ] : [
+          // A remote seat's counts are its own host's inventory when it serves
+          // them — "not served" when it doesn't. Never this host's queue
+          // matched by session name, and no local sample note or basis line.
+          ...wrapDetailValue("depth", agent.assignedWorkCount == null
+            ? "not served by the remote inventory"
+            : `${agent.assignedWorkCount} assigned · ${agent.pendingWorkCount ?? "—"} pending · ${agent.inProgressWorkCount ?? "—"} in progress · ${agent.blockedWorkCount ?? "—"} blocked`, contentWidth),
         ],
       },
-      { title: `UP NEXT · ${pending}${queueIncomplete(snap) ? " · sampled rows" : ""}`, lines: workRows(pendingRows, contentWidth, queueIncomplete(snap)) },
-      { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
-      ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
+      ...(localSeat ? [
+        { title: `UP NEXT · ${pending}${queueIncomplete(snap) ? " · sampled rows" : ""}`, lines: workRows(pendingRows, contentWidth, queueIncomplete(snap)) },
+        { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
+        ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
+      ] : []),
       {
         title: "SEAT",
         fields: [
@@ -459,13 +518,14 @@ function agentDetailLines(
         ],
         lines: [
           fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
+          ...(agent.runtime === "claude-code" ? wrapDetailValue("configured account", `${agent.configuredAccount ?? "unknown"} (not verified sign-in)`, contentWidth) : []),
         ],
       },
       {
         title: "SPEC · effective seat binding",
-        fields: [specInLibrary
+        fields: [specInLibrary && localSeat
           ? { label: "spec", value: agent.spec, link: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } } }
-          : { label: "spec", value: agent.spec ? `${agent.spec}  (not in library)` : "—" }],
+          : { label: "spec", value: agent.spec ? `${agent.spec}${localSeat ? "  (not in library)" : `  · read-only view`}` : "—" }],
         lines: [
           ...wrapDetailValue("profile", agent.profile ?? "not served", contentWidth),
           ...wrapDetailValue("version", agent.specVersion ?? "not served", contentWidth),
@@ -718,6 +778,66 @@ function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], l
     ? "  ✕ rigs read failed — named in the status line"
     : `  (no rigs served by ${host.name})`;
 }
+/** A remote rig page reads identity, state and context only: queue, work, actions and seat detail are this host's
+ *  reads and are deliberately absent, never rendered as zero. */
+function remoteSeatColumns(contentWidth: number): AgentColumn[] {
+  if (contentWidth >= 110) return [
+    ["pod", "POD", 10, "left"], ["seat", "SEAT", 20, "left"], ["runtime", "RT", 4, "left"],
+    ["model", "MODEL", 16, "left"], ["effort", "CFG EFF", 8, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 12, "left"],
+  ];
+  if (contentWidth >= 78) return [
+    ["pod", "POD", 7, "left"], ["seat", "SEAT", 14, "left"], ["runtime", "RT", 3, "left"],
+    ["context", "CTX", 5, "right"], ["status", "STATE", 10, "left"],
+  ];
+  return [
+    ["pod", "POD", 5, "left"], ["seat", "SEAT", 12, "left"], ["runtime", "RT", 3, "left"],
+    ["context", "CTX", 4, "right"], ["status", "STATE", 8, "left"],
+  ];
+}
+
+function remoteRigSeatLines(state: ViewState, rig: FleetSnapshot["hosts"][number]["rigs"][number], contentWidth: number, motion: MotionCtx): ContentLine[] {
+  const leaf = state.drill.at(-1);
+  const podFilter = leaf?.kind === "pod" ? leaf.name : null;
+  const all = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })));
+  const rows = all
+    .filter(({ pod, agent }) => !podFilter || pod === podFilter)
+    .filter(({ pod, agent }) => !state.filter || agent.name.includes(state.filter) || pod.includes(state.filter));
+  const columns = remoteSeatColumns(contentWidth);
+  const lines: ContentLine[] = [
+    { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"} · seats read through this daemon` },
+    { text: "  QUEUE, WORK, NOW, seat detail and actions are this host's reads; a remote page shows identity, state and context only." },
+    { text: tableRow(columns, { pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: "CFG EFF", context: "CTX", status: "STATE" }) },
+    { text: "━".repeat(columnsWidth(columns)) },
+  ];
+  if (rows.length === 0) {
+    lines.push({ text: all.length > 0 && state.filter
+      ? `  (no seats match the filter "${state.filter}")`
+      : "  (no seats reported for this rig)" });
+    return lines;
+  }
+  let previousPod: string | null = null;
+  for (const { pod, agent } of rows) {
+    const firstInPod = pod !== previousPod;
+    if (firstInPod && previousPod != null) lines.push({ text: "┈".repeat(columnsWidth(columns)) });
+    previousPod = pod;
+    const stateCell = operationalState(agent.status, motion);
+    lines.push({
+      text: tableRow(columns, {
+        pod: firstInPod ? pod : "",
+        seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
+        runtime: runtimeShort(agent.runtime),
+        model: tableModel(agent.model),
+        effort: tableEffort(agent.effort, agent.effortSource, 8),
+        context: contextCompact(agent.context, contentWidth < 110),
+        status: stateCell.word,
+      }),
+    });
+  }
+  const working = rows.filter(({ agent }) => ["active", "working", "running"].includes(agent.status)).length;
+  lines.push({ text: "" }, { text: `${rows.length} seats · ${working} working` });
+  return lines;
+}
+
 
 /** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG shows on a rig's first visible row so scrolled rows keep it. */
 function instanceContentLines(
@@ -953,16 +1073,26 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         : `host ${hostName} is not a registered host here · rig host list` }];
       return [{ text: "(no rigs served — proven empty, not fabricated)" }];
     }
-    if (rig.remoteHost) return [
-      { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"}` },
-      { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
-    ];
-    if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}…` }];
+    if (rig.remoteHost && (snap.topologyRemoteSeats !== true || state.viewTab !== "table")) {
+      // ui.topology_remote_seats (default off): the TABLE tab reads the open rig's seats through this daemon and
+      // renders them here; every other tab, and the shipped default, keeps the CLI pointer.
+      return [
+        { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"}` },
+        snap.topologyRemoteSeats === true
+          ? { text: `Seats are read on the TABLE tab; graph, health and recent stay unread for a remote host: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` }
+          : { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
+      ];
+    }
+    // The local inventory states sit BEFORE the remote branch again: a
+    // person's own rigs keep "Reading…" and "Inventory unavailable" (with the
+    // remote-seats setting off too); a remote rig names its host.
+    if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}${rig.remoteHost ? ` on ${rig.remoteHost}` : ""}…` }];
     if (rig.inventoryUnavailable) return [
-      { text: `Inventory unavailable for ${rig.name} · refresh to Retry` },
-      ...(leaf?.kind === "pod" ? [] : connectedAssistantLines(host.connectedAssistants, host.connectedAssistantsUnavailable,
+      { text: `Inventory unavailable for ${rig.name}${rig.remoteHost ? ` on ${rig.remoteHost}` : ""} · refresh to Retry` },
+      ...(rig.remoteHost || leaf?.kind === "pod" ? [] : connectedAssistantLines(host.connectedAssistants, host.connectedAssistantsUnavailable,
         rig.name, state.filter, contentWidth, state.timeZone)),
     ];
+    if (rig.remoteHost) return remoteRigSeatLines(state, rig, contentWidth, motion);
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all
@@ -973,7 +1103,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     // Keep the explicit desktop action above the rig's grid: the whole rig, or on a pod's page that pod.
     lines.push(podFilter
       ? fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${podFilter}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${podFilter}` } })
-      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
+      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.id ?? rig.name}` } }));
     const healthScope = { kind: "rig" as const, rigId: rig.id ?? rig.name, rigName: rig.name, local: host === snap.hosts[0] };
     if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, healthScope, contentWidth)];
     if (state.viewTab === "recent") {
@@ -1337,6 +1467,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   }
 
   if (state.section === "needs") return attentionLines(state, snap, contentWidth);
+  if (state.section === "fleet") return fleetScopesLines(state, snap, contentWidth);
   if (state.section === "scopes") {
     const catalog = snap.projects;
     if (!state.project && catalog !== undefined) return wrapDetailLines([
@@ -1398,12 +1529,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 export interface RenderOptions {
   /** Independent endpoint chosen for a standalone TUI after a collision. */
   controlSocketPath?: string;
+  /** No control socket could be bound this session; the status bar says so. */
+  controlSocketUnavailable?: boolean;
   /** First visit: preserve the prior frame with its original label and no effect targets. */
   previousPage?: { state: ViewState; snapshot: FleetSnapshot };
   startup?: StartupState;
   /** I5 — the live command context (from the C3 detector); default "standard". */
   commandContext?: string;
   completion?: { candidates: string[]; message: string } | null;
+  /** Display-only UTF-16 insertion offset; the terminal editor defaults to the end. */
+  readonly commandCaret?: number;
   cols?: number;
   rows?: number;
   /** wall-clock ms for time-driven motion (spinner frames, flash windows);
@@ -1505,11 +1640,12 @@ function truncateSegs(
   for (const s of segs) {
     if (used >= width) break;
     const room = width - used;
-    if (s.text.length <= room) {
+    const w = columns(s.text);
+    if (w <= room) {
       out.push(s);
-      used += s.text.length;
+      used += w;
     } else {
-      out.push({ ...s, text: s.text.slice(0, room) });
+      out.push({ ...s, text: s.text.slice(0, columnIndex(s.text, room)) });
       break;
     }
   }
@@ -1576,7 +1712,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   const flashRows: number[] = [];
   let flashAck = false;
 
-  lines.push(pad(`cmd ▸ ${inputLine}▊${inputLine ? "" : "  " + readStatus(load, state.timeZone)}`, cols));
+  lines.push(pad(commandViewport(inputLine, cols, options.commandCaret) + (inputLine ? "" : "  " + readStatus(load, state.timeZone)), cols));
   if (load.stale && !inputLine) hitMap.push({ y: 1, x1: 9, x2: cols, action: { type: "noop" } });
   if (options.completion) {
     lines.push(pad(options.completion.message, cols));
@@ -1647,8 +1783,10 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
     // the per-cell bg on the segs (mock affordance), so the content marker slot
     // stays blank — no "›" chevron (the native affordance the mock overrides).
     const citem = visiblePulse[i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (row) {
       pushExplorerTargets(hitMap, row, explorerDisplay[explorerIndex] ?? row.label, y, explW);
       explorerRows.push({ ...row, y });
@@ -1748,14 +1886,14 @@ function crashCartShell(
   contentTitle: string,
   cols: number,
   rows: number,
-  inputLine: string,
+  commandLine: string,
   opts?: { wrap?: boolean; scroll?: number },
 ): Screen {
   const explW = explorerWidth(cols);
   const lines: string[] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
   const hitMap: Screen["hitMap"] = [];
-  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  lines.push(pad(commandLine, cols));
   lines.push(paneRule(cols, explW, "top", "{ EXPLORER }", contentTitle));
 
   // The explorer's source note, then any discovered rigs (name + seat count).
@@ -1772,9 +1910,11 @@ function crashCartShell(
     const y = lines.length + 1;
     const left = pad(leftRows[i] ?? "", explW);
     const citem = content[scroll + i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
     if (citem?.action) hitMap.push({ y, x1: explW + 2, x2: cols, action: citem.action });
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
   lines.push(paneRule(cols, explW, "bottom"));
@@ -1800,18 +1940,54 @@ export function drawableSize(columns: number | undefined, rows: number | undefin
   return size.cols > 0 && size.rows > 0 ? size : null;
 }
 
+/** Credentials out of text headed for the screen: URL userinfo and Bearer tokens. */
+function redactCredentials(text: string): string {
+  return text
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+}
+
+/**
+ * Detail text that is both cleaned and redacted, in the order that keeps the redaction effective.
+ *
+ * Escape sequences go first, before any redaction. Redacting a URL inside an OSC payload can delete the
+ * sequence's own introducer — the credential pattern happily matches across `\x9d`, or across the bytes
+ * that follow `\x1b]` — and then the stripper no longer recognises the sequence and its tail survives as
+ * literal text. Consuming the sequence whole is what makes its payload leave with it.
+ *
+ * Then redaction, then control replacement, then redaction again. Redacting after the escapes are gone
+ * catches a credential a sequence was interrupting (`https:<CSI>//user:...`) and a Bearer token the
+ * sequence split. The pass after control replacement catches one a control byte split, since that byte
+ * becomes a space the credential pattern cannot cross.
+ */
+function redactedDetailText(text: string): string {
+  return redactCredentials(
+    replaceControlCharacters(redactCredentials(stripTerminalEscapes(text))),
+  );
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const screen = state.palette
     ? helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32)
     : renderBody(state, snap, options, inputLine);
   if (options.controlSocketPath && screen.lines.length) {
     const row = screen.lines.length - 1;
-    const socketPath = options.controlSocketPath.replace(/[\x00-\x1f\x7f]/g, " ");
+    // The row shows the path with terminal control cleaned out, and the copy action keeps the bound
+    // path itself: main.ts recognises this action by `value === socket.path`, so rewriting the value
+    // here would hand the click to whichever screen is underneath. The copy sink cleans the bytes it
+    // prints, so the shown text and the copied text still agree.
+    const shownPath = terminalSafeText(options.controlSocketPath);
     const label = "socket: [copy]";
     const cols = options.cols ?? 120;
-    screen.lines[row] = pad(`${label} ${socketPath} · ${screen.lines[row]!.trimEnd()}`, cols);
-    // The status stays compact; its copy target retains the actual bound path.
+    screen.lines[row] = pad(`${label} ${shownPath} · ${screen.lines[row]!.trimEnd()}`, cols);
     screen.hitMap.unshift({ y: row + 1, x1: 1, x2: Math.min(cols, label.length), action: { type: "print-for-copy", label: "Control socket", value: options.controlSocketPath } });
+    if (screen.segRows) delete screen.segRows[row + 1];
+  } else if (options.controlSocketUnavailable && screen.lines.length) {
+    // Said here rather than only in a notice: a notice is replaced as soon as work is chosen, and this
+    // is a fact about the session that stays true. Short on purpose, so it fits a narrow status bar.
+    const row = screen.lines.length - 1;
+    const cols = options.cols ?? 120;
+    screen.lines[row] = pad(`socket: unavailable · ${screen.lines[row]!.trimEnd()}`, cols);
     if (screen.segRows) delete screen.segRows[row + 1];
   }
   const commandReady = !state.palette && !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");
@@ -1834,12 +2010,11 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   if (options.startup?.open) {
     const startup = options.startup;
     const content = wrapContentLines(startupLines(startup).map((line) => ({ ...line,
-      text: line.text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f]/g, " ")
-        .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@").replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]"),
+      text: redactedDetailText(line.text),
     })), Math.max(1, cols - explW - 2));
     const selected = content.findIndex((line) => line.action?.type === "startup" && line.action.key === `select:${startup.local?.selected ?? startup.selected}`);
     const scroll = startup.local && !startup.local.result.entries ? startup.local.scroll : startup.expanded ? startup.scroll : Math.max(0, selected - Math.max(1, rows - 12));
-    const screen = crashCartShell(content, { note: "startup", rows: [] }, "START AND RETURN", cols, rows, "", { scroll });
+    const screen = crashCartShell(content, { note: "startup", rows: [] }, "START AND RETURN", cols, rows, commandViewport("", cols), { scroll });
     screen.lines[rows - 1] = pad("? Help · w Skip · L Local · ↑↓ scroll · Enter read · Esc Back · q Quit", cols);
     return screen;
   }
@@ -1849,22 +2024,19 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // verbatim; all rails stand. DOWN → cockpit; UNVERIFIED → cannot-verify (no restore).
   // B1 ROUND 2 — an ACTIVE fleet restore takes precedence over the cockpit: the operator sees live
   // progress (from the poll stream) and, on done, the rollup + keyboard-walkable triage list.
+  const commandLine = commandViewport(inputLine, cols, options.commandCaret);
   if (options.restore) {
     const led = buildLedgerExplorer(options.crashCart?.foundOnHost ?? []);
     // wrap: the triage needs are full sentences — wrap them to the pane so the EXACT need is never
     // clipped off the edge. scroll: a triage list longer than the viewport is vertically scrollable so
     // the final row's exact need is reachable (HIGH-2 — keyboard-walkable, not viewport-truncated).
-    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, inputLine, {
+    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, commandLine, {
       wrap: true,
       scroll: options.restoreScroll ?? 0,
     });
   }
   if (options.unavailable) {
-    const detail = options.unavailable
-      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-      .replace(/[\x00-\x1f\x7f]/g, " ")
-      .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-      .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]");
+    const detail = redactedDetailText(options.unavailable);
     const summary = /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|better-sqlite3/i.test(detail)
       ? "The installed native module cannot load in this runtime. Repair the installation prerequisite, then retry."
       : "Startup state could not be read. Retry after resolving the reported prerequisite.";
@@ -1875,7 +2047,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
       { text: "" },
       { text: "r retry · d details · q quit" },
       ...(options.unavailableExpanded ? [{ text: "" }, { text: detail }] : []),
-    ], { note: "state unavailable", rows: [] }, "STARTUP", cols, rows, inputLine,
+    ], { note: "state unavailable", rows: [] }, "STARTUP", cols, rows, commandLine,
     { wrap: true, scroll: options.restoreScroll ?? 0 });
   }
   if (options.daemonState === "down" && options.crashCart) {
@@ -1887,11 +2059,11 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
       : options.confirm
       ? [...renderConfirmBanner(options.confirm), ...renderCrashCartView(options.crashCart)]
       : renderCrashCartView(options.crashCart);
-    return crashCartShell(content, led, "CRASH-CART", cols, rows, inputLine, options.confirm ? { wrap: true } : undefined);
+    return crashCartShell(content, led, "CRASH-CART", cols, rows, commandLine, options.confirm ? { wrap: true } : undefined);
   }
   if (options.daemonState === "unverified" && options.daemonEvidence) {
     const led = { note: "daemon unverified", rows: [] }; // No ledger discovery occurred on this path.
-    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, inputLine);
+    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, commandLine);
   }
   // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
   // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
@@ -1915,7 +2087,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // shell accepts typing from the empty state, so the honest readiness
   // affordance must show BEFORE the first key (no new focus state; stylize
   // paints the cell; the shared motion clock controls its visibility).
-  lines.push(pad(`cmd ▸ ${inputLine}▊${inputLine ? "" : "  " + readStatus(load, state.timeZone)}`, cols));
+  lines.push(pad(commandLine + (inputLine ? "" : "  " + readStatus(load, state.timeZone)), cols));
   if (load.stale && !inputLine) hitMap.push({ y: 1, x1: 9, x2: cols, action: { type: "noop" } });
   if (options.completion) {
     lines.push(pad(options.completion.message, cols));
@@ -1923,7 +2095,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     if (options.completion.candidates.length > 4) lines.push(pad("  … keep typing to narrow matches", cols));
   }
 
-  const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", scopes: "PROJECTS", needs: "FEED", system: "SYSTEM · HEALTH", config: "SYSTEM · CONFIGURATION", connections: "SYSTEM · CONNECTIONS" }[state.section] ?? state.section.toUpperCase();
+  const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", scopes: "PROJECTS", fleet: "FLEET · PROJECTS", needs: "FEED", system: "SYSTEM · HEALTH", config: "SYSTEM · CONFIGURATION", connections: "SYSTEM · CONNECTIONS" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
   const explorerTitle = state.focusedPane === "explorer" ? "{ EXPLORER }" : "EXPLORER";
   const contentTitle = noticeDetail ? "{ ACTION RESULT }" : state.focusedPane === "content" ? `{ ${sectionTitle} }` : sectionTitle;
@@ -2013,11 +2185,12 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     let contentMarker = selectedAction ? "›" : " ";
     let rowSegs = item?.segs;
     if (selectedZone) {
-      if (selectedZone.start > 0) {
-        contentText = `${contentText.slice(0, selectedZone.start - 1)}›${contentText.slice(selectedZone.start)}`;
+      const before = selectedZone.start > 0 ? columnIndex(contentText, selectedZone.start - 1) : -1;
+      if (contentText[before] === " ") {
+        contentText = `${contentText.slice(0, before)}›${contentText.slice(before + 1)}`;
         // R2 HIGH-3: a segs row's paint source must carry the SAME splice the
         // plain text carries, or stylization erases the keyboard focus marker
-        if (rowSegs) rowSegs = spliceMarkerIntoSegs(rowSegs, selectedZone.start - 1);
+        if (rowSegs) rowSegs = spliceMarkerIntoSegs(rowSegs, before);
       } else contentMarker = "›";
     }
     lines.push(pad(fullReading ? `${contentMarker}${contentText}` : `${left}┃${contentMarker}${contentText}`, cols));

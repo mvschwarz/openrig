@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Packaging step (build-package.sh): point the CLI's and TUI's compiled imports of
+// Packaging step (build-package.sh): point the CLI's and TUI's compiled imports and declarations of
 // `@openrig/daemon/<subpath>` at the daemon copy the CLI package already ships in
 // `daemon/dist`, so the published package has no dependency on the unpublished
 // `@openrig/daemon` and any package manager can install it (#66).
@@ -23,7 +23,7 @@ const isDaemonSpecifier = (value) => value === PACKAGE || value.startsWith(`${PA
 
 // The daemon module specifiers in one file, from its syntax tree.
 function daemonSpecifiers(text, file) {
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith(".d.ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
   if (source.parseDiagnostics.length > 0) {
     throw new Error(`${file}: cannot parse (${source.parseDiagnostics[0].messageText})`);
   }
@@ -32,6 +32,8 @@ function daemonSpecifiers(text, file) {
     let literal;
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
       literal = node.moduleSpecifier;
+    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+      literal = node.argument.literal;
     } else if (ts.isCallExpression(node)
       && (node.expression.kind === ts.SyntaxKind.ImportKeyword
         || (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
@@ -78,13 +80,13 @@ export function remainingDaemonImports(text, file = "<input>") {
   return daemonSpecifiers(text, file).map(({ value }) => value);
 }
 
-function javascriptFiles(root) {
+function moduleFiles(root) {
   if (!existsSync(root)) return [];
   const files = [];
   for (const entry of readdirSync(root)) {
     const path = join(root, entry);
-    if (statSync(path).isDirectory()) files.push(...javascriptFiles(path));
-    else if (path.endsWith(".js")) files.push(path);
+    if (statSync(path).isDirectory()) files.push(...moduleFiles(path));
+    else if (path.endsWith(".js") || path.endsWith(".d.ts")) files.push(path);
   }
   return files;
 }
@@ -107,7 +109,7 @@ export function rewriteDaemonImports({ cliDir, daemonPackageJsonPath }) {
   let rewritten = 0;
   let files = 0;
   const roots = [join(cliDir, "dist"), join(cliDir, "tui", "dist")];
-  for (const file of roots.flatMap(javascriptFiles)) {
+  for (const file of roots.flatMap(moduleFiles)) {
     const text = readFileSync(file, "utf8");
     const { output, count } = rewriteSource(text, file, targetFor);
     if (count === 0) continue;
@@ -116,7 +118,7 @@ export function rewriteDaemonImports({ cliDir, daemonPackageJsonPath }) {
     files += 1;
   }
 
-  const left = roots.flatMap(javascriptFiles).flatMap((file) =>
+  const left = roots.flatMap(moduleFiles).flatMap((file) =>
     remainingDaemonImports(readFileSync(file, "utf8"), file).map((found) => `${file}: ${found}`));
   if (left.length > 0) throw new Error(`daemon imports left after rewrite:\n${left.join("\n")}`);
   return { rewritten, files };

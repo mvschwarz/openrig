@@ -164,4 +164,97 @@ describe("restore-check current-state eligibility correction", () => {
     expect((await (await app.request(`/api/rigs/${unknown.id}/status`)).json()).status).toBe("unknown");
     expect(changes()).toEqual(before);
   });
+
+  // A seat that only ever resumed or was attached has no saved startup context. With a resume token, restore resumes it
+  // with an empty plan; eligibility and restore-check follow the same rule.
+  function seedMoved(name: string, token: boolean, pod = true) {
+    const { rigRepo, sessionRegistry, db } = setup;
+    const rig = rigRepo.createRig(name);
+    if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run(`pod-${name}`, rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, pod ? "dev.moved" : "moved", { runtime: "codex", cwd: home, ...(pod ? { podId: `pod-${name}` } : {}) });
+    const session = sessionRegistry.registerSession(node.id, pod ? `dev-moved@${name}` : `moved@${name}`);
+    sessionRegistry.updateStatus(session.id, "stopped");
+    if (token) db.prepare("UPDATE sessions SET resume_type='codex_id',resume_token='fixture-codex-token' WHERE id=?").run(session.id);
+    return rig;
+  }
+  const startupContextCheck = (result: { checks: Array<{ check: string }> }) =>
+    result.checks.find((c) => c.check.endsWith(".startup-context")) as { status: string; evidence: string; remediation: string };
+
+  it("a pod-aware seat with a resume token and no saved startup context is eligible, and restore-check says it resumes", async () => {
+    const rig = seedMoved("moved", true);
+    expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!)).toEqual({ ok: true, blockers: [] });
+    const ctx = startupContextCheck(await check(rig.name));
+    expect(ctx).toMatchObject({ status: "yellow", evidence: expect.stringContaining("Restore tries dev-moved@moved's saved conversation without replaying a saved startup plan, and names this gap.") });
+    // A fresh seat launch refuses without a saved startup context, so none is offered.
+    expect(ctx.remediation).toBe("No startup-context repair is needed to restore it.");
+  });
+
+  it("a legacy seat with a resume token and no saved startup context reads yellow without promising a named gap", async () => {
+    const rig = seedMoved("legacy-moved", true, false);
+    const ctx = startupContextCheck(await check(rig.name));
+    expect(ctx).toMatchObject({ status: "yellow", evidence: expect.stringContaining("without replaying a saved startup plan.") });
+    expect(ctx.evidence).not.toContain("names this gap");
+    expect(ctx.remediation).toContain("No startup-context repair is needed to restore it.");
+  });
+
+  // A member outside the restore roster (joined later with `rig attach --self`, say) is left as it is, so its saved
+  // conversation isn't tried: from the selected snapshot's roster, or, on a current-state rehydrate, from the rig's
+  // recorded roster. With no recorded roster everyone is restored, as the eligible case above shows.
+  function seedOutside(name: string) {
+    const rig = seedMoved(name, true);
+    const lead = setup.rigRepo.addNode(rig.id, "dev.lead", { runtime: "codex", cwd: home, podId: `pod-${name}` });
+    return { rig, lead };
+  }
+  async function expectLeftAttached(rigName: string) {
+    const ctx = (await check(rigName)).checks.find((c: { check: string }) => c.check === `seat.dev-moved@${rigName}.startup-context`) as
+      { status: string; evidence: string; remediation: string };
+    expect(ctx).toMatchObject({ status: "yellow",
+      evidence: expect.stringContaining(`Restore leaves dev-moved@${rigName} attached and doesn't restore it: it isn't in this rig's restore roster.`) });
+    expect(ctx.evidence).not.toContain("Restore tries");
+    expect(ctx.remediation).toBe("No startup-context repair is needed: restore doesn't touch this member.");
+  }
+
+  it("a member outside the selected snapshot's roster reads as left attached and not restored, not as a resume", async () => {
+    const { rig, lead } = seedOutside("outside");
+    const live = setup.rigRepo.getRig(rig.id)!;
+    const sessions = setup.sessionRegistry.getSessionsForRig(rig.id);
+    // The snapshot holds both members and their current occupants, so restore uses it; its roster names only the lead.
+    setup.snapshotRepo.createSnapshot(rig.id, "auto-pre-down", {
+      rig: live.rig, nodes: live.nodes, edges: live.edges, sessions, checkpoints: {},
+      activeSessionIdByNode: Object.fromEntries(sessions.map((s) => [s.nodeId, s.id])),
+      topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [lead.id] },
+    });
+    await expectLeftAttached(rig.name);
+  });
+
+  it("a member the selected snapshot doesn't hold at all (it joined later and its session exited) reads as left attached", async () => {
+    const { rig, lead } = seedOutside("joined-after");
+    // With no fresh-launch record, the occupant match skips an exited session, so restore uses a snapshot that holds
+    // only the lead. Restore acts on that snapshot's roster and leaves the later member as it is.
+    setup.sessionRegistry.updateStatus(setup.sessionRegistry.getSessionsForRig(rig.id)[0]!.id, "exited");
+    const live = setup.rigRepo.getRig(rig.id)!;
+    setup.snapshotRepo.createSnapshot(rig.id, "auto-pre-down", {
+      rig: live.rig, nodes: live.nodes.filter((node) => node.id === lead.id), edges: [], sessions: [], checkpoints: {},
+      activeSessionIdByNode: {},
+      topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [lead.id] },
+    });
+    await expectLeftAttached(rig.name);
+  });
+
+  it("on a current-state rehydrate, a member outside the rig's recorded roster reads as left attached too", async () => {
+    const { rig, lead } = seedOutside("outside-rehydrate");
+    // No usable snapshot, so restore would rehydrate from current state, which takes the rig's recorded roster.
+    setup.db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)")
+      .run(rig.id, "topology.roster_recorded", JSON.stringify({ intendedNodeIds: [lead.id], source: "materialized_topology" }));
+    await expectLeftAttached(rig.name);
+  });
+
+  it("without a resume token the seat stays blocked, and restore-check names a supported command instead of 'recreate'", async () => {
+    const rig = seedMoved("unmoved", false);
+    expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!).blockers)
+      .toContain("node dev.moved is pod-aware but has no persisted startup context or resume token");
+    const ctx = startupContextCheck(await check(rig.name));
+    expect(ctx).toMatchObject({ status: "red", remediation: "No command records startup context for this seat yet. To see what restore would do for it, preview with: rig up unmoved --existing --plan (read-only; it records nothing)." });
+    expect(ctx.remediation).not.toContain("--fresh");
+  });
 });

@@ -15,6 +15,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -31,8 +32,8 @@ function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unk
     hasSession: vi.fn(async () => false),
     sendKeys: vi.fn(async () => {}),
     capturePaneContent: vi.fn(async () => ""),
-    getPaneCommand: vi.fn(async () => null),
-    getPanePid: vi.fn(async () => null),
+    getPaneCommand: vi.fn(async () => "claude"),
+    getPanePid: vi.fn(async () => 4242),
     listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
     getSessionStatus: vi.fn(async () => null),
     waitForReady: vi.fn(async () => true),
@@ -143,6 +144,34 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(result.launched?.[0]).toMatchObject({ status: "awaiting-decision", error: "No session was started for this seat. Restore a snapshot whose saved startup runtime matches the seat's current runtime." });
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
+  });
+
+  it.each([
+    ["codex", "claude-code"],
+    ["claude-code", "codex"],
+  ])("plans saved startup %s on live %s as unknown with restore's reason, never a definite mode", (saved, live) => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext(saved) });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(live, nodeIds[0]);
+    const result = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    const permission = result.targetNodes?.[0]?.permission;
+    expect(permission).toMatchObject({ basis: "unknown" });
+    expect(permission?.summary).toContain("restore stops for a runtime decision before it starts this seat. No session was started for this seat.");
+    expect(permission?.summary).not.toContain("On restore");
+  });
+
+  it("plans a seat recreated under the saved name as unknown with the launch's own refusal, never the replacement's account", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    // The snapshot saved dev.driver as another node; the current dev.driver has the same runtime and its own choice.
+    const snapshotId = seedSnapshot(rigId, ["saved-driver", nodeIds[1]!], { "saved-driver": emptyStartupContext("claude-code") });
+    new NativePermissionStore(db).write(nodeIds[0]!, { runtime: "claude-code", mode: "plan" }, "person@host", "the replacement's own choice");
+    const target = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId }).targetNodes?.[0];
+    expect(target).toEqual({ nodeId: "saved-driver", logicalId: "dev.driver", permission: { basis: "unknown", runtime: "claude-code",
+      summary: "Unknown: restore stops before it starts this seat. A snapshot seat was removed or recreated. Select history for the current seat." } });
+    // Execution keeps its existing refusal for the same seat.
+    const launched = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    expect(launched).toMatchObject({ ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." });
+    expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
   it("returns rig_not_found for unknown rig", async () => {
@@ -309,6 +338,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
     expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
+    // Each target carries the permission this launch will start it with, from restore's own posture rule.
+    expect(result.targetNodes?.[0]?.permission?.summary).toEqual(expect.any(String));
   });
 
   it("plans single-node subset by node id with nonTargetMode unchanged (#887)", () => {
@@ -740,6 +771,25 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "superseded" });
     });
 
+    it("#3253: a takeover chooses its path before the process is ended, and goes ahead without a limit it can't apply", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      const order: string[] = [];
+      const notice = { state: "not_applied", kind: "unverified", reason: "asking the systemd user manager timed out", retryable: true,
+        requested: { tasksMax: 256 } };
+      const plan = vi.fn(async () => { order.push("plan"); return notice; });
+      const signal = (tmux as any).signalPaneProcess;
+      (tmux as any).signalPaneProcess = vi.fn(async (...a: unknown[]) => { order.push("signal"); return signal(...a); });
+      Object.assign(tmux, { seatProcessLimitsRecoveryPlan: plan });
+      const adapter = readyAdapter("claude-code");
+      await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+      expect(order[0]).toBe("plan");
+      // the respawn runs in recovery mode: a limit can't stop it once the process has ended
+      expect((tmux as any).respawnPane).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+        expect.objectContaining({ processLimitsMode: "recovery" }));
+    });
+
     it("launches a kept running effort in place of the saved one, without saving it as the seat's choice", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       db.prepare("UPDATE nodes SET effort = 'low' WHERE id = ?").run(nodeIds[0]);
@@ -799,6 +849,21 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect((tmux as any).respawnPane).not.toHaveBeenCalled();
       expect(sessionRegistry.getBindingForNode(nodeIds[0]!)).toMatchObject({ tmuxSession: "dev-driver@test-rig", tmuxPane: "%8" });
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "running" });
+    });
+
+    // #2940: a compensation writes the seat's earlier statuses back, running included. That is an observation: a stop
+    // requested on the row in the meantime (a seat stop whose kill hasn't completed) survives it.
+    it("a failed takeover's compensation that writes running back keeps a pending stop request", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      const live = liveDriver(rigId, nodeIds[0]!, "%8");
+      sessionRegistry.requestStop(live.id, "pending-stop");
+      const writes = vi.spyOn(sessionRegistry, "updateStatus");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") }, keepPane: true });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "failed" })]);
+      expect(writes).toHaveBeenCalledWith(live.id, "running");
+      expect(db.prepare("SELECT status, intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(live.id))
+        .toEqual({ status: "running", intentionally_stopped: 1, stop_attempt: "pending-stop" });
     });
 
     it("carries the running Claude executable through takeover to the continuation", async () => {
@@ -977,14 +1042,36 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const freshLaunch = vi.fn(launchFresh);
       (orchestrator as any).freshLaunch = freshLaunch;
       const launch = () => orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId, adapters: { "claude-code": readyAdapter("claude-code") } as any });
-      return { rigId, nodeIds, freshLaunch, launchFresh, launch };
+      return { rigId, nodeIds, freshLaunch, launchFresh, launch, guard };
     }
+
+    it("a paused non-target doesn't refuse the launch: the target starts, and the paused seat keeps its mode", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      await guard.set(nodeIds[1]!, true, "person", "typing a draft");
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desired: true, effective: true });
+    });
+
+    it("a draft-aware non-target with a draft doesn't refuse the launch: the target starts, and the draft and mode stay", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      sessionRegistry.updateBinding(nodeIds[1]!, { tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+      await guard.set(nodeIds[1]!, { mode: "draft-aware" }, "person", "keep my draft");
+      // Someone is typing in the non-target's pane: its input isn't absent.
+      guard.attachInputInspection(async () => null, async () => false);
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desiredMode: "draft-aware", effectiveMode: "draft-aware" });
+      expect(sessionRegistry.getBindingForNode(nodeIds[1]!)).toMatchObject({ tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+      const touched = [...(tmux.sendKeys as any).mock.calls, ...(tmux.killSession as any).mock.calls].flat().map(String);
+      expect(touched.filter((arg) => arg.includes("dev-guard") || arg === "%9")).toEqual([]);
+    });
 
     it("starts: retiring the provisional shell rebinds the lease, so the persisted fresh launch owns the seat", async () => {
       const { rigId, nodeIds, freshLaunch, launch } = guarded();
       const result = await launch();
       expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
-      expect(freshLaunch).toHaveBeenCalledWith(rigId, nodeIds[0]);
+      expect(freshLaunch).toHaveBeenCalledWith(rigId, nodeIds[0], { processLimitsMode: "recovery" });
       expect(tmux.killSession).toHaveBeenCalledOnce();
       expect(tmux.createSession).toHaveBeenCalledTimes(2);
       const sessions = sessionRegistry.getSessionsForRig(rigId).filter((session) => session.nodeId === nodeIds[0]);
@@ -1016,6 +1103,343 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "failed",
         error: expect.stringContaining("Input target/occupant changed") })]);
       expect(tmux.createSession).toHaveBeenCalledOnce();
+    });
+  });
+
+  // #2940: the keep_alive supervisor relaunches a fallen seat through launchSingleNode with keepAlive. Under the seat's
+  // lifecycle lease and before any effect, the launch re-reads the seat: a stop or rig down recorded on its latest
+  // session, or keep_alive turned off, refuses with stop_requested. It never asks for a fresh start.
+  describe("a keep_alive relaunch", () => {
+    function fallenKeepAliveDriver() {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(nodeIds[0]);
+      const fallen = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
+      sessionRegistry.updateStatus(fallen.id, "detached");
+      return { rigId, nodeIds, fallen };
+    }
+    const allSessions = () => db.prepare("SELECT * FROM sessions ORDER BY id").all();
+
+    it("refuses with stop_requested, starting nothing, when the latest session carries a stop request", async () => {
+      const { rigId, fallen } = fallenKeepAliveDriver();
+      db.prepare("UPDATE sessions SET intentionally_stopped = 1 WHERE id = ?").run(fallen.id);
+      const before = allSessions();
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepAlive: true });
+      expect(result).toMatchObject({ ok: false, code: "stop_requested" });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      expect(allSessions()).toEqual(before);
+    });
+
+    it("refuses with stop_requested when the seat no longer declares keep_alive", async () => {
+      const { rigId, nodeIds } = fallenKeepAliveDriver();
+      db.prepare("UPDATE nodes SET keep_alive = 0 WHERE id = ?").run(nodeIds[0]);
+      const before = allSessions();
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: true });
+      expect(result).toMatchObject({ ok: false, code: "stop_requested" });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(allSessions()).toEqual(before);
+    });
+
+    it("relaunches a fallen keep_alive seat as an ordinary launch would, never asking for a fresh start", async () => {
+      const { rigId, nodeIds } = fallenKeepAliveDriver();
+      const restoreNode = vi.spyOn(orchestrator as any, "restoreNodeWithCompensation");
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepAlive: true });
+      expect(result.ok).toBe(true);
+      // The snapshot saves the seat with restore policy relaunch_fresh: the declared policy is what starts it fresh.
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(adapter.launchHarness).toHaveBeenCalledOnce();
+      expect(restoreNode).toHaveBeenCalledOnce();
+      const opts = restoreNode.mock.calls[0]![4] as Record<string, unknown>;
+      expect(opts).not.toHaveProperty("freshLogicalIds");
+      expect(opts).not.toHaveProperty("keepAlive");
+      const latest = sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeIds[0]).at(-1)!;
+      expect(latest.status).toBe("running");
+    });
+
+    it("without keepAlive, a stop request on the latest session doesn't refuse an operator's launch", async () => {
+      const { rigId, fallen } = fallenKeepAliveDriver();
+      db.prepare("UPDATE sessions SET intentionally_stopped = 1 WHERE id = ?").run(fallen.id);
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") } });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+    });
+
+    it("a stop recorded while the relaunch waits for the seat's lease wins: the relaunch refuses after taking it", async () => {
+      db.close();
+      const full = createDb();
+      migrate(full, ALL_MIGRATIONS);
+      setup(full);
+      const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name));
+      Object.assign(tmux, { deliveryGuard: guard });
+      const { rigId, nodeIds, fallen } = fallenKeepAliveDriver();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let holding!: () => void;
+      const held = new Promise<void>((resolve) => { holding = resolve; });
+      // A seat stop holds the lease and records its request; the relaunch queued behind it reads that request.
+      const stop = guard.lifecycle([nodeIds[0]!], async () => {
+        holding();
+        await released;
+        sessionRegistry.requestStop(fallen.id, "stop-attempt-1");
+      });
+      await held;
+      const relaunch = orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: true });
+      release();
+      await stop;
+      expect(await relaunch).toMatchObject({ ok: false, code: "stop_requested" });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("a daemon shutdown that begins while the relaunch waits for the seat's lease wins: it refuses with shutting_down", async () => {
+      db.close();
+      const full = createDb();
+      migrate(full, ALL_MIGRATIONS);
+      setup(full);
+      const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name));
+      Object.assign(tmux, { deliveryGuard: guard });
+      const { rigId, nodeIds } = fallenKeepAliveDriver();
+      const before = allSessions();
+      let stopping = false;
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let holding!: () => void;
+      const held = new Promise<void>((resolve) => { holding = resolve; });
+      const other = guard.lifecycle([nodeIds[0]!], async () => { holding(); await released; });
+      await held;
+      const adapter = readyAdapter("claude-code");
+      const relaunch = orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": adapter }, keepAlive: { shouldContinue: () => !stopping } });
+      stopping = true;
+      release();
+      await other;
+      expect(await relaunch).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      expect(allSessions()).toEqual(before);
+    });
+
+    it("a daemon shutdown that begins after the lease, while the relaunch prepares, wins: it refuses with shutting_down before any effect", async () => {
+      const { rigId } = fallenKeepAliveDriver();
+      const before = allSessions();
+      const bindingsBefore = db.prepare("SELECT * FROM bindings ORDER BY node_id").all();
+      // The gate under the lease and the read before the first effect still hold; shutdown has begun by the time the
+      // prepared launch is about to dispatch, its stale state already cleared.
+      let asked = 0;
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": adapter }, keepAlive: { shouldContinue: () => ++asked < 3 } });
+      expect(asked).toBe(3);
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      expect(allSessions()).toEqual(before);
+      expect(db.prepare("SELECT * FROM bindings ORDER BY node_id").all()).toEqual(bindingsBefore);
+    });
+
+    it("a daemon shutdown that begins after the shell is created, before the native dispatch, wins: nothing is dispatched and the shell is rolled back", async () => {
+      const { rigId, nodeIds, fallen } = fallenKeepAliveDriver();
+      const bindingsBefore = db.prepare("SELECT * FROM bindings ORDER BY node_id").all();
+      Object.assign(tmux, { killSession: vi.fn(async () => ({ ok: true as const })) });
+      // Every read up to the launcher's shell holds; shutdown has begun by the read just before the harness starts.
+      let asked = 0;
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": adapter }, keepAlive: { shouldContinue: () => ++asked < 4 } });
+      expect(asked).toBe(4);
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(tmux.createSession).toHaveBeenCalledOnce();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      const shell = sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeIds[0] && s.id !== fallen.id);
+      expect(shell).toHaveLength(1);
+      expect(tmux.killSession).toHaveBeenCalledWith(shell[0]!.sessionName);
+      expect(shell[0]!.status).toBe("superseded");
+      expect(sessionRegistry.getSessionsForRig(rigId).find((s) => s.id === fallen.id)!.status).toBe("detached");
+      expect(db.prepare("SELECT * FROM bindings ORDER BY node_id").all()).toEqual(bindingsBefore);
+    });
+
+    it("a daemon shutdown that begins while the provisional shell is retired wins: the replacement never starts and the seat goes back to its prior state", async () => {
+      // A never-started keep_alive seat: no startup context, so the provisional shell is retired for the fresh launcher.
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds);
+      db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(nodeIds[0]);
+      const fallen = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
+      sessionRegistry.updateStatus(fallen.id, "detached");
+      const bindingsBefore = db.prepare("SELECT * FROM bindings ORDER BY node_id").all();
+      const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+      Object.assign(orchestrator as any, { freshLaunch, freshLaunchAvailable: vi.fn(() => true) });
+      // Every read holds until the retire has stopped the provisional shell; shutdown has begun by the read after it.
+      let retired = false;
+      Object.assign(tmux, { killSession: vi.fn(async () => { retired = true; return { ok: true as const }; }) });
+      let askedAfterRetire = 0;
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": adapter }, keepAlive: { shouldContinue: () => { if (!retired) return true; askedAfterRetire++; return false; } } });
+      expect(askedAfterRetire).toBe(1);
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(freshLaunch).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      expect(tmux.createSession).toHaveBeenCalledOnce();
+      const shell = sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeIds[0] && s.id !== fallen.id);
+      expect(shell).toHaveLength(1);
+      expect(tmux.killSession).toHaveBeenCalledWith(shell[0]!.sessionName);
+      expect(shell[0]!.status).toBe("superseded");
+      expect(sessionRegistry.getSessionsForRig(rigId).find((s) => s.id === fallen.id)!.status).toBe("detached");
+      expect(db.prepare("SELECT * FROM bindings ORDER BY node_id").all()).toEqual(bindingsBefore);
+    });
+
+    it("a daemon shutdown that begins while the replacement launch prepares, after its shell exists, wins: nothing is dispatched and the seat goes back to its prior state", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds);
+      db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(nodeIds[0]);
+      const fallen = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
+      sessionRegistry.updateStatus(fallen.id, "detached");
+      const bindingsBefore = db.prepare("SELECT * FROM bindings ORDER BY node_id").all();
+      const adapter = readyAdapter("claude-code");
+      // The fresh launcher as launchPersistedFresh runs it: the replacement's shell is created and bound, then its
+      // startup reads the predicate just before the native dispatch (startNode's beforeNativeLaunch).
+      let replacementCreated = false;
+      const freshLaunch = vi.fn(async (_rigId: string, nodeId: string, launchOpts?: { beforeNativeDispatch?: () => boolean }) => {
+        const shell = sessionRegistry.registerSession(nodeId, "dev-driver@test-rig");
+        sessionRegistry.updateStatus(shell.id, "running");
+        sessionRegistry.updateBinding(nodeId, { tmuxSession: "dev-driver@test-rig", tmuxPane: "%9" });
+        replacementCreated = true;
+        if (launchOpts?.beforeNativeDispatch && !launchOpts.beforeNativeDispatch()) {
+          sessionRegistry.updateStartupStatus(shell.id, "attention_required");
+          return { status: "attention_required" as const, error: "native resume was not dispatched." };
+        }
+        await adapter.launchHarness();
+        return { status: "launched" as const };
+      });
+      Object.assign(orchestrator as any, { freshLaunch, freshLaunchAvailable: vi.fn(() => true) });
+      Object.assign(tmux, { killSession: vi.fn(async () => ({ ok: true as const })) });
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": adapter }, keepAlive: { shouldContinue: () => !replacementCreated } });
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(freshLaunch).toHaveBeenCalledOnce();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      const shells = sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeIds[0] && s.id !== fallen.id);
+      // The provisional shell and the replacement's: both stopped and superseded, neither left running.
+      expect(shells).toHaveLength(2);
+      for (const shell of shells) {
+        expect(tmux.killSession).toHaveBeenCalledWith(shell.sessionName);
+        expect(shell.status).toBe("superseded");
+      }
+      expect(sessionRegistry.getSessionsForRig(rigId).find((s) => s.id === fallen.id)!.status).toBe("detached");
+      expect(db.prepare("SELECT * FROM bindings ORDER BY node_id").all()).toEqual(bindingsBefore);
+    });
+
+    // The refusal carries the seat's own outcome, so the supervisor gives the attempt back only for a relaunch that
+    // started nothing or was positively undone: `notStarted` before the first effect, `compensated` for a shell whose
+    // stop tmux confirmed, with the seat's prior state put back.
+    it("a shutdown refusal reports the seat's outcome: compensated for a shell whose stop tmux confirmed", async () => {
+      const { rigId } = fallenKeepAliveDriver();
+      Object.assign(tmux, { killSession: vi.fn(async () => ({ ok: true as const })) });
+      let asked = 0;
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: { shouldContinue: () => ++asked < 4 } });
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", compensated: true })]);
+      expect(result.launched![0]).not.toHaveProperty("notStarted");
+    });
+
+    it("a shutdown refusal before the first effect reports the seat as not started", async () => {
+      const { rigId } = fallenKeepAliveDriver();
+      let asked = 0;
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: { shouldContinue: () => ++asked < 3 } });
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", notStarted: true })]);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["returns false", async () => ({ ok: false as const, message: "server busy" })],
+      ["throws", async () => { throw new Error("tmux timed out"); }],
+    ])("a shutdown after the shell is created whose stop %s keeps the shell's session and binding, and says so", async (_how, kill) => {
+      const { rigId, nodeIds, fallen } = fallenKeepAliveDriver();
+      Object.assign(tmux, { killSession: vi.fn(kill) });
+      let asked = 0;
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": adapter }, keepAlive: { shouldContinue: () => ++asked < 4 } });
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      const shell = sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeIds[0] && s.id !== fallen.id);
+      expect(shell).toHaveLength(1);
+      expect(shell[0]!.status).toBe("running");
+      expect(sessionRegistry.getBindingForNode(nodeIds[0]!)?.tmuxSession).toBe(shell[0]!.sessionName);
+      const outcome = result.launched?.[0];
+      expect(outcome).toMatchObject({ logicalId: "dev.driver", status: "attention_required" });
+      expect(outcome).not.toHaveProperty("compensated");
+      expect(outcome).not.toHaveProperty("notStarted");
+      expect(outcome!.error).toContain(`'${shell[0]!.sessionName}'`);
+      expect(outcome!.error).toContain("couldn't be confirmed stopped");
+      expect(outcome!.error).toContain("rig seat stop");
+    });
+
+    it("a shutdown after the provisional shell is retired is compensated by that retire: the gone shell isn't stopped again", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds);
+      db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(nodeIds[0]);
+      const fallen = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
+      sessionRegistry.updateStatus(fallen.id, "detached");
+      const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+      Object.assign(orchestrator as any, { freshLaunch, freshLaunchAvailable: vi.fn(() => true) });
+      // Only the retire finds a session: a later stop of the gone shell isn't confirmed.
+      let kills = 0;
+      Object.assign(tmux, { killSession: vi.fn(async () => (++kills === 1 ? { ok: true as const } : { ok: false as const, message: "can't find session" })) });
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: { shouldContinue: () => kills === 0 } });
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(freshLaunch).not.toHaveBeenCalled();
+      expect(tmux.killSession).toHaveBeenCalledOnce();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", compensated: true })]);
+    });
+
+    it("a shutdown in the replacement launch whose replacement stop isn't confirmed reports the replacement left in place", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds);
+      db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(nodeIds[0]);
+      const fallen = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
+      sessionRegistry.updateStatus(fallen.id, "detached");
+      let replacementCreated = false;
+      let replacementId = "";
+      const freshLaunch = vi.fn(async (_rigId: string, nodeId: string, launchOpts?: { beforeNativeDispatch?: () => boolean }) => {
+        const shell = sessionRegistry.registerSession(nodeId, "dev-driver-new@test-rig");
+        sessionRegistry.updateStatus(shell.id, "running");
+        sessionRegistry.updateBinding(nodeId, { tmuxSession: "dev-driver-new@test-rig", tmuxPane: "%9" });
+        replacementCreated = true;
+        replacementId = shell.id;
+        if (launchOpts?.beforeNativeDispatch && !launchOpts.beforeNativeDispatch()) {
+          return { status: "attention_required" as const, error: "native start was not dispatched." };
+        }
+        return { status: "launched" as const };
+      });
+      Object.assign(orchestrator as any, { freshLaunch, freshLaunchAvailable: vi.fn(() => true) });
+      // The provisional shell's retire is confirmed; the replacement's stop is not.
+      Object.assign(tmux, { killSession: vi.fn(async (name: unknown) => name === "dev-driver-new@test-rig"
+        ? { ok: false as const, message: "server busy" } : { ok: true as const }) });
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: { shouldContinue: () => !replacementCreated } });
+      expect(result).toMatchObject({ ok: false, code: "shutting_down" });
+      expect(tmux.killSession).toHaveBeenCalledTimes(2);
+      expect(tmux.killSession).toHaveBeenLastCalledWith("dev-driver-new@test-rig");
+      const replacement = sessionRegistry.getSessionsForRig(rigId).find((s) => s.id === replacementId)!;
+      expect(replacement.status).toBe("running");
+      expect(sessionRegistry.getBindingForNode(nodeIds[0]!)?.tmuxSession).toBe("dev-driver-new@test-rig");
+      const outcome = result.launched?.[0];
+      expect(outcome).not.toHaveProperty("compensated");
+      expect(outcome!.error).toContain("'dev-driver-new@test-rig'");
+      expect(outcome!.error).toContain("couldn't be confirmed stopped");
+    });
+
+    it("keepAlive with a shouldContinue that still holds relaunches as keepAlive: true does", async () => {
+      const { rigId } = fallenKeepAliveDriver();
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver",
+        { adapters: { "claude-code": readyAdapter("claude-code") }, keepAlive: { shouldContinue: () => true } });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
     });
   });
 });

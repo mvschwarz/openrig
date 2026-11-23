@@ -22,6 +22,7 @@ import {
   parseWatchdogSpec,
   WatchdogPolicyEngine,
 } from "../src/domain/watchdog-policy-engine.js";
+import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import type { PolicyEvaluation } from "../src/domain/policies/types.js";
 
@@ -182,6 +183,23 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     expect(after.lastFireAt).not.toBeNull();
     expect(after.actionable).toBe(true);
     expect(after.lastActionableAt).not.toBeNull();
+  });
+
+  it("records what the send's own result says in the shared words: taken, and render-verified only when the screen showed it", async () => {
+    const results = [{ ok: true, sessionName: "alice@rig", outcome: "rendered-unconfirmed" as const, verified: false },
+      { ok: true, sessionName: "alice@rig", outcome: "delivered" as const, verified: true }];
+    const engine = makeEngine({ deliver: makeWatchdogDeliver({ sessionTransport: { send: async () => results.shift()! } }) });
+    const job = jobsRepo.register({
+      policy: "periodic-reminder", specYaml: "policy: periodic-reminder\ntarget:\n  session: alice@rig\nmessage: ping\n",
+      targetSession: "alice@rig", intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    await engine.evaluate(job);
+    await engine.evaluate(jobsRepo.getByIdOrThrow(job.jobId));
+    const [verified, unconfirmed] = log.listForJob(job.jobId);
+    // Both stay `sent`, as before; the notes say which was only taken by the route.
+    expect(unconfirmed).toMatchObject({ outcome: "sent", evaluationNotes: expect.objectContaining({ deliveryFact: "accepted" }) });
+    expect(unconfirmed?.evaluationNotes).not.toHaveProperty("deliveryRenderVerified");
+    expect(verified).toMatchObject({ outcome: "sent", evaluationNotes: expect.objectContaining({ deliveryFact: "accepted", deliveryRenderVerified: true }) });
   });
 
   it("evaluate(quiet skip — no_actionable_artifacts) does NOT record history nor emit event (POC parity)", async () => {
@@ -609,6 +627,117 @@ describe("engine effects for the parked-owner consumer (OPR.0.5.6.24)", () => {
     expect(entries[0]?.evaluationNotes?.["deliveryReason"]).toBe(refusal);
     // The policy's own notes survive the merge untouched.
     expect(entries[0]?.evaluationNotes?.["episodeKey"]).toBe("k#1");
+    h.db.close();
+  });
+});
+
+// ─── #3643 — the per-job quiet count ─────────────────────────────────────────
+describe("per-job quiet count (#3643)", () => {
+  function makeHarness(opts: {
+    outcomes: PolicyEvaluation[];
+    now?: () => Date;
+    activeWakeIntervalSeconds?: number | null;
+    deliveryDeferred?: () => boolean;
+  }) {
+    const db = createDb();
+    migrate(db, [coreSchema, eventsSchema, watchdogJobsSchema, watchdogHistorySchema]);
+    const bus = new EventBus(db);
+    const jobsRepo = new WatchdogJobsRepository(db);
+    const log = new WatchdogHistoryLog(db);
+    const captured: PersistedEvent[] = [];
+    bus.subscribe((e) => captured.push(e));
+    const queued = [...opts.outcomes];
+    const makeEngine = (now?: () => Date) => new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: log,
+      eventBus: bus,
+      now,
+      deliver: async () => ({ status: "ok" as const }),
+      deliveryDeferred: opts.deliveryDeferred,
+      additionalPolicies: [{ name: "parked-owner-consumer", evaluate: async () => queued.shift()! }],
+    } as never);
+    const job = jobsRepo.register({
+      policy: "parked-owner-consumer",
+      specYaml: "policy: parked-owner-consumer\ntarget:\n  session: alice@rig\ninterval_seconds: 60\n",
+      targetSession: "alice@rig",
+      intervalSeconds: 60,
+      activeWakeIntervalSeconds: opts.activeWakeIntervalSeconds ?? null,
+      registeredBySession: "ops@kernel",
+    });
+    return { db, jobsRepo, log, captured, job, makeEngine, engine: makeEngine(opts.now) };
+  }
+
+  const send: PolicyEvaluation = { action: "send", target: { session: "alice@rig" }, message: "wake" };
+
+  it("counts each quiet decision, a policy's own not_due included, by reason and with the last one, and still writes no history row or event", async () => {
+    const h = makeHarness({ outcomes: [
+      { action: "skip", reason: "not_due" },
+      { action: "skip", reason: "no-parked-owner" },
+      { action: "skip", reason: "not_due" },
+    ] });
+    for (let i = 0; i < 3; i++) await h.engine.evaluate(h.jobsRepo.getByIdOrThrow(h.job.jobId));
+    expect(h.engine.quietCount(h.job.jobId)).toMatchObject({
+      total: 3,
+      byReason: { not_due: 2, "no-parked-owner": 1 },
+      lastReason: "not_due",
+    });
+    expect(h.log.countForJob(h.job.jobId)).toBe(0);
+    expect(h.captured.filter((e) => String(e.type).startsWith("watchdog."))).toHaveLength(0);
+    // The count is per job: another job evaluated by nobody still reads zero.
+    const other = h.jobsRepo.register({
+      policy: "parked-owner-consumer", specYaml: "policy: parked-owner-consumer\ntarget:\n  session: bob@rig\n",
+      targetSession: "bob@rig", intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    expect(h.engine.quietCount(other.jobId)).toMatchObject({ total: 0, lastReason: null });
+    expect(h.engine.quietCount(other.jobId).byReason).toEqual({});
+    h.db.close();
+  });
+
+  it("counts the active_wake_not_due branch", async () => {
+    let nowMs = 0;
+    const h = makeHarness({ outcomes: [send, send], activeWakeIntervalSeconds: 600, now: () => new Date(nowMs) });
+    await h.engine.evaluate(h.jobsRepo.getByIdOrThrow(h.job.jobId));
+    expect(h.engine.quietCount(h.job.jobId).total).toBe(0);
+    nowMs = 60_000;
+    const r = await h.engine.evaluate(h.jobsRepo.getByIdOrThrow(h.job.jobId));
+    expect(r.outcome).toEqual({ action: "skip", reason: "active_wake_not_due" });
+    expect(h.engine.quietCount(h.job.jobId)).toMatchObject({
+      total: 1, byReason: { active_wake_not_due: 1 }, lastReason: "active_wake_not_due",
+    });
+    h.db.close();
+  });
+
+  it("leaves the count alone for a loud skip, a send, a terminal and the other history: null returns", async () => {
+    let deferred = false;
+    const h = makeHarness({
+      outcomes: [{ action: "skip", reason: "loud_reason_for_test" }, send, { action: "terminal", reason: "done" }],
+      deliveryDeferred: () => deferred,
+    });
+    const evaluate = () => h.engine.evaluate(h.jobsRepo.getByIdOrThrow(h.job.jobId));
+    await evaluate();
+    await evaluate();
+    deferred = true;
+    expect((await evaluate()).outcome).toEqual({ action: "skip", reason: "rig_delivery_drain" });
+    deferred = false;
+    await evaluate();
+    expect(h.jobsRepo.getByIdOrThrow(h.job.jobId).state).toBe("terminal");
+    expect((await h.engine.evaluate(h.job)).outcome).toEqual({ action: "skip", reason: "job_not_active" });
+    expect(h.engine.quietCount(h.job.jobId)).toMatchObject({ total: 0, lastReason: null });
+    expect(h.engine.quietCount(h.job.jobId).byReason).toEqual({});
+    h.db.close();
+  });
+
+  it("reads zero for a job with no quiet decision yet, since the engine started, and starts again from zero on a new engine", async () => {
+    const h = makeHarness({ outcomes: [{ action: "skip", reason: "not_due" }], now: () => new Date("2026-11-21T00:00:00.000Z") });
+    expect(h.engine.quietCount(h.job.jobId)).toEqual({
+      since: "2026-11-21T00:00:00.000Z", total: 0, byReason: {}, lastReason: null,
+    });
+    await h.engine.evaluate(h.job);
+    expect(h.engine.quietCount(h.job.jobId).total).toBe(1);
+    const restarted = h.makeEngine(() => new Date("2026-11-21T01:00:00.000Z"));
+    expect(restarted.quietCount(h.job.jobId)).toEqual({
+      since: "2026-11-21T01:00:00.000Z", total: 0, byReason: {}, lastReason: null,
+    });
     h.db.close();
   });
 });

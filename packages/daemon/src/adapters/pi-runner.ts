@@ -1,3 +1,4 @@
+import type { PiManagedRequest } from "./pi-runner-protocol.js";
 // OPR.0.4.6.PI1 — the pane-hosted pi-runner (compiled entry in the daemon dist).
 //
 // The runner is what makes a Pi seat behave like a normal OpenRig tmux seat
@@ -19,6 +20,8 @@
 // entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
+import { startPiRecoveryServer, type RunnerRecoveryReply } from "./pi-recovery-rpc.js";
 import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough, Writable } from "node:stream";
@@ -132,6 +135,27 @@ export function composeLayout(text: string, width: number, caret = text.length):
   return { rows: row + 1, caretRow, caretColumn };
 }
 
+// ── Pane text styles ───────────────────────────────────────────────────────
+// Emphasis for the lines the runner itself writes. The words carry the meaning on their
+// own — a plain log or a captured pane reads the same — so colour is an addition, never
+// the only signal. Model output and the READY/EXITED/ERROR markers stay unstyled: adapters
+// grep the transcript for those markers. NO_COLOR and a non-TTY output disable styling.
+export interface PaneStyle {
+  bold(text: string): string;
+  dim(text: string): string;
+  /** The operator's own lines: `you ▸ …`, `you (steer) ▸ …`. */
+  commit(text: string): string;
+  /** A failed tool call's verdict. */
+  failed(text: string): string;
+}
+
+export function paneStyles(enabled: boolean): PaneStyle {
+  const sgr = (open: string) => (text: string) => (enabled ? `\u001b[${open}m${text}\u001b[0m` : text);
+  return { bold: sgr("1"), dim: sgr("2"), commit: sgr("1;36"), failed: sgr("1;31") };
+}
+
+const STYLE: PaneStyle = paneStyles(process.stdout.isTTY === true && !process.env.NO_COLOR);
+
 // ── Pane live region (compose + status) ────────────────────────────────────────
 // A seat pane is a plain terminal: one bottom live region holds the operator's draft
 // and the runner's status line, and is erased and repainted around every transcript
@@ -158,11 +182,14 @@ export interface PaneCompositor {
   /** A keypress is about to echo: close an open transcript line first, or the echo
    *  and the next streamed deltas would land on top of it. */
   beforeInput(): void;
-  /** Pin the latest diagnostic on the status line. The transcript copy is the caller's;
-   *  this pin is never the only copy. */
+  /** Pin the latest diagnostic on the region's diagnostic row. The transcript copy is the
+   *  caller's; this pin is never the only copy. The seat's own status row is untouched. */
   diagnostic(text: string): void;
-  /** Drop a pinned status line. */
+  /** Drop the pinned diagnostic. The seat's own status row stays. */
   clearStatus(): void;
+  /** The seat's own status row above the diagnostic row: what it runs and the state the
+   *  runner observed. Empty text clears it. */
+  status(text: string): void;
   /** Before the submit commits: drop the draft line so no partial copy scrolls, and
    *  finish any held streamed line; the durable copy is the commit line below. */
   beforeSubmit(): void;
@@ -171,10 +198,16 @@ export interface PaneCompositor {
 }
 
 export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
-  let status: string | null = null;
-  /** The status text actually on screen: clipped when it was painted. A resize must
-   *  size the region from this, not from the longer text it was pinned with. */
-  let paintedStatus: string | null = null;
+  /** The seat's own status row (`model · thinking:… · state`), and the pinned diagnostic
+   *  below it. They are independent: a turn clears the pin and keeps the seat row. */
+  let seat: string | null = null;
+  let pinned: string | null = null;
+  /** The status rows actually on screen, clipped when they were painted. A resize must
+   *  size the region from these, not from the longer text they were set with. */
+  let paintedSeat: string | null = null;
+  let paintedPinned: string | null = null;
+  /** The unfinished streamed line, as displayed above the status rows (null when it is not). */
+  let paintedHeld: string | null = null;
   let readInput: (() => string) | null = null;
   let redrawLine: (() => void) | null = null;
   let held = "";
@@ -206,18 +239,68 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     for (let index = 0; index < lines; index += 1) sequence += index === 0 ? "\r\u001b[2K" : "\u001b[1A\r\u001b[2K";
     if (sequence) out.write(sequence);
   };
+  /** The visible tail of the held streamed line: at most the pane's spare rows, so a
+   *  newline-free paragraph longer than the viewport never scrolls its own repaint —
+   *  what scrolls stays in history, and the whole line is committed once when it ends. */
+  const heldTail = (text: string): string => {
+    const height = typeof out.rows === "number" && out.rows > 0 ? out.rows : 24;
+    const budget = Math.max(1, height - 2
+      - (seat !== null ? 1 : 0) - (pinned !== null ? 1 : 0) - composeRows());
+    if (composeLayout(text, out.columns).rows <= budget) return text;
+    // Bound by the final wrapped layout, ellipsis included: at an odd width a two-cell
+    // character can't fill the last column, so a cell-count bound would overflow the
+    // region. A shorter suffix never wraps to more rows, so bisect on its start.
+    const graphemes = [...graphemesOf(text)];
+    const fits = (start: number) =>
+      composeLayout(`\u2026${graphemes.slice(start).join("")}`, out.columns).rows <= budget;
+    let low = 0;
+    let high = graphemes.length; // the ellipsis alone fits any budget
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (fits(mid)) high = mid;
+      else low = mid + 1;
+    }
+    return `\u2026${graphemes.slice(low).join("")}`;
+  };
   /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
    *  to the terminal, so nothing else can change these rows behind the compositor's back —
    *  except a reflow, which the resize handler owns. */
   const paint = () => {
-    paintedStatus = status !== null ? clip(status) : null;
-    if (paintedStatus !== null) {
-      out.write(paintedStatus);
+    // Without a width nothing can be placed, erased or measured; the status text is kept
+    // and painted once a width is known (a resize or the next write calls back here).
+    if (!widthKnown()) {
+      paintedSeat = null;
+      paintedPinned = null;
+      paintedHeld = null;
+      screenRows = 0;
+      return;
+    }
+    // A transcript line a verbatim write left open must not be spliced by the region:
+    // close it first, so the region starts on its own row and the line stays whole.
+    if (openLine && (seat !== null || pinned !== null || composeRows() > 0)) {
+      out.write("\n");
+      openLine = false;
+    }
+    paintedSeat = seat !== null ? clip(seat) : null;
+    paintedPinned = pinned !== null ? clip(pinned) : null;
+    const statusRows = [paintedSeat, paintedPinned].filter((text): text is string => text !== null);
+    // An in-progress streamed line stays visible as the region's first row while a status
+    // row is painted — bounded to the pane's spare rows so its own repaint never scrolls;
+    // without one the pane keeps its verbatim fallback and the line is held until it ends.
+    paintedHeld = statusRows.length > 0 && held.length > 0 ? heldTail(held) : null;
+    let heldRows = 0;
+    if (paintedHeld !== null) {
+      out.write(paintedHeld);
+      out.write("\n");
+      heldRows = Math.max(1, composeLayout(paintedHeld, out.columns).rows);
+    }
+    for (const text of statusRows) {
+      out.write(text);
       out.write("\n");
     }
     const rows = composeRows();
     if (rows) redrawLine?.();
-    screenRows = (status !== null ? 1 : 0) + (rows || (status !== null ? 1 : 0));
+    screenRows = heldRows + statusRows.length + (rows || (heldRows + statusRows.length > 0 ? 1 : 0));
     // Only a painted region closes an open transcript line. With nothing painted the
     // cursor still sits on the line a flush left open, and the next keystroke belongs
     // to that line's context, not to a fresh one.
@@ -258,15 +341,28 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       screenRows = 0;
       return;
     }
+    if (screenRows === 0) {
+      // Nothing painted: nothing to erase. A line a verbatim write left open is closed
+      // so the retained region starts on its own row instead of splicing into it.
+      if (openLine) {
+        out.write("\n");
+        openLine = false;
+      }
+      paint();
+      return;
+    }
     const draft = composeText();
     const layout = draft ? composeLayout(draft, out.columns, readCaretIndex ? readCaretIndex() : draft.length) : null;
     const draftRows = layout ? layout.rows : 0;
-    const statusLines = paintedStatus !== null ? Math.max(1, Math.ceil(stringWidth(paintedStatus) / out.columns)) : 0;
+    const statusLines = [paintedSeat, paintedPinned].reduce((sum, text) =>
+      text !== null ? sum + Math.max(1, Math.ceil(stringWidth(text) / out.columns)) : sum, 0);
+    // The held streamed row reflowed at the new width: a long partial line wraps here too.
+    const heldLines = paintedHeld !== null ? composeLayout(paintedHeld, out.columns).rows : 0;
     const down = layout ? layout.rows - 1 - layout.caretRow : 0;
     if (down > 0) out.write(`\u001b[${down}B`);
-    // A pinned status without a draft also owns the blank row its trailing newline
+    // Status and held rows without a draft also own the blank row their trailing newline
     // left the cursor on — the same row paint() counts into screenRows.
-    eraseLines(statusLines + (draftRows || (status !== null ? 1 : 0)));
+    eraseLines(heldLines + statusLines + (draftRows || (heldLines + statusLines > 0 ? 1 : 0)));
     screenRows = 0;
     paint();
   };
@@ -285,6 +381,12 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       redrawLine = null;
       readCaretUp = null;
       readCaretIndex = null;
+      // The region is gone; nothing of it may be repainted after the pane falls back.
+      seat = null;
+      pinned = null;
+      paintedSeat = null;
+      paintedPinned = null;
+      paintedHeld = null;
       openLine = false;
       screenRows = 0;
     },
@@ -292,7 +394,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       eraseScreen();
       // With no region left, an unfinished streamed line goes out verbatim so the
       // next delta continues it on the same row instead of splitting mid-word.
-      if (held && status === null && !composeText()) {
+      if (held && (!widthKnown() || (pinned === null && seat === null)) && !composeText()) {
         writeVerbatim(held);
         held = "";
       }
@@ -300,7 +402,7 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     },
     transcript(text) {
       if (!text) return;
-      if (status === null && composeRows() === 0 && screenRows === 0) {
+      if (!widthKnown() || (pinned === null && seat === null && composeRows() === 0 && screenRows === 0)) {
         if (held) {
           writeVerbatim(held);
           held = "";
@@ -309,13 +411,25 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
         return;
       }
       held += text;
-      let newline = held.indexOf("\n");
-      while (newline >= 0) {
-        const line = held.slice(0, newline + 1);
-        held = held.slice(newline + 1);
-        writeAbove(line);
-        newline = held.indexOf("\n");
+      const first = held.indexOf("\n");
+      if (first < 0) {
+        // A delta with no newline yet must still show as it streams: repaint the region
+        // (the painted tail is bounded) while a status row is painted.
+        if (seat !== null || pinned !== null) {
+          eraseScreen();
+          paint();
+        }
+        return;
       }
+      // Drain every complete line in one batch: erase once, write them above in order,
+      // then repaint. Painting the remainder between lines would scroll a long chunk.
+      const last = held.lastIndexOf("\n");
+      const complete = held.slice(0, last + 1);
+      held = held.slice(last + 1);
+      eraseScreen();
+      out.write(complete);
+      openLine = false;
+      paint();
     },
     line(text) {
       pane.transcript(`${text}\n`);
@@ -334,13 +448,27 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
         openLine = false;
       }
       eraseScreen();
-      status = clip(text);
+      pinned = text;
       paint();
     },
     clearStatus() {
-      if (status === null) return;
+      if (pinned === null) return;
       eraseScreen();
-      status = null;
+      pinned = null;
+      paint();
+    },
+    status(text) {
+      const next = text ? text : null;
+      if (next === seat) return;
+      // Without a width nothing is painted or measured, but the text is kept: the next
+      // resize (or paint with a width) shows the state it named, instead of dropping it
+      // until some later state change.
+      if (!widthKnown()) {
+        seat = next;
+        return;
+      }
+      eraseScreen();
+      seat = next;
       paint();
     },
     beforeSubmit() {
@@ -356,8 +484,8 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
 }
 
 export function createRunnerInput(
-  input: NodeJS.ReadStream,
-  output: NodeJS.WriteStream,
+  input: NodeJS.ReadableStream & { readonly isTTY?: boolean; readonly isRaw?: boolean; setRawMode: (raw: boolean) => unknown },
+  output: NodeJS.WritableStream & { readonly isTTY?: boolean; readonly columns?: number; readonly rows?: number },
   onSubmit: (block: string) => void,
   pane?: PaneCompositor,
 ): readline.Interface {
@@ -508,7 +636,7 @@ export function createRunnerInput(
     }
     pane?.refresh();
   };
-  const wasRaw = input.isRaw;
+  const wasRaw = input.isRaw ?? false;
   const end = () => editor.close();
   input.setRawMode(true);
   output.write("\u001b[?2004h");
@@ -566,6 +694,12 @@ function diagnosticText(details: unknown[]): string {
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "").find(Boolean) ?? "";
 }
+/** A runner-owned label for the pane (a configured model or effort): painted as given, so
+ *  terminal controls and bidi/format characters are neutralized first, as diagnostics are. */
+function paneLabel(text: string): string {
+  return stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
 
 function errorNotice(details: unknown[], runtime: RunnerRuntime | string): string {
   const text = diagnosticText(details);
@@ -589,7 +723,7 @@ function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime
   return {};
 }
 
-export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi"): MirrorAndActivity {
+export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi", style: PaneStyle = STYLE): MirrorAndActivity {
   const type = typeof event.type === "string" ? event.type : "";
   switch (type) {
     case "agent_start":
@@ -631,12 +765,12 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       return { mirrorLines: [""], ...modelErrorNotice(event, runtime) };
     case "tool_execution_start": {
       const tool = typeof event.toolName === "string" ? event.toolName : (typeof event.name === "string" ? event.name : "tool");
-      return { mirrorLines: [`  ⚙ ${tool} …`], activity: { hookEvent: "PreToolUse", subtype: tool } };
+      return { mirrorLines: [`  ${style.dim(`⚙ ${tool} …`)}`], activity: { hookEvent: "PreToolUse", subtype: tool } };
     }
     case "tool_execution_end": {
       const tool = typeof event.toolName === "string" ? event.toolName : (typeof event.name === "string" ? event.name : "tool");
       const failed = event.isError === true || event.error != null;
-      return { mirrorLines: [`  ⚙ ${tool} ${failed ? "FAILED" : "done"}`] };
+      return { mirrorLines: [`  ${style.dim(`⚙ ${tool}`)} ${failed ? style.failed("FAILED") : "done"}`] };
     }
     case "queue_update":
       return { mirrorLines: [] };
@@ -647,7 +781,8 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // summary (Pi's docs/rpc.md). An end that names neither is done.
       const failure = diagnosticText([event.errorMessage]).slice(0, 400);
       return { mirrorLines: [event.aborted === true ? `[${runtime}] compaction cancelled`
-        : failure ? `[${runtime}] compaction failed: ${failure}` : `[${runtime}] compaction done`] };
+        : failure ? `[${runtime}] compaction failed: ${failure}` : `[${runtime}] compaction done`],
+        ...(runtime === "pi" ? { activity: { hookEvent: "Stop", subtype: "compaction" } } : {}) };
     }
     // OMP names its automatic compaction separately. Pi keeps main's mapping
     // (unmapped), so an idle Pi seat never reads as running after one.
@@ -675,6 +810,9 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
 // ── The runner core (injected effects; owns protocol state) ─────────────────
 
 export interface RunnerIo {
+  /** Retries transport failures; false means permanent authority/receipt refusal. */
+  postRunner?(payload: Record<string, unknown>): Promise<boolean>;
+  withdrawNativeTurn?(payload: Record<string, unknown>): Promise<{ confirmed: boolean; notThisTurn?: boolean; pendingSubmissions?: number } | null>;
   /** Write one JSONL command to pi stdin. */
   sendRpc(cmd: Record<string, unknown>): void;
   /** Print a full line to the pane. */
@@ -686,6 +824,9 @@ export interface RunnerIo {
   diagnostic?(text: string): void;
   /** Drop a pinned status line at the start of a new agent turn. */
   clearStatus?(): void;
+  /** Paint the seat's own status row (what it runs, and the state the runner observed).
+   *  Always plain text: the pane clips and repaints it, and an empty string clears it. */
+  status?(text: string): void;
   /** POST to the daemon activity endpoint. May resolve to the parsed JSON
    *  response (null on transport failure) so identity delivery can retry. */
   postActivity(payload: Record<string, unknown>): void | Promise<Record<string, unknown> | null>;
@@ -707,13 +848,38 @@ export interface RunnerIo {
   readFirstLine?(path: string): string | null;
   /** The entry ids of a complete, valid Pi session file (a fork's parent); null when it isn't one. Never blocks. */
   readSessionEntryIds?(path: string): Promise<ReadonlySet<string> | null>;
+  /** #1275: the id of the last complete non-header entry in a local session file, read from its tail without scanning history. */
+  readLastEntryId?(path: string): string | null;
   now(): string;
 }
 
+export function writePiRunnerSidecar(path: string, state: PiRunnerState): void {
+  const temporary = `${path}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
+  fs.renameSync(temporary, path);
+}
+
 const GET_STATE_ID = "pi-runner-get-state";
+/** The reserved manual-compaction input carries its attempt id in the RPC id, so a
+ *  reply and the sidecar record can name exactly the request OpenRig made. */
+const COMPACT_ID = "pi-runner-compact:";
 const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 const NEGOTIATE_ID = "omp-runner-negotiate";
+const MAX_PENDING_CURSOR_REFRESHES = 16;
+/** #1275: completed turns a pending unanchored full read blocks new full reads before being treated as lost. */
+export const MAX_UNANCHORED_REFRESH_HOLD_TURNS = 3;
+const UNKNOWN_SINCE_CODE = "unknown_since";
+const UNKNOWN_ENTRIES_CURSOR_RE = /^unknown entries cursor\b/i;
+const ENTRY_NOT_FOUND_RE = /^entry not found\b/i;
+const OVERSIZED_RESTORE_ERROR_RE = /\bexceeded the transport limit\b|\breassembly limit\b/i;
+const OVERSIZED_REASSEMBLY_DROP_RE = /\babove the \d+-byte reassembly limit$/;
+
+function isUnknownCursorError(detail: string, code: string | undefined): boolean {
+  return code === UNKNOWN_SINCE_CODE
+    || UNKNOWN_ENTRIES_CURSOR_RE.test(detail)
+    || ENTRY_NOT_FOUND_RE.test(detail);
+}
 /** RPC commands that carry operator input. Their failure means the seat
  *  cannot do the requested work; other command failures are not attention. */
 const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow_up: true };
@@ -777,8 +943,118 @@ export async function readPiSessionEntryIds(
   }
 }
 
+const SESSION_TAIL_CHUNK_BYTES = 64 * 1024;
+/** #1275: largest trailing entry read locally to seed or recover a history cursor; larger lines return null. */
+export const SESSION_TAIL_READ_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * #1275: read the `id` of the last complete non-header entry in a local Pi or OMP JSONL session file without
+ * reading earlier history. Opens non-blocking and checks `isFile()` so a FIFO or device cannot stall the runner;
+ * requires a trailing newline and an unchanged file size across the read so a torn or concurrent write answers null.
+ */
+export function readSessionTailEntryId(
+  path: string,
+  limitBytes = SESSION_TAIL_READ_LIMIT_BYTES,
+  /** Test seam only: called after fstat and after reading the tail bytes, to mutate the file at those points. */
+  testHooks?: { afterStat?: () => void; afterRead?: () => void },
+): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0 || limitBytes <= 0) return null;
+    const size = stat.size;
+    testHooks?.afterStat?.();
+    const floor = Math.max(0, size - limitBytes);
+    const parts: Buffer[] = [];
+    let cursor = size;
+    let foundLineStart = false;
+    while (cursor > floor) {
+      const readStart = Math.max(floor, cursor - SESSION_TAIL_CHUNK_BYTES);
+      const length = cursor - readStart;
+      const chunk = Buffer.allocUnsafe(length);
+      let offset = 0;
+      while (offset < length) {
+        const bytesRead = fs.readSync(fd, chunk, offset, length - offset, readStart + offset);
+        if (bytesRead === 0) return null;
+        offset += bytesRead;
+      }
+      if (cursor === size && chunk[length - 1] !== 0x0a) return null;
+      const searchEnd = cursor === size ? length - 1 : length;
+      const newline = chunk.subarray(0, searchEnd).lastIndexOf(0x0a);
+      if (newline >= 0) {
+        parts.push(chunk.subarray(newline + 1, searchEnd));
+        foundLineStart = true;
+        break;
+      }
+      parts.push(chunk.subarray(0, searchEnd));
+      cursor = readStart;
+    }
+    if (!foundLineStart && floor > 0) return null;
+    testHooks?.afterRead?.();
+    if (fs.fstatSync(fd).size !== size) return null;
+    const lineBytes = parts.length === 1 ? parts[0]! : Buffer.concat(parts.reverse());
+    if (lineBytes.byteLength === 0) return null;
+    const entry = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(lineBytes)) as unknown;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const { type, id } = entry as { type?: unknown; id?: unknown };
+    if (type === "session" || typeof id !== "string" || !id) return null;
+    return id;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort */ }
+    }
+  }
+}
+
+interface PiManagedEntry {
+  frame: PiManagedRequest; acceptance?: Promise<void>; state: "accepting" | "queued" | "writing" | "submitted" | "terminal" | "unavailable";
+  reports: Promise<unknown>; nativeAccepted?: boolean; terminalResult?: Record<string, unknown>; wakeOpened?: boolean; contaminated?: boolean; answer?: string[]; stopReason?: string;
+  disposition?: string; preDispositionEvents?: boolean; nativeTerminal?: boolean;
+  acceptedTurnId?: string; nativeTurnId?: string;
+}
+
 export class RunnerCore {
+  private compaction: PiRunnerState["compaction"];
+  /** The last attempt-stamped record, kept beside `compaction` so a later
+   *  automatic run cannot erase a requested attempt's result. */
+  private requestedCompaction: PiRunnerState["requestedCompaction"];
+  /** The attempt a `/openrig-compact <id>` input named, awaiting its compaction_start. */
+  private pendingCompactAttemptId: string | null = null;
+  /** Durable copy of that pending attempt: written before the compact RPC, so a
+   *  restarted daemon reads the newest request as uncertain, not as an older run. */
+  private pendingCompaction: PiRunnerState["pendingCompaction"];
+  private readonly managed = new Map<string, PiManagedEntry>();
+  private readonly managedQueue: PiManagedEntry[] = [];
+  private readonly managedRpc = new Map<string, PiManagedEntry>();
+  private managedWake: PiManagedEntry | null = null;
+  private managedQuarantined = false;
+  private pendingManagedStart = false;
+  private readonly personPreflights = new Set<string>();
+  private promptRevision = 0;
+  private idleRevision = -1;
+  private idleQuery: { id: string; revision: number } | null = null;
+  private nativeQueueStateAvailable = false;
   private streaming = false;
+  /** The child is gone; the status row says exited, never idle. */
+  private paneExited = false;
+  /** A failure is known and no new turn has started: the status row says error, not idle. */
+  private paneError = false;
+  /** A runtime-reported automatic retry is in flight; the row says retrying until it ends. */
+  private paneRetrying = false;
+  private nativeEpoch = 0;
+  private nativeTurn: { id: string; accepted: string[]; owned: boolean } | null = null;
+  private nativeTurnSequence = 0;
+  private nativeTurnPosts: Promise<unknown> = Promise.resolve();
+  private cancellationFence: string | null = null;
+  private cancellation: { entry: PiManagedEntry; target: { runId: string; nativeTurnId: string }; submitted: boolean; acknowledged: boolean; ended: boolean; aborted: boolean; revision: number; pendingMessages?: number } | null = null;
+  private nativeQueues: { steering: string[]; followUp: string[] } | null = null;
+  private readonly epochSteers = new Set<string>();
+  private readonly personSteers = new Set<string>();
+  private readonly heldPersonPrompts: Record<string, unknown>[] = [];
+  private readonly pendingNativeInputs = new Set<PiManagedEntry>();
   /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
   private turn = 0;
   private sessionFile: string | undefined;
@@ -799,6 +1075,25 @@ export class RunnerCore {
   /** Whether the last activity posted is that attention. Later activity in
    *  the same turn (a tool call after a denied approval) replaces it. */
   private attentionIsLatest = false;
+  /** WHICH SOURCE raised the current attention — an assistant failure, a
+   *  refused input, or a get_state finding — because the subtype alone can't
+   *  tell them apart (a refused steer and an untyped provider error both ask
+   *  for runtime_error). A `willRetry` release or a retry-start clear may
+   *  release only assistant-owned attention; input- and state-owned attention
+   *  outrank it and pin the owner when raises are deduplicated. */
+  private attentionOwner: "assistant" | "input" | "state" | null = null;
+  /** True between this run's agent_end and the next agent_start/turn_start:
+   *  Pi 0.87.1 emits the exhausted-retry summary AFTER agent_end, so the
+   *  correlation must survive the run boundary on forks. */
+  private runEnded = false;
+  /** Set at a fork's auto_retry_start and consumed by the NEXT agent_start:
+   *  the retry's opening is exactly one run-opening, so a later new user run
+   *  is never mistaken for it (forks that omit agent_settled included). */
+  private retryOpeningPending = false;
+  /** True while the CURRENT run opened as an automatic retry's opening: the
+   *  opening-block reset must not clear the retry's own correlation — only a
+   *  genuinely new user run does. */
+  private runOpenedAsRetry = false;
   // Native OMP retry summaries have no message/status. Correlate only within
   // the announced attempt, using the latest typed assistant failure's exact
   // diagnostic as an identity check, never as a transient-error classifier.
@@ -824,11 +1119,47 @@ export class RunnerCore {
   /** #1275: OMP protocol v2. The limit offered while negotiating, then the decoder once OMP accepts. */
   private v2Limit: number | null = null;
   private frameDecoder: OmpFrameDecoder | null = null;
+  /** #1275: true while the startup catch-up get_entries request is still awaiting a reply. */
+  private catchUpPending = false;
+  /** #1275: true when an unattributed oversized v2 drop happened while startup catch-up was in flight. */
+  private catchUpSuspectedOversizedDrop = false;
+  /** #1275: report startup restore replay loss at most once per launch. */
+  private catchUpReplayLossReported = false;
+  /** #1275: cursor sequence at which the startup catch-up request was dispatched. */
+  private catchUpSentSeq = 0;
+  /** #1275: true when the saved cursor was refused as unknown so refresh re-anchors instead of repeating it. */
+  private unheldSavedCursor = false;
+  /** #1275: true after an unanchored full get_entries failed for size so later turns do not repeat it. */
+  private unanchoredFullReadOversized = false;
+  /** #1275: monotonic ordering for concurrent turn-end refreshes and live event cursor updates. */
+  private cursorSeq = 0;
+  private liveCursorSeq = 0;
+  private lastCursorAdvanceSeq = 0;
+  private refreshSequence = 0;
+  private lastSettledRefreshSeq = 0;
+  private completedTurns = 0;
+  private readonly pendingRefreshes = new Map<string, {
+    id: string;
+    seq: number;
+    sentSeq: number;
+    dispatchedTurn: number;
+    requestSince: string | undefined;
+    anchorId?: string;
+    isRecovery?: boolean;
+    suspectedOversizedDrop?: boolean;
+    mayHaveBeenDropped?: boolean;
+  }>();
+  private readonly oversizedSinceIds = new Set<string>();
+  private readonly rejectedSinceIds = new Set<string>();
 
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string; runId?: string },
     private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
+      /** The seat profile's configured model and effort, shown on the status row when known. */
+      model?: string; thinking?: string;
+      /** How the runner emphasises its own pane lines. */
+      style?: PaneStyle;
       /** K4: the credential observation taken before Pi was spawned. */
       launchCredentialEvidence?: PiCredentialEvidence;
       /** The session file this launch resumes (--session). */
@@ -841,6 +1172,85 @@ export class RunnerCore {
   }
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
+  /** A permanent reporting-authority refusal fences new managed dispatch, not person input or native work already in flight. */
+  quarantineManagedChannel(): void {
+    this.managedQuarantined = true;
+    if (this.cancellation && !this.cancellation.submitted)
+      this.rejectNativeCancellation(this.cancellation.entry, "runner_reporting_authority_lost");
+  }
+
+  nativeChannelCapabilities() { return { input: this.ready && !this.managedQuarantined, wake: this.ready && !this.managedQuarantined && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: this.ready && !this.managedQuarantined && this.runtime === "pi" && !!this.io.withdrawNativeTurn }; }
+
+  /** Install the local preparation fence; this method alone submits no native operation. */
+  prepareNativeCancellation(target: { runId: string; nativeTurnId: string }): boolean {
+    if (this.runtime !== "pi" || !this.ready || this.managedQuarantined || !this.nativeTurn
+      || !this.nativeTurn.owned || target.runId !== this.identity.runId || target.nativeTurnId !== this.nativeTurn.id
+      || this.cancellationFence && this.cancellationFence !== target.nativeTurnId) return false;
+    this.cancellationFence = target.nativeTurnId;
+    return true;
+  }
+
+  /** After withdrawal, retain E's fence if still live; release only a pre-submit mismatch. */
+  recheckNativeCancellation(target: { runId: string; nativeTurnId: string }): boolean {
+    if (target.runId !== this.identity.runId || this.cancellationFence !== target.nativeTurnId) return false;
+    if (this.cancellation?.ended || this.nativeTurn?.id === target.nativeTurnId) return true;
+    this.cancellationFence = null;
+    this.pumpPersonPrompts(); this.pumpManaged();
+    return false;
+  }
+
+  private reportNativeTurn(state: "opened" | "closed"): void {
+    if (!this.nativeTurn || !this.identity.runId || !this.io.postRunner || this.runtime !== "pi") return;
+    const body = { type: "turn", runId: this.identity.runId, sequence: ++this.nativeTurnSequence,
+      nativeTurnId: this.nativeTurn.id, state, acceptedTurnIds: [...this.nativeTurn.accepted] };
+    this.nativeTurnPosts = this.nativeTurnPosts.then(() => this.io.postRunner!(body)).catch(() => {});
+  }
+
+  private pumpPersonPrompts(): void {
+    if (this.streaming || this.pendingManagedStart || !this.ready || this.cancellation?.submitted || this.cancellation?.ended) return;
+    const command = this.heldPersonPrompts.shift();
+    if (command) this.personPrompt(command.type === "follow_up" ? { type: "prompt", message: command.message, streamingBehavior: "steer" } : command);
+  }
+
+  private recoveryRequests = new Map<string, { sessionFile: string; finish: (reply: RunnerRecoveryReply) => void }>();
+
+  /** A new get_state response and a new daemon acknowledgement, never cached readiness. No prompt is submitted. */
+  verifyRecovery(sessionFile: string): Promise<RunnerRecoveryReply> {
+    if (!this.ready || this.attention) return Promise.resolve({ ok: false, code: "runner_rpc_unavailable", detail: "The runner is not ready or still reports attention." });
+    if (this.sessionFile !== sessionFile) return Promise.resolve({ ok: false, code: "runner_session_mismatch", detail: "The runner's session file differs from the recorded resume token." });
+    if (this.recoveryRequests.size > 0) return Promise.resolve({ ok: false, code: "runner_rpc_unavailable", detail: "A recovery probe is already in progress; retry after it completes." });
+    const id = `recovery-${randomUUID()}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child or daemon did not answer the recovery probe in time." }), 4_000);
+      const finish = (reply: RunnerRecoveryReply) => {
+        if (!this.recoveryRequests.delete(id)) return;
+        clearTimeout(timer); resolve(reply);
+      };
+      this.recoveryRequests.set(id, { sessionFile, finish });
+      try { this.io.sendRpc({ type: "get_state", id }); }
+      catch { finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child could not be reached." }); }
+    });
+  }
+
+  private async finishRecovery(record: Record<string, unknown>, request: { sessionFile: string; finish: (reply: RunnerRecoveryReply) => void }): Promise<void> {
+    if (record.success !== true || record.command !== "get_state") {
+      request.finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child did not return a successful get_state response." }); return;
+    }
+    const data = record.data as { sessionFile?: unknown; sessionId?: unknown } | undefined;
+    if (data?.sessionFile !== request.sessionFile || typeof data?.sessionId !== "string" || !data.sessionId) {
+      request.finish({ ok: false, code: "runner_session_mismatch", detail: "The live RPC response does not identify the recorded session file." }); return;
+    }
+    const ack = await Promise.resolve(this.io.postActivity({
+      eventFamily: "session_identity", sessionName: this.identity.sessionName, nodeId: this.identity.nodeId ?? null,
+      ...(this.identity.runId ? { runId: this.identity.runId } : {}),
+      runtime: this.runtime, generation: this.identity.generation ?? null, hookEvent: "SessionStart",
+      sessionFile: data.sessionFile, sessionId: data.sessionId, occurredAt: this.io.now(),
+    })).catch(() => null);
+    if (!this.ready || this.attention || this.sessionFile !== request.sessionFile || ack?.tokenPersisted !== true) {
+      request.finish({ ok: false, code: "runner_identity_unconfirmed", detail: "The daemon did not confirm this runner's current session identity." }); return;
+    }
+    request.finish({ ok: true, sessionFile: request.sessionFile, sessionId: data.sessionId });
+  }
 
   /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
   start(ready?: Record<string, unknown>): void {
@@ -861,12 +1271,21 @@ export class RunnerCore {
       if (this.v2Limit !== null) this.io.sendRpc({ type: "negotiate_protocol", protocolVersion: 2, id: NEGOTIATE_ID });
     }
     this.io.sendRpc({ type: "get_state", id: GET_STATE_ID });
+    this.unheldSavedCursor = false;
+    this.unanchoredFullReadOversized = false;
+    this.catchUpSuspectedOversizedDrop = false;
+    this.catchUpReplayLossReported = false;
+    this.oversizedSinceIds.clear();
+    this.rejectedSinceIds.clear();
     if (this.opts.catchUpSince) {
       // Durable catch-up cursor (FR-5): replay session entries the previous
       // runner instance had not yet projected. Mirror-only; activity states
       // are live-only signals.
+      this.catchUpPending = true;
+      this.catchUpSentSeq = ++this.cursorSeq;
       this.io.sendRpc({ type: "get_entries", since: this.opts.catchUpSince, id: CATCH_UP_ID });
     }
+    this.refreshPaneStatus();
   }
 
   /** One LF-delimited JSONL record from pi stdout. */
@@ -919,13 +1338,243 @@ export class RunnerCore {
 
   /** A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was. */
   private reportDroppedFrame(reason: string | null | undefined): void {
-    if (reason) this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
+    if (!reason) return;
+    const catchUpWasPending = this.catchUpPending;
+    const oversizedDrop = OVERSIZED_REASSEMBLY_DROP_RE.test(reason);
+    if (oversizedDrop) {
+      if (this.catchUpPending && this.opts.catchUpSince) {
+        this.catchUpPending = false;
+        this.catchUpSuspectedOversizedDrop = true;
+      }
+      for (const pending of this.pendingRefreshes.values()) {
+        if (pending.seq <= this.lastSettledRefreshSeq) continue;
+        pending.suspectedOversizedDrop = true;
+      }
+    } else {
+      for (const pending of this.pendingRefreshes.values()) {
+        if (pending.seq <= this.lastSettledRefreshSeq) continue;
+        if (pending.requestSince === undefined) pending.mayHaveBeenDropped = true;
+      }
+    }
+    this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
+    if (oversizedDrop && catchUpWasPending && !this.catchUpReplayLossReported) {
+      this.catchUpReplayLossReported = true;
+      this.diag("[omp-runner] Startup restore replay was in flight when an oversized chunked frame was dropped; missed restore history may have been lost, and later cursor refreshes will not replay it.");
+    }
   }
 
   private get runtime(): string { return this.opts.runtime ?? "pi"; }
 
+  async acceptRunnerRequest(frame: PiManagedRequest): Promise<void> {
+    if (!this.ready || this.runtime !== "pi" && frame.kind !== "input" || !this.io.postRunner || frame.version !== 1 || frame.runId !== this.identity.runId
+      || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1 || typeof frame.requestId !== "string"
+      || !["input", "wake", "cancel"].includes(frame.kind)
+      || (frame.kind === "cancel" ? !frame.payload?.target || frame.payload.target.runId !== frame.runId || typeof frame.payload.target.nativeTurnId !== "string"
+        : typeof (frame.kind === "wake" ? frame.payload?.question : frame.payload?.text) !== "string")) return;
+    frame = { version: 1, runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, kind: frame.kind,
+      payload: frame.kind === "cancel" ? { target: { ...frame.payload.target! } } : frame.kind === "wake" ? { question: frame.payload.question! } : { text: frame.payload.text! } };
+    if ([...this.managed.values()].some(entry => entry.frame.sequence === frame.sequence && entry.frame.requestId !== frame.requestId)) throw new Error("Conflicting native sequence");
+    const old = this.managed.get(frame.requestId);
+    if (old) {
+      if (JSON.stringify(old.frame) !== JSON.stringify(frame)) throw new Error("Conflicting native request identity");
+      await old.acceptance; return;
+    }
+    const entry: PiManagedEntry = { frame, state: "accepting", reports: Promise.resolve() };
+    this.managed.set(frame.requestId, entry);
+    const named = frame.kind === "cancel" ? frame.payload.target! : null;
+    const prepared = named && !this.cancellation && this.prepareNativeCancellation(named);
+    const operation = prepared ? { entry, target: named!, submitted: false, acknowledged: false, ended: false, aborted: false, revision: this.promptRevision } : null;
+    if (operation) this.cancellation = operation;
+    entry.acceptance = (async () => {
+      const accepted = await this.io.postRunner!({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" });
+      if (!accepted) {
+        entry.state = "unavailable";
+        if (operation && this.cancellation === operation && !operation.submitted && !operation.ended) {
+          this.cancellation = null;
+          if (this.cancellationFence === operation.target.nativeTurnId) this.cancellationFence = null;
+          this.pumpPersonPrompts();
+        }
+        this.pumpManaged(); return;
+      }
+      if (operation && this.cancellation !== operation) return;
+      if (named) {
+        entry.state = "queued";
+        if (!prepared) {
+          if (this.cancellation) this.rejectNativeCancellation(entry, "cancellation_in_progress");
+          else if (this.nativeTurn && this.nativeTurn.id !== named.nativeTurnId) {
+            entry.state = "terminal"; this.reportManaged(entry, "result", { kind: "cancel", outcome: "not-this-turn", confirmed: false });
+          } else this.rejectNativeCancellation(entry, "native_turn_ownership_unknown");
+        }
+        else void this.performNativeCancellation(operation!).catch(() => {
+          if (this.cancellation === operation && !operation!.submitted) this.rejectNativeCancellation(entry, "preparation_failed");
+        });
+        return;
+      }
+      entry.state = "queued"; this.managedQueue.push(entry); this.managedQueue.sort((a, b) => a.frame.sequence - b.frame.sequence); this.pumpManaged();
+    })();
+    await entry.acceptance;
+  }
+
+  private reportManaged(entry: PiManagedEntry, type: "submitted" | "result" | "rejected", result?: Record<string, unknown>): void {
+    const f = entry.frame;
+    if (type !== "submitted" && result) entry.terminalResult = result;
+    entry.reports = entry.reports.then(async () => {
+      await entry.acceptance;
+      if (entry.state === "unavailable") return;
+      return this.io.postRunner?.({ type, runId: f.runId, requestId: f.requestId, sequence: f.sequence,
+      ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId } : {}),
+      ...(entry.acceptedTurnId ? { acceptedTurnId: entry.acceptedTurnId } : {}), ...(result ? { result } : {}) });
+    }).catch(() => {});
+  }
+
+  private async performNativeCancellation(operation: NonNullable<RunnerCore["cancellation"]>): Promise<void> {
+    const { entry, target } = operation;
+    if (this.cancellation !== operation || operation.ended) return;
+    if (!this.io.withdrawNativeTurn) { this.finishNativeCancellation("not-supported"); return; }
+    for (;;) {
+      if (this.cancellation !== operation || operation.ended) return;
+      const withdrawal = await this.io.withdrawNativeTurn({ type: "cancel-prepare", runId: entry.frame.runId, requestId: entry.frame.requestId, sequence: entry.frame.sequence });
+      if (this.cancellation !== operation || operation.ended) return;
+      if (!withdrawal) { this.rejectNativeCancellation(entry, "preparation_failed"); return; }
+      if (operation.revision !== this.promptRevision) { this.rejectNativeCancellation(entry, "person_input_after_preparation"); return; }
+      if (!this.nativeTurn || this.nativeTurn.id !== target.nativeTurnId || withdrawal.notThisTurn) { this.finishNativeCancellation("not-this-turn"); return; }
+      if (withdrawal?.confirmed) break;
+      if (!this.ready || this.cancellation !== operation) return;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (!this.ready || this.nativeTurn?.id !== target.nativeTurnId) { this.finishNativeCancellation("not-this-turn"); return; }
+    if (!this.nativeTurn.owned || this.managedQuarantined || !this.ownsNativeCancellationQueue()) {
+      this.rejectNativeCancellation(entry, "native_queue_ownership_unknown"); return;
+    }
+    // The state reply is correlated to this captured preparation. E is rechecked again after the await.
+    this.io.sendRpc({ type: "get_state", id: `openrig-cancel-preflight-${entry.frame.requestId}` });
+  }
+
+  private ownsNativeCancellationQueue(pending?: number): boolean {
+    if (this.nativeQueues && (this.nativeQueues.followUp.length > 0 || this.nativeQueues.steering.some(text => this.personSteers.has(text) || !this.epochSteers.has(text)))) return false;
+    if (pending === undefined) return true;
+    if (!Number.isSafeInteger(pending) || pending < 0) return false;
+    return pending === 0 ? !this.nativeQueues || this.nativeQueues.steering.length === 0
+      : !!this.nativeQueues && this.nativeQueues.steering.length === pending;
+  }
+
+  /** Only this local owner can establish that no native cancel was written. */
+  private rejectNativeCancellation(entry: PiManagedEntry, reason: string): void {
+    if (this.cancellation?.entry === entry) {
+      if (this.cancellation.submitted || this.cancellation.ended) return;
+      this.cancellation = null; this.cancellationFence = null;
+    }
+    entry.state = "terminal";
+    this.diag(`Cancellation ${JSON.stringify(entry.frame.requestId)} was not applied (${reason}); withdrawn approvals stay withdrawn. Person input remains available.`);
+    this.reportManaged(entry, "rejected", { kind: "cancel", reason, applied: false });
+    this.pumpPersonPrompts(); this.pumpManaged();
+  }
+
+  private finishNativeCancellation(outcome: "cancelled" | "requested" | "not-this-turn" | "not-supported", detail?: string): void {
+    const operation = this.cancellation; if (!operation) return;
+    const unavailable = operation.entry.state === "unavailable";
+    if (!unavailable) operation.entry.state = "terminal";
+    const words = this.nativeQueues ? [...this.nativeQueues.steering, ...this.nativeQueues.followUp] : [];
+    const inputRequestIds: string[] = []; let unmatchedCount = this.nativeQueues ? 0 : operation.pendingMessages ?? 0;
+    for (const text of words) {
+      const matches = [...this.managed.values()].filter(entry => entry.frame.kind === "input" && entry.nativeTurnId === operation.target.nativeTurnId && entry.frame.payload.text === text);
+      if (matches.length === 1 && matches[0]!.frame.requestId.length > 0 && matches[0]!.frame.requestId.length <= 1024 && inputRequestIds.length < 100 && !inputRequestIds.includes(matches[0]!.frame.requestId)) inputRequestIds.push(matches[0]!.frame.requestId);
+      else unmatchedCount++;
+    }
+    if (!unavailable) this.reportManaged(operation.entry, "result", { kind: "cancel", outcome, confirmed: outcome === "cancelled", operationAccepted: operation.acknowledged, ...(detail ? { detail } : {}),
+      ...(operation.submitted && (words.length || unmatchedCount) ? { continuation: { inputRequestIds, pendingRequestIds: this.managedQueue.map(entry => entry.frame.requestId).filter(id => id.length > 0 && id.length <= 1024).slice(0, 100), unmatchedCount } } : {}) });
+    this.cancellation = null; this.cancellationFence = null;
+    this.pumpPersonPrompts(); this.pumpManaged();
+  }
+
+  private finishEndedNativeCancellation(settled = false): void {
+    const operation = this.cancellation;
+    if (!operation?.ended || !settled) return;
+    if (!operation.submitted) { this.finishNativeCancellation("not-this-turn"); return; }
+    const queueEmpty = operation.pendingMessages === 0 && (!this.nativeQueues
+      || this.nativeQueues.steering.length === 0 && this.nativeQueues.followUp.length === 0);
+    const confirmed = operation.aborted && queueEmpty && operation.revision === this.promptRevision;
+    this.finishNativeCancellation(confirmed ? "cancelled" : "requested", confirmed ? undefined : "native_end_without_cancellation_proof");
+  }
+
+  private pumpManaged(): void {
+    if (!this.ready || this.cancellationFence || this.managedQuarantined || this.managedWake || this.runtime === "pi" && this.pendingManagedStart && !this.streaming) return;
+    const entry = this.managedQueue[0];
+    if (!entry || this.personPreflights.size || [...this.managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < entry.frame.sequence)
+      || entry.frame.kind === "wake" && (this.streaming || this.pendingManagedStart)) return;
+    if (entry.frame.kind === "wake" && this.idleRevision !== this.promptRevision) {
+      if (!this.idleQuery) {
+        this.idleQuery = { id: `openrig-native-idle-${this.promptRevision}`, revision: this.promptRevision };
+        this.io.sendRpc({ type: "get_state", id: this.idleQuery.id });
+      }
+      return;
+    }
+    this.promptRevision += 1;
+    this.managedQueue.shift(); entry.state = "writing";
+    if (entry.frame.kind === "wake") { this.managedWake = entry; entry.answer = []; }
+    if (this.runtime === "pi" && !this.streaming) this.pendingManagedStart = true;
+    const id = `openrig-native-${entry.frame.requestId}`;
+    this.managedRpc.set(id, entry);
+    if (this.runtime === "pi" && this.streaming && entry.frame.kind === "input") this.epochSteers.add(entry.frame.payload.text!);
+    this.io.sendRpc({ id, type: "prompt", message: entry.frame.kind === "wake" ? entry.frame.payload.question! : entry.frame.payload.text!, streamingBehavior: "steer" });
+    this.acceptIntoOpenRun();
+    if (this.runtime === "pi") {
+      if (this.nativeTurn) { entry.nativeTurnId = this.nativeTurn.id; entry.acceptedTurnId = String(this.turn); }
+      else this.pendingNativeInputs.add(entry);
+    }
+    // Ordinary busy messages may steer; the next queued wake waits for agent_end, not this RPC response.
+    this.pumpManaged();
+  }
+
+  private finishManagedWake(entry: PiManagedEntry, forced?: "unknown" | "failed"): void {
+    // Pi reports started before agent.prompt, but awaits extension handlers before handled.
+    // Events before that authoritative disposition cannot establish this invocation's ownership.
+    if (!forced && entry.disposition === undefined) return;
+    const ownershipUnknown = !["started", "handled"].includes(entry.disposition ?? "") || entry.preDispositionEvents === true;
+    if (ownershipUnknown) this.managedQuarantined = true;
+    const completion = ownershipUnknown || forced && !entry.nativeAccepted ? "unknown" : forced ?? (entry.contaminated || !entry.wakeOpened ? "unknown"
+      : entry.stopReason === "stop" && entry.answer?.some(text => text.length > 0) ? "completed" : entry.stopReason === "aborted" ? "interrupted" : entry.stopReason === "error" ? "failed" : "unknown");
+    entry.state = "terminal";
+    entry.terminalResult = { kind: "wake", ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId } : {}),
+      completion, answer: completion === "completed" ? entry.answer?.join("\n") ?? "" : null,
+      ...(ownershipUnknown ? { ownershipUnknown: true } : {}),
+      ...(forced && !entry.nativeAccepted ? { submissionUnknown: true } : {}) };
+    if (entry.nativeAccepted || forced) this.reportManaged(entry, "result", entry.terminalResult);
+    if (this.managedWake === entry) this.managedWake = null;
+  }
+
+  private personPrompt(command: Record<string, unknown>): void {
+    if (this.runtime !== "pi" || !this.io.postRunner) { this.io.sendRpc(command); return; }
+    if (this.cancellation?.submitted || this.cancellation?.ended || command.type === "follow_up" && (this.streaming || this.pendingManagedStart)) {
+      this.heldPersonPrompts.push(command); return;
+    }
+    const id = `openrig-person-${++this.promptRevision}`;
+    this.personPreflights.add(id);
+    if (!this.streaming) this.pendingManagedStart = true;
+    if (this.streaming && typeof command.message === "string") this.personSteers.add(command.message);
+    this.io.sendRpc({ ...command, id });
+    this.acceptIntoOpenRun();
+  }
+
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
+    if (this.cancellation && !this.cancellation.submitted && !this.cancellation.ended) this.rejectNativeCancellation(this.cancellation.entry, "person_input_after_preparation");
+    const compact = /^\/openrig-compact ([\w-]+)$/.exec(block);
+    if (this.runtime === "pi" && compact) {
+      const attemptId = compact[1]!;
+      if (this.pendingCompactAttemptId || (this.compaction?.startedAt && !this.compaction.endedAt)) {
+        this.diag("[pi-runner] compact already in progress; request not sent");
+        return;
+      }
+      this.pendingCompactAttemptId = attemptId;
+      this.pendingCompaction = { attemptId, requestedAt: this.io.now() };
+      // Persist the request before the RPC leaves: the id survives a daemon
+      // restart, so the newest attempt reads uncertain, never an older result.
+      this.writeSidecar({});
+      this.io.sendRpc({ type: "compact", id: COMPACT_ID + attemptId });
+      return;
+    }
+    if (this.managedWake) this.managedWake.contaminated = true;
     if (block === "/abort") {
       this.io.sendRpc({ type: "abort" });
       this.diag("[pi-runner] abort sent");
@@ -933,18 +1582,18 @@ export class RunnerCore {
     }
     if (block.startsWith("/followup ")) {
       const message = block.slice("/followup ".length);
-      this.io.sendRpc({ type: "follow_up", message });
-      this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
-      this.acceptIntoOpenRun();
+      this.personPrompt({ type: "follow_up", message });
+      this.io.mirrorLine(`${this.style.commit("you (follow-up) ▸")} ${message}`);
+      if (this.runtime !== "pi" || !this.io.postRunner) this.acceptIntoOpenRun();
       return;
     }
     // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
     // while busy, queue it as a steer, delivered after the current turn's tool calls and before the next model call.
     // The runner's `streaming` starts only at agent_start, so it can't tell when a turn is about to start (#1932) or
     // when a prompt was consumed locally and started none. It labels the mirror line only.
-    this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
-    this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
-    this.acceptIntoOpenRun();
+    this.personPrompt({ type: "prompt", message: block, streamingBehavior: "steer" });
+    this.io.mirrorLine(this.streaming ? `${this.style.commit("you (steer) ▸")} ${block}` : `${this.style.commit("you ▸")} ${block}`);
+    if (this.runtime !== "pi" || !this.io.postRunner) this.acceptIntoOpenRun();
   }
 
   /** A working beat counts only for the latest accepted turn, and each prompt the runner gives the agent is accepted with
@@ -954,19 +1603,117 @@ export class RunnerCore {
   private acceptIntoOpenRun(): void {
     if (this.runtime === "omp" || !this.streaming) return;
     this.turn += 1;
+    if (this.nativeTurn) { this.nativeTurn.accepted.push(String(this.turn)); this.reportNativeTurn("opened"); }
+    // A newly accepted prompt is a new user run: any retry correlation (and
+    // its pending opening mark) ended with the previous run.
+    this.retryAttempt = null;
+    this.retryFailure = null;
+    this.retryOpeningPending = false;
     this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
 
   /** Child process exit — honest, loud, durable. */
   handlePiExit(code: number | null): void {
     this.ready = false;
+    for (const request of this.recoveryRequests.values()) request.finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child exited during recovery verification." });
+    this.paneExited = true;
+    if (this.cancellation) this.finishNativeCancellation(this.cancellation.submitted ? "requested" : "not-this-turn", "native_process_exited");
+    if (this.managedWake) this.finishManagedWake(this.managedWake, "failed");
     this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
     this.io.postActivity(this.activityPayload("Stop", `${this.runtime}_exited`));
+    this.refreshPaneStatus();
   }
 
   private handleResponse(record: Record<string, unknown>): void {
+    const recovery = typeof record.id === "string" ? this.recoveryRequests.get(record.id) : undefined;
+    if (recovery) {
+      void this.finishRecovery(record, recovery).catch(() => recovery.finish({ ok: false, code: "runner_identity_unconfirmed", detail: "Session identity could not be confirmed." }));
+      return;
+    }
+    const cancellation = this.cancellation;
+    if (cancellation && !cancellation.submitted && record.id === `openrig-cancel-preflight-${cancellation.entry.frame.requestId}`) {
+      if (cancellation.ended) return;
+      const state = record.data as { isStreaming?: boolean; pendingMessageCount?: number } | undefined;
+      if (!this.ready || this.nativeTurn?.id !== cancellation.target.nativeTurnId || state?.isStreaming === false) {
+        this.finishNativeCancellation("not-this-turn"); return;
+      }
+      if (cancellation.revision !== this.promptRevision) { this.rejectNativeCancellation(cancellation.entry, "person_input_after_preparation"); return; }
+      if (record.success !== true || state?.isStreaming !== true || typeof state.pendingMessageCount !== "number"
+        || !this.nativeTurn.owned || this.managedQuarantined || !this.ownsNativeCancellationQueue(state.pendingMessageCount)) {
+        this.rejectNativeCancellation(cancellation.entry, "native_queue_ownership_unknown"); return;
+      }
+      cancellation.pendingMessages = state.pendingMessageCount;
+      cancellation.submitted = true; cancellation.entry.state = "submitted";
+      this.io.sendRpc({ type: "abort", id: `openrig-cancel-${cancellation.entry.frame.requestId}` });
+      this.reportManaged(cancellation.entry, "submitted", { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
+      this.diag(`Cancellation ${JSON.stringify(cancellation.entry.frame.requestId)} for ${JSON.stringify(cancellation.target.nativeTurnId)} is requested, not confirmed. Managed inputs ${JSON.stringify(this.managedQueue.map(entry => entry.frame.requestId))} remain recorded for ${this.identity.sessionName}. Inspect rig seat status ${this.identity.sessionName} --json. The named invocation settling releases the cancellation hold; a wake still waits for native idle and an empty queue. Continue with a new plain prompt in this pane, without resending retained words. This is distinct from /abort or stopping the seat; continuation is not cancellation proof and never restores withdrawn approvals. Person's /abort remains available, or explicitly choose rig seat stop ${this.identity.sessionName} --reason <reason>. Nothing restarts or replays automatically.`);
+      return;
+    }
+    if (cancellation && record.id === `openrig-cancel-${cancellation.entry.frame.requestId}`) {
+      if (record.success === true) cancellation.acknowledged = true;
+      return;
+    }
+
+    if (this.idleQuery && record.id === this.idleQuery.id) {
+      const query = this.idleQuery; this.idleQuery = null;
+      const data = record.data as { isStreaming?: boolean; pendingMessageCount?: number } | undefined;
+      if (record.success === true && data?.isStreaming === false && data.pendingMessageCount === 0 && query.revision === this.promptRevision) {
+        this.idleRevision = query.revision; this.pumpManaged();
+      } else if (record.success === true && typeof data?.isStreaming === "boolean" && Number.isSafeInteger(data.pendingMessageCount) && Number(data.pendingMessageCount) >= 0) {
+        setTimeout(() => this.pumpManaged(), 250).unref();
+      } else {
+        const next = this.managedQueue.shift();
+        if (next) { next.state = "terminal"; this.reportManaged(next, "rejected", { kind: next.frame.kind, reason: "native_idle_state_unavailable" }); }
+        this.pumpManaged();
+      }
+      return;
+    }
+    if (typeof record.id === "string" && this.personPreflights.delete(record.id)) {
+      if (record.success !== true || (record.data as { disposition?: string } | undefined)?.disposition === "handled") this.pendingManagedStart = false;
+      this.pumpPersonPrompts(); this.pumpManaged();
+      if (record.success !== false && record.error == null) return;
+    }
+    const managed = typeof record.id === "string" ? this.managedRpc.get(record.id) : undefined;
+    if (managed) {
+      this.managedRpc.delete(String(record.id));
+      if (record.success === true) {
+        managed.nativeAccepted = true; managed.state = "submitted"; this.reportManaged(managed, "submitted");
+        const inputData = record.data as { disposition?: unknown; agentInvoked?: boolean } | undefined;
+        if (managed.frame.kind === "wake") {
+          const disposition = inputData?.disposition;
+          managed.disposition = typeof disposition === "string" ? disposition : "unknown";
+          if (!["started", "handled"].includes(managed.disposition) || managed.preDispositionEvents) this.managedQuarantined = true;
+          if (managed.nativeTerminal || managed.disposition !== "started" && !this.streaming) this.finishManagedWake(managed);
+          else if (managed.terminalResult) this.reportManaged(managed, "result", managed.terminalResult);
+          if (this.managedWake !== managed && !this.streaming) { this.pendingManagedStart = false; this.pumpPersonPrompts(); this.pumpManaged(); }
+        } else if (this.runtime !== "pi") {
+          // Input acceptance needs the correlated RPC response, not an invented native invocation.
+          managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true });
+        } else {
+          managed.disposition = inputData?.agentInvoked === false ? "handled" : typeof inputData?.disposition === "string" ? inputData.disposition : "unknown";
+          if (managed.disposition === "handled") {
+            this.pendingNativeInputs.delete(managed);
+            delete managed.nativeTurnId; delete managed.acceptedTurnId;
+            if (!this.streaming) this.pendingManagedStart = false;
+          }
+          // A started prompt's acknowledgement precedes agent_start. Wait for that actual scope before
+          // committing its immutable terminal receipt; a handled local command has no native epoch.
+          if (managed.disposition !== "started" || managed.nativeTurnId) {
+            managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true });
+          }
+          if (managed.disposition === "handled") { this.pumpPersonPrompts(); this.pumpManaged(); }
+        }
+      } else {
+        this.pendingNativeInputs.delete(managed);
+        managed.state = "terminal"; this.pendingManagedStart = false;
+        this.reportManaged(managed, "rejected", { kind: managed.frame.kind, reason: "native_prompt_rejected" });
+        if (this.managedWake === managed) this.managedWake = null;
+        this.pumpPersonPrompts(); this.pumpManaged();
+      }
+      return;
+    }
     if (record.id === NEGOTIATE_ID && this.v2Limit !== null) {
       if (record.success === true) {
         this.frameDecoder = new OmpFrameDecoder(this.v2Limit);
@@ -977,30 +1724,110 @@ export class RunnerCore {
       }
       return;
     }
+    if (this.runtime === "pi" && record.success === true && record.error == null
+      && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)) {
+      const attemptId = record.id.slice(COMPACT_ID.length);
+      if (this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+      if (this.pendingCompaction?.attemptId === attemptId) this.pendingCompaction = undefined;
+      this.writeSidecar({});
+      return;
+    }
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
+      const code = typeof record.code === "string" ? record.code : undefined;
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
+      const compactId = this.runtime === "pi" && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)
+        ? record.id : null;
+      if (compactId) {
+        const attemptId = compactId.slice(COMPACT_ID.length);
+        const unsupported = /unknown command|unsupported|not supported/i.test(detail);
+        this.io.mirrorLine(`[pi-runner] ERROR rpc compact${unsupported ? " unsupported" : " failed"}: ${message}`);
+        // A failure with no start replaces any older record: this attempt is the answer.
+        const prior = this.compaction?.attemptId === attemptId ? this.compaction : undefined;
+        const wasPending = this.pendingCompactAttemptId === attemptId;
+        if (this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+        if (this.pendingCompaction?.attemptId === attemptId) this.pendingCompaction = undefined;
+        const failed = { attemptId, reason: prior?.reason ?? "manual",
+          ...(prior?.requestId ? { requestId: prior.requestId } : {}),
+          ...(prior?.startedAt ? { startedAt: prior.startedAt } : {}),
+          endedAt: prior?.endedAt ?? this.io.now(), errorMessage: detail };
+        if (wasPending || !this.compaction?.attemptId || this.compaction.attemptId === attemptId) this.compaction = failed;
+        if (wasPending || !this.requestedCompaction || this.requestedCompaction.attemptId === attemptId) this.requestedCompaction = failed;
+        this.writeSidecar({});
+        return;
+      }
       if (record.id === GET_STATE_ID) {
         this.ready = false;
+        this.paneError = true;
         this.writeSidecar({});
         this.diag(this.runtime === "omp" ? `[omp-runner] ERROR rpc get_state: ${message}` : `${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
+        this.refreshPaneStatus();
         // OMP cannot provide a resume token without get_state; stop it so the
         // launch fails now instead of waiting out readiness.
         if (this.runtime === "omp") this.io.stopChild?.();
         return;
       }
-      if (record.id === CATCH_UP_ID && this.runtime === "pi") {
-        // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
-        // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
-        this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
-        this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+      if (record.id === CATCH_UP_ID) {
+        this.catchUpPending = false;
+        this.catchUpSuspectedOversizedDrop = false;
+        const oversized = OVERSIZED_RESTORE_ERROR_RE.test(detail);
+        const unknown = isUnknownCursorError(detail, code);
+        if (oversized) {
+          this.recordOversizedSince(this.opts.catchUpSince);
+        } else if (unknown) {
+          this.recordRejectedSince(this.opts.catchUpSince);
+          if (this.lastEntryId === this.opts.catchUpSince) this.unheldSavedCursor = true;
+        }
+        if (this.runtime === "pi") {
+          // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
+          // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
+          if (!oversized && this.lastEntryId === this.opts.catchUpSince) this.unheldSavedCursor = true;
+          this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
+          this.requestCursorRefresh(true);
+          return;
+        }
+        this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
+        if (!this.catchUpReplayLossReported) {
+          this.catchUpReplayLossReported = true;
+          this.diag(`[${this.runtime}-runner] Startup restore replay was lost; later cursor refreshes will advance without replaying missed history.`);
+        }
+        if (unknown && this.unheldSavedCursor) {
+          this.requestCursorRefresh(true);
+        }
         return;
+      }
+      if (this.isCursorRefreshId(record.id)) {
+        const failed = this.pendingRefreshes.get(record.id);
+        if (failed) {
+          this.pendingRefreshes.delete(record.id);
+          if (OVERSIZED_RESTORE_ERROR_RE.test(detail)) {
+            if (failed.requestSince !== undefined) {
+              this.recordOversizedSince(failed.requestSince);
+            } else {
+              this.unanchoredFullReadOversized = true;
+            }
+          }
+          if (failed.seq >= this.lastSettledRefreshSeq) {
+            this.lastSettledRefreshSeq = failed.seq;
+            if (failed.requestSince !== undefined && isUnknownCursorError(detail, code)) {
+              this.recordRejectedSince(failed.requestSince);
+              if (failed.requestSince === this.lastEntryId) this.unheldSavedCursor = true;
+              this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
+              if (!failed.isRecovery) this.requestCursorRefresh(true);
+              return;
+            }
+          }
+        }
       }
       this.diag(`[${this.runtime}-runner] ERROR rpc: ${message}`);
       // Only a rejected input means the seat cannot do the requested work.
       // A mistimed /abort (or any control command) leaves the seat idle.
-      if (this.runtime === "omp" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
-        this.raiseAttention("runtime_error");
+      // Built-in Pi keeps its own handling; OMP and `protocol: pi-rpc`
+      // community harnesses must raise attention here because a refused
+      // prompt/steer/follow_up is the seat being unable to work at all —
+      // e.g. a missing or invalid credential.
+      if (this.runtime !== "pi" && typeof record.command === "string" && Object.hasOwn(INPUT_COMMANDS, record.command)) {
+        this.raiseAttention("runtime_error", "input");
       }
       return;
     }
@@ -1011,7 +1838,9 @@ export class RunnerCore {
       this.sessionFile = sessionFile ?? this.sessionFile;
       this.sessionId = sessionId ?? this.sessionId;
       const wasReady = this.ready;
+      this.nativeQueueStateAvailable = typeof data.isStreaming === "boolean" && Number.isSafeInteger(data.pendingMessageCount) && Number(data.pendingMessageCount) >= 0;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
+      if (this.ready) this.pumpManaged();
       if (!this.ready) {
         if (this.runtime === "omp") {
           this.diag("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
@@ -1021,7 +1850,9 @@ export class RunnerCore {
         // For custom protocol: pi-rpc community harnesses, reporting no session file
         // reads as needing attention rather than stopping the child process.
         this.diag(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
-        this.raiseAttention("runtime_error");
+        this.paneError = true;
+        this.refreshPaneStatus();
+        this.raiseAttention("runtime_error", "state");
         return;
       }
       this.writeSidecar({});
@@ -1029,7 +1860,9 @@ export class RunnerCore {
         // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below), and the
         // seat asks for attention rather than beating idle on a session nothing records.
         this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
-        this.raiseAttention("runtime_error");
+        this.paneError = true;
+        this.refreshPaneStatus();
+        this.raiseAttention("runtime_error", "state");
         return;
       }
       if (!wasReady) {
@@ -1037,26 +1870,223 @@ export class RunnerCore {
         // Subsequent get_state evaluations confirm liveness silently to avoid
         // terminal output spam while preserving state updates.
         this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile ?? "unknown"}`);
+        this.paneError = false;
+        this.refreshPaneStatus();
       }
       // Re-post session identity on every successful get_state reply so the
       // daemon can discover replacement runners and keep session records current.
       this.postSessionIdentity();
       return;
     }
-    if (record.id === CURSOR_REFRESH_ID || record.id === CATCH_UP_ID) {
-      const data = (record.data ?? record) as Record<string, unknown>;
-      const entries = Array.isArray(data.entries) ? data.entries : (Array.isArray(record.entries) ? record.entries : []);
+    if (this.isCursorRefreshId(record.id) || record.id === CATCH_UP_ID) {
+      const isCatchUp = record.id === CATCH_UP_ID;
+      let meta: { id: string; seq: number; sentSeq: number; requestSince: string | undefined; anchorId?: string; isRecovery?: boolean } | undefined;
+      if (isCatchUp) {
+        this.catchUpPending = false;
+        this.catchUpSuspectedOversizedDrop = false;
+      } else {
+        meta = this.pendingRefreshes.get(record.id);
+        if (this.refreshSequence > 0 && !meta) return;
+        if (meta) this.pendingRefreshes.delete(record.id);
+      }
+      const rawData = record.data !== null && typeof record.data === "object" && !Array.isArray(record.data)
+        ? record.data as Record<string, unknown>
+        : undefined;
+      const rawEntries = Array.isArray(rawData?.entries) ? rawData.entries : (Array.isArray(record.entries) ? record.entries : null);
+      if (rawEntries === null) {
+        if (meta && meta.seq >= this.lastSettledRefreshSeq) this.lastSettledRefreshSeq = meta.seq;
+        return;
+      }
+      const entries = rawEntries;
       const last = entries.at(-1);
-      const lastId = last !== null && typeof last === "object" && typeof (last as Record<string, unknown>).id === "string"
+      const lastId = last !== null && typeof last === "object" && !Array.isArray(last)
+        && typeof (last as Record<string, unknown>).id === "string" && ((last as Record<string, unknown>).id as string).length > 0
         ? (last as Record<string, unknown>).id as string
         : undefined;
-      if (lastId) {
-        this.lastEntryId = lastId;
-        this.writeSidecar({});
+      if (entries.length > 0 && lastId === undefined) {
+        if (meta && meta.seq >= this.lastSettledRefreshSeq) this.lastSettledRefreshSeq = meta.seq;
+        this.reportUsageFacts(entries);
+        return;
+      }
+      if (!isCatchUp && meta !== undefined && meta.seq < this.lastSettledRefreshSeq) {
+        this.reportUsageFacts(entries);
+        return;
+      }
+      if (meta) this.lastSettledRefreshSeq = meta.seq;
+
+      if (isCatchUp) {
+        if (this.opts.catchUpSince) {
+          this.oversizedSinceIds.delete(this.opts.catchUpSince);
+          this.rejectedSinceIds.delete(this.opts.catchUpSince);
+        }
+        if (this.lastEntryId === this.opts.catchUpSince) this.unheldSavedCursor = false;
+        const canAdvance = lastId !== undefined && lastId !== this.lastEntryId
+          && (this.lastCursorAdvanceSeq <= this.catchUpSentSeq
+            || (this.lastEntryId !== undefined && this.entriesContainId(entries, this.lastEntryId)));
+        if (canAdvance) {
+          this.lastEntryId = lastId;
+          this.unheldSavedCursor = false;
+          this.rejectedSinceIds.delete(lastId);
+          this.lastCursorAdvanceSeq = ++this.cursorSeq;
+          this.writeSidecar({});
+        }
+      } else {
+        if (meta?.requestSince !== undefined) {
+          this.oversizedSinceIds.delete(meta.requestSince);
+          this.rejectedSinceIds.delete(meta.requestSince);
+        } else if (meta !== undefined) {
+          this.unanchoredFullReadOversized = false;
+        }
+        const confirmedId = entries.length === 0
+          ? (record.success === true ? meta?.anchorId : undefined)
+          : lastId;
+        if (confirmedId !== undefined) {
+          const canAdvance = meta === undefined
+            || meta.sentSeq >= this.liveCursorSeq
+            || (lastId !== undefined && this.lastEntryId !== undefined && this.entriesContainId(entries, this.lastEntryId));
+          if (canAdvance) {
+            this.unheldSavedCursor = false;
+            this.rejectedSinceIds.delete(confirmedId);
+            if (this.lastEntryId !== confirmedId) {
+              this.lastEntryId = confirmedId;
+              this.lastCursorAdvanceSeq = ++this.cursorSeq;
+              this.writeSidecar({});
+            }
+          }
+        }
       }
       this.reportUsageFacts(entries);
       return;
     }
+  }
+
+  private isCursorRefreshId(id: unknown): id is string {
+    return id === CURSOR_REFRESH_ID || (typeof id === "string" && id.startsWith(`${CURSOR_REFRESH_ID}:`));
+  }
+
+  /** Matches main reportUsageFacts predicate: Pi --usage-facts seats keep full get_entries refreshes for retry. */
+  private isPiUsageFactsActive(): boolean {
+    return Boolean(this.opts.usageFacts) && this.runtime === "pi" && Boolean(this.io.postUsageFacts);
+  }
+
+  private readableSessionFile(): string | undefined {
+    return !this.resumedElsewhere() ? this.sessionFile : undefined;
+  }
+
+  private entriesContainId(entries: unknown[], targetId: string): boolean {
+    for (const entry of entries) {
+      if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && (entry as { id?: unknown }).id === targetId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private dispatchCursorRefresh(since: string | undefined, anchorId?: string, isRecovery = false): void {
+    const seq = ++this.refreshSequence;
+    const sentSeq = ++this.cursorSeq;
+    const id = seq === 1 ? CURSOR_REFRESH_ID : `${CURSOR_REFRESH_ID}:${seq}`;
+    if (this.pendingRefreshes.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldestKey = this.pendingRefreshes.keys().next().value;
+      if (oldestKey !== undefined) {
+        const evicted = this.pendingRefreshes.get(oldestKey);
+        this.pendingRefreshes.delete(oldestKey);
+        if (evicted?.suspectedOversizedDrop) {
+          if (evicted.requestSince !== undefined) this.recordOversizedSince(evicted.requestSince);
+          else this.unanchoredFullReadOversized = true;
+        }
+      }
+    }
+    this.pendingRefreshes.set(id, {
+      id,
+      seq,
+      sentSeq,
+      dispatchedTurn: this.completedTurns,
+      requestSince: since,
+      ...(anchorId ? { anchorId } : {}),
+      ...(isRecovery ? { isRecovery: true } : {}),
+    });
+    this.io.sendRpc(since ? { type: "get_entries", since, id } : { type: "get_entries", id });
+  }
+
+  private recordOversizedSince(since: string | undefined): void {
+    if (!since || this.oversizedSinceIds.has(since)) return;
+    if (this.oversizedSinceIds.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldest = this.oversizedSinceIds.keys().next().value;
+      if (oldest !== undefined) this.oversizedSinceIds.delete(oldest);
+    }
+    this.oversizedSinceIds.add(since);
+  }
+
+  private recordRejectedSince(since: string | undefined): void {
+    if (!since || this.rejectedSinceIds.has(since)) return;
+    if (this.rejectedSinceIds.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldest = this.rejectedSinceIds.keys().next().value;
+      if (oldest !== undefined) this.rejectedSinceIds.delete(oldest);
+    }
+    this.rejectedSinceIds.add(since);
+  }
+
+  private isSinceBlockedOversized(since: string): boolean {
+    if (this.oversizedSinceIds.has(since)) return true;
+    if (this.catchUpSuspectedOversizedDrop && this.opts.catchUpSince === since) return true;
+    for (const pending of this.pendingRefreshes.values()) {
+      if (pending.suspectedOversizedDrop && pending.requestSince === since) return true;
+    }
+    return false;
+  }
+
+  private isUnanchoredBlockedOversized(): boolean {
+    if (this.unanchoredFullReadOversized) return true;
+    for (const pending of this.pendingRefreshes.values()) {
+      if (pending.suspectedOversizedDrop && pending.requestSince === undefined) return true;
+    }
+    return false;
+  }
+
+  private hasInFlightUnanchoredRefresh(): boolean {
+    for (const pending of this.pendingRefreshes.values()) {
+      if (
+        pending.requestSince === undefined
+        && pending.seq > this.lastSettledRefreshSeq
+        && !pending.suspectedOversizedDrop
+        && !pending.mayHaveBeenDropped
+        && this.completedTurns - pending.dispatchedTurn < MAX_UNANCHORED_REFRESH_HOLD_TURNS
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** #1275: refresh the cursor boundedly using `since` from the saved position or local session tail,
+   *  keeping full reads for active Pi --usage-facts seats. */
+  private requestCursorRefresh(isRecovery = false, allowUnanchoredFullRead = true): void {
+    if (this.isPiUsageFactsActive()) {
+      this.dispatchCursorRefresh(undefined, undefined, isRecovery);
+      return;
+    }
+    let skippedOversizedSince = false;
+    if (!this.unheldSavedCursor && this.lastEntryId !== undefined && !this.rejectedSinceIds.has(this.lastEntryId)) {
+      if (!this.isSinceBlockedOversized(this.lastEntryId)) {
+        this.dispatchCursorRefresh(this.lastEntryId, undefined, isRecovery);
+        return;
+      }
+      skippedOversizedSince = true;
+    }
+    const sessionFile = this.readableSessionFile();
+    const tailId = sessionFile ? this.io.readLastEntryId?.(sessionFile) ?? null : null;
+    if (tailId && !(this.unheldSavedCursor && tailId === this.lastEntryId) && !this.rejectedSinceIds.has(tailId)) {
+      if (!this.isSinceBlockedOversized(tailId)) {
+        this.dispatchCursorRefresh(tailId, tailId, isRecovery);
+        return;
+      }
+      skippedOversizedSince = true;
+    }
+    if (!allowUnanchoredFullRead || skippedOversizedSince || this.isUnanchoredBlockedOversized() || this.hasInFlightUnanchoredRefresh()) {
+      return;
+    }
+    this.dispatchCursorRefresh(undefined, undefined, isRecovery);
   }
 
   /** OPR.0.7.0.2: report usage from the persisted entries a get_entries response returned (catch-up after a
@@ -1131,15 +2161,26 @@ export class RunnerCore {
     }, () => { /* best-effort: resent on the next refresh */ });
   }
 
-  private raiseAttention(subtype: "runtime_error" | "permission_prompt" | "transient_turn_error"): void {
+  private raiseAttention(subtype: "runtime_error" | "permission_prompt" | "transient_turn_error", owner: "assistant" | "input" | "state"): void {
     // Persistent failures and denied approvals outrank transient failures.
     // Only emit when attention changes or intervening activity replaced it.
     const next = this.attention === "runtime_error" ? this.attention
       : this.attention === "permission_prompt" && subtype === "transient_turn_error" ? this.attention : subtype;
-    if (this.attention === next && this.attentionIsLatest) return;
+    // The owner records the source even when the post is deduplicated: an
+    // input or state raise PINS the owner (a later assistant error of the
+    // same subtype must not make it releasable), and an assistant raise
+    // updates the owner only when an assistant failure is what is held.
+    const ownerNext = this.attentionOwner !== null && this.attentionOwner !== "assistant" && owner === "assistant"
+      ? this.attentionOwner : owner;
+    if (this.attention === next && this.attentionIsLatest) {
+      this.attentionOwner = ownerNext;
+      return;
+    }
     this.attention = next;
+    this.attentionOwner = ownerNext;
     this.attentionIsLatest = true;
     this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
+    this.refreshPaneStatus();
   }
 
   /** Idle and streaming heartbeat. A Pi runner only reports at turn and tool boundaries, and the
@@ -1180,7 +2221,9 @@ export class RunnerCore {
 
   private clearAttention(): void {
     this.attention = null;
+    this.attentionOwner = null;
     this.attentionIsLatest = false;
+    this.refreshPaneStatus();
   }
 
   /** A diagnostic stays in the transcript — the readiness probe and the operator both read
@@ -1190,7 +2233,93 @@ export class RunnerCore {
     this.io.diagnostic?.(text);
   }
 
+  /** The pane's status row: what this seat runs, and the state the runner observed.
+   *  Only what is known is shown — a model or effort the launch did not name is omitted,
+   *  and a seat that is not ready yet, waiting on the operator, or failed never reads as
+   *  idle. Plain text; the pane owns clipping and repainting. */
+  private refreshPaneStatus(): void {
+    if (!this.io.status) return;
+    const parts: string[] = [];
+    // The labels are runner-owned text painted as given: neutralize terminal controls so a
+    // configured value cannot act on the terminal, exactly as diagnostics are treated.
+    if (this.opts.model) parts.push(paneLabel(this.opts.model));
+    if (this.opts.thinking) parts.push(`thinking:${paneLabel(this.opts.thinking)}`);
+    parts.push(this.paneState());
+    this.io.status(parts.join(" \u00b7 "));
+  }
+
+  private paneState(): string {
+    if (this.paneExited) return "exited";
+    if (!this.ready) return this.paneError ? "error" : "starting";
+    if (this.attention === "permission_prompt") return "waiting for input";
+    if (this.attention === "runtime_error") return "error";
+    if (this.attention === "transient_turn_error") return "retrying";
+    // A known failure outranks an open turn, and an observed retry outranks "working".
+    if (this.paneError) return "error";
+    if (this.paneRetrying) return "retrying";
+    if (this.streaming) return "working";
+    return "idle";
+  }
+
+  /** Emphasis for the lines the runner writes itself; model output stays plain. */
+  private get style(): PaneStyle { return this.opts.style ?? STYLE; }
+
   private handleEvent(event: Record<string, unknown>): void {
+    if (this.runtime === "pi" && (event.type === "compaction_start" || event.type === "compaction_end")) {
+      const identity = {
+        ...(typeof event.requestId === "string" ? { requestId: event.requestId } : {}),
+        ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+      };
+      // The attempt id OpenRig's reserved input named rides the runner's native
+      // compact command and returns here. An automatic run (threshold/overflow)
+      // never takes it, so its result cannot answer a requested attempt.
+      const manualReason = typeof event.reason !== "string" || event.reason === "manual";
+      if (event.type === "compaction_start") {
+        const attemptId = manualReason ? this.pendingCompactAttemptId ?? undefined : undefined;
+        if (attemptId) {
+          this.pendingCompactAttemptId = null;
+          this.pendingCompaction = undefined;
+        }
+        this.compaction = { ...(attemptId ? { attemptId } : {}), ...identity, startedAt: this.io.now() };
+      } else {
+        const result = event.result;
+        const summary = result !== null && typeof result === "object" ? Object.fromEntries(
+          Object.entries(result).filter(([key, value]) =>
+            (["summary", "firstKeptEntryId"].includes(key) && typeof value === "string") ||
+            (["tokensBefore", "estimatedTokensAfter"].includes(key) && typeof value === "number")),
+        ) : undefined;
+        const attemptId = this.compaction?.attemptId
+          ?? (manualReason ? this.pendingCompactAttemptId ?? undefined : undefined);
+        if (attemptId && this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+        this.compaction = { ...this.compaction, ...(attemptId ? { attemptId } : {}), ...identity, endedAt: this.io.now(),
+          ...(result === null ? { result: null } : summary ? { result: summary } : {}),
+          ...(typeof event.aborted === "boolean" ? { aborted: event.aborted } : {}),
+          ...(typeof event.willRetry === "boolean" ? { willRetry: event.willRetry } : {}),
+          ...(typeof event.errorMessage === "string" ? { errorMessage: event.errorMessage } : {}),
+        };
+        // Keep the attempt-stamped record beside `compaction`: a later automatic
+        // run replaces that field, and this request must still read completed.
+        if (this.compaction.attemptId) this.requestedCompaction = this.compaction;
+      }
+      this.writeSidecar({});
+    }
+    if (event.type === "queue_update") {
+      if (this.cancellation?.submitted && (!Array.isArray(event.steering) || !event.steering.every(text => typeof text === "string") || !Array.isArray(event.followUp) || !event.followUp.every(text => typeof text === "string") || event.steering.length > 0 || event.followUp.length > 0))
+        this.cancellation.pendingMessages = Math.max(1, this.cancellation.pendingMessages ?? 0);
+      this.nativeQueues = Array.isArray(event.steering) && event.steering.every(text => typeof text === "string")
+        && Array.isArray(event.followUp) && event.followUp.every(text => typeof text === "string")
+        ? { steering: event.steering as string[], followUp: event.followUp as string[] } : null;
+    }
+    if (event.type === "agent_settled" && this.cancellation?.ended) {
+      if (typeof event.aborted === "boolean") this.cancellation.aborted = event.aborted;
+      this.finishEndedNativeCancellation(true);
+    }
+    if (this.cancellation && this.nativeTurn?.id === this.cancellation.target.nativeTurnId) {
+      const message = event.message as { role?: string; stopReason?: string } | undefined;
+      if (event.type === "message_end" && message?.role === "assistant" && message.stopReason === "aborted") this.cancellation.aborted = true;
+      if (event.type === "agent_end") this.cancellation.ended = true;
+    }
+
     if (event.type === "extension_ui_request") {
       const method = event.method;
       const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
@@ -1209,28 +2338,74 @@ export class RunnerCore {
         this.diag(this.runtime !== "omp"
           ? `[${this.runtime}-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
           : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
-        this.raiseAttention("permission_prompt");
+        this.raiseAttention("permission_prompt", "input");
       }
       return;
     }
     const message = event.message as Record<string, unknown> | undefined;
     if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
       this.assistantErrorShown = false;
+      // A new assistant message supersedes the failed one it follows, even in the same turn.
+      if (event.type === "message_start" && this.paneError) {
+        this.paneError = false;
+        this.refreshPaneStatus();
+      }
     }
-    // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
-    // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
-    const entryId = typeof event.entryId === "string" ? event.entryId
+    // Durable cursor (#2117, #2870, #1275): explicit entryId string takes precedence (empty string
+    // leaves cursor put, as on main); on OMP without entryId, non-empty event.id advances it
+    // (Pi requires explicit entryId only).
+    const entryId = typeof event.entryId === "string"
+      ? event.entryId
       : (this.runtime === "omp" && typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
       this.lastEntryId = entryId;
+      this.unheldSavedCursor = false;
+      this.rejectedSinceIds.delete(entryId);
+      this.liveCursorSeq = ++this.cursorSeq;
+      this.lastCursorAdvanceSeq = this.liveCursorSeq;
       this.writeSidecar({});
     }
 
     if (event.type === "agent_start") {
-      this.clearAttention();
+      // An automatic retry's opening is not a new user run (Pi 0.87.1:
+      // auto_retry_start, the backoff, then agent.continue() emits
+      // agent_start + turn_start). Input- and state-owned attention survives
+      // it — the retry correlation marks the opening; assistant-owned
+      // attention yields to the new run, and a genuinely new run clears
+      // everything, as every omp run still does.
+      const retryOpening = this.retryOpeningPending;
+      this.retryOpeningPending = false;
+      this.runOpenedAsRetry = retryOpening;
+      if (!(retryOpening && this.attentionOwner !== null && this.attentionOwner !== "assistant")) this.clearAttention();
+      this.runEnded = false;
       this.io.clearStatus?.();
+      this.paneError = false;
+      this.paneRetrying = false;
+      this.refreshPaneStatus();
     }
-    if (this.runtime === "omp") {
+    // A retry replaces the failed attempt it retries, so the row follows the attempt until
+    // its matching end, exit or a superseding turn.
+    if (event.type === "auto_retry_start") {
+      this.paneError = false;
+      this.paneRetrying = true;
+      this.refreshPaneStatus();
+    }
+    if (event.type === "auto_retry_end") {
+      this.paneRetrying = false;
+      this.refreshPaneStatus();
+    }
+    // A turn's opening supersedes the previous turn's failure — on either runtime, since
+    // both can open a turn with turn_start alone. omp's attention policy is untouched.
+    if (event.type === "turn_start") {
+      this.paneError = false;
+      this.paneRetrying = false;
+      if (this.runtime === "omp" && !this.streaming) {
+        // A turn the runtime opened itself is work in flight; agent_end still closes it.
+        this.streaming = true;
+      }
+      this.refreshPaneStatus();
+    }
+    if (this.runtime !== "pi") {
       if (event.type === "agent_start" || event.type === "turn_start"
         || (event.type === "message_start" && message?.role === "assistant")
         || ((event.type === "message_end" || event.type === "turn_end")
@@ -1238,32 +2413,105 @@ export class RunnerCore {
       if (event.type === "auto_retry_start") {
         this.retryAttempt = Number.isInteger(event.attempt) && (event.attempt as number) > 0 ? event.attempt as number : null;
         this.retryFailure = null;
+        if (this.runtime !== "omp" && this.runtime !== "pi") this.retryOpeningPending = true;
       }
       // A successful automatic retry supersedes the failed attempt.
-      if (event.type === "auto_retry_start" && (this.attention === "runtime_error" || this.attention === "transient_turn_error")) this.clearAttention();
+      // OMP keeps its existing clear. A fork's retry start releases only what
+      // this run's assistant failure raised — a refused input's or a get_state
+      // attention stays held through the backoff.
+      if (event.type === "auto_retry_start" && (this.attention === "runtime_error" || this.attention === "transient_turn_error")
+        && (this.runtime === "omp" || this.attentionOwner === "assistant")) this.clearAttention();
       // Some paths omit agent_start; turn_start still opens a new turn.
-      if (event.type === "turn_start") this.assistantErrorShown = false;
+      if (event.type === "turn_start") { this.assistantErrorShown = false; this.runEnded = false; }
     }
-    const mapped = mapPiEvent(event, this.runtime);
+    const wake = this.managedWake;
+    if (wake && wake.disposition === undefined && ["agent_start", "message_end", "agent_end"].includes(String(event.type))) wake.preDispositionEvents = true;
+    if (event.type === "agent_start" && wake) {
+      if (wake.wakeOpened) wake.contaminated = true;
+      wake.wakeOpened = true;
+    }
+    if (event.type === "message_end" && wake && wake.disposition === "started" && !wake.preDispositionEvents && wake.wakeOpened) {
+      const assistant = event.message as { role?: string; content?: Array<{ type: string; text?: string }>; stopReason?: string } | undefined;
+      if (assistant?.role === "assistant") {
+        wake.answer!.push(...(Array.isArray(assistant.content) ? assistant.content : []).filter(part => part.type === "text" && typeof part.text === "string").map(part => part.text!));
+        wake.stopReason = assistant.stopReason;
+      }
+    }
+    const mapped = mapPiEvent(event, this.runtime, this.style);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
     // into an open run is accepted as it's sent (acceptIntoOpenRun).
+    if (this.runtime === "pi" && event.type === "agent_start" && this.nativeTurn) this.managedQuarantined = true;
     const opening = this.runtime !== "omp" && mapped.streaming === true && !this.streaming;
-    if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
+    if (mapped.streaming !== undefined) {
+      const changed = this.streaming !== mapped.streaming;
+      this.streaming = mapped.streaming;
+      if (changed) this.refreshPaneStatus();
+    }
+    if (this.cancellation && (this.cancellation.submitted || this.cancellation.ended) && (event.type === "agent_start" || opening))
+      this.finishNativeCancellation(this.cancellation.submitted ? "requested" : "not-this-turn", "native_settlement_superseded");
     if (opening) {
+      setImmediate(() => this.pumpManaged());
       this.turn += 1;
+      this.epochSteers.clear(); this.personSteers.clear(); this.nativeQueues = null;
+      this.nativeTurn = { id: `pi-invocation-${++this.nativeEpoch}`, accepted: [String(this.turn)], owned: this.pendingManagedStart };
+      this.reportNativeTurn("opened");
+      for (const entry of this.pendingNativeInputs) {
+        entry.nativeTurnId = this.nativeTurn.id; entry.acceptedTurnId = String(this.turn);
+        if (entry.frame.kind === "input" && entry.nativeAccepted && entry.disposition === "started") {
+          entry.state = "terminal"; this.reportManaged(entry, "result", { kind: "input", accepted: true });
+        }
+      }
+      this.pendingNativeInputs.clear();
+      // A newly accepted prompt is a new user run: any retry correlation (and
+      // its pending opening mark) ended with the previous run. The automatic
+      // retry's OWN opening also counts as an opening (streaming false→true
+      // after agent_end) — there the correlation must SURVIVE, or a failure
+      // inside the retry raises persistent and the terminal summary can no
+      // longer match. The mark is CONSUMED here: exactly one opening — the
+      // retry's — is exempt, so a later run that opens without an agent_start
+      // (turn_start only) still resets the correlation.
+      const retryOwnOpening = this.runOpenedAsRetry;
+      this.runOpenedAsRetry = false;
+      if (!retryOwnOpening) {
+        this.retryAttempt = null;
+        this.retryFailure = null;
+        this.retryOpeningPending = false;
+      }
       this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
     }
     // OMP writes its JSONL lazily; re-announce identity after each turn until
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
     if (event.type === "agent_end") {
+      // A retry that never reported its end must not outlive the turn it belonged to.
+      if (this.paneRetrying) {
+        this.paneRetrying = false;
+        this.refreshPaneStatus();
+      }
+      this.idleRevision = -1;
+      this.pendingManagedStart = false;
+      this.reportNativeTurn("closed"); this.nativeTurn = null;
+      this.finishEndedNativeCancellation();
+      if (wake) { wake.nativeTerminal = true; this.finishManagedWake(wake); }
+      setImmediate(() => { this.pumpPersonPrompts(); this.pumpManaged(); });
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
-      // completed turn — get_entries returns append-order entries with stable
-      // ids; the response handler advances the cursor from the tail.
-      this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+      // completed turn using a bounded read (#1275).
+      const completedTurn = this.runtime !== "omp" || event.isTerminal !== false;
+      this.requestCursorRefresh(false, completedTurn);
+      if (completedTurn) this.completedTurns += 1;
+      // A provider failure the harness says it will retry (Pi >=0.75.4 types
+      // `willRetry` at agent_end) must not hold the seat through the backoff.
+      // Release only the attention this run's assistant error raised; a
+      // refused input or get_state attention is not this run's to clear.
+      this.runEnded = true;
+      if ((event as { willRetry?: unknown }).willRetry === true
+        && this.attention !== null
+        && this.attentionOwner === "assistant" && this.attentionIsLatest) {
+        this.clearAttention();
+      }
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
@@ -1276,25 +2524,58 @@ export class RunnerCore {
         this.diag(mapped.errorNotice);
       }
       this.assistantErrorShown = true;
+      // The failure is known: the row says so until a new turn starts, never idle.
+      this.paneError = true;
+      this.refreshPaneStatus();
       // Only typed, explicitly transient HTTP failures may release the send
-      // guard at agent_end. Unknown/auth/configuration failures stay attention;
-      // diagnostic prose is never used to decide whether a retry is safe.
+      // guard at agent_end on status alone (OMP types the status). A fork's
+      // untyped provider failure releases through `willRetry` at agent_end and
+      // the harness's own retry summary instead. Unknown/auth/configuration
+      // failures stay attention; diagnostic prose never decides retry safety.
       const status = message?.errorStatus;
       const transient = (event.type === "message_end" || event.type === "turn_end")
         && message?.role === "assistant" && message.stopReason === "error"
         && typeof status === "number" && [408, 429, 500, 502, 503, 504, 529].includes(status);
-      if (this.runtime === "omp") {
+      // Built-in Pi leaves assistant failures as pane output; OMP and `protocol:
+      // pi-rpc` community harnesses make them attention. The typed-transient
+      // release needs a harness that types `errorStatus` (OMP does); an untyped
+      // fork provider error releases instead through `willRetry` at agent_end
+      // and a matched retry summary, while a final unretried failure stays held.
+      if (this.runtime !== "pi") {
         const retrySummary = event.type === "auto_retry_end" && event.success === false
           && this.retryAttempt !== null && event.attempt === this.retryAttempt
           && this.retryFailure !== null && event.finalError === this.retryFailure
           && event.message === undefined && event.error === undefined;
         if (event.type !== "auto_retry_end") {
-          this.retryFailure = transient && this.retryAttempt !== null && typeof message?.errorMessage === "string"
+          // OMP records a retryable diagnostic only when the status is typed
+          // transient; a pi-rpc fork never types `errorStatus` (Pi 0.87.1), so
+          // its in-flight retry records the prose instead — never as a
+          // classifier, only to match the harness's own retry summary.
+          const retryable = this.runtime === "omp" ? transient : true;
+          this.retryFailure = retryable && this.retryAttempt !== null && typeof message?.errorMessage === "string"
             && message.errorMessage.length > 0 ? message.errorMessage : null;
         } else if (!retrySummary) {
           this.retryFailure = null;
         }
-        this.raiseAttention(transient || retrySummary ? "transient_turn_error" : "runtime_error");
+        // A pi-rpc fork's failure while the harness has a retry in flight is
+        // transient-class too (it never types errorStatus); a final unretried
+        // failure stays runtime_error. OMP keeps its typed-status rule.
+        const assistantFailure = (event.type === "message_end" || event.type === "turn_end")
+          && message?.role === "assistant" && message.stopReason === "error";
+        const forkRetried = this.runtime !== "omp" && this.retryAttempt !== null;
+        const kind = transient || retrySummary || (assistantFailure && forkRetried)
+          ? "transient_turn_error" : "runtime_error";
+        // Pi 0.87.1 emits the terminal summary AFTER agent_end (willRetry:
+        // false). By then the failure was already released at agent_end as
+        // transient, and the correlation survives the run boundary on forks —
+        // so a MATCHED summary after the run ended settles instead of raising
+        // a fresh persistent error. A genuine unmatched failure still raises.
+        if (retrySummary && this.runEnded && this.runtime !== "omp" && this.runtime !== "pi") {
+          this.retryAttempt = null;
+          this.retryFailure = null;
+          return;
+        }
+        this.raiseAttention(kind, "assistant");
       }
     }
     if (this.runtime === "omp" && (event.type === "auto_retry_end" && event.success === true
@@ -1302,15 +2583,33 @@ export class RunnerCore {
       this.retryAttempt = null;
       this.retryFailure = null;
     }
+    // A fork's retry correlation survives agent_end (the summary follows it);
+    // agent_settled and a new run are where it genuinely ends.
+    if (this.runtime !== "pi" && this.runtime !== "omp" && event.type === "agent_settled") {
+      this.retryAttempt = null;
+      this.retryFailure = null;
+      this.retryOpeningPending = false;
+      this.runOpenedAsRetry = false;
+    }
     if (!mapped.activity) return;
     if (event.type === "agent_end" && this.attention === "transient_turn_error") this.clearAttention();
-    if (mapped.activity.hookEvent === "Stop" && this.attention) {
-      // The turn ended, but the operator still has to act. Drop the Stop; if
-      // later activity replaced the attention, restore it as the final state.
-      if (!this.attentionIsLatest) this.raiseAttention(this.attention);
-    } else {
-      this.attentionIsLatest = false;
-      this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype));
+    const compactionBeat = this.runtime === "pi" && mapped.activity.subtype === "compaction";
+    try {
+      if (mapped.activity.hookEvent === "Stop" && this.attention) {
+        // The turn ended, but the operator still has to act. Drop the Stop; if
+        // later activity replaced the attention, restore it as the final state.
+        if (!this.attentionIsLatest) this.raiseAttention(this.attention, this.attentionOwner ?? "assistant");
+      } else {
+        this.attentionIsLatest = false;
+        this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype,
+          compactionBeat ? { requestId: this.compaction?.requestId, reason: this.compaction?.reason,
+            ...(event.type === "compaction_end" ? { endedAt: this.compaction?.endedAt } : {}) } : {}));
+      }
+    } finally {
+      if (compactionBeat && event.type === "compaction_end") {
+        this.lastPostedHook = null;
+        this.lastHeartbeatMs = null;
+      }
     }
   }
 
@@ -1384,6 +2683,11 @@ export class RunnerCore {
       sessionFile: this.sessionFile,
       sessionId: this.sessionId,
       lastEntryId: this.lastEntryId,
+      ...(this.runtime === "pi" ? {
+        compaction: this.compaction,
+        requestedCompaction: this.requestedCompaction,
+        pendingCompaction: this.pendingCompaction,
+      } : {}),
       updatedAt: this.io.now(),
       ...patch,
     });
@@ -1651,6 +2955,96 @@ export function piLaunchCapabilityError(
   return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
+function isPermanentPiRunRefusal(status: number, code?: string): boolean {
+  if (![401, 403, 404, 409, 410].includes(status) || ["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(code ?? "")) return false;
+  return status === 401 || status === 403 || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code ?? "");
+}
+
+function runnerFrameBound(buffer: string): { limit: number; chars?: number } {
+  const overhead = 64 * 1024;
+  const fallback = { limit: 6 * 1024 * 1024 + overhead };
+  if (!buffer.startsWith(": runner-frame-chars=") || !buffer.includes("\n")) return fallback;
+  const header = /^: runner-frame-chars=([0-9]+)\n/.exec(buffer);
+  const chars = header ? Number(header[1]) : NaN;
+  if (!Number.isSafeInteger(chars) || chars < 1 || chars > Number.MAX_SAFE_INTEGER - overhead)
+    throw new Error("Invalid channel frame size");
+  return { limit: chars + overhead, chars };
+}
+
+/** Pi's HTTP/SSE wire loop; it owns no native executor or durable receiver journal. */
+export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseUrl: string; token: string }, runId: string, signal: AbortSignal): Promise<void> {
+  let retained = false, cursor = 0;
+  while (!signal.aborted) {
+    try {
+      if (!core.isReady()) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
+      const hello = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST", signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
+        headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ type: "hello", version: 1, runId, retained, capabilities: core.nativeChannelCapabilities() }) });
+      if (!hello.ok) {
+        const failure = await hello.json().catch(() => null) as { code?: string } | null;
+        if (isPermanentPiRunRefusal(hello.status, failure?.code)) { core.quarantineManagedChannel(); return; }
+        throw new Error("Channel handshake unavailable");
+      }
+      retained = true;
+      const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { signal,
+        headers: { authorization: `Bearer ${endpoint.token}`, "Last-Event-ID": String(cursor) } });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null) as { code?: string } | null;
+        if (isPermanentPiRunRefusal(response.status, failure?.code)) { core.quarantineManagedChannel(); return; }
+        throw new Error("Channel subscription unavailable");
+      }
+      if (!response.body) throw new Error("Channel subscription unavailable");
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      try {
+        for (;;) {
+          const chunk = await reader.read(); if (chunk.done) break;
+          buffer += chunk.value.replace(/\r/g, "");
+          let end: number;
+          while ((end = buffer.indexOf("\n\n")) >= 0) {
+            const bound = runnerFrameBound(buffer);
+            if (end > bound.limit) throw new Error("Channel frame too large");
+            const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+            const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+            if (bound.chars !== undefined && data.length !== bound.chars) throw new Error("Channel frame size mismatch");
+            if (!data) continue;
+            const frame = JSON.parse(data) as PiManagedRequest;
+            if (frame.runId !== runId || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1) throw new Error("Invalid channel frame");
+            cursor = Math.max(cursor, frame.sequence);
+            // Do not block reconnection on an ack whose response was lost; the core retains its acceptance promise.
+            void core.acceptRunnerRequest(frame).catch(() => {});
+          }
+          if (buffer.length > runnerFrameBound(buffer).limit) throw new Error("Channel frame too large");
+        }
+      } finally { await reader.cancel().catch(() => {}); }
+    } catch { /* Same live process/map reconnects; native writes never replay here. */ }
+    if (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 250));
+  }
+}
+
+async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void, onContinuation?: (line: string) => void): Promise<boolean> {
+  while (!signal.aborted) {
+    try {
+      const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST",
+        signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]), headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+      if (response.ok) {
+        if ((body.result as Record<string, unknown> | undefined)?.continuation) {
+          const reply = await response.json().catch(() => null) as { continuation?: Record<string, unknown> } | null;
+          if (reply?.continuation) onContinuation?.(`Native continuation: ${JSON.stringify(reply.continuation)}`);
+        }
+        return true;
+      }
+      const failure = await response.json().catch(() => null) as { code?: string } | null;
+      if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) {
+        if (isPermanentPiRunRefusal(response.status, failure?.code)) onPermanentRunRefusal();
+        return false;
+      }
+    } catch { /* A lost response retries the saved receipt, never the native operation. */ }
+    if (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   let args: RunnerArgs;
   try {
@@ -1747,7 +3141,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       try {
         const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
         const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+        writePiRunnerSidecar(paths.runnerStatePath, exitedState);
       } catch { /* the pane ERROR marker still fails readiness */ }
       process.exitCode = 127;
       return;
@@ -1827,29 +3221,47 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
-      .then(async (response) => response.ok && (runtime === "omp" || runId) ? await response.json() as Record<string, unknown> : null)
+      .then(async (response) => response.ok ? await response.json() as Record<string, unknown> : null)
       .catch(() => null)
       .finally(() => clearTimeout(timeout));
   });
 
+  let recoveryPort: number | undefined;
+  const nativePosts = new AbortController(), nativeStream = new AbortController();
+  child.once("exit", () => { nativeStream.abort(); setTimeout(() => nativePosts.abort(), 2000).unref(); });
+  child.once("error", () => { nativeStream.abort(); nativePosts.abort(); });
   const io: RunnerIo = {
+    ...(endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel(), paneDiag) } : {}),
+    ...(runtime === "pi" && endpoint && runId ? { withdrawNativeTurn: async (body: Record<string, unknown>) => {
+        try {
+          const response = await fetch(`${endpoint.baseUrl}/api/activity/runner-channel`, { method: "POST", signal: AbortSignal.timeout(3000),
+            headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+          if (!response.ok) {
+            const failure = await response.json().catch(() => null) as { code?: string } | null;
+            if (isPermanentPiRunRefusal(response.status, failure?.code)) core.quarantineManagedChannel();
+            return null;
+          }
+          return (await response.json() as { withdrawal?: { confirmed: boolean; notThisTurn?: boolean } }).withdrawal ?? null;
+        } catch { return null; }
+      } } : {}),
+
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
     mirrorLine: (line) => pane.line(line),
     mirrorAppend: (text) => pane.transcript(text),
     diagnostic: (text) => pane.diagnostic(text),
+    status: (text) => pane.status(text),
     clearStatus: () => pane.clearStatus(),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const result = postInOrder(payload).catch(() => null);
-      // Managed runs and OMP read the acknowledgement so identity delivery can retry; null
-      // (transport failure or a non-OK reply) means "not yet persisted".
-      if (runtime === "omp" || runId) return result;
+      // Recovery also needs a fresh acknowledgement for legacy Pi launches.
+      return result;
     },
     writeSidecar: (state) => {
       try {
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(state));
+        writePiRunnerSidecar(paths.runnerStatePath, { ...state, ...(recoveryPort && child.pid ? { recovery: { port: recoveryPort, pid: process.pid, childPid: child.pid } } : {}) });
       } catch { /* best-effort; adapter falls back to pane markers */ }
     },
     now: () => new Date().toISOString(),
@@ -1888,6 +3300,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       } catch { return null; }
     },
     readSessionEntryIds: (path) => readPiSessionEntryIds(path),
+    readLastEntryId: (path) => readSessionTailEntryId(path),
   };
 
   const core = new RunnerCore(io, {
@@ -1896,7 +3309,25 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
     runId: runId,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
-    requestedSessionFile: args.sessionFile });
+    requestedSessionFile: args.sessionFile, model: args.model, thinking: args.thinking });
+
+  if (endpoint && runId)
+    void connectPiRunnerChannel(core, endpoint, runId, nativeStream.signal);
+
+  // A loopback endpoint for a bounded, read-only RPC proof. Failure leaves ordinary launch usable;
+  // recovery then reports that this runner cannot provide the proof.
+  if (runtime === "pi" || runtime === "omp") {
+    void startPiRecoveryServer(args.launchId, (sessionFile) => core.verifyRecovery(sessionFile)).then((server) => {
+      if (!child.pid || child.exitCode !== null || child.signalCode !== null) { server.close(); return; }
+      recoveryPort = server.port;
+      child.once("exit", () => server.close());
+      child.once("error", () => server.close());
+      try {
+        const state = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+        if (state?.launchId === args.launchId) io.writeSidecar(state);
+      } catch { /* the next sidecar write publishes it */ }
+    }).catch(() => {});
+  }
 
   let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

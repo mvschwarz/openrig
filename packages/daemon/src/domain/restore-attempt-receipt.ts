@@ -7,6 +7,7 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { rollupRestoreRigResult } from "./restore-orchestrator.js";
+import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 
 export interface RestoreAttemptReceipt {
   ok: true;
@@ -72,7 +73,8 @@ export function deriveRestoreAttemptReceipt(
     const completed = JSON.parse(completedRow.payload) as { result: RestoreResult };
     const originalResult = completed.result;
     const intendedRoster = started.intendedRoster ?? originalResult.intendedRoster ?? originalResult.nodes.map((node) => ({ nodeId: node.nodeId, logicalId: node.logicalId }));
-    const intendedIds = new Set(intendedRoster.map((node) => node.nodeId));
+    const originalByNode = restoreOutcomesByIntendedNode(intendedRoster, originalResult.nodes);
+    const intendedIds = new Set(intendedRoster.map(node => originalByNode.get(node.nodeId)?.nodeId ?? node.nodeId));
     const reconciliationRows = db.prepare(
       "SELECT seq, rig_id, type, payload, created_at FROM events WHERE rig_id = ? AND type = 'restore.outcome_reconciled' AND json_extract(payload, '$.attemptId') = ? ORDER BY seq",
     ).all(rigId, attemptId) as EventRow[];
@@ -81,8 +83,10 @@ export function deriveRestoreAttemptReceipt(
       return intendedIds.has(event.nodeId) ? [{ ...event, seq: row.seq, createdAt: row.created_at }] : [];
     });
     const recovered = new Set(reconciliations.map((event) => event.nodeId));
-    const originalByNode = new Map(originalResult.nodes.map((node) => [node.nodeId, node]));
-    const currentNodes = intendedRoster.map((intended) => {
+    // #3395: a seat pool agent the restore kept down (drained) has no outcome on purpose; it is not an unrecorded failure.
+    // Restore matches it by logical id, as it launches seats, so the receipt does too.
+    const keptDown = new Set((originalResult.keptDown ?? []).map((node) => node.logicalId));
+    const currentNodes = intendedRoster.filter((intended) => !keptDown.has(intended.logicalId)).map((intended) => {
       const node = originalByNode.get(intended.nodeId) ?? {
         nodeId: intended.nodeId,
         logicalId: intended.logicalId,
@@ -105,7 +109,10 @@ export function deriveRestoreAttemptReceipt(
       reconciliations,
       currentNodes,
       unresolvedIntendedSeats,
-      currentIntendedSetVerdict: rollupRestoreRigResult(currentNodes),
+      // Every intended seat kept down leaves no node to roll up (the empty rollup is `failed`): the attempt's own verdict
+      // stands, a restore that launched nothing on purpose or one that failed before any seat (a service boot).
+      currentIntendedSetVerdict: currentNodes.length === 0 && keptDown.size > 0 ? originalResult.rigResult
+        : rollupRestoreRigResult(currentNodes),
     };
   } catch (error) {
     return { ok: false, code: "attempt_corrupt", message: `Restore attempt ${attemptId} could not be decoded: ${(error as Error).message}` };

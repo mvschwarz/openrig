@@ -115,6 +115,70 @@ export function tmuxRenamedSessionError(sessionName: string): string | null {
   return `session name "${sessionName}" contains "." and tmux would create it as "${sessionName.replace(/\./g, "_")}", so OpenRig could not reach the seat; use a rig name without dots`;
 }
 
+// Single-letter format aliases tmux 3.6a replaces after "#" (format.c format_upper and format_lower).
+const TMUX_FORMAT_ALIASES = "DFHIPSTWh";
+
+/** What tmux 3.6a's format expansion does to a name new-session runs through it (cmd-new-session.c:104,
+ *  format.c format_expand1), or null when every "#" is copied as written: "#" plus any other character is kept. */
+function tmuxFormatChange(name: string): string | null {
+  let styleEnd = -1;
+  for (let i = 0; i < name.length; i++) {
+    if (name[i] !== "#") continue;
+    const next = name[i + 1];
+    if (next === undefined) return 'tmux can\'t reliably handle a "#" at the end of a new session\'s name';
+    let run = i + 1;
+    while (name[run] === "#") run++;
+    if (name[run] === "[") {
+      // "#[" and "##…[" open a style, copied as written; an alias inside it isn't expanded.
+      styleEnd = name.indexOf("]", run);
+      i = run;
+      continue;
+    }
+    if (next === "#") return 'tmux reads "##" as "#" in a new session\'s name';
+    if (next === "(") return 'tmux runs "#(…)" as a command in a new session\'s name';
+    if (next === "{") return 'tmux expands "#{…}" in a new session\'s name';
+    if (next === "}" || next === ",") return `tmux reads "#${next}" as "${next}" in a new session's name`;
+    if (TMUX_FORMAT_ALIASES.includes(next) && i + 1 > styleEnd) return `tmux replaces "#${next}" with a value in a new session's name`;
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Why a seat can't be launched again under the name it is bound to, or null when it can. An adopted seat keeps its own
+ * tmux session's name, which need not follow the canonical or legacy pattern validateSessionName checks. Such a name is
+ * reused unless something on the restore, send or capture path changes it or can't find it:
+ * - tmux 3.6a refuses an empty name, turns ":" and "." into "_", escapes control characters, "\" and invalid UTF-8
+ *   (session.c session_check_name), and changes some "#" sequences in a new session's name (tmuxFormatChange).
+ * - OpenRig addresses a session as "=name" (exactTarget, probeSession and listPanes in adapters/tmux.ts), and tmux strips
+ *   the "=" and then reads a leading "$" as a session id (cmd-find.c). A name shaped like an id ("%3", "@1") is passed
+ *   through as that id. A leading "%", "@" or "=" is otherwise found as written.
+ * - A name with two or more "@" is read as already carrying a host (`rig send`'s origin, run-on-host originFor), and
+ *   `rig send --to` splits on "," and trims each part.
+ */
+export function boundSessionNameProblem(sessionName: string): string | null {
+  if (!sessionName) return "it is empty";
+  if (sessionName !== sessionName.trim()) return "it starts or ends with whitespace, which `rig send --to` trims";
+  if (sessionName.split("@").length >= 3) return 'it contains more than one "@", so OpenRig reads its last part as a host';
+  if (sessionName.includes(",")) return 'it contains ",", which `rig send --to` reads as a list separator';
+  const renamed = [":", "."].find((ch) => sessionName.includes(ch));
+  if (renamed) return `tmux turns "${renamed}" into "_" in a session name`;
+  // Control characters, and unpaired surrogates (which aren't valid UTF-8): iterating by code point leaves a lone
+  // surrogate as its own value in 0xd800-0xdfff.
+  const escaped = [...sessionName].some((ch) => {
+    const code = ch.codePointAt(0)!;
+    return code < 0x20 || code === 0x7f || (code >= 0xd800 && code <= 0xdfff);
+  });
+  if (sessionName.includes("\\") || escaped) {
+    return 'tmux escapes "\\", control characters and invalid UTF-8 in a session name';
+  }
+  const format = tmuxFormatChange(sessionName);
+  if (format) return format;
+  if (sessionName.startsWith("$")) return 'tmux reads a name starting with "$" as a session id, even in an exact target';
+  if (/^[%@]\d+$/.test(sessionName)) return `tmux reads "${sessionName}" as a ${sessionName[0] === "%" ? "pane" : "window"} id`;
+  return null;
+}
+
 // ============================================================================
 // OPR.0.4.6.MH1 FR-8 — THE session-name parse contract (parity-pinned).
 //

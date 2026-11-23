@@ -93,6 +93,22 @@ describe("Slack sweep selection", () => {
     expect((await ports().listHumanAlerts({})).map(q => q.notificationKey)).toEqual([newer]);
   });
 
+  it("counts marked receipts for their exact episode without changing their kind", async () => {
+    // Given an active episode recorded as marked, not posted.
+    row("marked"); const key = notify("marked");
+    repo.update({ qitemId: "marked", actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-marked notification_key=${key} reason=identical-content kind=human-required message_ts=1.1` });
+    // When receipt readers select the episode.
+    expect(repo.transitionLog.getOwnerNotificationReceipt("marked", key)?.messageTs).toBe("1.1");
+    expect(repo.transitionLog.getOwnerNotificationReceipt("marked", `${key}0`)).toBeNull();
+    expect(repo.transitionLog.postedHumanAskIds()).toContain("marked");
+    expect(repo.transitionLog.activeOwnerNotificationEpisodes(true)).toMatchObject([{ qitemId: "marked", posted: true }]);
+    expect(await ports().listHumanAlerts({})).toEqual([]);
+    // Then a newer episode is still eligible.
+    const newer = notify("marked");
+    expect((await ports().listHumanAlerts({})).map((q) => q.notificationKey)).toEqual([newer]);
+  });
+
   it("keeps a legacy schema without owner classification quiet", async () => {
     row("legacy");
     for (const table of ["queue_transitions", "queue_transitions_archive"]) {

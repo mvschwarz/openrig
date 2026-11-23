@@ -162,6 +162,8 @@ describe("the installer's setup boundary", () => {
     expect(r.exitCode).toBeUndefined();
     expect(r.output).toContain("Setup complete.");
     expect(r.output).toContain("codex_auth: Not selected");
+    // Ready for Claude alone, and still told that a built-in team's Codex seat needs that login, as doctor says.
+    expect(r.output).toContain("A built-in team can use one you didn't select: starter runs its reviewer on Codex.");
   });
 
   it("an uncertain probe is listed with its own error, not as a confirmed missing login", async () => {

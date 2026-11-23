@@ -1,5 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_SECTION_CAP, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
+import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_SECTION_CAP, SLACK_TEXT_CAP, type QitemLike } from "../src/domain/gateway/slack/message.js";
+
+describe("person-facing question labels", () => {
+  it.each(["Ship", "Ship (recommended)", "Ship (Recommended)"])("marks %s as recommended once in the accessible text and option history", (label) => {
+    const modes: Partial<QitemLike>[] = [{}, { sharedChannel: true }, { ownerNotificationKind: "human-decision-resolved" }];
+    for (const mode of modes) {
+      const message = buildOutboundMessage({ qitemId: "q-label", summary: "Choose", body: "Pick one.", ...mode,
+        humanQuestions: [{ id: "ship", question: "Ship now?", options: [
+          { id: "yes", label, recommended: true }, { id: "hold", label: "Hold" },
+        ] }],
+      }, { sourceLabel: "test" });
+      expect(message.text.match(/\(recommended\)/gi)).toHaveLength(1);
+      const sections = message.blocks.filter((b) => (b as { type?: string }).type === "section");
+      expect(JSON.stringify(sections).match(/\(recommended\)/gi)?.length ?? 0).toBe(mode.sharedChannel || mode.ownerNotificationKind ? 1 : 0);
+      expect(message.text.split("\n")).toContain("• Hold");
+    }
+  });
+});
 
 describe("Slice-11 outbound message — content hygiene (item 7)", () => {
   const opts = { sourceLabel: "vm-openrig-build" };
@@ -95,7 +112,14 @@ describe("#47 evidence link boundaries", () => {
     const message = buildOutboundMessage(qitem, { ...opts, evidenceLink: url });
     expect(context.length).toBe(SLACK_SECTION_CAP);
     expect(message.blocks).toContainEqual({ type: "context", elements: [{ type: "mrkdwn", text: context }] });
-    expect(() => buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character })).toThrow(/evidence context.*maximum 3000/);
+    const longer = base + escaped.repeat(count) + padding + escaped;
+    const compact = buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character });
+    expect(compact.blocks).toContainEqual({
+      type: "context", elements: [{ type: "mrkdwn", text: suffix ? `<${longer}|evidence>` : longer }],
+    });
+    const extra = 1 + Math.floor((prefix.length + suffix.length) / escaped.length);
+    expect(() => buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character.repeat(extra) }))
+      .toThrow(/evidence context.*maximum 3000/);
   });
 
   it("includes evidence, images, attribution, mentions and the reconcile marker in the complete fallback budget", () => {
@@ -118,7 +142,13 @@ describe("#47 evidence link boundaries", () => {
     expect(message.text).toContain("From dev@rig@host");
     expect(message.text).toContain("<@U-EVIDENCE>");
     expect(message.text.endsWith(fullOpts.reconcileMarker)).toBe(true);
-    expect(() => buildOutboundMessage({ ...brief, body: body + "b" }, fullOpts)).toThrow(/complete fallback.*maximum 3900/);
+    const compactBody = body + "b".repeat("Evidence: ".length);
+    const compact = buildOutboundMessage({ ...brief, body: compactBody }, fullOpts);
+    expect(compact.text.length).toBe(SLACK_TEXT_CAP);
+    expect(compact.text.split("\n")).toContain(evidenceLink.replaceAll("&", "&amp;"));
+    expect(compact.text).toContain(compactBody);
+    expect(() => buildOutboundMessage({ ...brief, body: compactBody + "b" }, fullOpts))
+      .toThrow(/complete fallback.*maximum 3900/);
   });
 });
 

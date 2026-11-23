@@ -61,6 +61,7 @@ interface NodeInventoryRead {
   podNamespace?: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  configuredAccount?: string | null;
   model?: string | null;
   /** Configured launch effort and its provenance, served by the node inventory. */
   effort?: string | null;
@@ -231,8 +232,10 @@ function fmtTokens(input: number | null, output: number | null): string | null {
 function toAgentRow(node: NodeInventoryRead): AgentRow {
   const ctx = node.contextUsage;
   const known = ctx?.availability === "known";
+  const sessionMissing = node.identityVerdict?.reason === "session_missing"
+    || node.identityVerdict?.reason === "session_missing_tmux_unavailable";
   const identityDownranked = node.identityVerdict?.verdict === "mismatch"
-    || (node.identityVerdict?.verdict === "pane_missing" && node.identityVerdict?.reason !== "session_missing");
+    || (node.identityVerdict?.verdict === "pane_missing" && !sessionMissing);
   return {
     needsAttention: node.needsAttention ?? null,
     arbitratedNeedsInput: node.arbitratedNeedsInput ?? null,
@@ -240,6 +243,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     nodeId: node.nodeId,
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
+    configuredAccount: node.configuredAccount ?? null,
     model: node.model ?? null,
     effort: node.effort ?? null,
     effortSource: node.effortSource ?? null,
@@ -271,7 +275,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     },
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
-    status: node.identityVerdict?.reason === "session_missing" && node.sessionStatus === "detached" && node.lifecycleState !== "attention_required"
+    status: sessionMissing && node.sessionStatus === "detached" && node.lifecycleState !== "attention_required"
       ? "detached"
       : node.startupStatus === "failed"
         ? "failed"
@@ -383,7 +387,11 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * avoids re-reading every spec every refresh; the key rolls when the library
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
-export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill">;
+export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill" | "fleetSelected">;
+
+/** Last-resolved ui.topology_remote_seats per drilled remote host — see the
+ *  gated read in the topology section; memory-only, reset by re-drilling. */
+let remoteSeatsToggleMemo: { host: string; on: boolean } | null = null;
 
 export async function hydrateSnapshot(
   client: DaemonClient,
@@ -451,6 +459,19 @@ export async function hydrateSnapshot(
   if (viewContext?.section === "terminals") {
     const terminals = await readTerminals(client, viewContext.terminalView);
     return { ...emptySnapshot(), terminals, hydratedAt: new Date().toISOString(), readErrors: terminals.error ? [terminals.error] : [] };
+  }
+
+  // FLEET PROJECTS (#3093): one GET of the daemon's view across registered hosts, plus — when a fleet slice is open —
+  // that slice's detail from its ORIGIN host through the read-through. Both are bounded reads; the pane never writes.
+  if (viewContext?.section === "fleet") {
+    const sel = viewContext.fleetSelected;
+    const [status, detail] = await Promise.all([
+      client.fleetScopes(),
+      sel ? client.fleetSliceDetail(sel.hostId, sel.mission, sel.slice) : null,
+    ]);
+    if (!("view" in status)) readErrors.push(`fleet projects: ${status.error}`);
+    if (detail && "error" in detail) readErrors.push(`fleet slice detail (${sel!.hostId}): ${detail.error}`);
+    return { ...emptySnapshot(), fleetScopes: { status }, fleetSliceDetail: detail, readErrors, hydratedAt: new Date().toISOString() };
   }
 
   // USAGE ACROSS HOSTS: one GET of the daemon's view across registered hosts, answered from memory there and on every
@@ -709,6 +730,32 @@ export async function hydrateSnapshot(
   const remoteRigs = drilledRemote
     ? await safe<RigSummaryRead[]>(`rigs-summary(${drilledRemote})`, () => client.rigsSummary(drilledRemote))
     : null;
+  // ui.topology_remote_seats — an OPEN remote rig page may read that rig's seats through this daemon's read-only
+  // `?host=` forwarding. The toggle is the daemon's resolved setting (config browser); a failed or absent read
+  // keeps the shipped refusal line, never a fabricated page. Bounded: one config read only while a remote host is
+  // drilled into, and one nodes read only for the open rig while the toggle is on.
+  // The remote rig's nodes are read ONLY while the TABLE tab is open — the
+  // one tab that renders them; the config-browser read below rides the same
+  // gate, so no remote seat read happens on any other tab.
+  const remoteSeatRig = drilledRemote && (topologyLeaf?.kind === "rig" || topologyLeaf?.kind === "pod" || topologyLeaf?.kind === "agent") && viewContext?.viewTab === "table" ? drillRig : null;
+  // The toggle is read only while the TABLE tab holds the remote rig open (the
+  // one tab that renders seats), and MEMOIZED per drilled host: later refreshes
+  // on other tabs reuse it, so the CLI pointer keeps saying where seats are
+  // read without re-issuing the config-browser read on every refresh.
+  if (remoteSeatRig && drilledRemote) {
+    const resolved = (await client.configBrowser().catch(() => null))?.entries?.find((entry) => entry.key === "ui.topology_remote_seats")?.value === true;
+    remoteSeatsToggleMemo = { host: drilledRemote, on: resolved };
+  }
+  const topologyRemoteSeats = remoteSeatRig
+    ? remoteSeatsToggleMemo?.on === true
+    : (drilledRemote && remoteSeatsToggleMemo?.host === drilledRemote ? remoteSeatsToggleMemo.on : false);
+  const remoteSeatRigId = topologyRemoteSeats ? (remoteRigs ?? []).find((rig) => rig.name === remoteSeatRig)?.id : undefined;
+  const remoteNodes = remoteSeatRigId
+    ? await safe<NodeInventoryRead[]>(`nodes(${remoteSeatRig})`, () => client.rigNodes(remoteSeatRigId, drilledRemote!))
+    : null;
+  const remoteInventory: Partial<HostNode["rigs"][number]> = remoteSeatRigId
+    ? remoteNodes === null ? { inventoryUnavailable: true } : { pods: groupPods(remoteNodes) }
+    : {};
   const remoteHosts: HostNode[] = remoteIds.map((id) => ({
     id,
     name: id,
@@ -716,7 +763,7 @@ export async function hydrateSnapshot(
       ? aggStatus.get(id) === "ok" ? true : aggStatus.get(id) === "unreachable" ? false : null
       : registered.find((h) => h.id === id)?.reachable ?? null,
     rigs: id === drilledRemote
-      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id })).sort(byRigName)
+      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id, ...(rig.name === remoteSeatRig ? remoteInventory : {}) })).sort(byRigName)
       : [],
   }));
 
@@ -860,6 +907,7 @@ export async function hydrateSnapshot(
         }
       : healthRequested ? { availability: "unavailable", evaluatedAt: null, total: 0, truncated: false, records: [] } : undefined,
     hosts: [localHost, ...remoteHosts],
+    ...(topologyRemoteSeats ? { topologyRemoteSeats: true } : {}),
     specs,
     specsLoaded: wantsSpecs && library != null,
     fileRoots: fileRoots?.roots,

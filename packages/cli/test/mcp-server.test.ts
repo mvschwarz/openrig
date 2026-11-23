@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { CALLER_SHAPED, createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
+import type { HostRegistryLoadResult } from "../src/host-registry.js";
+import type { HostBindingsFile } from "../src/host-bindings.js";
 
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
@@ -18,6 +20,39 @@ function mockClient(overrides?: {
   client.postText = overrides?.postText ?? vi.fn(async () => ({ status: 200, data: { valid: true, errors: [] } }));
   return client;
 }
+
+// What a connection that relays a person's request is told when more than one assistant could be the one they mean. With
+// rig_team it lists the team first; pickup is said only where it's true for the path.
+const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else.";
+const ASK_RUNNING_PICKUP = "When you send to a running team seat, tell your person that seat will pick it up on its own.";
+const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time.";
+// How an external connection keeps one request one item: it chooses the id, so an uncertain create is checked, never resent.
+const RETRY_RULE = "Acceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.";
+const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until that one is back.";
+const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
+const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.";
+const ASK_REMOVED_FACT = "If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered.";
+
+describe("caller address shape", () => {
+  it("keeps the caller shape with nonempty parts, including hyphens in either part", () => {
+    for (const address of [
+      "cus-a-caller@team", "cus-a-b-c@team", "cus---b@team", "cus-a--@team",
+      "cus-?-?-@team", "cus-名-接続@組", "cus-a\n-b@team", "cus-a-b@team\n",
+    ]) expect(CALLER_SHAPED.test(address), address).toBe(true);
+    for (const address of [
+      "lead@team", "Cus-a-b@team", "xcus-a-b@team", "cus-a@team", "cus--b@team",
+      "cus-a-@team", "cus-a-b@", "cus-a-b@team@other", "cus-a@b-c@team",
+    ]) expect(CALLER_SHAPED.test(address), address).toBe(false);
+  });
+
+  it("rejects a long repeated-hyphen input without retrying all possible splits", () => {
+    const address = `cus-${"?-".repeat(100_000)}@team@other`;
+    const start = performance.now();
+    expect(CALLER_SHAPED.test(address)).toBe(false);
+    // The linear scan takes milliseconds; allow a full second for a slow test host.
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
+});
 
 describe("MCP Server", () => {
   let mcpClient: Client;
@@ -395,6 +430,10 @@ describe("MCP Server", () => {
       expect(instructions).not.toContain(MEMBER_WORKFLOW);
       expect(instructions).not.toContain("without asking whether you may");
       for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      // It hands the team the person's work, so which assistant they mean is theirs to say when several fit. Its list shows
+      // team seats and connected assistants: only a running team seat picks a request up on its own.
+      expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_RUNNING_PICKUP} ${ASK_CONNECTED_PICKUP} ${ASK_SENT_ANYWAY} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+      expect(FRONT_DOOR_WORKFLOW).not.toContain("<name>");
       // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
       expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
       const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
@@ -788,22 +827,38 @@ describe("MCP Server", () => {
   });
 
   it("the context reads return bounded summaries, cut long text and say so, and keep a route's hint as the message", async () => {
-    const slice = (name: string, missionId: string) => ({ name, missionId, displayName: name, status: "active", description: null, qitemCount: 2, lastActivityAt: null, slicePath: `/abs/${name}`, readiness: { big: true } });
+    const slice = (name: string, missionId: string, status = "active") => ({ name, missionId, displayName: name, status, description: null, qitemCount: 2, lastActivityAt: null, slicePath: `/abs/${name}`, readiness: { big: true } });
     const getFn = vi.fn(async (path: string) => {
       if (path === "/api/slices") return { status: 200, data: { slices: [slice("s1", "m1"), slice("s2", "m1"), slice("s3", "m2")], totalCount: 3 } };
       if (path === "/api/slices?filter=done") return { status: 503, data: { error: "slices_root_not_configured", hint: "Run rig config init-workspace" } };
+      if (path === "/api/slices?filter=closed") return { status: 200, data: { slices: [slice("s-closed", "m1", "closed")], totalCount: 1 } };
       if (path === "/api/missions/m1") return { status: 200, data: { missionId: "m1", missionPath: "/abs/m1", status: "active", readiness: { big: true }, slices: [slice("s1", "m1")] } };
       if (path.startsWith("/api/context-packs/library/by-ref")) return { status: 200, data: { relativePath: "world", name: "world", version: "1", purpose: "the world", sourcePath: "/abs", files: [{ path: "a.md", role: "atom", summary: null, estimatedTokens: 10, absolutePath: "/abs/a.md" }] } };
       if (path.startsWith("/api/context-packs/library/resolve-address")) return { status: 200, data: { address: "world/a.md", packRef: "world", filePath: "a.md", text: "x".repeat(50_000) } };
       return { status: 404, data: {} };
     });
     await setup({ get: getFn });
+    const rigSlicesTool = (await mcpClient.listTools()).tools.find((t) => t.name === "rig_slices");
+    expect((rigSlicesTool?.inputSchema.properties as Record<string, { enum?: string[] }> | undefined)?.filter?.enum).toEqual([
+      "all",
+      "active",
+      "done",
+      "closed",
+      "blocked",
+    ]);
     const call = async (name: string, args: Record<string, unknown>) => await mcpClient.callTool({ name, arguments: args });
 
     const slices = (await call("rig_slices", { missionId: "m1", limit: 1 })).structuredContent as { slices: Array<Record<string, unknown>>; totalCount: number; truncated: boolean };
     expect(slices).toMatchObject({ totalCount: 2, truncated: true });
     expect(slices.slices).toEqual([{ name: "s1", missionId: "m1", displayName: "s1", status: "active", description: null, qitemCount: 2, lastActivityAt: null }]);
     expect((await call("rig_slices", { filter: "done" })).structuredContent).toEqual({ ok: false, code: "slices_root_not_configured", message: "Run rig config init-workspace", status: 503 });
+    const closedSlices = await call("rig_slices", { filter: "closed" });
+    expect(closedSlices.isError).not.toBe(true);
+    expect(closedSlices.structuredContent).toEqual({
+      slices: [{ name: "s-closed", missionId: "m1", displayName: "s-closed", status: "closed", description: null, qitemCount: 2, lastActivityAt: null }],
+      totalCount: 1,
+      truncated: false,
+    });
 
     const mission = (await call("rig_mission", { missionId: "m1" })).structuredContent as Record<string, unknown>;
     expect(mission).toEqual({ missionId: "m1", status: "active", slices: [expect.objectContaining({ name: "s1" })] });
@@ -846,11 +901,13 @@ describe("MCP Server", () => {
     // The inbox, the claim before work, and keeping an item blocked while a person is asked.
     for (const part of ["rig_queue_list with owned set", "rig_queue_claim", "blockedOn that person", "blockedOn that new qitemId"]) expect(MEMBER_WORKFLOW).toContain(part);
     // v2: the closure reason a finished item takes, and scope described from the grant, not the tool list.
-    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v2");
     for (const part of ["closure reason no-follow-on", "a listed tool isn't access", "names the shared roots you may read"]) expect(MEMBER_WORKFLOW).toContain(part);
+    // v3: an item titled "Checked on …" is OpenRig's check on other work, to act on, not a task to close.
+    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v3");
+    expect(MEMBER_WORKFLOW).toContain("An item titled \"Checked on …\" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself.");
     const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
     expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
-    expect(doc).not.toContain("member-workflow/v1");
+    for (const old of ["member-workflow/v1", "member-workflow/v2"]) expect(doc).not.toContain(old);
     await cleanup();
   });
 
@@ -877,9 +934,112 @@ describe("MCP Server", () => {
     expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
     expect(instructions).not.toContain("basically authorized");
     expect(instructions).toContain("You may omit destination");
+    // Asked to "send my Claude assistant one request" on a team with four Claude seats, a client picked one from its own history.
+    // Without rig_team it can't list the team, and its destinations aren't other connected assistants: it's told only to ask.
+    expect(instructions).toContain(ASK_UNLISTED);
+    expect(instructions).not.toContain("list the team's members");
+    expect(instructions).not.toContain("no longer on the team");
+    expect(instructions).not.toContain("closed unanswered");
+    expect(instructions).not.toMatch(/picked up|pick it up/);
     expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
     await server.close();
+  });
+
+  it("an external request grant with team/list lists the team before asking which assistant, and says when another connected one picks up", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"], team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+    expect(instructions).not.toContain(ASK_RUNNING_PICKUP);
+    expect(instructions).not.toContain(ASK_SENT_ANYWAY);
+    await external.close();
+    await server.close();
+  });
+
+  it.each([
+    ["a full inbox grant", { queue: ["create", "show", "list", "claim", "update"], team: ["list"] }],
+    ["a narrow inbox grant", { queue: ["claim", "update"] }],
+  ])("%s's instructions name only tools its connection offers", async (_label, objects) => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    const offered = new Set((await external.listTools()).tools.map((tool) => tool.name));
+    const named = [...new Set(instructions.match(/\brig_[a-z_]+/g) ?? [])];
+    expect(instructions).toContain("claim it (rig_queue_claim)");
+    expect(named.filter((tool) => !offered.has(tool))).toEqual([]);
+    expect(instructions).not.toMatch(/rig_whoami|rig_queue_handoff|rig_queue_decide/);
+    expect(instructions.includes("rig_team")).toBe(offered.has("rig_team"));
+    // Only a grant that can hand the team work is told to ask which assistant the person means; with team/list it lists the
+    // team first and may reach another connected assistant, so it's told when that one picks the request up.
+    expect(instructions.includes("ask which")).toBe(offered.has("rig_queue_create"));
+    if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+    // A grant that can send and read back what it sent carries the retry rule; one that only works its inbox doesn't.
+    expect(instructions.includes(RETRY_RULE)).toBe(offered.has("rig_queue_create"));
+    await external.close();
+    await server.close();
+  });
+
+  it("names rig_queue_show in rig_queue_create's description only for a grant that offers it", async () => {
+    const createDescription = async (objects: Record<string, string[]>) => {
+      const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+        access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } } });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "create-only", version: "1.0.0" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const description = (await client.listTools()).tools.find((tool) => tool.name === "rig_queue_create")?.description ?? "";
+      await client.close();
+      await server.close();
+      return description;
+    };
+    const createOnly = await createDescription({ queue: ["create"] });
+    expect(createOnly).not.toContain("rig_queue_show");
+    expect(createOnly).toContain("Pass a qitemId you choose, and retry an uncertain create (a timeout, or an error after sending) only with that same id, never a new one");
+    expect(await createDescription({ queue: ["create", "show"] })).toContain("check rig_queue_show with that qitemId first, and retry only with the same id, never a new one.");
+  });
+
+  it("a network grant's tool descriptions carry the request rules on their own, for a client that drops instructions", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false,
+        external: { objects: { queue: ["create", "show", "list", "claim", "update"], team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const described = new Map((await external.listTools()).tools.map((tool) => [tool.name, tool.description ?? ""]));
+    // Send: choose the id, check by it, retry only with it; the pickup is the recipient's; a no-requests seat is said after.
+    expect(described.get("rig_queue_create")).toContain("Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one.");
+    expect(described.get("rig_queue_create")).toContain("When it's picked up depends on that assistant: rig_team shows how each one checks for requests, where that's known.");
+    expect(described.get("rig_queue_create")).toContain("requestsAdvisory says so");
+    // Answer: on the same item, where its sender reads it.
+    expect(described.get("rig_queue_update")).toContain("the answer in resolution, which the item keeps and its sender reads on this same item");
+    expect(described.get("rig_queue_show")).toContain("this is where its answer is");
+    // Who to send to: an address as listed, and which ones take no requests.
+    expect(described.get("rig_team")).toContain("Send to an address exactly as shown.");
+    expect(described.get("rig_team")).toContain("An entry with takesRequests: false is one whose owner says it takes no requests");
+    await external.close();
+    await server.close();
+  });
+
+  it("a member's instructions keep every shared paragraph word for word", async () => {
+    const instructions = mcpClient.getInstructions() ?? "";
+    for (const paragraph of [
+      "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
+      "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
+      "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+      "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
+    ]) expect(instructions).toContain(paragraph);
+    // A member works items rather than relaying a person's request, so it isn't told to ask which assistant they mean.
+    expect(instructions).not.toContain("ask which");
   });
 
   it("shows a connected assistant's person plain titles and openings, keeping each tool's rules and hints", async () => {
@@ -928,6 +1088,27 @@ describe("MCP Server", () => {
     }
     expect(local.get("rig_whoami")?.description).toBe("Shows which assistant this connection is and which team it belongs to. It answers with its rig, pod, peers and edges, and caller: authenticated (a validated HTTP credential, with its principal) or declared (OPENRIG_SESSION_NAME where the server was configured, which nothing verifies).");
     expect(local.get("rig_whoami")?.annotations).toEqual({ readOnlyHint: true, title: "Show this connection" });
+  });
+
+  it.each([
+    ["grant-service", "Show my network"],
+    ["file", "Show my team"],
+    ["local-authority", "Show my team"],
+  ] as const)("rig_team title follows the authenticated %s principal source", async (principalSource, title) => {
+    const server = createMcpServer(mockClient(), { seat: "participant@team", principalSource,
+      access: { principal: "opaque-principal", owner: false, rigs: ["team"], roots: [], workspace: false,
+        external: { objects: { team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "source-title-control", version: "1" });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const tool = (await client.listTools()).tools.find(tool => tool.name === "rig_team");
+      expect(tool?.title).toBe(title);
+      expect(tool?.annotations?.title).toBe(title);
+      expect(tool?.annotations?.readOnlyHint).toBe(true);
+      expect(tool?.description).toContain(principalSource === "grant-service" ? "on your network" : "on your team");
+    } finally { await client.close(); await server.close(); }
   });
 
   it("rig_down calls POST /api/down with correct params", async () => {
@@ -1537,6 +1718,48 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
+    it("rig_queue_list carries the daemon's page marker and applied limit into its result (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      // The result carries the limit the daemon says it applied, not the one asked for.
+      const page = (truncated: string) => new Headers({ "X-OpenRig-Limit": "7", "X-OpenRig-Truncated": truncated });
+      const getFn = vi.fn()
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("1") })
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("0") })
+        .mockResolvedValueOnce({ status: 200, data: [row] });
+      await setup({ get: getFn });
+      const texts = (result: Awaited<ReturnType<typeof mcpClient.callTool>>) => (result.content as Array<{ text: string }>).map((c) => c.text);
+
+      // A cut page: the items as before, the limit the daemon applied, truncated, and a line saying so.
+      const cut = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(cut.isError).toBeFalsy();
+      expect(cut.structuredContent).toEqual({ items: [row], limit: 7, truncated: true });
+      expect(texts(cut)).toEqual([JSON.stringify([row]), "This page stops at the limit of 7 and more items match; pass a larger limit to see the rest."]);
+
+      // Exactly the limit matched: a full page alone claims nothing more.
+      const exact = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(exact.structuredContent).toEqual({ items: [row], limit: 7, truncated: false });
+      expect(texts(exact)).toEqual([JSON.stringify([row])]);
+
+      // A daemon that doesn't send the marker leaves the result as it was.
+      const older = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(older.structuredContent).toEqual({ items: [row] });
+      expect(texts(older)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
+    it("rig_queue_list reads a limit header without a truncation header as unknown, not as a complete page (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      const getFn = vi.fn(async () => ({ status: 200, data: [row], headers: new Headers({ "X-OpenRig-Limit": "7" }) }));
+      await setup({ get: getFn });
+
+      // Only an explicit 0 or 1 says whether the page was cut; without one, the result carries no marker at all.
+      const result = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({ items: [row] });
+      expect((result.content as Array<{ text: string }>).map((c) => c.text)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
     it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
       const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
       await setup({ get: getFn });
@@ -1607,5 +1830,413 @@ describe("MCP Server", () => {
       expect(postFn.mock.calls[1]?.[1]).toMatchObject({ state: "pending", reopen: true, transitionNote: "one more detail" });
       await cleanup();
     });
+  });
+});
+
+
+describe("MCP host routing", () => {
+  const noBindings: HostBindingsFile = { version: 1, bindings: {} };
+  const registryOf = (...hosts: Array<{ id: string; transport: "http" | "ssh"; url?: string; bearer_env?: string }>): HostRegistryLoadResult =>
+    ({ ok: true, registry: { hosts: hosts as unknown as never } });
+
+  function remoteMock(url = "http://127.0.0.1:17433"): DaemonClient {
+    const remote = new DaemonClient(url);
+    remote.get = vi.fn(async () => ({ status: 200, data: [] }));
+    remote.post = vi.fn(async () => ({ status: 200, data: {} }));
+    return remote;
+  }
+
+  /** A remote client whose real request pipeline runs, recording each call's path and headers. */
+  function recordingRemote(url = "http://127.0.0.1:17433"): { client: DaemonClient; calls: Array<{ path: string; headers: Record<string, string> }> } {
+    const calls: Array<{ path: string; headers: Record<string, string> }> = [];
+    const client = new DaemonClient(url, {
+      fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+        calls.push({ path: new URL(String(input)).pathname, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    return { client, calls };
+  }
+
+  async function run(local: DaemonClient, options: Parameters<typeof createMcpServer>[1], name: string, args: Record<string, unknown>) {
+    const server = createMcpServer(local, options);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "test-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    try {
+      return await mcp.callTool({ name, arguments: args });
+    } finally {
+      await mcp.close();
+      await server.close();
+    }
+  }
+
+  it("rig_ps with host reads that host's daemon with its bearer", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-123";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const remote = remoteMock();
+    const local = mockClient();
+    const result = await run(local, {
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: "unipc" });
+
+    expect(result.isError).toBeFalsy();
+    expect(remote.get).toHaveBeenCalledWith("/api/ps", { headers: { Authorization: "Bearer tok-123" } });
+    expect(local.get).not.toHaveBeenCalled();
+  });
+
+  it("an unregistered host is an error, never a quiet local read", async () => {
+    const local = mockClient();
+    const result = await run(local, {
+      hostRegistryLoader: () => registryOf(),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: "nope" });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("unknown_host");
+    expect(local.get).not.toHaveBeenCalled();
+  });
+
+  it("an ssh host says MCP reaches http hosts only", async () => {
+    const result = await run(mockClient(), {
+      hostRegistryLoader: () => registryOf({ id: "remote-dev", transport: "ssh" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: "remote-dev" });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("host_not_http");
+  });
+
+  it("a blank host is an error, never a quiet local read", async () => {
+    const local = mockClient();
+    const result = await run(local, {
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", { host: " " });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { code?: string } | undefined)?.code).toBe("invalid_host");
+    expect(local.get).not.toHaveBeenCalled();
+  });
+
+  it("an omitted host keeps reading the local daemon", async () => {
+    const local = mockClient();
+    const result = await run(local, {
+      hostRegistryLoader: () => registryOf(),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_ps", {});
+    expect(result.isError).toBeFalsy();
+    expect(local.get).toHaveBeenCalledWith("/api/ps");
+  });
+
+  // The maintainer's narrowed ask: the remote client is bound to the calling agent, so a row written on the other host
+  // names that agent as its sender. The daemon derives it from X-OpenRig-Session, exactly as a local write's.
+  it("a remote queue_create names the calling seat as the item's sender", async () => {
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", destination: "qa@team", body: "Review the diff." });
+
+    expect(result.isError).toBeFalsy();
+    const create = box.calls.find((call) => call.path === "/api/queue/create");
+    // The origin may qualify the seat; the agent it names is the caller's either way.
+    expect(create?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("checks a landed same-id retry on the selected remote host before applying new-work backoff", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-123";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const box = recordingRemote();
+    const local = mockClient();
+    local.get = vi.fn(async () => ({ status: 404, data: {} }));
+    const result = await run(local, {
+      seat: "impl@team",
+      access: { principal: "local", owner: true, rigs: ["team"], roots: [], newWorkRetryAfterMs: 9000 },
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", qitemId: "qitem-already-remote", destination: "qa@team", body: "already landed" });
+    expect(result.isError).toBeFalsy();
+    expect(box.calls.find(call => call.path === "/api/queue/qitem-already-remote")?.headers.Authorization).toBe("Bearer tok-123");
+    expect(box.calls.some(call => call.path === "/api/queue/create")).toBe(true);
+    expect(local.get).not.toHaveBeenCalledWith("/api/queue/qitem-already-remote");
+  });
+
+  it("a remote send names the calling seat as the sender", async () => {
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_send", { host: "unipc", session: "qa@team", text: "Build is green." });
+
+    expect(result.isError).toBeFalsy();
+    const send = box.calls.find((call) => call.path === "/api/transport/send");
+    expect(send?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("a remote write from a server with no seat carries no sender, as a local one doesn't", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    dropUnfilledSeat();
+    onTestFinished(() => { vi.unstubAllEnvs(); });
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_send", { host: "unipc", session: "qa@team", text: "Build is green." });
+
+    expect(result.isError).toBeFalsy();
+    const send = box.calls.find((call) => call.path === "/api/transport/send");
+    expect(send?.headers["X-OpenRig-Session"]).toBeUndefined();
+  });
+
+  /** The eight tools that take a `host`, with arguments each accepts. */
+  const hostToolCalls = (host: string): Array<[string, Record<string, unknown>]> => [
+    ["rig_ps", { host }],
+    ["rig_send", { host, session: "qa@team", text: "Build is green." }],
+    ["rig_capture", { host, session: "qa@team" }],
+    ["rig_queue_create", { host, destination: "qa@team", body: "Review the diff." }],
+    ["rig_queue_show", { host, qitemId: "qitem-1" }],
+    ["rig_queue_list", { host }],
+    ["rig_queue_update", { host, qitemId: "qitem-1", state: "done", closureReason: "no-follow-on" }],
+    ["rig_queue_handoff", { host, qitemId: "qitem-1", to: "qa@team" }],
+  ];
+  const httpHost = { id: "unipc", transport: "http" as const, url: "http://127.0.0.1:17433" };
+
+  // How access is decided (mcp-http.ts): stdio and unauthenticated loopback build no access (a local owner),
+  // an HTTP token's grant builds one, and only `owner: true` marks it the daemon's owner. `host` needs that owner.
+  it("a non-owner grant can't name a host on any of the eight host-aware tools", async () => {
+    const nonOwner: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+    const calls = hostToolCalls("unipc");
+    expect(calls).toHaveLength(8);
+    for (const [tool, args] of calls) {
+      const local = mockClient();
+      const result = await run(local, {
+        access: nonOwner,
+        clientFactory: () => remoteMock(),
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect((result.structuredContent as { code?: string } | undefined)?.code, tool).toBe("host_not_available");
+      expect(local.get, tool).not.toHaveBeenCalled();
+      expect(local.post, tool).not.toHaveBeenCalled();
+    }
+  });
+
+  it("an HTTP owner token's caller reaches the named host on all eight", async () => {
+    const owner: McpAccess = { principal: "owner", owner: true, rigs: [], roots: [], workspace: false };
+    for (const [tool, args] of hostToolCalls("unipc")) {
+      const remote = remoteMock();
+      await run(mockClient(), {
+        access: owner,
+        clientFactory: () => remote,
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(vi.mocked(remote.get).mock.calls.length + vi.mocked(remote.post).mock.calls.length, tool).toBeGreaterThan(0);
+    }
+  });
+
+  it("a loopback caller with no auth (the stdio owner) reaches the named host on all eight", async () => {
+    for (const [tool, args] of hostToolCalls("unipc")) {
+      const remote = remoteMock();
+      await run(mockClient(), {
+        clientFactory: () => remote,
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(vi.mocked(remote.get).mock.calls.length + vi.mocked(remote.post).mock.calls.length, tool).toBeGreaterThan(0);
+    }
+  });
+
+  it("a learned binding routes a host token only when eligibleQueueBindings admits it", async () => {
+    const stale: HostBindingsFile = { version: 1, bindings: {
+      unipc: { hostId: "self-abc", firstObservedAt: "", lastObservedAt: "", observedUrl: "http://127.0.0.1:9999" },
+    } };
+    const local = mockClient();
+    const refused = await run(local, {
+      hostRegistryLoader: () => registryOf(httpHost),
+      hostBindingsLoader: () => stale,
+    }, "rig_ps", { host: "self-abc" });
+    expect(refused.isError).toBe(true);
+    expect((refused.structuredContent as { code?: string } | undefined)?.code).toBe("unknown_host");
+    expect((refused.content as Array<{ text: string }>)[0]?.text).toContain("isn't used");
+    expect(local.get).not.toHaveBeenCalled();
+
+    const eligible: HostBindingsFile = { version: 1, bindings: {
+      unipc: { hostId: "self-abc", firstObservedAt: "", lastObservedAt: "", observedUrl: "http://127.0.0.1:17433" },
+    } };
+    const remote = remoteMock();
+    const ok = await run(mockClient(), {
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf(httpHost),
+      hostBindingsLoader: () => eligible,
+    }, "rig_ps", { host: "self-abc" });
+    expect(ok.isError).toBeFalsy();
+    expect(remote.get).toHaveBeenCalled();
+  });
+
+  it("a host-targeted queue_show reads every follow-up row through that host's bearer", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-show";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const calls: Array<{ path: string; headers: Record<string, string> }> = [];
+    const remote = new DaemonClient("http://127.0.0.1:17433", {
+      fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        calls.push({ path: pathname, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+        const data = pathname.endsWith("/transitions") ? []
+          : pathname === "/api/queue/list" ? [{ qitemId: "qitem-2", destinationSession: "qa@team", state: "pending" }]
+            : { qitemId: "qitem-1", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" };
+        return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf({ ...httpHost, bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_show", { host: "unipc", qitemId: "qitem-1" });
+
+    expect(result.isError).toBeFalsy();
+    expect(calls.map((call) => call.path)).toEqual(["/api/queue/qitem-1", "/api/queue/qitem-1/transitions", "/api/queue/list"]);
+    for (const call of calls) {
+      expect(call.headers.Authorization, call.path).toBe("Bearer tok-show");
+      expect(call.headers["X-OpenRig-Session"], call.path).toMatch(/^impl@team(@.+)?$/);
+    }
+  });
+
+  it("a host-targeted create reads its revises original through that host's bearer", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-create";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const calls: Array<{ path: string; headers: Record<string, string> }> = [];
+    const remote = new DaemonClient("http://127.0.0.1:17433", {
+      fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        calls.push({ path: pathname, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+        return new Response(JSON.stringify({ qitemId: "qitem-orig", chainOfRecord: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    const result = await run(mockClient(), {
+      seat: "impl@team",
+      clientFactory: () => remote,
+      hostRegistryLoader: () => registryOf({ ...httpHost, bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", destination: "qa@team", body: "Also cover the README.", revises: "qitem-orig" });
+
+    expect(result.isError).toBeFalsy();
+    const original = calls.find((call) => call.path === "/api/queue/qitem-orig");
+    expect(original?.headers.Authorization).toBe("Bearer tok-create");
+    expect(original?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("the unknown-outcome recovery hint names the host it acted on", async () => {
+    for (const [tool, args] of [["rig_queue_create", { host: "unipc", destination: "qa@team", body: "x" }],
+      ["rig_queue_handoff", { host: "unipc", qitemId: "qitem-1", to: "qa@team" }]] as Array<[string, Record<string, unknown>]>) {
+      const remote = remoteMock();
+      remote.post = vi.fn(async () => { throw new Error("connection reset"); });
+      const result = await run(mockClient(), {
+        clientFactory: () => remote,
+        hostRegistryLoader: () => registryOf(httpHost),
+        hostBindingsLoader: () => noBindings,
+      }, tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect((result.content as Array<{ text: string }>)[0]?.text, tool).toContain("and host unipc");
+      expect(result.structuredContent, tool).toMatchObject({ outcome: "unknown", host: "unipc" });
+    }
+  });
+
+  it("a local unknown-outcome receipt carries no host", async () => {
+    const local = mockClient();
+    vi.mocked(local.post).mockRejectedValueOnce(new Error("connection reset"));
+    const result = await run(local, {}, "rig_queue_handoff", { qitemId: "qitem-1", to: "qa@team" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ outcome: "unknown" });
+    expect(result.structuredContent).not.toHaveProperty("host");
+    expect((result.content as Array<{ text: string }>)[0]?.text).not.toContain("host");
+  });
+
+  it("a remote create with no return address names the host in its follow-up", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    dropUnfilledSeat();
+    onTestFinished(() => { vi.unstubAllEnvs(); });
+    const box = recordingRemote();
+    const result = await run(mockClient(), {
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf(httpHost),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", destination: "qa@team", body: "Review the diff." });
+
+    expect(result.isError).toBeFalsy();
+    const unknownSender = (result.structuredContent as { unknownSender?: { followUp?: string } } | undefined)?.unknownSender;
+    expect(unknownSender?.followUp).toContain("and host unipc");
+  });
+});
+
+
+describe("MCP instruction resources", () => {
+  const coreUri = "openrig://reference/coordination";
+  async function connectInstructions(options: Parameters<typeof createMcpServer>[1] = {}) {
+    const server = createMcpServer(mockClient(), options);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "instruction-consumer", version: "1.0.0" });
+    onTestFinished(async () => { await client.close(); await server.close(); });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  it("serves the generic coordination reference without an instruction extension", async () => {
+    const client = await connectInstructions();
+    expect((await client.listResources()).resources.map(resource => resource.uri)).toEqual([coreUri]);
+    expect(await client.readResource({ uri: coreUri })).toEqual({
+      contents: [{ uri: coreUri, mimeType: "text/plain", text: client.getInstructions() }],
+    });
+  });
+
+  it("canonicalizes configured resource URIs for SDK list-then-read", async () => {
+    const client = await connectInstructions({ instructions: { resources: [
+      { uri: "https://example.com", name: "site-guide", mimeType: "text/markdown", text: "# Site guide" },
+    ] } });
+    const listed = (await client.listResources()).resources.find(resource => resource.name === "site-guide");
+    expect(listed).toBeDefined();
+    const read = await client.readResource({ uri: listed!.uri });
+    expect(listed).toMatchObject({ uri: "https://example.com/", name: "site-guide", mimeType: "text/markdown" });
+    expect(read).toEqual({ contents: [{ uri: "https://example.com/", mimeType: "text/markdown", text: "# Site guide" }] });
+  });
+
+  it("composes endpoint introductions without broadening read-only guidance or sharing resources", async () => {
+    const access: McpAccess = {
+      principal: "reader", owner: false, rigs: ["team"], roots: [], readOnly: true,
+      external: { objects: { queue: ["show", "create"] } },
+    };
+    const aUri = "embedding://a/guide";
+    const bUri = "embedding://b/guide";
+    const a = await connectInstructions({ access, instructions: {
+      introduction: "Use A's guide.", resources: [{ uri: aUri, name: "a-guide", mimeType: "text/markdown", text: "# A guide" }],
+    } });
+    const b = await connectInstructions({ access, instructions: {
+      introduction: "Use B's guide.", resources: [{ uri: bUri, name: "b-guide", mimeType: "text/plain", text: "B guide" }],
+    } });
+    const core = await a.readResource({ uri: coreUri });
+    const generic = (core.contents[0] as { text: string }).text;
+    expect(generic).toContain("read operations only");
+    expect(generic).not.toContain("rig_queue_create");
+    expect(a.getInstructions()).toBe(`${generic}\n\nUse A's guide.`);
+    expect(b.getInstructions()).toBe(`${generic}\n\nUse B's guide.`);
+    expect((await a.listTools()).tools.map(tool => tool.name)).toEqual(["rig_queue_show"]);
+    expect((await a.listResources()).resources.map(resource => resource.uri).sort()).toEqual([coreUri, aUri].sort());
+    expect((await b.listResources()).resources.map(resource => resource.uri).sort()).toEqual([coreUri, bUri].sort());
+    expect(await a.readResource({ uri: aUri })).toEqual({ contents: [{ uri: aUri, mimeType: "text/markdown", text: "# A guide" }] });
+    expect(await b.readResource({ uri: bUri })).toEqual({ contents: [{ uri: bUri, mimeType: "text/plain", text: "B guide" }] });
+    await expect(a.readResource({ uri: bUri })).rejects.toThrow();
+    await expect(b.readResource({ uri: aUri })).rejects.toThrow();
   });
 });

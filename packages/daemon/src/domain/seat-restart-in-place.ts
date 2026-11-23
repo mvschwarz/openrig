@@ -3,7 +3,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
 import type BetterSqlite3 from "better-sqlite3";
-import { isStagedSendScriptPath, type TmuxAdapter } from "../adapters/tmux.js";
+import { isStagedSendScriptPath, noticeLine, notAppliedNotice, type SeatProcessLimitsNotice, type TmuxAdapter } from "../adapters/tmux.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -39,11 +39,12 @@ export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
   | "capturePaneHistory" | "capturePaneHistoryParts">
-  & Partial<Pick<TmuxAdapter, "getDefaultShell">>;
+  & Partial<Pick<TmuxAdapter, "getDefaultShell" | "seatProcessLimitsSet" | "seatProcessLimitsNotApplied" | "seatProcessLimitsKeepPlan">>;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
-  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string }):
+  /** `preview` builds the same command without bringing the Codex config to OpenRig's managed state. */
+  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string; preview?: boolean }):
     Promise<{ ok: true; command: string; core: string } | { ok: false; error: string }>;
   /** `nodeId` lets the resume proof read the seat's own CODEX_HOME when it declares one; `home`, the one the running
    *  Codex was read using, wins over both that and the daemon's. */
@@ -150,6 +151,9 @@ export interface InPlaceRestartReport {
   peers: PeerReport[];
   oldProcess: { pid: number; startedAt: string | null };
   newProcess?: { pid: number; startedAt: string | null; sameExecutable: boolean | null };
+  /** #3253: the restart went ahead without the seat's requested process limit (it stays stored; a fresh launch
+   *  applies it). Absent when the seat has no limit, or keeps it. */
+  processLimits?: SeatProcessLimitsNotice;
   paneHeld?: { option: "remain-on-exit"; value: "on"; previous: string | null; detail: string };
   /** After a failed direct-native stop or respawn: the pane and the original process, as observed. */
   observedAfterStop?: { pane: "present" | "gone" | "unknown"; process: "running" | "exited" | "unknown"; detail: string };
@@ -235,7 +239,7 @@ export class CodexInPlaceRestart {
 
   /** Every gate, read-only. Returns the report a restart would start from, or the refusal it would give. */
   async plan(target: InPlaceRestartTarget): Promise<InPlaceRestartReport | InPlaceRestartRefusal> {
-    const observed = await this.observe(target, null);
+    const observed = await this.observe(target, null, true);
     if (!observed.ok) return observed;
     return { ...observed.report, message: "Preview only: nothing was stopped or restarted." };
   }
@@ -278,6 +282,16 @@ export class CodexInPlaceRestart {
     return result;
   }
 
+  /** #3253: the restart's structured warning, on the report (and every result built from it). It is logged only once
+   *  the restart has gone on (logProcessLimits). */
+  private noteProcessLimits(report: InPlaceRestartReport, notice: SeatProcessLimitsNotice): void {
+    report.processLimits = notice;
+  }
+
+  private logProcessLimits(report: InPlaceRestartReport): void {
+    if (report.processLimits) console.warn(`[restart in place] ${report.seat.nodeId}: ${noticeLine(report.processLimits)}`);
+  }
+
   /** The restart after its started event. Updates `progress` so a throw is reported at its stage. */
   private async restart(target: InPlaceRestartTarget, observed: Observed, progress: RestartProgress): Promise<InPlaceRestartReport> {
     const { report, codexPid, codexStartedAt, panePid, relaunch, priorRemainOnExit, cwd, oldExe } = observed;
@@ -288,6 +302,11 @@ export class CodexInPlaceRestart {
 
     let launch: HarnessLaunchResult;
     if (report.paneShape === "shell_backed") {
+      // #3253: the resume is typed into the running shell, so the seat keeps the process tree it has, and any limit
+      // already applied to it. Chosen before anything is stopped: a shell not under the limit goes ahead with a
+      // structured warning (a recovery never stops for a limit), and the request stays stored.
+      const notApplied = await this.deps.tmux.seatProcessLimitsNotApplied?.(target.seat.nodeId, pane);
+      if (notApplied) this.noteProcessLimits(report, notApplied);
       const stopped = await this.stopUnderShell(pane, panePid, codexPid, codexStartedAt, report.oldProcess);
       if (stopped === "running") {
         return { ...report, outcome: "not_started", recoveryCommand, message: "Codex did not exit after TERM and KILL; nothing was restarted and the original process is still running." };
@@ -302,10 +321,21 @@ export class CodexInPlaceRestart {
       // The relaunch runs in the home the running Codex used (anything else refused as drift), so the proof reads that one.
       launch = await this.deps.codex.sendResumeCommand(sessionName, relaunch.command, report.conversationId, target.seat.nodeId, report.codexHome);
       if (!launch.ok) return this.incomplete(report, launch, recoveryCommand);
+      this.logProcessLimits(report);
       progress.stage = "identity check";
       return this.verifyReplacement(target, report, oldExe);
     }
 
+    // #3253: this respawn carries no seat environment. Chosen before anything is stopped: a seat whose process reads
+    // back under its limit is respawned in a new scope with it; otherwise it goes ahead with a structured warning, and a
+    // fresh launch re-applies the limit.
+    const keepPlan = this.deps.tmux.seatProcessLimitsKeepPlan
+      ? await this.deps.tmux.seatProcessLimitsKeepPlan(target.seat.nodeId, pane)
+      : this.deps.tmux.seatProcessLimitsSet?.(target.seat.nodeId)
+        ? { keep: false as const, notice: notAppliedNotice({ kind: "setup",
+          reason: "a restart in place respawns a bare pane without the seat's environment, so it can't keep or re-apply the limit; a fresh launch applies it" }) }
+        : null;
+    if (keepPlan && !keepPlan.keep) this.noteProcessLimits(report, keepPlan.notice);
     // Hold the pane before any signal: without remain-on-exit, Codex exiting would destroy the pane and
     // there would be nothing to respawn into. The hold counts only once tmux reads it back as on.
     progress.stage = "pane hold";
@@ -326,11 +356,19 @@ export class CodexInPlaceRestart {
     if (!terminated.ok) return this.afterFailedStop(target, report, observed, held, recoveryCommand, terminated.message, progress);
     // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
     progress.stage = "respawn";
-    const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command, { cwd });
+    const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command,
+      { cwd, groupSeatOf: target.seat.nodeId,
+        ...(keepPlan?.keep ? { keepLimitOf: target.seat.nodeId, processLimitsMode: "recovery" as const } : {}) });
     if (!respawned.ok) {
       return this.afterFailedStop(target, report, observed, held, recoveryCommand, `the pane could not be respawned: ${respawned.message}`, progress);
     }
-    if (respawned.warnings) report.warnings.push(...respawned.warnings);
+    // The respawn returns its process-limits notice both as processLimits and as a warning line; the report keeps it
+    // once, as processLimits, which the CLI prints as its own line.
+    const limitsLine = respawned.processLimits ? noticeLine(respawned.processLimits) : undefined;
+    if (respawned.warnings) report.warnings.push(...respawned.warnings.filter((line) => line !== limitsLine));
+    // The respawn logs its own notice (a kept scope that failed late, or a start it can't tell); the plan's is logged here.
+    if (respawned.processLimits) this.noteProcessLimits(report, respawned.processLimits);
+    else this.logProcessLimits(report);
     progress.stage = "resume";
     launch = await this.deps.codex.verifyResumeInPane(sessionName, report.conversationId, target.seat.nodeId, report.codexHome);
     if (!launch.ok) return this.incomplete(report, launch, recoveryCommand, held);
@@ -383,7 +421,7 @@ export class CodexInPlaceRestart {
 
   // -- observation (shared by plan and execute) --
 
-  private async observe(target: InPlaceRestartTarget, seenStartedSeq: number | null): Promise<Observed | InPlaceRestartRefusal> {
+  private async observe(target: InPlaceRestartTarget, seenStartedSeq: number | null, preview = false): Promise<Observed | InPlaceRestartRefusal> {
     const { binding, sessionName, seat } = target;
     const history = this.restartHistory(seat.nodeId, seenStartedSeq);
     if ("code" in history) return history;
@@ -512,6 +550,7 @@ export class CodexInPlaceRestart {
       resumeToken: token,
       running,
       ...(launchShell ? { launchShell } : {}),
+      ...(preview ? { preview: true } : {}),
     });
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")

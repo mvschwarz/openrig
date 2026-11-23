@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ExpectedConversation } from "./expected-conversation.js";
 import type Database from "better-sqlite3";
 
@@ -14,6 +15,8 @@ import type Database from "better-sqlite3";
  * select it. Single source of truth for the drain query only.
  */
 export const WAKE_INTENT_PREFIX = "wake-intent-";
+/** #48: a held queue row's one notice to its sender in one held episode (`<prefix><qitem>-<episode>`). */
+export const HELD_SENDER_NOTICE_PREFIX = "held-sender-notice-";
 /** The sender a watchdog's reminders carry; their audit pointer is the job. */
 const WATCHDOG_SENDER = "watchdog@system";
 /** Who a coalesced held message records as having retired it (#2430). */
@@ -96,6 +99,33 @@ export interface OutboxRecordInput {
   identityPrincipal?: string | null;
 }
 
+/** Native protocol custody and effects share the existing delivery receipt. */
+export interface RunnerReceipt {
+  version: 1; requestId: string; nodeId: string; runId: string; sequence: number;
+  kind: "input" | "wake" | "cancel"; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown>;
+  stage: "pending" | "offered" | "accepted" | "submitted" | "completed" | "rejected";
+  bindingHash?: string; erasedAt?: string; acceptedAt?: string; submittedAt?: string; completedAt?: string;
+  acceptedTurnId?: string; nativeTurnId?: string; result?: Record<string, unknown>;
+  withdrawal?: { stage: "pending" | "confirmed"; startedAt: string; confirmedAt?: string; pendingSubmissions: number; withdrawn: number };
+  reconciliation?: "receiver_state_lost" | "native_ownership_unknown";
+}
+export type RunnerAdmission = OutboxRecordInput & { outboxId: string; nodeId: string; runId: string;
+  kind: RunnerReceipt["kind"]; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown> };
+
+/** Object key order is not part of a request's immutable wire content. */
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function runnerBindingHash(input: RunnerAdmission): string {
+  return createHash("sha256").update(stable({ id: input.outboxId, sender: input.senderSession, destination: input.destinationSession,
+    body: input.body, nodeId: input.nodeId, runId: input.runId, kind: input.kind, inputRoute: input.inputRoute,
+    payload: input.payload, memberIds: input.memberIds ?? [input.outboxId] })).digest("hex");
+}
+
 export class OutboxHandlerError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -144,6 +174,8 @@ export class OutboxHandler {
     if (!this.hasGuardDeliveryColumn) throw new OutboxHandlerError("expected_identity_unavailable", "The durable conditional-delivery schema is unavailable.");
     this.db.transaction(() => {
       const prior = this.getById(input.outboxId), bound = this.expectedIdentity(input.outboxId);
+      if (this.runnerReceipt(input.outboxId) && !bound)
+        throw new OutboxHandlerError("delivery_identity_conflict", "This native ID already selects a different original-conversation constraint.");
       if (prior && (prior.senderSession !== input.senderSession || prior.destinationSession !== input.destinationSession || prior.body !== input.body)
         || bound && ["nodeId", "sessionName", "runtime", "nativeId"].some(key => bound[key as keyof ExpectedConversation] !== expected[key as keyof ExpectedConversation]))
         throw new OutboxHandlerError("delivery_identity_conflict", "This delivery ID already selects different input or an original conversation.");
@@ -153,6 +185,297 @@ export class OutboxHandler {
       this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?")
         .run(JSON.stringify({ ...receipt, expectedIdentity: expected }), input.outboxId);
     })();
+  }
+
+  inputRoute(id: string): "typed" | "native" | null {
+    if (!this.hasGuardDeliveryColumn) return null;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null } | undefined;
+    if (!row?.guard_delivery) return null;
+    const receipt = JSON.parse(row.guard_delivery);
+    return receipt.runner?.inputRoute ?? receipt.inputRoute ?? null;
+  }
+
+  inputKind(id: string): RunnerReceipt["kind"] | null {
+    if (!this.hasGuardDeliveryColumn) return null;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null } | undefined;
+    const saved = row?.guard_delivery ? JSON.parse(row.guard_delivery) : null;
+    return saved?.runner?.kind ?? saved?.kind ?? null;
+  }
+
+  bindInputRoute(input: OutboxRecordInput & { outboxId: string }, route: "typed" | "native", kind: RunnerReceipt["kind"] = "input"): void {
+    if (!this.hasGuardDeliveryColumn) {
+      if (route === "typed") return; // Legacy curated schemas retain their existing typed behavior.
+      throw new OutboxHandlerError("runner_receipt_unavailable", "Route receipt schema unavailable.");
+    }
+    this.db.transaction(() => {
+      const entry = this.getById(input.outboxId), prior = this.inputRoute(input.outboxId), priorKind = this.inputKind(input.outboxId);
+      if (entry && (entry.senderSession !== input.senderSession || entry.destinationSession !== input.destinationSession || entry.body !== input.body)
+        || prior && prior !== route || priorKind && priorKind !== kind) throw new OutboxHandlerError("delivery_identity_conflict", "This ID names different input or route.");
+      if (!entry) this.record(input);
+      const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(input.outboxId) as { guard_delivery: string | null };
+      const receipt = row.guard_delivery ? JSON.parse(row.guard_delivery) : { ids: [input.outboxId] };
+      this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, inputRoute: route, ...(route === "native" ? { kind } : {}) }), input.outboxId);
+    })();
+  }
+
+  runnerPrimary(id: string): string | null {
+    if (!this.hasGuardDeliveryColumn) return null;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null } | undefined;
+    if (!row?.guard_delivery) return null;
+    const receipt = JSON.parse(row.guard_delivery);
+    return receipt.nativeRequestId ?? (receipt.runner ? id : null);
+  }
+
+  runnerReceipt(id: string): RunnerReceipt | null {
+    if (!this.hasGuardDeliveryColumn) return null;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null } | undefined;
+    if (!row?.guard_delivery) return null;
+    const saved = JSON.parse(row.guard_delivery);
+    if (saved.runner) return saved.runner;
+    if (!saved.nativeRequestId) return null;
+    const primary = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(saved.nativeRequestId) as { guard_delivery: string | null } | undefined;
+    const receipt = primary?.guard_delivery ? JSON.parse(primary.guard_delivery).runner as RunnerReceipt | undefined : undefined;
+    return receipt && receipt.requestId === saved.nativeRequestId && receipt.memberIds?.includes(id) ? receipt : null;
+  }
+
+  runnerReceipts(nodeId: string, runId?: string): RunnerReceipt[] {
+    if (!this.hasGuardDeliveryColumn) return [];
+    return (this.db.prepare(`SELECT guard_delivery FROM outbox_entries
+      WHERE json_extract(guard_delivery,'$.runner.nodeId')=? ${runId === undefined ? '' : "AND json_extract(guard_delivery,'$.runner.runId')=?"}
+      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER)`).all(...(runId === undefined ? [nodeId] : [nodeId, runId])) as { guard_delivery: string }[])
+      .map(row => JSON.parse(row.guard_delivery).runner as RunnerReceipt);
+  }
+
+  /** Status-only metadata: SQLite filters JSON internally; prompt payloads never enter application memory. */
+  runnerRecovery(nodeId: string): Record<string, unknown>[] {
+    if (!this.hasGuardDeliveryColumn) return [];
+    const rows = this.db.prepare(`SELECT
+      json_extract(guard_delivery,'$.runner.requestId') AS requestId,
+      json_extract(guard_delivery,'$.runner.runId') AS runId,
+      json_extract(guard_delivery,'$.runner.kind') AS kind,
+      json_extract(guard_delivery,'$.runner.stage') AS stage, json_type(guard_delivery,'$.runner.stage') AS stageType,
+      json_extract(guard_delivery,'$.runner.erasedAt') AS erasedAt,
+      json_extract(guard_delivery,'$.runner.memberIds') AS memberIds,
+      CASE WHEN json_extract(guard_delivery,'$.runner.kind')='cancel' THEN json_quote(json_extract(guard_delivery,'$.runner.payload.target')) END AS target,
+      json_type(guard_delivery,'$.runner.payload.target') AS targetType,
+      json_type(guard_delivery,'$.runner.withdrawal') AS withdrawalType,
+      json_extract(guard_delivery,'$.runner.withdrawal.stage') AS withdrawalStage,
+      json_extract(guard_delivery,'$.runner.withdrawal.startedAt') AS startedAt,
+      json_extract(guard_delivery,'$.runner.withdrawal.confirmedAt') AS confirmedAt,
+      json_extract(guard_delivery,'$.runner.withdrawal.pendingSubmissions') AS pendingSubmissions,
+      json_extract(guard_delivery,'$.runner.reconciliation') AS reconciliation,
+      json_extract(guard_delivery,'$.runner.result.outcome') AS outcome,
+      json_type(guard_delivery,'$.runner.result.confirmed') AS confirmedType,
+      CASE json_type(guard_delivery,'$.runner.result.confirmed') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false'
+        ELSE json_quote(json_extract(guard_delivery,'$.runner.result.confirmed')) END AS confirmed,
+      sender_session AS sender, destination_session AS destination
+      FROM outbox_entries WHERE json_extract(guard_delivery,'$.runner.nodeId')=? AND (
+        COALESCE(json_extract(guard_delivery,'$.runner.reconciliation'),'') <> ''
+        OR COALESCE(json_extract(guard_delivery,'$.runner.stage'),'') NOT IN ('completed','rejected')
+        OR (json_extract(guard_delivery,'$.runner.kind')='cancel' AND json_extract(guard_delivery,'$.runner.result.outcome')='requested'
+          AND json_type(guard_delivery,'$.runner.result.confirmed') IS NOT 'true'))
+      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER), rowid`).all(nodeId) as Record<string, unknown>[];
+    return rows.map(row => ({ requestId: row.requestId, runId: row.runId, kind: row.kind, stage: row.stageType === null ? undefined : row.stage,
+      ...(row.erasedAt ? { erasedAt: row.erasedAt } : {}), sender: row.sender, destination: row.destination,
+      ...(row.memberIds ? { memberIds: JSON.parse(String(row.memberIds)) } : {}),
+      ...(row.kind === "cancel" ? { target: row.targetType === null ? undefined : JSON.parse(String(row.target)) } : {}),
+      ...(row.withdrawalType === "object" ? { withdrawal: { stage: row.withdrawalStage ?? undefined, startedAt: row.startedAt ?? undefined,
+        ...(row.confirmedAt ? { confirmedAt: row.confirmedAt } : {}), pendingSubmissions: row.pendingSubmissions ?? undefined } } : {}),
+      ...(row.reconciliation ? { reconciliation: row.reconciliation } : {}),
+      ...(row.outcome ? { outcome: row.outcome, confirmed: row.confirmedType === null ? undefined : JSON.parse(String(row.confirmed)) } : {}) }));
+  }
+
+  /** Run-local uncertainty guard; unlike recovery status, cancellation and historical runs do not block input. */
+  hasRunnerReconciliation(nodeId: string, runId: string): boolean {
+    if (!this.hasGuardDeliveryColumn) return false;
+    return !!this.db.prepare(`SELECT 1 FROM outbox_entries WHERE json_extract(guard_delivery,'$.runner.nodeId')=?
+      AND json_extract(guard_delivery,'$.runner.runId')=? AND json_extract(guard_delivery,'$.runner.kind') IS NOT 'cancel'
+      AND COALESCE(json_extract(guard_delivery,'$.runner.reconciliation'),'') <> '' LIMIT 1`).get(nodeId, runId);
+  }
+
+  admitRunner(input: RunnerAdmission): RunnerReceipt {
+    if (!this.hasGuardDeliveryColumn) throw new OutboxHandlerError("runner_receipt_unavailable", "Native receipt schema unavailable.");
+    return this.db.transaction(() => {
+      const entry = this.getById(input.outboxId), primary = this.runnerPrimary(input.outboxId), prior = this.runnerReceipt(input.outboxId);
+      if (primary && !prior || !entry && this.db.prepare("SELECT 1 FROM outbox_entries WHERE json_extract(guard_delivery,'$.nativeRequestId')=? LIMIT 1").get(input.outboxId))
+        throw new OutboxHandlerError("runner_receipt_unavailable", "Native custody evidence is unavailable; no input offered.");
+      if (prior?.erasedAt) throw new OutboxHandlerError(prior.bindingHash === runnerBindingHash(input) ? "runner_receipt_erased" : "delivery_identity_conflict",
+        prior.bindingHash === runnerBindingHash(input) ? "This native receipt was erased; no input offered." : "This ID names different erased input.");
+      if (primary && primary !== input.outboxId) throw new OutboxHandlerError("delivery_identity_conflict", "This member belongs to a different native operation.");
+      const memberIds = input.memberIds ?? [input.outboxId];
+      if (!memberIds.length || memberIds[0] !== input.outboxId || new Set(memberIds).size !== memberIds.length)
+        throw new OutboxHandlerError("delivery_identity_conflict", "Invalid ordered native membership.");
+      for (const id of memberIds) {
+        const member = this.getById(id), owner = this.runnerPrimary(id), kind = this.inputKind(id);
+        if (owner && owner !== input.outboxId || memberIds.length > 1 && (!member || member.destinationSession !== input.destinationSession)
+          || this.inputRoute(id) === "typed" || kind && kind !== input.kind) throw new OutboxHandlerError("delivery_identity_conflict", "Native membership names different target, route or operation.");
+      }
+      if (this.inputRoute(input.outboxId) === "typed") throw new OutboxHandlerError("delivery_identity_conflict", "This ID names a different input route.");
+      if (entry && (entry.senderSession !== input.senderSession || entry.destinationSession !== input.destinationSession || entry.body !== input.body)
+        || prior && (prior.nodeId !== input.nodeId || prior.runId !== input.runId || prior.kind !== input.kind || prior.inputRoute !== input.inputRoute
+          || stable(prior.payload) !== stable(input.payload) || stable(prior.memberIds ?? [prior.requestId]) !== stable(memberIds)))
+        throw new OutboxHandlerError("delivery_identity_conflict", "This request ID names different input, route or target.");
+      if (prior) return prior;
+      if (entry && !["pending", "sending", "retained"].includes(entry.deliveryState))
+        throw new OutboxHandlerError("delivery_identity_conflict", "This request ID already names a different delivery attempt.");
+      const receipts = this.runnerReceipts(input.nodeId, input.runId);
+      const sequence = (receipts.at(-1)?.sequence ?? 0) + 1;
+      if (!Number.isSafeInteger(sequence)) throw new OutboxHandlerError("runner_sequence_exhausted", "Run sequence exhausted.");
+      const receipt: RunnerReceipt = { version: 1, requestId: input.outboxId, nodeId: input.nodeId, runId: input.runId, sequence,
+        bindingHash: runnerBindingHash(input), kind: input.kind, ...(memberIds.length > 1 ? { memberIds } : {}), inputRoute: input.inputRoute, payload: input.payload, stage: "pending" };
+      if (!entry) this.record(input);
+      this.writeRunner(receipt);
+      for (const id of memberIds) {
+        if (id !== input.outboxId) {
+          const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null };
+          const previous = row.guard_delivery ? JSON.parse(row.guard_delivery) : {};
+          this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?")
+            .run(JSON.stringify({ ...previous, ids: memberIds, inputRoute: "native", nativeRequestId: input.outboxId }), id);
+        }
+        this.db.prepare("UPDATE outbox_entries SET delivery_state='sending' WHERE outbox_id=?").run(id);
+      }
+      return receipt;
+    })();
+  }
+
+  /** Repeated stages are idempotent; a conflicting result never replaces retained evidence. */
+  updateRunner(nodeId: string, runId: string, id: string, sequence: number, stage: RunnerReceipt["stage"],
+    evidence: Pick<RunnerReceipt, "acceptedTurnId" | "nativeTurnId" | "result"> = {}): RunnerReceipt {
+    return this.db.transaction(() => {
+      const receipt = this.runnerReceipt(id);
+      if (!receipt || receipt.requestId !== id || receipt.nodeId !== nodeId || receipt.runId !== runId || receipt.sequence !== sequence)
+        throw new OutboxHandlerError("runner_request_mismatch", "Unknown request or run/sequence mismatch.");
+      if (receipt.erasedAt) throw new OutboxHandlerError("runner_receipt_erased", "This native receipt was erased; no result recorded.");
+      if (receipt.reconciliation) throw new OutboxHandlerError("runner_state_lost", "Native custody or execution ownership is uncertain; effect remains indeterminate.");
+      for (const key of ["acceptedTurnId", "nativeTurnId", "result"] as const) {
+        if (receipt[key] !== undefined && evidence[key] !== undefined && stable(receipt[key]) !== stable(evidence[key])
+          && !(key === "result" && receipt.kind === "cancel" && receipt.stage !== "completed" && receipt.result?.outcome === "requested"
+            && ["requested", "cancelled"].includes(String(evidence.result?.outcome))))
+          throw new OutboxHandlerError("runner_result_conflict", "A different native result is already retained.");
+      }
+      const stages = ["pending", "offered", "accepted", "submitted", "completed"];
+      if (receipt.stage === "rejected" || receipt.stage === "completed") {
+        if (stage !== receipt.stage && (stage === "completed" || stage === "rejected"))
+          throw new OutboxHandlerError("runner_result_conflict", "A different terminal result is retained.");
+        return receipt;
+      }
+      if (stage !== "rejected" && stages.indexOf(stage) <= stages.indexOf(receipt.stage)) return receipt;
+      const unknownSubmission = stage === "completed" && receipt.stage === "accepted" && evidence.result?.submissionUnknown === true
+        && evidence.result?.completion === "unknown";
+      const noCancelEffect = receipt.kind === "cancel" && receipt.stage === "accepted" && stage === "completed"
+        && ["not-this-turn", "not-supported"].includes(String(evidence.result?.outcome));
+      if (stage !== "rejected" && !unknownSubmission && !noCancelEffect && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
+        throw new OutboxHandlerError("runner_stage_conflict", "Native receipt skipped a required custody stage.");
+      if (stage === "rejected" && ["submitted", "completed"].includes(receipt.stage))
+        throw new OutboxHandlerError("runner_stage_conflict", "Submitted effects cannot become pre-effect rejection.");
+      const unknownCancellation = receipt.kind === "cancel" && evidence.result?.outcome === "requested" && evidence.result.operationAccepted !== true;
+      const at = new Date().toISOString();
+      const updated: RunnerReceipt = { ...receipt, ...evidence, stage,
+        ...(evidence.result?.ownershipUnknown === true ? { reconciliation: "native_ownership_unknown" as const } : {}),
+        ...(stage === "accepted" ? { acceptedAt: at } : stage === "submitted" ? { submittedAt: at }
+          : stage === "completed" || stage === "rejected" ? { completedAt: at } : {}) };
+      this.writeRunner(updated);
+      if (stage === "submitted" || stage === "completed" || stage === "rejected") for (const memberId of receipt.memberIds ?? [id])
+        this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=? WHERE outbox_id=?")
+          .run(unknownSubmission || unknownCancellation || updated.reconciliation ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || unknownCancellation || updated.reconciliation || stage === "rejected" ? null : at, memberId);
+      return updated;
+    })();
+  }
+
+  /** Called only at a committed Core run cutover, never from an uncertain liveness read. */
+  replaceRunnerRun(nodeId: string, currentRunId: string): void {
+    if (!this.hasGuardDeliveryColumn) return;
+    this.db.transaction(() => {
+      const runs = this.db.prepare(`SELECT DISTINCT json_extract(guard_delivery,'$.runner.runId') AS runId
+        FROM outbox_entries WHERE json_extract(guard_delivery,'$.runner.nodeId')=?
+        AND json_extract(guard_delivery,'$.runner.runId')<>?`).all(nodeId, currentRunId) as { runId: string }[];
+      for (const { runId } of runs) for (const receipt of this.runnerReceipts(nodeId, runId)) {
+        if (receipt.erasedAt || ["completed", "rejected"].includes(receipt.stage)
+          || receipt.stage === "submitted" && receipt.kind === "input") continue;
+        const pending = receipt.stage === "pending";
+        this.writeRunner(pending ? { ...receipt, stage: "rejected", completedAt: new Date().toISOString(),
+          result: { kind: receipt.kind, accepted: false, error: "not offered: its run ended" } }
+          : { ...receipt, reconciliation: "receiver_state_lost" });
+        for (const id of receipt.memberIds ?? [receipt.requestId])
+          this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=NULL WHERE outbox_id=?")
+            .run(pending ? "failed" : "indeterminate", id);
+      }
+    })();
+  }
+
+  recordRunnerWithdrawal(nodeId: string, runId: string, id: string, sequence: number,
+    evidence: { confirmed: boolean; pendingSubmissions: number; withdrawn: number }): RunnerReceipt {
+    const receipt = this.runnerReceipt(id);
+    if (!receipt || receipt.kind !== "cancel" || receipt.nodeId !== nodeId || receipt.runId !== runId || receipt.sequence !== sequence
+      || receipt.erasedAt || receipt.reconciliation || receipt.stage !== "accepted")
+      throw new OutboxHandlerError("runner_request_mismatch", "Cancellation preparation does not match retained accepted custody.");
+    const at = new Date().toISOString();
+    const withdrawal: NonNullable<RunnerReceipt["withdrawal"]> = { stage: evidence.confirmed ? "confirmed" : "pending",
+      startedAt: receipt.withdrawal?.startedAt ?? at, ...(evidence.confirmed ? { confirmedAt: receipt.withdrawal?.confirmedAt ?? at } : {}),
+      pendingSubmissions: evidence.pendingSubmissions, withdrawn: evidence.withdrawn };
+    if (receipt.withdrawal?.stage === "confirmed" && !evidence.confirmed) throw new OutboxHandlerError("runner_result_conflict", "Withdrawal confirmation cannot regress.");
+    const updated = { ...receipt, withdrawal }; this.writeRunner(updated); return updated;
+  }
+
+  forgetRunnerMap(nodeId: string, runId: string): void {
+    this.db.transaction(() => {
+      for (const receipt of this.runnerReceipts(nodeId, runId)) {
+        if (["pending", "completed", "rejected"].includes(receipt.stage)) continue;
+        this.writeRunner({ ...receipt, reconciliation: "receiver_state_lost" });
+        for (const id of receipt.memberIds ?? [receipt.requestId])
+          this.db.prepare("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE outbox_id=? AND delivery_state='sending'").run(id);
+      }
+    })();
+  }
+
+  /** Content erasure keeps native custody tombstones: deleting them would permit ID/sequence reuse and blind replay.
+   * The existing erasure transaction calls this before its ordinary body/delete effects. Other members' bodies stay
+   * under the existing erasure scope, while the composed native payload/result for the whole group disappears. */
+  eraseRunner(id: string, at: string): boolean {
+    const primary = this.runnerPrimary(id) ?? (this.inputRoute(id) === "native" ? id : null);
+    if (!primary) return false;
+    const receipt = this.runnerReceipt(id);
+    const source = this.getById(id)!;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null };
+    const retained = row.guard_delivery ? JSON.parse(row.guard_delivery) : {};
+    const target = receipt?.kind === "cancel" ? receipt.payload.target as { runId?: unknown; nativeTurnId?: unknown } | undefined : undefined;
+    const cancellationTarget = target && typeof target.runId === "string" && typeof target.nativeTurnId === "string"
+      ? { runId: target.runId, nativeTurnId: target.nativeTurnId } : null;
+    const tombstone: RunnerReceipt | null = receipt ? { version: 1, requestId: receipt.requestId, nodeId: receipt.nodeId, runId: receipt.runId,
+      sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: cancellationTarget ? { target: cancellationTarget } : {},
+      ...(cancellationTarget && receipt.withdrawal ? { withdrawal: { stage: receipt.withdrawal.stage, startedAt: receipt.withdrawal.startedAt,
+        ...(receipt.withdrawal.confirmedAt ? { confirmedAt: receipt.withdrawal.confirmedAt } : {}), pendingSubmissions: receipt.withdrawal.pendingSubmissions, withdrawn: receipt.withdrawal.withdrawn } } : {}),
+      ...(cancellationTarget && receipt.result ? { result: { kind: "cancel", outcome: receipt.result.outcome, confirmed: receipt.result.confirmed,
+        ...(typeof receipt.result.operationAccepted === "boolean" ? { operationAccepted: receipt.result.operationAccepted } : {}) } } : {}),
+      ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}),
+      bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at } : null;
+    this.db.transaction(() => {
+      // Every erasure entry point removes this selected source's content/endpoints. Other group source histories
+      // stay governed by their own scope; the composed native payload/result is always sanitized for the whole group.
+      this.db.prepare("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL,retirement_reason=NULL,retired_by=NULL WHERE outbox_id=?").run(id);
+      if (!receipt || !tombstone) {
+        // A native request held before run admission has no run or sequence to invent. Keep its opaque erased-route
+        // identity; the same unavailable shape also fences a surviving pointer whose primary evidence is missing.
+        const erased = { ids: retained.ids ?? [id], inputRoute: "native", nativeRequestId: primary,
+          erasedAt: retained.erasedAt ?? at, bindingHash: retained.bindingHash ?? createHash("sha256")
+            .update(stable({ id, sender: source.senderSession, destination: source.destinationSession, body: source.body, inputRoute: "native" })).digest("hex") };
+        this.db.prepare("UPDATE outbox_entries SET guard_delivery=?,delivery_state='indeterminate' WHERE outbox_id=?").run(JSON.stringify(erased), id);
+        return;
+      }
+      for (const member of receipt.memberIds ?? [primary]) {
+        const saved = member === primary ? { ids: receipt.memberIds ?? [primary], inputRoute: "native", runner: tombstone }
+          : { ids: receipt.memberIds, inputRoute: "native", nativeRequestId: primary, erasedAt: tombstone.erasedAt };
+        this.db.prepare("UPDATE outbox_entries SET guard_delivery=?,delivery_state='indeterminate' WHERE outbox_id=?").run(JSON.stringify(saved), member);
+      }
+    })();
+    return true;
+  }
+
+  private writeRunner(receipt: RunnerReceipt): void {
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(receipt.requestId) as { guard_delivery: string | null };
+    const previous = row.guard_delivery ? JSON.parse(row.guard_delivery) : { ids: [receipt.requestId] };
+    this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?")
+      .run(JSON.stringify({ ...previous, runner: receipt }), receipt.requestId);
   }
 
   record(input: OutboxRecordInput): OutboxEntry {
@@ -341,6 +664,27 @@ export class OutboxHandler {
       .get(nodeId) as { count: number; bytes: number };
   }
 
+  /** #48: a queue wake the draft-aware guard held goes back to pending for one more guarded attempt, which re-checks the
+   *  input and holds it again if it still can't go. Only a held entry moves; any other state is left as it is. */
+  reopenHeld(outboxId: string): boolean {
+    return this.db.prepare("UPDATE outbox_entries SET delivery_state='pending' WHERE outbox_id=? AND delivery_state='retained'")
+      .run(outboxId).changes === 1;
+  }
+
+  /** #48: claim an entry that was never tried, or whose last try definitely wrote nothing (failed), for one more send.
+   *  One delivered, uncertain (indeterminate), held, retired or already in flight is left as it is, so an uncertain send
+   *  is never repeated. */
+  claimUnsent(outboxId: string): boolean {
+    return this.db.prepare("UPDATE outbox_entries SET delivery_state='sending' WHERE outbox_id=? AND delivery_state IN ('pending','failed')")
+      .run(outboxId).changes === 1;
+  }
+
+  /** #48: an entry never sent, or definitely not written, that is no longer owed: retired with who and why, never sent. */
+  retireUnsent(outboxId: string, actor: string, reason: string): boolean {
+    return this.db.prepare(`UPDATE outbox_entries SET delivery_state='retired', retired_at=?, retired_by=?, retirement_reason=?
+      WHERE outbox_id=? AND delivery_state IN ('pending','failed')`).run(new Date().toISOString(), actor, reason, outboxId).changes === 1;
+  }
+
   retire(outboxId: string, actor: string, reason: string): OutboxEntry {
     if (!actor.trim() || !reason.trim()) throw new OutboxHandlerError("retirement_reason_required", "Actor and reason are required.");
     const entry = this.getByIdOrThrow(outboxId);
@@ -437,7 +781,7 @@ export class OutboxHandler {
     const result = this.db
       .prepare(
         `UPDATE outbox_entries SET delivery_state = 'sending'
-          WHERE outbox_id = ? AND delivery_state IN ('pending','failed','indeterminate')`
+          WHERE outbox_id = ? AND delivery_state IN ('pending','failed','indeterminate')${this.hasGuardDeliveryColumn ? " AND json_extract(guard_delivery,'$.runner') IS NULL AND json_extract(guard_delivery,'$.nativeRequestId') IS NULL" : ""}`
       )
       .run(outboxId);
     return result.changes === 1;
@@ -450,6 +794,8 @@ export class OutboxHandler {
    * confirmed delivery.
    */
   finalizeDelivery(outboxId: string, state: "delivered" | "indeterminate" | "failed" | "retained"): OutboxEntry {
+    // Generic wake accounting cannot settle native custody or turn an accepted effect into a typed retry.
+    if (this.runnerPrimary(outboxId)) return this.getByIdOrThrow(outboxId);
     const deliveredAt = state === "delivered" ? new Date().toISOString() : null;
     const result = this.db
       .prepare(
@@ -522,13 +868,19 @@ export class OutboxHandler {
    * ambiguous (the external send may or may not have landed after the claim), so
    * it records `indeterminate`, never a forever-transient claim and never a blind
    * re-send. EXACT-CASE prefix, matching the executable selector. Returns the
-   * count reconciled.
+   * count reconciled. A row the seat's hook bridge (slice 13) still owns stays as it is: one only queued is delivered or
+   * typed by the bridge's sweep, and one its waiter claimed is named uncertain by the bridge, never resent. Every other
+   * receipt, including none, an ordinary one and one that isn't JSON, is reconciled as before.
    */
   reconcileAbandonedSending(idPrefix: string): number {
+    // A CASE, not NOT(...): a receipt without these fields reads NULL there, and NOT NULL would skip the row.
     const result = this.db
       .prepare(
         `UPDATE outbox_entries SET delivery_state = 'indeterminate'
-          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?`
+          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?
+            AND CASE WHEN guard_delivery IS NOT NULL AND json_valid(guard_delivery)
+              THEN COALESCE(json_extract(guard_delivery, '$.channel') = 'hook-bridge' AND json_extract(guard_delivery, '$.state') IN ('queued', 'claimed'), 0)
+              ELSE 0 END = 0`
       )
       .run(idPrefix.length, idPrefix);
     return result.changes;

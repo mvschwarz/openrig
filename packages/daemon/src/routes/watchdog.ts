@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { Hono } from "hono";
+import { isMap, parseDocument } from "yaml";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { WatchdogHistoryLog } from "../domain/watchdog-history-log.js";
@@ -7,8 +8,9 @@ import {
   type WatchdogJobsRepository,
   WatchdogJobsError,
 } from "../domain/watchdog-jobs-repository.js";
-import { parseWatchdogSpec } from "../domain/watchdog-policy-engine.js";
+import { parseWatchdogSpec, type WatchdogPolicyEngine } from "../domain/watchdog-policy-engine.js";
 import { updateWatchdogJob } from "../domain/watchdog-job-update.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 /**
  * Watchdog HTTP routes (PL-004 Phase C). Backs `rig watchdog` CLI verb.
@@ -22,7 +24,7 @@ import { updateWatchdogJob } from "../domain/watchdog-job-update.js";
  *   GET  /list              list all watchdog jobs (active + stopped + terminal)
  *   GET  /sse               SSE stream of watchdog.* events
  *   GET  /:job_id           show one job
- *   GET  /:job_id/status    job + recent history (compact summary)
+ *   GET  /:job_id/status    job + recent history (compact summary) + quiet count since the daemon started
  *   POST /:job_id/stop      operator stop
  *   POST /:job_id/update    change an active job's interval, spec or message in place
  */
@@ -37,6 +39,9 @@ export function watchdogRoutes(): Hono {
   }
   function getEventBus(c: { get: (key: string) => unknown }): EventBus {
     return c.get("eventBus" as never) as EventBus;
+  }
+  function getPolicyEngine(c: { get: (key: string) => unknown }): WatchdogPolicyEngine | undefined {
+    return c.get("watchdogPolicyEngine" as never) as WatchdogPolicyEngine | undefined;
   }
 
   function errorResponse(
@@ -97,6 +102,10 @@ export function watchdogRoutes(): Hono {
       return c.json({ error: "intervalSeconds is required" }, 400);
     }
     if (!body.registeredBySession) return c.json({ error: "registeredBySession is required" }, 400);
+    // P18 supersede: a wire identity (X-OpenRig-Session) decides the recorded sender; the body's
+    // registeredBySession is the claimed-era fallback for callers the header cannot name (shell CLI).
+    const sender = requireSenderIdentity(c, { verb: "watchdog register", bodyClaim: body.registeredBySession });
+    if (!sender.ok) return sender.response;
     try {
       const jobsRepo = getJobsRepo(c);
       const context = parseWatchdogSpec(body.specYaml).context;
@@ -139,14 +148,20 @@ export function watchdogRoutes(): Hono {
           );
         }
       }
-      const job = jobsRepo.register({
+      // A file named for this registration (`--watched-file`, or `watchedFilePath` on the API) wins over the spec's own
+      // `context.watched_file`, as the binding above already does. The stored spec names it too, so the engine keeps
+      // watching the file this registration bound.
+      const specYaml = isContextUsageThreshold && body.watchedFilePath && body.watchedFilePath !== specWatchedFile
+        ? withWatchedFile(body.specYaml, body.watchedFilePath)
+        : body.specYaml;
+      const { job, replaced } = jobsRepo.registerReplacing({
         policy: body.policy,
-        specYaml: body.specYaml,
+        specYaml,
         targetSession: body.targetSession,
         intervalSeconds: body.intervalSeconds,
         activeWakeIntervalSeconds: body.activeWakeIntervalSeconds,
         scanIntervalSeconds: body.scanIntervalSeconds,
-        registeredBySession: body.registeredBySession,
+        registeredBySession: sender.session,
         watchedFilePath,
         thresholdBytes: isContextUsageThreshold
           ? (body.thresholdBytes ?? specThresholdBytes)
@@ -164,7 +179,8 @@ export function watchdogRoutes(): Hono {
         targetSession: job.targetSession,
         registeredBy: job.registeredBySession,
       });
-      return c.json(job, 201);
+      // #3437: an auto-registered policy keeps one row per target; say which rows this one replaced.
+      return c.json(replaced.length > 0 ? { ...job, replaced } : job, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -210,7 +226,9 @@ export function watchdogRoutes(): Hono {
     const job = getJobsRepo(c).getById(jobId);
     if (!job) return c.json({ error: "job_not_found", jobId }, 404);
     const recentHistory = getHistoryLog(c).listForJob(jobId, 20);
-    return c.json({ job, recentHistory });
+    // #3643: the quiet count comes from the engine that evaluates the jobs; without one nothing is counted, so it's left out.
+    const engine = getPolicyEngine(c);
+    return c.json(engine ? { job, recentHistory, quiet: engine.quietCount(jobId) } : { job, recentHistory });
   });
 
   app.post("/:job_id/stop", async (c) => {
@@ -265,4 +283,13 @@ export function watchdogRoutes(): Hono {
   });
 
   return app;
+}
+
+/** The spec with `context.watched_file` set to the named file; everything else in it is kept as written. */
+function withWatchedFile(specYaml: string, watchedFile: string): string {
+  const doc = parseDocument(specYaml);
+  // A `context:` left empty (or `~`) reads as no context, and a path can't be set inside it: give it one holding the file.
+  if (isMap(doc.get("context", true))) doc.setIn(["context", "watched_file"], watchedFile);
+  else doc.set("context", doc.createNode({ watched_file: watchedFile }));
+  return doc.toString();
 }

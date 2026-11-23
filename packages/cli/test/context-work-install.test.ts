@@ -718,6 +718,32 @@ id: OPR.0.5.8.13
     });
   });
 
+  it("warns and keeps the project's context when the selected mission doesn't exist, with or without --slice", async () => {
+    const missionsRoot = join(alphaRoot, "missions");
+    for (const slice of [undefined, "01-live-work"]) {
+      const result = await captureLogs(async () => {
+        await makeCommand().parseAsync([
+          "node", "rig", "context", "work-install",
+          "--project", "alpha", "--mission", "release-0.7.13", ...(slice ? ["--slice", slice] : []), "--json",
+        ]);
+      });
+      expect(result.exitCode).toBeUndefined();
+      const plan = JSON.parse(result.logs.join("")) as {
+        position: { mission: string; missionRoot: string | null; sliceRoot: string | null; frontier: string };
+        pieces: Array<{ altitude: string }>;
+        warnings: string[];
+      };
+      expect(plan.position).toMatchObject({ mission: "release-0.7.13", missionRoot: null, sliceRoot: null, frontier: "project" });
+      expect(plan.pieces.every((piece) => piece.altitude === "project")).toBe(true);
+      expect(plan.warnings).toContain(`mission 'release-0.7.13' not found under ${missionsRoot}${slice ? `, so slice '${slice}' wasn't looked up` : ""}; using the project's context`);
+    }
+    const text = await captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--project", "alpha", "--mission", "release-0.7.13"]);
+    });
+    expect(text.exitCode).toBeUndefined();
+    expect(text.errLogs).toContain(`Warning: mission 'release-0.7.13' not found under ${missionsRoot}; using the project's context`);
+  });
+
   it("uses explicit mission composition as the strict slice-selection boundary", async () => {
     const missionRoot = join(alphaRoot, "missions", "alpha-active");
     writeFileSync(join(missionRoot, "slices", "01-live-work", "slice.yaml"), `schema: openrig.slice/v0alpha1

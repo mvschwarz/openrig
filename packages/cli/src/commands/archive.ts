@@ -36,7 +36,7 @@ export function archiveCommand(depsOverride?: StatusDeps): Command {
     .action(async (rigId: string, opts: { force?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const resolution = await resolveRigHandle(client, rigId);
       if (resolution.kind === "ambiguous") {

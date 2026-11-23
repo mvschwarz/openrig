@@ -14,15 +14,25 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 function run(env: Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), "hermes-example-")); dirs.push(dir);
   const fake = join(dir, "hermes");
-  writeFileSync(fake, `#!/bin/sh\necho "$@ HOME=$HERMES_HOME" > "${dir}/started"\n`);
+  const observe = `legacy=false; [ "\${OPENRIG_ACTIVITY_HOOK_TOKEN-}" != legacy-hook ] || legacy=true
+printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "\${OPENRIG_RUN_ID+x}" "\${OPENRIG_ACTIVITY_HOOK_TOKEN+x}" "$legacy" "$OPENRIG_NODE_ID" "\${OPENRIG_SESSION_NAME-}" "\${OPENRIG_URL-}" "\${OPENRIG_OCCUPANT_GENERATION-}" "\${ANTHROPIC_API_KEY-}" >> "${dir}/native-env"`;
+  writeFileSync(fake, `#!/bin/sh\n${observe}\necho "$@ HOME=$HERMES_HOME" > "${dir}/started"\n`);
   chmodSync(fake, 0o755);
   const launch = (extra: Record<string, string>) => execFileSync(join(EXAMPLE, "openrig-hermes-launch"), ["--provider", "openrouter"],
     { env: { PATH: process.env["PATH"]!, OPENRIG_HERMES: fake, OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", ...extra }, timeout: 20_000, stdio: "pipe" });
   launch(env);
-  return { started: readFileSync(join(dir, "started"), "utf8").trim(), home: join(dir, "home", "state", "hermes", "node-1"), launch };
+  return { started: readFileSync(join(dir, "started"), "utf8").trim(), home: join(dir, "home", "state", "hermes", "node-1"), launch,
+    childEnv: readFileSync(join(dir, "native-env"), "utf8").trim() };
 }
 
 describe("the documented Hermes launcher and preset", () => {
+  it.each([false, true])("strips only new run authority before native Hermes exec, bound=%s", bound => {
+    const result = run({ OPENRIG_CONVERSATION: "named", ...(bound ? { OPENRIG_RUN_ID: "actual-run" } : {}), OPENRIG_ACTIVITY_HOOK_TOKEN: bound ? "scoped-fixture-secret" : "legacy-hook",
+      OPENRIG_SESSION_NAME: "hermes@rig", OPENRIG_URL: "http://fixture.test", OPENRIG_OCCUPANT_GENERATION: "generation", ANTHROPIC_API_KEY: "fixture-provider" });
+    expect(result.childEnv).toBe(`${bound ? "||false" : "|x|true"}|node-1|hermes@rig|http://fixture.test|generation|fixture-provider`);
+    expect(JSON.stringify(result)).not.toContain("scoped-fixture-secret");
+    expect(JSON.stringify(result)).not.toContain("actual-run");
+  });
   it("creates the session OpenRig named, in the seat's own Hermes home", () => {
     const { started, home } = run({ OPENRIG_CONVERSATION: "openrig-dev-impl-1a2b3c4d" });
     expect(started).toBe(`chat -c openrig-dev-impl-1a2b3c4d --create-if-missing --provider openrouter HOME=${home}`);

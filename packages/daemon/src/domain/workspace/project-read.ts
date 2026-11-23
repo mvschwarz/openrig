@@ -3,9 +3,15 @@ import * as path from "node:path";
 import { parse, YAMLParseError } from "yaml";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
-import { readProjectCatalog, selectCatalogProject, yamlObject, ProjectReadError } from "./project-catalog.js";
+import { readProjectCatalog, readProjectCatalogWithRigs, readCatalogAliasReport, selectCatalogProject, workspaceAliases, yamlObject, ProjectReadError, type IgnoredAlias } from "./project-catalog.js";
 
-export interface ProjectRead { id: string; root: string; name: string; sourcePath: string | null; missionsRoot: string; error?: string }
+/** `aliases` are the former ids the project declares in its project.yaml; rows tagged with one are still this project's.
+ *  `aliasWarnings` name the ones it declares that can't apply, and why (#3261). */
+export interface ProjectRead { id: string; root: string; name: string; sourcePath: string | null; missionsRoot: string; rigs?: string[] | null; rigsError?: string; aliases?: string[]; aliasWarnings?: string[]; error?: string }
+/** Every id a project's rows can carry: its current id, then its declared former ids. */
+export function projectIds(p: Pick<ProjectRead, "id" | "aliases">): string[] { return [p.id, ...(p.aliases ?? [])]; }
+/** Whether an id is a project's current id or one of its declared former ids. */
+export function namesProject(p: Pick<ProjectRead, "id" | "aliases">, id: string | null | undefined): boolean { return !!id && projectIds(p).includes(id); }
 type ReadContext = { get: (key: never) => unknown; req: { query: (key: string) => string | undefined } };
 export function projectCatalogPaths(c: Pick<ReadContext, "get">) {
   const store = c.get("settingsStore" as never) as SettingsStore | undefined;
@@ -41,8 +47,8 @@ export function workSource(root: string, dir: string, validate = true): string {
   }
   return source;
 }
-function projectEntry(id: string, root: string): ProjectRead {
-  let p: ProjectRead = { id, root, name: id, sourcePath: null, missionsRoot: path.join(root, "missions") };
+function projectEntry(id: string, root: string, aliases: string[] = [], aliasWarnings: string[] = [], onError?: (err: unknown) => void): ProjectRead {
+  let p: ProjectRead = { id, root, name: id, sourcePath: null, missionsRoot: path.join(root, "missions"), aliases, ...(aliasWarnings.length ? { aliasWarnings } : {}) };
   try {
     p.root = fs.realpathSync(root);
     const manifest = path.join(p.root, "project.yaml");
@@ -55,23 +61,71 @@ function projectEntry(id: string, root: string): ProjectRead {
     p.missionsRoot = path.resolve(p.root, missions);
     p.sourcePath = workSource(p.root, p.root);
     if (fs.existsSync(p.missionsRoot)) insideProject(p.root, p.missionsRoot);
-  } catch (err) { p.error = (err as Error).message; }
+  } catch (err) { p.error = (err as Error).message; onError?.(err); }
   return p;
+}
+function aliasesOf(aliases: Map<string, string>, id: string): string[] {
+  return [...aliases].filter(([, owner]) => owner === id).map(([alias]) => alias);
+}
+/** One plain advisory for each former id this project declares that can't apply. A collision is reported, never refused. */
+function aliasWarningsOf(ignored: IgnoredAlias[], id: string): string[] {
+  return ignored.filter(i => i.declaredBy.includes(id)).map(i => {
+    if (i.currentOwner) return `aliases: '${i.alias}' is ignored: it's project ${i.currentOwner}'s current id, so rows tagged project:${i.alias} stay ${i.currentOwner}'s`;
+    const others = i.declaredBy.filter(d => d !== id);
+    return `aliases: '${i.alias}' is ignored: ${others.join(", ")} also declare${others.length === 1 ? "s" : ""} it, so rows tagged project:${i.alias} belong to no project`;
+  });
+}
+/** `roots`: healthy catalogued projects' missions roots. `unavailable`: what couldn't be read, so a scope that may live
+ *  there reads as unavailable rather than gone: an existing catalog that can't be read, or a project whose own read
+ *  fails (an unreadable root, a bad project.yaml, a failing work source). */
+export interface CatalogMissionsRoots { roots: readonly string[]; unavailable: readonly string[] }
+/** A project read failure that holds no scope OpenRig would read: a missing root, or a missions root or source that
+ *  escapes the project. Those stay out of both lists, as a missing optional index root does. */
+function holdsNoScopes(err: unknown): boolean {
+  if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return true;
+  return err instanceof ProjectReadError && (err.code === "missions_root_escape" || err.code === "project_path_escape");
+}
+/** The catalog's roots for readers that resolve scopes through the project catalog (terminal mission/slice views, #3553).
+ *  An unavailable project is named, never walked. No catalog yields no roots. */
+export function catalogMissionsRoots(catalogPath: string): CatalogMissionsRoots {
+  let entries: Array<{ id: string; root: string }> | null;
+  try {
+    entries = readProjectCatalog(catalogPath);
+  } catch {
+    return { roots: [], unavailable: [catalogPath] };
+  }
+  if (!entries) return { roots: [], unavailable: [] };
+  const report = readCatalogAliasReport(catalogPath);
+  const roots: string[] = [], unavailable: string[] = [];
+  for (const entry of entries) {
+    let failure: unknown;
+    const project = projectEntry(entry.id, path.resolve(path.dirname(catalogPath), entry.root),
+      aliasesOf(report.aliases, entry.id), aliasWarningsOf(report.ignored, entry.id), err => { failure = err; });
+    if (!project.error) roots.push(project.missionsRoot);
+    else if (!holdsNoScopes(failure)) unavailable.push(project.root);
+  }
+  return { roots, unavailable };
 }
 export function listProjects(c: Pick<ReadContext, "get">): { catalogPath: string; projects: ProjectRead[] } {
   const { workspace, catalog } = projectCatalogPaths(c);
-  const entries = readProjectCatalog(catalog);
-  if (entries) return { catalogPath: catalog, projects: entries.map(e => projectEntry(e.id, path.resolve(path.dirname(catalog), e.root))) };
+  const entries = readProjectCatalogWithRigs(catalog);
+  if (entries) {
+    const report = readCatalogAliasReport(catalog);
+    return { catalogPath: catalog, projects: entries.map(e => ({ ...projectEntry(e.id, path.resolve(path.dirname(catalog), e.root), aliasesOf(report.aliases, e.id), aliasWarningsOf(report.ignored, e.id)), rigs: e.rigs, ...(e.rigsError ? { rigsError: e.rigsError } : {}) })) };
+  }
   // Uncatalogued workspaces keep their existing single-project authority.
   const manifest = path.join(workspace, "project.yaml");
   const value = fs.existsSync(manifest) ? yamlObject(manifest) : {};
-  return { catalogPath: catalog, projects: [projectEntry(value.id ?? value.metadata?.id ?? "workspace", workspace)] };
+  const id = value.id ?? value.metadata?.id ?? "workspace";
+  return { catalogPath: catalog, projects: [{ ...projectEntry(id, workspace, workspaceAliases(workspace, id)), rigs: [] }] };
 }
 function lookupProject(c: Pick<ReadContext, "get">, id: string): ProjectRead {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) throw new ProjectReadError("invalid_project", "Invalid project ID");
   const { catalog } = projectCatalogPaths(c);
   const selected = selectCatalogProject(catalog, id);
-  const p = selected ? projectEntry(selected.id, selected.root) : listProjects(c).projects.find(p => p.id === id);
+  const report = selected ? readCatalogAliasReport(catalog) : null;
+  const p = selected && report ? projectEntry(selected.id, selected.root, aliasesOf(report.aliases, selected.id), aliasWarningsOf(report.ignored, selected.id))
+    : listProjects(c).projects.find(p => p.id === id);
   if (!p) throw new ProjectReadError("project_not_found", `Project ${id} is unavailable`);
   return p;
 }

@@ -337,3 +337,74 @@ describe("rig spec", () => {
     expect(exitCode).toBeUndefined();
   });
 });
+
+describe("#3253 rig spec show: the daemon's export refusal", () => {
+  const refusal = { error: "Cannot export seat 'dev.impl': Seat n1 process_limits: stored value is not valid JSON. Fix it by re-applying the spec " +
+    "with process_limits: { tasks_max: <N> }, or clear it with process_limits: {}; then export again.", code: "export_refused" };
+  const deps = (status: number): RigDeps => ({
+    lifecycleDeps: runningLifecycleDeps(1),
+    clientFactory: () => ({
+      get: vi.fn(async () => ({ status, data: status === 404 ? { error: "Rig r1 not found" } : refusal })),
+      getText: vi.fn(async () => ({ status, data: status === 404 ? JSON.stringify({ error: "Rig r1 not found" }) : JSON.stringify(refusal) })),
+    }) as unknown as DaemonClient,
+    readFile: vi.fn(() => ""),
+  });
+  const show = (status: number, ...args: string[]) => {
+    const program = new Command();
+    program.addCommand(rigCommand(deps(status)));
+    return captureLogs(() => program.parseAsync(["node", "rig", "spec", "show", "r1", ...args]).then(() => undefined));
+  };
+
+  it.each([[[]], [["--json"]]])("prints the refusal, not 'not found' (%j)", async (args) => {
+    const out = await show(409, ...args);
+    expect(out.exitCode).toBe(1);
+    expect(out.logs).toEqual([`Export of rig r1 failed: ${refusal.error}`]);
+  });
+
+  it("a 404 still reads not found", async () => {
+    expect((await show(404)).logs).toEqual(["Rig r1 was not found."]);
+  });
+});
+
+describe("#3253 rig spec show: what an export left out reaches stderr when the output can't carry it", () => {
+  const header = { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify([
+    { logicalId: "dev.impl", reason: "process_limits can't be read; not carried" }])) };
+  const notCarried = "# Not carried: dev.impl's process_limits, because the saved value can't be read; it stays stored as it is.";
+  const deps = (): RigDeps => ({
+    lifecycleDeps: runningLifecycleDeps(1),
+    clientFactory: () => ({
+      get: vi.fn(async () => ({ status: 200, data: { name: "r1" }, headers: new Headers(header) })),
+      getText: vi.fn(async () => ({ status: 200, data: `${notCarried}\nname: r1\nversion: "0.2"\npods: []\n`, headers: new Headers(header) })),
+    }) as unknown as DaemonClient,
+    readFile: vi.fn(() => ""),
+  });
+  const show = async (...args: string[]) => {
+    const out: string[] = [], err: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { out.push(a.join(" ")); });
+    const error = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { err.push(a.join(" ")); });
+    try {
+      const program = new Command();
+      program.addCommand(rigCommand(deps()));
+      await program.parseAsync(["node", "rig", "spec", "show", "r1", ...args]);
+    } finally { log.mockRestore(); error.mockRestore(); }
+    return { out, err };
+  };
+
+  it("--json keeps stdout as the spec and prints the export's warnings header on stderr", async () => {
+    const { out, err } = await show("--json");
+    expect(JSON.parse(out.join("\n"))).toEqual({ name: "r1" });
+    expect(err).toEqual(["Warning: dev.impl: process_limits can't be read; not carried"]);
+  });
+
+  it("--as-template drops the export's comments, so its not-carried line goes to stderr", async () => {
+    const { out, err } = await show("--as-template");
+    expect(out.join("\n")).not.toContain("Not carried");
+    expect(err).toEqual([`Warning: ${notCarried.slice(2)}`]);
+  });
+
+  it("plain YAML already carries the comment, with nothing added on stderr", async () => {
+    const { out, err } = await show();
+    expect(out.join("\n")).toContain(notCarried);
+    expect(err).toEqual([]);
+  });
+});

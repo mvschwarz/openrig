@@ -1,3 +1,4 @@
+import stringWidth from "string-width";
 import { describe, expect, it } from "vitest";
 import { createViewState } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
@@ -402,4 +403,42 @@ describe("PULSE view (5.2 Wave B) — tab-strip active PULSE renders bold [P2]",
     // the trailing active "PULSE" is the bold token; "[ PULSE ]" is dim, not bold
     expect(boldText(tabLine)).toContain("PULSE");
   });
+});
+
+it.each([
+  { kind: "wide characters", label: "界".repeat(36), clipped: true },
+  { kind: "combining characters", label: "e\u0301".repeat(36), clipped: true },
+  { kind: "short combining labels", label: "e\u0301".repeat(12), clipped: false },
+])("holds the next Pulse lane at its terminal column after $kind", ({ label, clipped }) => {
+  const { lanes } = demoPulseModel();
+  const [now, finished] = lanes;
+  now.rows[0]!.label = label;
+  finished.rows[0]!.label = "finish-marker";
+  const plain = renderLanes(lanes)[0]!.text;
+  const at = plain.indexOf("finish-marker");
+  expect(at).toBeGreaterThan(0);
+  const prefix = `${finished.rows[0]!.glyph} ${finished.rows[0]!.time ?? ""}`.trimEnd() + " ";
+  expect(stringWidth(plain.slice(0, at))).toBe(33 + stringWidth(prefix));
+  if (clipped) expect(plain).toContain("…   ");
+  else expect(plain).toContain(label);
+});
+
+it("keeps UP NEXT on the rendered Pulse screen when a NOW label has combining marks", () => {
+  const combining = structuredClone(snap);
+  combining.inProgress.find((q) => q.destinationSession === "dev50-driver@openrig-build")!.summary = "e\u0301".repeat(36);
+  const v = createViewState({ instanceId: "t", getSnapshot: () => combining });
+  v.dispatch({ type: "tab", tab: "pulse" });
+  const screen = renderScreen(v.get(), combining, { cols: 120, rows: 44, nowMs: DEMO_NOW, colorMode: "truecolor" });
+  const index = screen.lines.findIndex((line) => line.includes("e\u0301"));
+  expect(index).toBeGreaterThan(0);
+  const plain = screen.lines[index]!;
+  expect(stringWidth(plain)).toBe(120);
+  expect(plain).toContain("○ RM ceremony");
+
+  const styled = stylizeLines(screen, createStyle("truecolor"))[index]!;
+  expect(styled.replace(/\x1b\[[0-9;]*m/g, "")).toBe(plain);
+  expect(styled).toContain("RM ceremony");
+
+  const upNextColumn = stringWidth(plain.slice(0, plain.indexOf("○ RM ceremony"))) + 1;
+  expect(screen.contentTargets.some((t) => t.y === index + 1 && t.x1 <= upNextColumn && upNextColumn <= t.x2)).toBe(true);
 });

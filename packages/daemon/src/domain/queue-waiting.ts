@@ -5,12 +5,34 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { nextDueAt } from "./watchdog-due.js";
+import { isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 import type { WatchdogJob } from "./watchdog-jobs-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy" | "backgroundWork"> | null;
 
 /** A blocked row's backstop when no live timer or watchdog is armed and its blocker isn't a row that can finish. */
 export const NO_TIMED_BACKSTOP = "UNVERIFIED: no timed backstop";
+
+/** This module's statements, prepared once per connection and reused. Preparing parses and plans the SQL every time,
+ *  and these few fixed texts run on every waiting view, sweep and ladder read. A prepared statement still reads the
+ *  current data each time it runs, and SQLite re-prepares it itself after a schema change, so reuse changes no result.
+ *  Keyed by the connection, so they go with it, and by SQL text from this module's fixed set, capped as a backstop. */
+const REUSED_STATEMENT_CAP = 32;
+const reusedStatements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
+export function reusedStatement(db: Database.Database, sql: string): Database.Statement {
+  let byText = reusedStatements.get(db);
+  if (!byText) {
+    byText = new Map();
+    reusedStatements.set(db, byText);
+  }
+  let statement = byText.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    if (byText.size < REUSED_STATEMENT_CAP) byText.set(sql, statement);
+  }
+  return statement;
+}
 
 /** A read of the existing transition log, not another progress receipt. Machine
  * actors and typed wake receipts are bookkeeping, never task progress. Historical
@@ -18,9 +40,9 @@ export const NO_TIMED_BACKSTOP = "UNVERIFIED: no timed backstop";
  * Delivery bookkeeping uses the reserved daemon actors and must not reset the
  * ladder before it can join its dispatch marker to the delivery receipt. */
 export function lastMeaningfulTransition(db: Database.Database, id: string): { id: number; at: string } | null {
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return null;
-  const hasWakes = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-  const row = db.prepare(`SELECT t.transition_id, t.ts FROM (
+  if (!reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return null;
+  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
+  const row = reusedStatement(db, `SELECT t.transition_id, t.ts FROM (
       SELECT *, LAG(state) OVER (ORDER BY transition_id) AS previous_state FROM queue_transitions WHERE qitem_id = ?
     ) t WHERE (t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system') OR t.state IS NOT t.previous_state)
     ${hasWakes ? "AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id AND w.phase = 'fired')" : ""}
@@ -34,9 +56,9 @@ export function lastMeaningfulTransitionMany(db: Database.Database, ids: readonl
   const unique = [...new Set(ids)];
   const out = new Map<string, { id: number; at: string } | null>(unique.map((id) => [id, null]));
   if (unique.length === 0) return out;
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return out;
-  const hasWakes = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-  const rows = db.prepare(`SELECT qitem_id, transition_id, ts FROM (
+  if (!reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return out;
+  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
+  const rows = reusedStatement(db, `SELECT qitem_id, transition_id, ts FROM (
       SELECT t.qitem_id, t.transition_id, t.ts, ROW_NUMBER() OVER (PARTITION BY t.qitem_id ORDER BY t.transition_id DESC) AS newest FROM (
         SELECT *, LAG(state) OVER (PARTITION BY qitem_id ORDER BY transition_id) AS previous_state FROM queue_transitions
          WHERE qitem_id IN (SELECT value FROM json_each(?))
@@ -47,21 +69,15 @@ export function lastMeaningfulTransitionMany(db: Database.Database, ids: readonl
   return out;
 }
 
-/** The waiting view's statements, each prepared once, and the schema checks they depend on, each made once. A listing
- * holds one for all its rows; a single read uses a fresh one. A listing reads synchronously, so neither the statements
- * nor the schema checks can go stale under it. */
+/** The waiting view's statements (reused per connection) and the schema checks they depend on, each made once per
+ * instance. A listing holds one for all its rows; a single read uses a fresh one. A listing reads synchronously, so its
+ * schema checks can't go stale under it, and a fresh instance checks again. */
 export class WaitingStatements {
-  private readonly prepared = new Map<string, Database.Statement>();
   private readonly tables = new Map<string, boolean>();
   constructor(private readonly db: Database.Database) {}
 
   statement(sql: string): Database.Statement {
-    let prepared = this.prepared.get(sql);
-    if (!prepared) {
-      prepared = this.db.prepare(sql);
-      this.prepared.set(sql, prepared);
-    }
-    return prepared;
+    return reusedStatement(this.db, sql);
   }
 
   hasTable(name: string): boolean {
@@ -72,6 +88,15 @@ export class WaitingStatements {
     }
     return known;
   }
+}
+
+/** Whether a row's stored tags (a JSON array, or null) carry every one of `wanted`. */
+function hasTags(tags: string | null, wanted: string[]): boolean {
+  if (!tags) return false;
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed) && wanted.every(t => parsed.includes(t));
+  } catch { return false; }
 }
 
 /** The queue_items columns a waiting view reads from its own row. */
@@ -168,13 +193,22 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     view.nextBackstop.owner = recoveryOwner ?? row.destination_session;
     view.nextBackstop.dueAt = base ? new Date(Date.parse(base) + delay * 1000).toISOString() : null;
     view.nextBackstop.mechanism = row.state === "pending" ? "queue-stuck-sweep:unclaimed" : "queue-stuck-sweep:pickup (activity checked at detection)";
+    // A queue-only seat's cold watchdog reminder (#3076) waits, with no nudge, for a person or the seat's next turn; the
+    // stuck sweep files no unclaimed finding for it, so none is promised here.
+    if (row.state === "pending" && row.source_session === "watchdog@system" && hasTags(row.tags, ["watchdog", "queue-only"])) {
+      view.nextBackstop = { owner: row.destination_session, dueAt: null, intervalSeconds: null,
+        mechanism: "none (queue-only reminder row: it waits for someone to pick it up or for the agent's next ordinary turn; no timed sweep)" };
+    }
   }
   if (row.state === "blocked") {
     const hasTimers = statements.hasTable("queue_transition_wakes");
-    const timer = hasTimers ? statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
+    const timer = hasTimers ? readWithCurrentParkBoundary(boundary => statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
       FROM queue_transition_wakes w JOIN watchdog_jobs j ON j.job_id = w.wake_ref
       WHERE w.qitem_id = ? AND w.phase = 'armed' AND j.state = 'active'
-      ORDER BY w.transition_id DESC LIMIT 1`).get(id) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
+        AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+          WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+        ${boundary}
+      ORDER BY w.transition_id DESC LIMIT 1`).get(id)) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
     // The scheduler's own due time: a never-evaluated reminder fires one interval after registration (#801),
     // and the wake-now marker is due now (#860).
     const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,
@@ -191,7 +225,9 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
         notice = state?.notice;
         if (state?.evidence?.attention?.scope && state.attentionRevision) view.attention = { scope: state.evidence.attention.scope, revision: state.attentionRevision, source: "last observed by wait timer" };
       } catch { /* operator YAML has no queue notice */ }
-      if (notice) view.nextBackstop = { owner: recoveryOwner ?? row.source_session, mechanism: `unconsumed wait notice; delivery=${notice.deliveryStatus}`, intervalSeconds: sweepInterval,
+      // A queue-only seat's notice (#3076) was noted on the row or became a queue row: held at the seat, and the stuck
+      // sweep files no unconsumed-wait finding for it. The timer stays the backstop.
+      if (notice && !isQueueOnlyDeliveryCode(notice.deliveryStatus)) view.nextBackstop = { owner: recoveryOwner ?? row.source_session, mechanism: `unconsumed wait notice; delivery=${notice.deliveryStatus}`, intervalSeconds: sweepInterval,
         dueAt: new Date(Date.parse(notice.at) + resolvePickupThresholdMinutes() * 60_000).toISOString() };
     }
   }

@@ -9,7 +9,14 @@
 // delivers payloads of type `message`), so the mapping is explicit and checked.
 // The constructor imports no configuration: it cannot load files or read the environment.
 import { stringify } from "yaml";
-import { ADMITTED_EVENT_TYPES, BASELINE_REQUIRED_SCOPES, EVENT_SUBSCRIPTIONS, FEATURE_SCOPES } from "./capabilities.js";
+import {
+  ADMITTED_EVENT_TYPES,
+  BASELINE_REQUIRED_SCOPES,
+  EVENT_SUBSCRIPTIONS,
+  FEATURE_SCOPES,
+  PRIVATE_CHANNEL_MESSAGE_SUBSCRIPTION,
+  PRIVATE_CHANNEL_SCOPES,
+} from "./capabilities.js";
 
 export const MANIFEST_DISPLAY_NAME = "OpenRig";
 export const SLACK_CREATE_APP_URL = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
@@ -44,6 +51,11 @@ export interface ManifestSources {
   eventSubscriptions: Readonly<Record<string, { subscription: string; scope: string }>>;
 }
 
+export interface SlackManifestOptions {
+  /** Request private-channel grants and the message.groups event without changing public defaults. */
+  privateChannel?: boolean;
+}
+
 export const CANONICAL_MANIFEST_SOURCES: ManifestSources = {
   requiredScopes: BASELINE_REQUIRED_SCOPES,
   featureScopes: FEATURE_SCOPES.map((f) => f.scope),
@@ -54,8 +66,12 @@ export const CANONICAL_MANIFEST_SOURCES: ManifestSources = {
 /** Build the manifest from its sources. Throws if an admitted event type has no subscription
  *  mapping, or if a subscribed event's scope is not requested — a manifest Slack would reject
  *  or that silently loses inbound traffic is a construction error, not a runtime surprise. */
-export function buildSlackAppManifest(sources: ManifestSources = CANONICAL_MANIFEST_SOURCES): SlackManifestBundle {
-  const scopes = [...new Set([...sources.requiredScopes, ...sources.featureScopes])].sort();
+export function buildSlackAppManifest(
+  sources: ManifestSources = CANONICAL_MANIFEST_SOURCES,
+  options: SlackManifestOptions = {},
+): SlackManifestBundle {
+  const privateScopes = options.privateChannel ? PRIVATE_CHANNEL_SCOPES : [];
+  const scopes = [...new Set([...sources.requiredScopes, ...sources.featureScopes, ...privateScopes])].sort();
   const events: string[] = [];
   for (const type of sources.admittedEventTypes) {
     const mapped = sources.eventSubscriptions[type];
@@ -64,6 +80,13 @@ export function buildSlackAppManifest(sources: ManifestSources = CANONICAL_MANIF
       throw new Error(`slack manifest: event "${mapped.subscription}" needs scope "${mapped.scope}", which is not requested`);
     }
     events.push(mapped.subscription);
+  }
+  if (options.privateChannel && sources.admittedEventTypes.includes("message")) {
+    const mapped = PRIVATE_CHANNEL_MESSAGE_SUBSCRIPTION;
+    if (!scopes.includes(mapped.scope)) {
+      throw new Error(`slack manifest: event "${mapped.subscription}" needs scope "${mapped.scope}", which is not requested`);
+    }
+    if (!events.includes(mapped.subscription)) events.push(mapped.subscription);
   }
   events.sort();
   const manifest: SlackAppManifest = {

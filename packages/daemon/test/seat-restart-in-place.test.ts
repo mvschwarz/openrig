@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
+import { defaultTmuxFileOps, isStagedSendScriptPath, noticeLine, TmuxAdapter as RealTmuxAdapter } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -13,7 +13,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
-import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import type { SeatProcessLimitsNotice, SeatProcessLimitsReport, TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
@@ -45,6 +45,17 @@ type Shape = "shell_backed" | "direct_native";
 
 interface WorldOptions {
   shape?: Shape;
+  /** #3253: the seat has process limits (rig spec process_limits); "applied": its running pane is proven under them;
+   *  "unknown": its readback failed. */
+  processLimited?: boolean | "applied" | "unknown";
+  /** #3253: what the seat's limit reads back as (overrides processLimited's), or "invalid": its stored value is unreadable.
+   *  The adapter's own classifier (seatProcessLimitsNotApplied) turns it into the restart's warning. */
+  processLimitsReadback?: SeatProcessLimitsReport | "invalid";
+  /** #3253: the adapter's plan for a bare respawn (seatProcessLimitsKeepPlan), and the notice its respawn returns. */
+  processLimitsKeep?: { keep: true } | { keep: false; notice: SeatProcessLimitsNotice };
+  respawnProcessLimits?: SeatProcessLimitsNotice;
+  /** Other warning lines the respawn returns (the adapter also returns its process-limits notice as a warning line). */
+  respawnWarnings?: string[];
   runningArgs?: string;
   runningArgv?: string[];
   savedModel?: string | null;
@@ -153,6 +164,7 @@ function world(options: WorldOptions = {}) {
   const calls: string[] = [];
   const paneLines: string[] = (options.screenBefore ?? "").split("\n").filter(Boolean);
   let relaunched = false;
+  const respawnOpts: Array<Record<string, unknown> | undefined> = [];
   let replacementReads = 0;
   const replacementYields: number[] = [];
   let thrown = false;
@@ -170,7 +182,21 @@ function world(options: WorldOptions = {}) {
     dead = false;
   };
 
+  // #3253: the real adapter classifies what the seat's limit reads back as; only the readback itself is synthetic.
+  const limitsAdapter = new RealTmuxAdapter(async () => "", defaultTmuxFileOps(), async () => "");
+  const readback = options.processLimitsReadback ?? (options.processLimited === "applied" ? { state: "applied" as const }
+    : options.processLimited === "unknown" ? { state: "unknown" as const, reason: "cgroup unreadable" }
+      : { state: "not_applied" as const, reason: "the seat's process is not in a seat scope" });
+  limitsAdapter.seatProcessLimits = () => {
+    if (readback === "invalid") throw new Error("the stored process_limits can't be read");
+    return { tasksMax: 256 };
+  };
+  if (readback !== "invalid") vi.spyOn(limitsAdapter, "readSeatProcessLimits").mockResolvedValue({ requested: { tasksMax: 256 }, ...readback });
   const tmux = {
+    ...(options.processLimited || options.processLimitsReadback ? {
+      seatProcessLimitsSet: limitsAdapter.seatProcessLimitsSet.bind(limitsAdapter),
+      seatProcessLimitsNotApplied: limitsAdapter.seatProcessLimitsNotApplied.bind(limitsAdapter) } : {}),
+    ...(options.processLimitsKeep ? { seatProcessLimitsKeepPlan: async () => options.processLimitsKeep! } : {}),
     probeSession: async () => ({ state: "present" as const }),
     listPanes: async () => (paneGone ? [] : [{ id: "%1", index: 0, cwd: "/work", width: 80, height: 24, active: true }]),
     getPanePid: async () => (shape === "shell_backed" ? 100 : rows[0]?.pid ?? null),
@@ -212,7 +238,14 @@ function world(options: WorldOptions = {}) {
     restorePaneOption: async (_pane: string, _option: string, value: string | null): Promise<TmuxResult> => {
       calls.push(`restore remain-on-exit ${value}`); maybeThrow("restorePaneOption"); remainOnExit = value; return { ok: true };
     },
-    respawnPane: async (_pane: string, command?: string): Promise<TmuxResult> => { calls.push(`respawn ${command}`); maybeThrow("respawnPane"); relaunch(); return { ok: true }; },
+    respawnPane: async (_pane: string, command?: string, opts?: Record<string, unknown>): Promise<TmuxResult> => {
+      calls.push(`respawn ${command}`); respawnOpts.push(opts); maybeThrow("respawnPane"); relaunch();
+      // As the adapter does: a respawn's process-limits notice comes both as processLimits and as a warning line.
+      const warnings = [...(options.respawnWarnings ?? []),
+        ...(options.respawnProcessLimits ? [noticeLine(options.respawnProcessLimits)] : [])];
+      return { ok: true, ...(warnings.length ? { warnings } : {}),
+        ...(options.respawnProcessLimits ? { processLimits: options.respawnProcessLimits } : {}) };
+    },
     capturePaneHistory: async () => paneLines.join("\n"),
     capturePaneHistoryParts: async () => {
       const history = paneLines.slice(0, Math.max(0, paneLines.length - (options.screenRows ?? 3)));
@@ -224,6 +257,8 @@ function world(options: WorldOptions = {}) {
   /** The Codex home each resume proof was asked to read. */
   const proofHomes: Array<string | undefined> = [];
   const builds: Array<{ running?: unknown; launchWrapper?: string[]; launchShell?: string }> = [];
+  /** Whether each resume command was built as a preview (one that may not write the Codex config). */
+  const previews: boolean[] = [];
   const wrapperEnv = options.realResumeBuilder === "env"
     ? (() => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-inplace-wrapper-"));
@@ -257,7 +292,8 @@ function world(options: WorldOptions = {}) {
     : null;
   const codex = {
     runtime: "codex",
-    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string }) {
+    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string; preview?: boolean }) {
+      previews.push(opts.preview === true);
       builds.push({
         running: opts.running,
         ...(binding.launchWrapper ? { launchWrapper: binding.launchWrapper } : {}),
@@ -269,6 +305,7 @@ function world(options: WorldOptions = {}) {
           resumeToken: opts.resumeToken,
           running: opts.running,
           ...(opts.launchShell !== undefined ? { launchShell: opts.launchShell } : {}),
+          ...(opts.preview ? { preview: true } : {}),
         });
       }
       const running = opts.running;
@@ -335,7 +372,7 @@ function world(options: WorldOptions = {}) {
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux,
+  return { db, service, node, session, calls, launches, proofHomes, builds, previews, events, sessionRegistry, tmux, respawnOpts,
     wrapperBinDir: wrapperEnv?.binDir,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
@@ -352,6 +389,14 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it("plan builds its resume command as a preview, which leaves the Codex config alone; the restart itself doesn't", async () => {
+    const w = world({});
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true });
+    expect(w.previews).toEqual([true]);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "new account" })).toMatchObject({ ok: true });
+    expect(w.previews).toEqual([true, false]);
+  });
+
   it("plan reports activity, child processes and settings, and changes nothing", async () => {
     const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),
@@ -626,6 +671,20 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
   it("refuses a direct-native pane whose remain-on-exit cannot be read (it could not be put back)", async () => {
     const w = world({ shape: "direct_native", remainOnExit: "unreadable" });
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+  });
+
+  // #3076: the typing-guard preflight follows lifecycle's rule: queue-only refuses no lifecycle work, an explicit hold does.
+  it.each([
+    [{ desired: true, effective: true, desiredLevel: "queue-only", effectiveLevel: "queue-only" }, true],
+    [{ desired: true, effective: true }, false],
+    [{ desired: true, effective: true, desiredLevel: "openrig-urgent", effectiveLevel: "openrig-urgent" }, false],
+  ])("the typing-guard refusal follows lifecycle's rule (%j: restartable %s)", async (preference, restartable) => {
+    const w = world();
+    Object.defineProperty(w.tmux, "deliveryGuard", { value: { preference: () => preference, ownsLifecycle: () => true } });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    if (restartable) expect(plan).toMatchObject({ ok: true });
+    else expect(plan).toMatchObject({ ok: false, code: "typing_guard_enabled" });
+    expect(w.calls).toEqual([]);
   });
 
   it("names the shared seat refusals: reason, runtime, adopted session", async () => {
@@ -1256,6 +1315,112 @@ describe("#1196 round 2: the shell branch keeps the running settings (F1)", () =
     expect(await adapter.sendResumeCommand(SEAT, command, TOKEN)).toMatchObject({ ok: true });
     expect(sent).toEqual([command]);
     expect(verified).toEqual([TOKEN]);
+  });
+});
+
+describe("#3253: a seat with process limits: a restart in place never stops for the limit", () => {
+  it("a bare (direct-native) pane restarts as before, with the structured warning (its respawn carries no seat environment)", async () => {
+    const control = world({ shape: "direct_native", remainOnExit: "off" });
+    const expected = await control.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ outcome: (expected as { outcome?: string }).outcome,
+      processLimits: { state: "not_applied", kind: "setup", retryable: false,
+        reason: expect.stringContaining("respawns a bare pane without the seat's environment") } });
+    expect("processLimits" in (expected as object)).toBe(false);
+  });
+
+  it("a shell-backed pane under its limit restarts in place as before, keeping its scope, with no warning", async () => {
+    const w = world({ shape: "shell_backed", processLimited: "applied" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).not.toMatchObject({ outcome: "not_started" });
+    expect("processLimits" in (result as object)).toBe(false);
+  });
+
+  it("a bare pane whose process reads back under its limit is respawned in a new scope with it, without a warning", async () => {
+    const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true, processLimitsKeep: { keep: true } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).not.toMatchObject({ outcome: "not_started" });
+    expect("processLimits" in (result as object)).toBe(false);
+    expect(w.respawnOpts).toEqual([expect.objectContaining({ keepLimitOf: w.node.id, processLimitsMode: "recovery" })]);
+  });
+
+  it("a bare pane kept in a new scope whose start can't be told reports unknown, not that it went on without the limit", async () => {
+    const unknown = { state: "unknown" as const, kind: "unverified" as const, retryable: true, requested: { tasksMax: 256 },
+      reason: "the seat's scope start was not confirmed in time; the seat was not started again" };
+    const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true, processLimitsKeep: { keep: true },
+      respawnProcessLimits: unknown });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ processLimits: unknown });
+  });
+
+  it("a respawn's process-limits notice reaches the report once: as processLimits, not also as a warning line", async () => {
+    const notices = [
+      { state: "unknown" as const, kind: "unverified" as const, retryable: true, requested: { tasksMax: 256 },
+        reason: "the seat's scope start was not confirmed in time; the seat was not started again" },
+      { state: "not_applied" as const, kind: "unverified" as const, retryable: true, requested: { tasksMax: 256 },
+        reason: "the kept scope's launch could not be prepared: Default shell unavailable" },
+    ];
+    for (const notice of notices) {
+      const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true, processLimitsKeep: { keep: true },
+        respawnProcessLimits: notice, respawnWarnings: ["an unrelated respawn warning"] });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(result).toMatchObject({ processLimits: notice });
+      expect(result.warnings).toEqual(expect.arrayContaining(["an unrelated respawn warning"]));
+      expect(result.warnings).not.toContain(noticeLine(notice));
+      expect(result.warnings.filter((line) => /process_limits requested/.test(line))).toEqual([]);
+    }
+  });
+
+  it("a bare pane not under its limit goes on without it, with the plan's warning, and no scope is asked for", async () => {
+    const notice = { state: "not_applied" as const, kind: "setup" as const, retryable: false, requested: { tasksMax: 256 },
+      reason: "a restart in place respawns a bare pane and keeps only a limit that reads back as applied; it is not under the limit; a fresh launch applies it" };
+    const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true, processLimitsKeep: { keep: false, notice } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ processLimits: notice });
+    expect(w.respawnOpts[0]).not.toHaveProperty("keepLimitOf");
+  });
+
+  it("a shell-backed pane whose limit can't be read back says unknown, not that it went on without the limit", async () => {
+    const w = world({ shape: "shell_backed", processLimited: "unknown" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ processLimits: { state: "unknown", kind: "unverified", retryable: true } });
+  });
+
+  it("the warning is logged only once the restart has gone on", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const stopped = world({ shape: "shell_backed", processLimited: true, codexIgnoresSignals: true });
+      expect(await stopped.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "not_started" });
+      expect(warn.mock.calls.filter((call) => String(call[0]).startsWith("[restart in place]"))).toEqual([]);
+      const went = world({ shape: "shell_backed", processLimited: true });
+      await went.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(warn.mock.calls.filter((call) => String(call[0]).startsWith("[restart in place]"))).toHaveLength(1);
+    } finally { warn.mockRestore(); }
+  });
+
+  it.each([
+    ["applied", { state: "applied" }, undefined],
+    ["not_applied", { state: "not_applied", reason: "not in a seat scope" }, { state: "not_applied", kind: "setup", retryable: false }],
+    ["unsupported", { state: "unsupported", reason: "cgroup v1" }, { state: "not_applied", kind: "unsupported", retryable: false }],
+    ["unknown", { state: "unknown", reason: "no pane pid" }, { state: "unknown", kind: "unverified", retryable: true }],
+    ["an unreadable stored value", "invalid", { state: "not_applied", kind: "invalid", retryable: false }],
+  ] as const)("a shell-backed pane whose limit reads back %s gets the classifier's warning", async (_name, readback, expected) => {
+    const w = world({ shape: "shell_backed", processLimitsReadback: readback as SeatProcessLimitsReport | "invalid" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).not.toMatchObject({ outcome: "not_started" });
+    if (expected) expect(result).toMatchObject({ processLimits: expected });
+    else expect("processLimits" in (result as object)).toBe(false);
+  });
+
+  it("a shell-backed pane not under its limit goes ahead too, and says so", async () => {
+    const control = world({ shape: "shell_backed" });
+    const expected = await control.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    const w = world({ shape: "shell_backed", processLimited: true });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ outcome: (expected as { outcome?: string }).outcome,
+      processLimits: { state: "not_applied", kind: "setup", retryable: false,
+        reason: expect.stringContaining("keeps the running process") } });
   });
 });
 

@@ -22,7 +22,15 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     expect(out).toContain('↩ Reply: rig send driver-3@my-rig "..."');
   });
 
-  it.each(["human@kernel", "human@host", "human-alice@kernel", "human-alice@host"])(
+  // An answer typed at this machine is recorded as human@host, which names nobody: a reply there asks no one, waits on
+  // Steering and in the Feed, and OpenRig reports it as undeliverable, so its reply hint says so and points to the person's registered address.
+  it.each(["human@host", "human@host@host-origin"])("never points %s's reply at the unattributed address", (sender) => {
+    const last = wrapPaneEnvelope(sender, "driver@rig", "Answered.").split("\n").at(-1);
+    expect(last).toBe(`↩ ${sender} names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).`);
+    expect(last).not.toContain("rig queue create");
+  });
+
+  it.each(["human@kernel", "human-alice@kernel", "human-alice@host"])(
     "gives %s a queue update reply with the existing human-route fields",
     (sender) => {
       const body = "Please check this.\nKeep the actor unchanged.";
@@ -208,6 +216,15 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     for (const sender of ["alex@external", "daemon@kernel", "system:health"]) {
       expect(wrapPaneEnvelope(sender, "b@r", "hi", { senderReachable: false })).toBe(wrapPaneEnvelope(sender, "b@r", "hi"));
     }
+  });
+
+  // #3268: MIRRORED in packages/cli/test/send-header.test.ts against wrapSendBody (byte-identity contract).
+  it("#3268: senderRegistered false gives an @external sender no reply command; absent or true keeps the hint", () => {
+    expect(wrapPaneEnvelope("some-team@external", "b@r", "hi", { replyToQitem: "q-1", senderRegistered: false }))
+      .toBe("From: some-team@external\nTo: b@r\n---\nhi\n---\n↩ No reply route: some-team@external isn't a registered person (rig gateway human list lists who's registered).");
+    expect(wrapPaneEnvelope("alex@external", "b@r", "hi", { replyToQitem: "q-1", senderRegistered: true }))
+      .toBe(wrapPaneEnvelope("alex@external", "b@r", "hi", { replyToQitem: "q-1" }));
+    expect(wrapPaneEnvelope("a@r", "b@r", "hi", { senderRegistered: false })).toBe(wrapPaneEnvelope("a@r", "b@r", "hi"));
   });
 
   it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {

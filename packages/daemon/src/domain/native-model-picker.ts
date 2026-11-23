@@ -4,6 +4,13 @@
 
 const CLAUDE_MODEL_FOOTERS = ["Enter to set as default · s to use this session only · Esc to cancel"];
 const CODEX_MODEL_FOOTERS = ["enter select · esc back", "enter default · s session · esc back"];
+const CLAUDE_MODEL_HEADER = "Select model";
+const isCodexModelHeader = (line: string) => line === "Select Model and Effort" || /^Select Reasoning Level for \S.*$/.test(line);
+
+/** A send guard's evidence is one of these pickers' headers, which is what the two readers below return. */
+export function isModelPickerHeader(evidence: string | null | undefined): boolean {
+  return evidence === CLAUDE_MODEL_HEADER || isCodexModelHeader(evidence ?? "");
+}
 
 /** The choice rows between a picker's instruction and its footer hold exactly one highlighted, numbered row. */
 function oneHighlightedChoice(body: string[], pointer: string): boolean {
@@ -18,7 +25,7 @@ export function currentClaudeModelMenu(pane: string): string | null {
   // OpenRig-launched Claude may draw its named seat rule below the menu footer.
   if (/^─{3,} [\w.-]+@[\w.-]+ ─+$/.test(lines.at(-1) ?? "")) lines.pop();
   if (!CLAUDE_MODEL_FOOTERS.includes(lines.at(-1) ?? "")) return null;
-  const header = lines.lastIndexOf("Select model");
+  const header = lines.lastIndexOf(CLAUDE_MODEL_HEADER);
   if (header < 1 || !/^─{3,}$/.test(lines[header - 1]!) || !lines[header + 1]?.startsWith("Switch between Claude models.")) return null;
   return oneHighlightedChoice(lines.slice(header + 2, -1), "❯") ? lines[header]! : null;
 }
@@ -27,7 +34,7 @@ export function currentClaudeModelMenu(pane: string): string | null {
 export function currentCodexModelPicker(pane: string): string | null {
   const lines = pane.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   if (!CODEX_MODEL_FOOTERS.includes(lines.at(-1) ?? "")) return null;
-  const header = lines.map(line => line === "Select Model and Effort" || /^Select Reasoning Level for \S.*$/.test(line)).lastIndexOf(true);
+  const header = lines.map(isCodexModelHeader).lastIndexOf(true);
   if (header < 0) return null;
   return oneHighlightedChoice(lines.slice(header + 1, -1), "›") ? lines[header]! : null;
 }

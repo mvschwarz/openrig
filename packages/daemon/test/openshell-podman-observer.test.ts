@@ -68,12 +68,15 @@ async function httpFixture(failure?: "404" | "malformed", mountedVolumes?: strin
   await new Promise<void>(resolve => server.listen(socket, resolve));
   closers.push(() => new Promise<void>(resolve => server.close(() => resolve())));
   const observer = new OpenShellPodmanObserver(), st = lstatSync(socket);
+  const identity = { socketDevice: st.dev, socketInode: st.ino, uid: st.uid, host: "engine.test" };
   // Exercise the real HTTP reader on macOS too; rootless socket selection has its Linux cells above.
   const selection = vi.spyOn(observer as unknown as { socket(path: string): unknown }, "socket")
-    .mockImplementation(path => ({ socket: path, socketDevice: st.dev, socketInode: st.ino, uid: st.uid, host: "engine.test" }));
+    .mockImplementation(path => ({ socket: path, ...identity }));
   closers.push(() => selection.mockRestore());
   return {
     observer, socket, requests, binding: { resource: { id }, placement: { workspace: "workspace" } } as EnvironmentBinding,
+    // A restart or reboot that gives the same socket path a new socket object, or a different host or user.
+    replaceSocket: (change: Partial<typeof identity>) => { Object.assign(identity, change); },
     retireContainers: () => { containers = [unrelated]; volumes = [ownedVolumes[0]!, "unrelated-volume"]; },
     retireVolumes: () => { volumes = ["unrelated-volume"]; },
     loseVolumeRoute: () => { volumeMissingRoute = true; },
@@ -118,4 +121,28 @@ it.each(["control", "channel"])("refuses an unattributable %s volume even when o
     .filter(name => name !== `openshell-${missing}-compute-one`);
   const f = await httpFixture(undefined, volumes);
   await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
+});
+
+it("reads recreation's cleanup on a replaced socket object and reports the change, while delete still refuses it", async () => {
+  const f = await httpFixture(), selected = await f.observer.capture(f.binding, f.socket);
+  expect(await f.observer.observeEndpoint(f.binding, selected)).toMatchObject({ endpointChanged: false, remaining: { workload: true, supervisor: true, volumes: true } });
+  f.replaceSocket({ socketDevice: selected.socketDevice + 1, socketInode: selected.socketInode + 1 });
+  // Delete's exact endpoint requirement is unchanged.
+  await expect(f.observer.observe(f.binding, selected)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed", message: expect.stringContaining("absence is not established") });
+  // Recreation reads the current engine: what's still present is reported present, not hidden by the change.
+  expect(await f.observer.observeEndpoint(f.binding, selected)).toEqual({ endpointChanged: true, remaining: { workload: true, supervisor: true, volumes: true },
+    endpoint: { socket: f.socket, socketDevice: selected.socketDevice + 1, socketInode: selected.socketInode + 1, uid: selected.uid, host: "engine.test" } });
+  f.retireContainers(); f.retireVolumes();
+  expect(await f.observer.observeEndpoint(f.binding, selected)).toMatchObject({ endpointChanged: true, remaining: { workload: false, supervisor: false, volumes: false } });
+  // An unreadable inventory on the current engine is still not absence.
+  f.loseVolumeRoute();
+  await expect(f.observer.observeEndpoint(f.binding, selected)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
+  expect(f.requests.every(req => req.method === "GET")).toBe(true);
+});
+
+it.each([["host", { host: "another.test" }], ["user", { uid: 4242 }]] as const)("still refuses recreation's read when the socket belongs to another %s", async (_name, change) => {
+  const f = await httpFixture(), selected = await f.observer.capture(f.binding, f.socket), before = f.requests.length;
+  f.replaceSocket(change);
+  await expect(f.observer.observeEndpoint(f.binding, selected)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed", message: expect.stringContaining("another host or user") });
+  expect(f.requests).toHaveLength(before);
 });

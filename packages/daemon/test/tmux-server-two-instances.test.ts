@@ -2,11 +2,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONTROL_OPTION, supportsControlMode } from "../src/adapters/tmux-control.js";
 import type { TmuxServerSelection } from "../src/domain/tmux-server-selection.js";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
-import { runRig, spawnScenarioDaemon, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
+import { findFreePort, runRig, spawnScenarioDaemon, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
 import { stageTopologyRoot } from "./helpers/scenario-stage.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +20,8 @@ const nativeAvailable = process.platform !== "win32" && (() => {
 
 interface Instance {
   scaffold: HermeticScaffold;
+  /** Its daemon's own URL, set before the start so cleanup can address a daemon whose start didn't return. */
+  url?: string;
   daemon?: ScenarioDaemon;
   selection?: TmuxServerSelection;
 }
@@ -53,11 +55,16 @@ describe.skipIf(!nativeAvailable)("two isolated daemon instances with tmux contr
   afterEach(async () => {
     const failures: unknown[] = [];
     // Also stop a daemon whose start timed out before the helper returned its
-    // handle: the CLI resolves only this scaffold's own daemon record.
-    for (const { scaffold } of instances) {
+    // handle. Each stop is addressed to its own instance's URL: after the body's
+    // stop removed daemon.json, the scrubbed env would otherwise check the
+    // default 127.0.0.1:7433, the machine's own daemon (#3631). An instance
+    // with no URL never started a daemon.
+    for (const { scaffold, url } of instances) {
       try {
-        const stopped = await runRig(["daemon", "stop"], scaffold.env, RIG_BIN, 30_000);
-        if (stopped.code !== 0) throw new Error(`Fixture daemon stop failed: ${stopped.stderr}\n${stopped.stdout}`);
+        if (url) {
+          const stopped = await runRig(["daemon", "stop"], { ...scaffold.env, OPENRIG_URL: url }, RIG_BIN, 30_000);
+          if (stopped.code !== 0) throw new Error(`Fixture daemon stop failed: ${stopped.stderr}\n${stopped.stdout}`);
+        }
       }
       catch (error) { failures.push(error); }
       try {
@@ -126,7 +133,9 @@ describe.skipIf(!nativeAvailable)("two isolated daemon instances with tmux contr
       mkdirSync(scriptDir, { recursive: true });
       writeFileSync(join(scriptDir, "script.json"), JSON.stringify({ steps: [{ kind: "say", text: `INSTANCE_${index}_READY` }] }));
       try {
-        instance.daemon = await spawnScenarioDaemon(scaffold, { rigBin: RIG_BIN, timeoutMs: 60_000 });
+        const port = await findFreePort();
+        instance.url = `http://127.0.0.1:${port}`;
+        instance.daemon = await spawnScenarioDaemon(scaffold, { rigBin: RIG_BIN, timeoutMs: 60_000, port });
       } catch (error) {
         const log = join(scaffold.openrigHome, "daemon.log");
         const detail = existsSync(log) ? readFileSync(log, "utf8").slice(-8_000) : "No daemon log was written.";
@@ -145,6 +154,13 @@ describe.skipIf(!nativeAvailable)("two isolated daemon instances with tmux contr
       const paneHome = native(socket, ["show-environment", "-t", `=${SEAT}`, "HOME"]);
       expect(paneHome).toMatch(/^HOME=/);
       expect(realpathSync(paneHome.slice(5))).toBe(realpathSync(shared.home));
+
+      // An early probe can back off while this server has no seat yet. Captures can succeed via the spawned
+      // fallback meanwhile, so wait for an actual control client before testing the two-instance control path.
+      await vi.waitFor(async () => {
+        await capture(instance);
+        expect(controlSessions(socket)).toHaveLength(1);
+      }, { timeout: 45_000, interval: 100 });
     }
 
     expect(a.scaffold.openrigHome).not.toBe(b.scaffold.openrigHome);
@@ -183,7 +199,7 @@ describe.skipIf(!nativeAvailable)("two isolated daemon instances with tmux contr
     const survivingPane = paneIdentity(b.selection!.socketPath!);
 
     await rig(a, ["down", "scn-baton", "--json", "--force", "--yes"]);
-    const stopped = await runRig(["daemon", "stop"], a.scaffold.env, RIG_BIN, 30_000);
+    const stopped = await runRig(["daemon", "stop"], a.daemon!.readEnv, RIG_BIN, 30_000);
     expect(stopped.code, `${stopped.stderr}\n${stopped.stdout}`).toBe(0);
     expect(() => native(a.selection!.socketPath!, ["has-session", "-t", `=${SEAT}`])).toThrow();
     expect(paneIdentity(b.selection!.socketPath!)).toBe(survivingPane);

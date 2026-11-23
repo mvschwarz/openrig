@@ -47,7 +47,7 @@ function tmuxWithLivePeer(): TmuxAdapter {
     listWindows: async () => [],
     listPanes: async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }],
     // Only the peer is live; the cold-start target's session is gone.
-    hasSession: async (name: string) => name === PEER_SESSION,
+    probeSession: async (name: string) => ({ state: name === PEER_SESSION ? "present" : "absent" }),
   } as unknown as TmuxAdapter;
 }
 
@@ -116,8 +116,7 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     sessionRegistry.updateStatus(implSessionId(), "exited");
   }
 
-  function orchestratorWith(pi: PiResumeAdapter): RestoreOrchestrator {
-    const tmux = tmuxWithLivePeer();
+  function orchestratorWith(pi: PiResumeAdapter, tmux: TmuxAdapter = tmuxWithLivePeer()): RestoreOrchestrator {
     tmux.deliveryGuard = deliveryGuard;
     return new RestoreOrchestrator({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -135,8 +134,8 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     return new SeatColdStarter({
       db,
       deliveryGuard,
-      launchSingleNode: (id, logicalId) => orchestrator.launchSingleNode(id, logicalId),
-      hasSession: name => tmux.hasSession(name),
+      launchSingleNode: (id, logicalId) => orchestrator.launchSingleNode(id, logicalId, { requireCurrentOccupant: true }),
+      probeSession: name => tmux.probeSession(name),
       getNodeLaunchRecipe: () => recipeWithColdStart(),
       log: () => {},
     });
@@ -211,4 +210,92 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     expect(db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id = ?").get(created.qitemId)).toEqual(before);
     expect((before as { state: string }).state).toBe("pending");
   });
+
+  it("parks when the snapshot's occupant is older than the seat's current session (stale snapshot, R2)", async () => {
+    // Conversation A is captured, then the seat runs a NEWER conversation B before going away.
+    // Resuming A from the stale snapshot would silently replace B — the door must park instead.
+    sessionRegistry.updateResumeToken(implSessionId(), "pi_session_file", SESSION_FILE);
+    db.prepare("UPDATE sessions SET restore_policy = 'resume_if_possible' WHERE id = ?").run(implSessionId());
+    snapshotCapture.captureSnapshot(rigId, "manual");            // snapshot occupant = A
+    sessionRegistry.updateStatus(implSessionId(), "exited");      // A ends
+    const newer = sessionRegistry.registerSession(implNodeId, SEAT_SESSION);   // B, a newer id
+    sessionRegistry.updateResumeToken(newer.id, "pi_session_file", "/home/pi/.pi/sessions/conv-99.jsonl");
+    db.prepare("UPDATE sessions SET restore_policy = 'resume_if_possible' WHERE id = ?").run(newer.id);
+    sessionRegistry.updateStatus(newer.id, "exited");             // B ends too; seat dormant, latest = B
+    const sessionsBefore = (db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n;
+
+    const resume = vi.fn(async () => ({ ok: true as const }));
+    const pi = { canResume: vi.fn(() => true), resume } as unknown as PiResumeAdapter;
+    const starter = starterFor(orchestratorWith(pi));
+    starter.notify(SEAT_SESSION);
+    await vi.waitFor(() => expect(ledger()?.startsWith("awaiting_decision")).toBe(true));
+
+    expect(resume).not.toHaveBeenCalled();
+    expect((db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n).toBe(sessionsBefore);
+  });
+
+// #3173 review round 2 (repaired per round 3): the snapshot must NOT contain the target
+// (the old fixture captured it running, which takes the resolved-occupant path instead),
+// and the createSession spy must sit on the tmux instance the orchestrator actually uses.
+it("parks when the seat ran after the snapshot and the snapshot records no occupant", async () => {
+  // Snapshot before the seat's current session existed: only the peer is in it.
+  db.prepare("DELETE FROM sessions WHERE node_id = ?").run(implNodeId);
+  snapshotCapture.captureSnapshot(rigId, "manual");
+  const later = sessionRegistry.registerSession(implNodeId, SEAT_SESSION);
+  sessionRegistry.updateStatus(later.id, "exited"); // exited without intent → dormant, revivable
+  const pi = { canResume: () => false, resume: vi.fn() } as unknown as PiResumeAdapter;
+  const tmux = tmuxWithLivePeer();
+  const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
+  const orchestrator = orchestratorWith(pi, tmux);
+  const starter = starterFor(orchestrator);
+
+  starter.notify(SEAT_SESSION);
+  await vi.waitFor(() => expect(ledger()).toBeDefined());
+
+  expect(ledger()).toContain("awaiting_decision");
+  expect(pi.resume).not.toHaveBeenCalled();
+  expect(createSession).not.toHaveBeenCalled();
+});
+
+// #3173 review round 3 (C): a snapshot that explicitly records the occupant absent while
+// retaining the seat's resume_if_possible history with NO token used to fall through both
+// guards to a fresh launch, replacing a conversation the seat had. It must park.
+it("parks an explicitly-absent snapshot occupant that retains resume history without a token", async () => {
+  // The seat ran under resume_if_possible but its capture carries no resume token.
+  db.prepare("UPDATE sessions SET status = 'exited', restore_policy = 'resume_if_possible' WHERE node_id = ?").run(implNodeId);
+  snapshotCapture.captureSnapshot(rigId, "manual");
+  const pi = { canResume: () => false, resume: vi.fn() } as unknown as PiResumeAdapter;
+  const tmux = tmuxWithLivePeer();
+  const createSession = tmux.createSession as ReturnType<typeof vi.fn>;
+  const orchestrator = orchestratorWith(pi, tmux);
+  const starter = starterFor(orchestrator);
+
+  starter.notify(SEAT_SESSION);
+  await vi.waitFor(() => expect(ledger()).toBeDefined());
+
+  expect(ledger()).toContain("awaiting_decision");
+  expect(pi.resume).not.toHaveBeenCalled();
+  expect(createSession).not.toHaveBeenCalled();
+});
+
+// #3173 review round 4 — the control for the C park: with periodic snapshots on, a seat
+// that crashed before the periodic tick is recorded absent-occupant-with-history by the
+// auto-periodic capture while KEEPING its token as the periodic resume source. That valid
+// carry must not be parked by the C guard; the cold start resumes the exact conversation.
+it("resumes a valid periodic carry instead of parking it", async () => {
+  sessionRegistry.updateResumeToken(implSessionId(), "pi_session_file", SESSION_FILE);
+  db.prepare("UPDATE sessions SET restore_policy = 'resume_if_possible' WHERE id = ?").run(implSessionId());
+  snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+  sessionRegistry.updateStatus(implSessionId(), "exited"); // crashed before the periodic tick
+  snapshotCapture.captureSnapshot(rigId, "auto-periodic"); // occupant absent, token carried
+  const resume = vi.fn(async () => ({ ok: true as const }));
+  const pi = { canResume: vi.fn(() => true), resume } as unknown as PiResumeAdapter;
+  const starter = starterFor(orchestratorWith(pi));
+
+  starter.notify(SEAT_SESSION);
+  await vi.waitFor(() => expect(ledger()).toBe("resumed"));
+
+  expect(resume).toHaveBeenCalledTimes(1);
+  expect(resume.mock.calls[0]!.slice(1, 4)).toEqual(["pi_session_file", SESSION_FILE, "./"]);
+});
 });

@@ -17,7 +17,14 @@ vi.mock("node:fs", async importOriginal => {
 });
 
 const roots: string[] = [];
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.mocked(fs.readFileSync).mockReset();
+  vi.mocked(fs.watch).mockReset();
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
 function fixture() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "policy-reuse-"))); roots.push(root);
   const missions = path.join(root, "missions"), mission = path.join(missions, "trial");
@@ -50,7 +57,7 @@ describe("request-local proof-policy reuse", () => {
     const mission = readMissionReadiness(f.mission);
     expect(mission.issues).toEqual([]);
     expect(mission.slices).toHaveLength(8);
-    const read = vi.spyOn(fs, "readFileSync");
+    const read = vi.spyOn(fs, "readFileSync").mockClear();
     const parse = vi.spyOn(YAML, "parse");
     const result = await f.get();
     expect(result.slices.map((s: any) => s.readiness)).toEqual(expected);
@@ -88,7 +95,7 @@ describe("request-local proof-policy reuse", () => {
 
   it("preserves scopes' null-on-read-failure versus proofFs' thrown error and recovers on the next GET", async () => {
     const f = fixture(), before = await f.get();
-    const original = fs.readFileSync, read = vi.spyOn(fs, "readFileSync");
+    const original = actualFs.readFileSync, read = vi.spyOn(fs, "readFileSync");
     read.mockImplementation(((file: fs.PathOrFileDescriptor, ...args: any[]) => {
       if (file === f.projectFile) throw Object.assign(new Error(`EACCES: ${f.projectFile}`), { code: "EACCES" });
       return (original as any)(file, ...args);
@@ -145,7 +152,8 @@ describe("request-local proof-policy reuse", () => {
     expect(accepted.readiness.state).toBe("ready");
     expect(accepted.readiness).toEqual(readSliceReadiness(dir));
     expect(judge(next, "new")).toMatchObject({ replayed: true, judgment: accepted.judgment, readiness: accepted.readiness });
-    f.write(f.projectFile, { proofPolicy: { judges: ["new", "second"] } });
+    // #3621: adding a judge alone keeps the receipt current; turning everyJudge on is a policy change it can't certify.
+    f.write(f.projectFile, { proofPolicy: { judges: ["new", "second"], everyJudge: true } });
     const replay = judge(next, "new");
     expect(replay.replayed).toBe(true); expect(replay.readiness.state).toBe("unknown");
     expect(replay.readiness).toEqual(readSliceReadiness(dir));
@@ -223,7 +231,7 @@ describe("watch-local proof-policy reuse", () => {
         f.write(f.projectFile, bad); await o.event(); expect(readSliceReadiness(f.dirs[0]!).state).toBe("unknown");
         f.write(f.projectFile, project); await o.event(); expect(readSliceReadiness(f.dirs[0]!).policy!.judges).toEqual(["judge@trial"]);
       }
-      const original = fs.readFileSync, read = vi.spyOn(fs, "readFileSync");
+      const original = actualFs.readFileSync, read = vi.spyOn(fs, "readFileSync");
       read.mockImplementation(((file: fs.PathOrFileDescriptor, ...args: any[]) => {
         if (file === f.projectFile) throw Object.assign(new Error("policy denied"), { code: "EACCES" });
         return (original as any)(file, ...args);

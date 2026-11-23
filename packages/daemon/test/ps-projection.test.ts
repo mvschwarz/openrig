@@ -1,10 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// #3636 — hoisted importOriginal passthrough: every export stays the real
+// implementation; only the two inventory builders are wrapped, so the scoping
+// tests can see which rigs a projection folds. Behavior is unchanged.
+vi.mock("../src/domain/node-inventory.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/domain/node-inventory.js")>();
+  return {
+    ...actual,
+    getNodeInventoryForAllRigs: vi.fn(actual.getNodeInventoryForAllRigs),
+    getNodeInventoryForRigs: vi.fn(actual.getNodeInventoryForRigs),
+  };
+});
 import type Database from "better-sqlite3";
 import { monotonicFactory } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention, arbitratedNeedsInputSignal } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
-import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { attachTerminalActivityAndWork, getNodeInventory, getNodeInventoryForAllRigs, getNodeInventoryForRigs } from "../src/domain/node-inventory.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -48,6 +60,95 @@ describe("PsProjectionService", () => {
     db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(id, rigId, "manual", "complete", "{}", createdAt ?? new Date().toISOString().replace("T", " ").slice(0, 19));
   }
+
+  it("keeps an unlaunched held seat visible without degrading an otherwise running rig, until it owes work", () => {
+    const rigId = seedRig("planned-hold");
+    seedSession(seedNode(rigId, "worker"), "running");
+    const held = seedNode(rigId, "optional.worker");
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+
+    const row = () => attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db }).find((n) => n.nodeId === held)!;
+    expect(row()).toMatchObject({ heldReason: "on demand", needsAttention: false, hasAssignedWork: false });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "running", status: "partial", runningCount: 1, attentionCount: 0 });
+
+    const destination = "optional-worker@planned-hold";
+    db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
+      VALUES ('q-planned', datetime('now'), datetime('now'), 'operator@test', ?, 'pending', 'routine', 'routine', 'work')`).run(destination);
+    expect(row()).toMatchObject({ needsAttention: true, hasAssignedWork: true });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1, attentionCount: 1 });
+  });
+
+  it("keeps attention on a held seat whose earlier restore already ended failed", () => {
+    const rigId = seedRig("held-after-failure");
+    seedSession(seedNode(rigId, "worker"), "running");
+    const held = seedNode(rigId, "optional.worker");
+    // An earlier restore named this seat and ended `failed`; it recorded no startup error, so only
+    // the restore outcome carries the fact. A later subset launch leaves the seat out and writes
+    // `node.held` for it without recording any result.
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'restore.completed', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ result: { nodes: [{ nodeId: held, status: "failed" }] } }));
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+
+    const row = () => attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db }).find((n) => n.nodeId === held)!;
+    expect(row()).toMatchObject({ heldReason: "on demand", restoreOutcome: "failed", needsAttention: true, hasAssignedWork: false });
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1, attentionCount: 1 });
+  });
+
+  it("does not count all held seats as running or hide an unexpected detached seat", () => {
+    const rigId = seedRig("held-only");
+    const held = seedNode(rigId, "optional.worker");
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+      .run(rigId, held, JSON.stringify({ reason: "on demand" }));
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "stopped", runningCount: 0, attentionCount: 0 });
+    seedSession(seedNode(rigId, "running"), "running");
+    seedNode(rigId, "unexpected");
+    expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "degraded", runningCount: 1 });
+  });
+
+  it("retains attention for held seats with startup errors or an unresolvable work destination", () => {
+    const rigId = seedRig("held-errors");
+    const failed = seedNode(rigId, "optional.failed");
+    const unresolved = seedNode(rigId, "unresolved");
+    for (const node of [failed, unresolved]) {
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.held', ?, datetime('now'))")
+        .run(rigId, node, JSON.stringify({ reason: "on demand" }));
+    }
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.startup_failed', ?, datetime('now'))")
+      .run(rigId, failed, JSON.stringify({ error: "launch failed" }));
+    const nodes = attachTerminalActivityAndWork(getNodeInventory(db, rigId), { db });
+    expect(nodes.map((node) => node.needsAttention)).toEqual([true, true]);
+    expect(ps.getEntries()[0]!.attentionCount).toBe(2);
+  });
+
+  // A pane restore left as a bare shell (no harness started) carries its own marker and isn't counted running. A seat
+  // that needs attention for another reason (an identity question here) keeps the existing running count, and so does a
+  // later launch on a once-bare seat: the marker belongs to the session that recorded it.
+  it("a seat restore left as a bare shell isn't counted running; other attention still is", () => {
+    const rigId = seedRig("shell-only");
+    const shell = seedNode(rigId, "shell");
+    const asked = seedNode(rigId, "asked");
+    const relaunched = seedNode(rigId, "relaunched");
+    const bus = new EventBus(db);
+    for (const [nodeId, stage] of [[shell, "harness_not_started"], [asked, "identity_verification"], [relaunched, "harness_not_started"]] as const) {
+      const id = seedSession(nodeId, "running");
+      db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = ?").run(id);
+      bus.emit({ type: "node.startup_failed", rigId, nodeId, error: `fixture ${stage}`, sessionId: id, stage });
+    }
+    // The relaunch's own session needs attention (an identity check that records no startup failure).
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(relaunched);
+    const next = seedSession(relaunched, "running");
+    db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = ?").run(next);
+
+    const entries = ps.getEntries();
+    expect(entries[0]!.nodeCount).toBe(3);
+    expect(entries[0]!.runningCount).toBe(2);
+    const inventory = getNodeInventory(db, rigId);
+    expect(inventory.find((node) => node.logicalId === "shell")).toMatchObject({ startupStatus: "attention_required", latestErrorStage: "harness_not_started" });
+    expect(inventory.find((node) => node.logicalId === "asked")).toMatchObject({ startupStatus: "attention_required", latestErrorStage: "identity_verification" });
+    expect(inventory.find((node) => node.logicalId === "relaunched")).toMatchObject({ sessionStatus: "running", startupStatus: "attention_required", latestErrorStage: null });
+  });
 
   // T1: All nodes running -> status: running
   it("all nodes running -> status: running", () => {
@@ -539,6 +640,34 @@ describe("PsProjectionService", () => {
       expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), null)).toBe(true);
     });
 
+    // #3571: a current Claude auth or billing StopFailure counts, as attention and never as a question.
+    const stopFailure = (error: string, reason: string, over: Partial<AgentActivity> = {}): AgentActivity => ({
+      ...idleActivity("unknown"), reason, rawEvent: "StopFailure", rawSubtype: error, evidence: error, runtime: "claude-code", ...over,
+    } as AgentActivity);
+    const claudeSeat = baseEntry({ runtime: "claude-code" } as Partial<NodeInventoryEntry>);
+    it("#3571: counts a current Claude auth or billing failure, which an arbitrated clear doesn't cancel", () => {
+      expect(seatNeedsAttention(claudeSeat, stopFailure("authentication_failed", "provider_auth_error"), null)).toBe(true);
+      expect(seatNeedsAttention(claudeSeat, stopFailure("billing_error", "provider_billing_error"), false)).toBe(true);
+    });
+    it.each([
+      { name: "a generic provider error", activity: stopFailure("server_error", "provider_error") },
+      { name: "an unlisted value", activity: stopFailure("auth_expired", "provider_error") },
+      { name: "a stale report", activity: stopFailure("authentication_failed", "stale_runtime_hook", { stale: true }) },
+      { name: "a generation-mismatched report", activity: stopFailure("billing_error", "generation_mismatch", { stale: true }) },
+      { name: "another runtime's report", activity: stopFailure("authentication_failed", "provider_auth_error", { runtime: "codex" }) },
+      { name: "a typed reason on another event", activity: stopFailure("authentication_failed", "provider_auth_error", { rawEvent: "Notification" }) },
+      { name: "a reason the value doesn't map to", activity: stopFailure("server_error", "provider_auth_error") },
+      { name: "the other typed reason", activity: stopFailure("authentication_failed", "provider_billing_error") },
+      { name: "a report marked stale", activity: stopFailure("authentication_failed", "provider_auth_error", { stale: true }) },
+      { name: "a fallback reading", activity: stopFailure("authentication_failed", "provider_auth_error", { fallback: true }) },
+    ])("#3571: doesn't count $name", ({ activity }) => {
+      expect(seatNeedsAttention(claudeSeat, activity, null)).toBe(false);
+    });
+    it("#3571: doesn't count a Claude failure on a seat of another runtime", () => {
+      const codexSeat = baseEntry({ runtime: "codex" } as Partial<NodeInventoryEntry>);
+      expect(seatNeedsAttention(codexSeat, stopFailure("authentication_failed", "provider_auth_error"), null)).toBe(false);
+    });
+
     it("#180 review: arbitratedNeedsInputSignal is tri-state over observed needs-input evidence", () => {
       const zero = { count: 0, reason: null };
       const observed = (rung: EvidenceRungId) => ({ rung, observedAt: new Date().toISOString() });
@@ -743,5 +872,92 @@ describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () =
     } finally {
       db.close();
     }
+  });
+});
+
+describe("#3636 — the ps projection folds only the rigs it returns", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    vi.mocked(getNodeInventoryForAllRigs).mockClear();
+    vi.mocked(getNodeInventoryForRigs).mockClear();
+  });
+
+  afterEach(() => { vi.useRealTimers(); db.close(); });
+
+  function seedRunningRig(
+    name: string,
+    opts: { id?: string; archived?: boolean; latest?: "running" | "stopped" } = {},
+  ): { rigId: string; nodeId: string } {
+    const rigId = opts.id ?? `rig-${name}`;
+    const nodeId = `node-${rigId}`;
+    db.prepare("INSERT INTO rigs (id, name, archived_at) VALUES (?, ?, ?)")
+      .run(rigId, name, opts.archived ? "2026-11-20 00:00:00" : null);
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES (?, ?, 'dev', 'claude-code', '/tmp')").run(nodeId, rigId);
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, 'running', '2026-11-20 12:00:00')")
+      .run(sessionId(), nodeId, `tmux-${rigId}`);
+    if (opts.latest === "stopped") {
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, 'stopped', '2026-11-20 13:00:00')")
+        .run(sessionId(), nodeId, `tmux-${rigId}`);
+    }
+    return { rigId, nodeId };
+  }
+
+  it("the default projection builds the inventory only for the active rigs, with the same entries as before", () => {
+    const active = seedRunningRig("active");
+    const archived = seedRunningRig("archived", { archived: true });
+    // One name, three rigs: two active generations and one archived.
+    const twinA = seedRunningRig("twin", { id: "rig-twin-a" });
+    const twinB = seedRunningRig("twin", { id: "rig-twin-b" });
+    const twinOld = seedRunningRig("twin", { id: "rig-twin-old", archived: true });
+    const ps = new PsProjectionService({ db });
+    // One clock for both projections, so uptime can't roll over between them.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+
+    const entries = ps.getEntries();
+
+    expect(vi.mocked(getNodeInventoryForAllRigs)).not.toHaveBeenCalled();
+    expect(vi.mocked(getNodeInventoryForRigs)).toHaveBeenCalledTimes(1);
+    expect([...vi.mocked(getNodeInventoryForRigs).mock.calls[0]![1]].sort()).toEqual([active.rigId, twinA.rigId, twinB.rigId].sort());
+    expect(entries.map((e) => [e.rigId, e.runningCount]).sort()).toEqual(
+      [[active.rigId, 1], [twinA.rigId, 1], [twinB.rigId, 1]].sort(),
+    );
+    // Same per-rig entries the unscoped (all-rigs) pass gives.
+    expect(entries).toEqual(ps.getEntries({ includeArchived: true }).filter((e) => !e.isArchived));
+
+    vi.mocked(getNodeInventoryForRigs).mockClear();
+    const archivedEntries = ps.getEntries({ archivedOnly: true });
+    expect(archivedEntries.map((e) => [e.rigId, e.runningCount]).sort()).toEqual([[archived.rigId, 1], [twinOld.rigId, 1]].sort());
+    expect([...vi.mocked(getNodeInventoryForRigs).mock.calls[0]![1]].sort()).toEqual([archived.rigId, twinOld.rigId].sort());
+    expect(archivedEntries).toEqual(ps.getEntries({ includeArchived: true }).filter((e) => e.isArchived));
+  });
+
+  it("countRunningSeats equals the includeArchived runningCount sum and folds only rigs with a running latest registration", () => {
+    const active = seedRunningRig("active");
+    const archived = seedRunningRig("archived", { archived: true }); // forced archival: still running, still counted
+    seedRunningRig("stopped-now", { latest: "stopped" });            // an older running row doesn't count
+    const gone = seedRunningRig("gone");                             // running row, but the session is confirmed missing
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-gone', ?, 'tmux', 'tmux-rig-gone', '%1')")
+      .run(gone.nodeId);
+    new SeatIdentityStore(db).upsert({
+      nodeId: gone.nodeId,
+      verdict: "pane_missing",
+      evidenceSource: "tmux_session",
+      reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: "tmux-rig-gone",
+      // After the ULID registration time, so the verdict applies to this session.
+      observedAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const ps = new PsProjectionService({ db });
+
+    const count = ps.countRunningSeats();
+
+    expect(count).toBe(2);
+    expect(vi.mocked(getNodeInventoryForAllRigs)).not.toHaveBeenCalled();
+    expect([...vi.mocked(getNodeInventoryForRigs).mock.calls[0]![1]].sort()).toEqual([active.rigId, archived.rigId, gone.rigId].sort());
+    expect(count).toBe(ps.getEntries({ includeArchived: true }).reduce((n, entry) => n + entry.runningCount, 0));
   });
 });

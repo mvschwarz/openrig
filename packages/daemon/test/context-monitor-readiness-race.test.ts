@@ -98,6 +98,8 @@ describe("ContextMonitor readiness ownership", () => {
     const tmux = {
       sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
       capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
+      listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: home, width: 80, height: 24, active: true }]),
+      getPanePid: vi.fn(async () => 4242), getPaneCommand: vi.fn(async () => "claude"),
     } as unknown as TmuxAdapter;
     const adapter: RuntimeAdapter = {
       runtime: "claude-code", listInstalled: async () => [],
@@ -158,7 +160,7 @@ describe("ContextMonitor readiness ownership", () => {
       expect(inventory).toMatchObject([{ nodeId: node.id, startupStatus: ready ? "ready" : "attention_required" }]);
       expect(compactNodeProjection(inventory)).toMatchObject([{ startupStatus: ready ? "ready" : "attention_required" }]);
       expect(check).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, tmuxSession: session.sessionName }),
-        ...(runtime === "codex" ? [{ observationPass: expect.any(ObservationPass) }] : []));
+        { observationPass: expect.any(ObservationPass) });
       const first = state(session.id);
       await monitor.pollOnce();
       expect(state(session.id)).toEqual(first);

@@ -17,12 +17,19 @@ export const FEATURE_SCOPES: ReadonlyArray<{ scope: string; usedBy: string }> = 
   { scope: "users:read", usedBy: "named-bot delivery: bots.info names the app a bot's post in the bot inbox belongs to (InboundRouter.routeBot)" },
 ];
 
+/** Optional bot scopes used only when a user explicitly creates a private-channel manifest. */
+export const PRIVATE_CHANNEL_SCOPES: readonly string[] = ["groups:history", "groups:read"];
+
+/** The existing admitted `message` payload can arrive from private channels through this event. */
+export const PRIVATE_CHANNEL_MESSAGE_SUBSCRIPTION = { subscription: "message.groups", scope: "groups:history" } as const;
+
 /** The Slack event payload types the inbound path admits (the `type` gate of ingestDecision). */
 export const ADMITTED_EVENT_TYPES: readonly string[] = ["message", "app_mention", "reaction_added"];
 
 /** Admitted payload type → the Slack bot event to subscribe to, and the scope Slack requires for
  *  it. A subscription name is not always the payload type: `message.channels` delivers payloads
- *  of type `message`. Public channels only; no DM or private-channel subscriptions. */
+ *  of type `message`. The default subscription is public-channel-only; the private-channel
+ *  manifest adds a separate optional subscription. No DM subscription is requested. */
 export const EVENT_SUBSCRIPTIONS: Readonly<Record<string, { subscription: string; scope: string }>> = {
   message: { subscription: "message.channels", scope: "channels:history" },
   app_mention: { subscription: "app_mention", scope: "app_mentions:read" },

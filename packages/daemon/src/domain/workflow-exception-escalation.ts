@@ -156,13 +156,17 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
         ...(toPerson ? { humanAlert: true } : {}),
       });
     let created;
-    try {
-      created = await createItem(route.destinationSession, route.tier, route.humanRouted === true);
-    } catch (error) {
-      if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
-      // An unavailable agent rig may use the registered human fallback.
-      // Other admission/storage failures retain their original diagnosis.
+    if (!route.humanRouted && !deps.queueRepo.acceptsDestination(route.destinationSession)) {
       created = await createItem(workflowHumanDestination(deps.humanFallbackSeat), "human-gate", true);
+    } else {
+      try {
+        created = await createItem(route.destinationSession, route.tier, route.humanRouted === true);
+      } catch (error) {
+        if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
+        // An unavailable agent rig may use the registered human fallback.
+        // Other admission/storage failures retain their original diagnosis.
+        created = await createItem(workflowHumanDestination(deps.humanFallbackSeat), "human-gate", true);
+      }
     }
     log(
       `workflow exception: stuck_overdue item ${created.qitemId} created for instance ${e.instanceId} (step ${e.stepId ?? "?"}, ${route.position})`,

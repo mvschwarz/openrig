@@ -2,11 +2,13 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, markReservationRetained, processStartToken } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { daemonFetch } from "../daemon-transport.js";
 import { personRegistrationOffer } from "../person-registration-offer.js";
+import { ensureDefaultWorkspace } from "@openrig/daemon/instance-initialization";
 import {
   startDaemon,
   stopDaemon,
@@ -96,22 +98,29 @@ export function realDeps(): LifecycleDeps {
     readProcessState: (pid) => readProcessState(pid),
   });
 
+  // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
+  const pidNamespace = (): string | undefined => {
+    if (process.platform !== "linux") return "host";
+    try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
+  };
+
   return {
     processLiveness,
     acquireStartLock: () => {
-      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness });
-      if (lock.archived) console.error(`A start reservation from before this boot was left behind; archived it as ${lock.archived}`);
+      const lock = acquireDaemonStartLock(OPENRIG_DIR, { bootId: currentBootId(), bootedAtMs: bootedAtMs(), processLiveness, pidNamespace: pidNamespace() });
+      if (lock.archived) console.error(`An abandoned start reservation (from before this boot, or whose recorded launcher and child are both gone) was archived as ${lock.archived}`);
       return lock;
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
-    fetch: async (url) => {
-      const res = await fetchWithTimeout(globalThis.fetch, url, {}, {
+    fetch: async (url, init) => {
+      let body = "";
+      const res = await fetchWithTimeout(daemonFetch(url, globalThis.fetch), url, init?.signal ? { signal: init.signal } : {}, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
+        consumeResponse: async (response) => { body = await response.text(); },
       });
-      // OPR.0.4.3.21 — expose json() so getDaemonStatus can read the enriched
-      // /healthz event-loop evidence. Bound to this Response instance.
-      return { ok: res.ok, json: () => res.json() };
+      // Read the finite health body inside the deadline, then expose its cached JSON to lifecycle evidence readers.
+      return { ok: res.ok, json: async () => JSON.parse(body) as unknown };
     },
     isPortOccupied: (host, port) => new Promise((resolve) => {
       const server = createServer();
@@ -163,11 +172,12 @@ export function realDeps(): LifecycleDeps {
     isProcessAlive,
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
     listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
-    // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
-    pidNamespace: () => {
-      if (process.platform !== "linux") return "host";
-      try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
-    },
+    pidNamespace,
+    // #3315: what the start records and stop checks to confirm a start reservation still names its child.
+    bootId: currentBootId,
+    processStartToken,
+    releaseStartReservation: archiveSpentReservation,
+    retainStartReservation: markReservationRetained,
   };
 }
 
@@ -178,7 +188,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("start")
     .description("Start the daemon")
-    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on.\n")
+    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on; so is one from\nthis boot whose recorded launcher and child are both gone in this shell's pid namespace and that no stop retained.\n")
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")
@@ -268,10 +278,17 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             // check in startup.ts honors the flag.
             skipKernelBoot: skipKernel,
             allowDbConflict: opts.allowDbConflict,
+            readinessWaitSeconds: config.daemon.startReadinessWaitSeconds,
           },
           getDeps(),
         );
         console.log(`Daemon started on port ${state.port} (pid ${state.pid})`);
+        // The daemon leaves a workspace.root that holds a project of its own as it is, and its log says so; so does this
+        // output, from the same read-only check.
+        const workspace = ensureDefaultWorkspace({ root: config.workspace.root, dryRun: true });
+        if (workspace.existingProject) {
+          console.log(`workspace.root holds a project of its own (${workspace.existingProject}); OpenRig left it as it is and reads that project's own id.`);
+        }
 
         // V0.3.1 slice 05 forward-fix #3 architectural — --wait-for-kernel
         // post-bind polling. Kernel boot is fire-and-forget after the
@@ -320,7 +337,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("stop")
     .description("Stop the daemon (10s shutdown budget; 12s process wait; incomplete drain exits nonzero)")
-    .addHelpText("after", "\nSends at most one SIGTERM to a live target and verifies the original PID and listener. Repeated signals join shutdown.\nFor a recorded target, missing/stale receipts and incomplete drains exit nonzero, including retries.\nTarget state is retained until a matching clean receipt; status reads preserve unverified state.\nNo target is a distinct no-op, never clean-drain certification; unbound incomplete evidence stays unverified.\nInspect OPENRIG_HOME/daemon-shutdown.json and daemon.log for the phase and outcome.\nThe bound covers asynchronous shutdown; an event-loop wedge still requires operator recovery.\n")
+    .addHelpText("after", "\nSends at most one SIGTERM to a live target and verifies the original PID and listener. Repeated signals join shutdown.\nFor a recorded target, missing/stale receipts and incomplete drains exit nonzero, including retries.\nTarget state is retained until a matching clean receipt; status reads preserve unverified state.\nNo target is a distinct no-op, never clean-drain certification; unbound incomplete evidence stays unverified.\nInspect OPENRIG_HOME/daemon-shutdown.json and daemon.log for the phase and outcome.\nThe bound covers asynchronous shutdown; an event-loop wedge still requires operator recovery.\nWith no recorded target, the child of a start that ended pending is signalled only when its reservation still names it\n(same boot, launcher gone, same process, its endpoint checked) and its listener names it or does not answer in time.\n")
     .action(async () => {
       try {
         const outcome = await stopDaemon(getDeps());

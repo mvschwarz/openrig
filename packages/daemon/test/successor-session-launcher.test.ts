@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SuccessorSessionLauncher } from "../src/domain/successor-session-launcher.js";
+import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
@@ -63,6 +64,84 @@ describe("SuccessorSessionLauncher", () => {
       tmuxOptionDefaults,
     });
   }
+
+  it("uses the seat identity for guarded cutover when a detached binding shares the pane", async () => {
+    db.exec(`INSERT INTO rigs (id,name) VALUES ('rig-1','rig');
+      INSERT INTO nodes (id,rig_id,logical_id,runtime) VALUES ('live','rig-1','dev.live','codex'), ('old','rig-1','dev.old','codex');
+      INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b1','live','dev-live@rig','%7'), ('b2','old','dev-old@rig','%7');
+      INSERT INTO sessions (id,node_id,session_name,status) VALUES ('s1','live','dev-live@rig','running'), ('s2','old','dev-old@rig','detached');`);
+    expect(resolveGuardTarget(db, "%7")).toBeNull();
+    expect(resolveGuardTarget(db, "live")).toMatchObject({ nodeId: "live", pane: "%7" });
+    const resolveWrite = (target: string) => resolveGuardTarget(db, target)?.nodeId === "live"
+      ? { ok: true } : { ok: false, code: "guard_target_unknown", message: "ambiguous target" };
+    signalPaneProcess.mockImplementation(async (target: string) => resolveWrite(target));
+    respawnPane.mockImplementation(async (target: string) => resolveWrite(target));
+    isPaneDead.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    const tmux = { deliveryGuard: { maybeTarget: (name: string) => resolveGuardTarget(db, name) }, createSession, listPanes, killSession, respawnPane, setRemainOnExit,
+      signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG",
+      runtimeAdapters: { codex: fakeAdapter("codex") }, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5 });
+    const result = await subject.createSuccessor({ node: { id: "live", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-live@rig" });
+    expect(result.ok).toBe(true);
+    expect(signalPaneProcess).toHaveBeenCalledWith("live", "TERM");
+    expect(signalPaneProcess).toHaveBeenCalledWith("live", "KILL");
+    expect(respawnPane).toHaveBeenCalledWith("live", "/bin/zsh", expect.anything());
+    expect(isPaneDead).toHaveBeenCalledWith("%7");
+    expect(db.prepare("SELECT node_id, tmux_session, tmux_pane FROM bindings WHERE id = ?").get("b2"))
+      .toEqual({ node_id: "old", tmux_session: "dev-old@rig", tmux_pane: "%7" });
+    expect(db.prepare("SELECT node_id, session_name, status FROM sessions WHERE id = ?").get("s2"))
+      .toEqual({ node_id: "old", session_name: "dev-old@rig", status: "detached" });
+  });
+
+  it("does not cut over when the selected pane disagrees with the managed binding", async () => {
+    const tmux = { deliveryGuard: { maybeTarget: () => ({ session: "dev-live@rig", pane: "%8" }) }, listPanes,
+      respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: fakeAdapter("codex") } });
+    const result = await subject.createSuccessor({ node: { id: "live", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-live@rig" });
+    expect(result).toMatchObject({ ok: false, code: "pane_unresolved", replacementStarted: false });
+    expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("leaves the predecessor untouched when launch preflight refuses or throws (throws: %s)", async throws => {
+    const preflightLaunch = vi.fn(async () => {
+      if (throws) throw new Error("preflight unavailable");
+      return { ok: false as const, error: "policy conflicts with the successor" };
+    });
+    const runtime = { ...fakeAdapter("codex"), preflightLaunch };
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead,
+      getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const guarded = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: runtime } });
+    const onReplacementStarted = vi.fn();
+    const result = await guarded.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig", onReplacementStarted });
+    expect(result).toMatchObject({ ok: false, code: "successor_preflight_failed", replacementStarted: false });
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
+    expect(launchHarness).not.toHaveBeenCalled();
+    expect(onReplacementStarted).not.toHaveBeenCalled();
+  });
+
+  it("preflights the same binding it launches and retains an inconclusive-policy warning", async () => {
+    const preflightLaunch = vi.fn(async () => ({ ok: true as const, warnings: ["policy not verified: native read timed out"] }));
+    const runtime = { ...fakeAdapter("codex"), preflightLaunch };
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead,
+      getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const guarded = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: runtime } });
+    signalPaneProcess.mockImplementation(async () => {
+      expect(preflightLaunch).toHaveBeenCalledTimes(1);
+      return { ok: true };
+    });
+    const result = await guarded.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w",
+      codexPermissions: { approval: "never", filesystem: { ":minimal": "read" } } },
+      departingSessionName: "dev-impl@rig", occupantGeneration: "successor-generation" });
+    expect(result).toMatchObject({ ok: true, warnings: ["policy not verified: native read timed out"] });
+    expect(preflightLaunch.mock.calls[0]?.[0]).toBe(launchHarness.mock.calls[0]?.[0]);
+  });
 
   it("revokes the staged attempt if its separate readiness probe fails", async () => {
     db.prepare("INSERT INTO rigs (id,name) VALUES ('rig-bound','bound')").run();
@@ -288,6 +367,52 @@ describe("SuccessorSessionLauncher", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
   });
 
+  it("#3253: a handover chooses its path before the retiree is signalled, and a limit never stops it after that", async () => {
+    const order: string[] = [];
+    const notice = { state: "not_applied", kind: "unsupported", reason: "not Linux", retryable: false, requested: { tasksMax: 256 } };
+    const seatProcessLimitsRecoveryPlan = vi.fn(async (nodeId: string) => { order.push("plan"); return nodeId === "n" ? notice : null; });
+    const signal = vi.fn(async (...a: unknown[]) => { order.push("signal"); return (signalPaneProcess as any)(...a); });
+    // the respawn goes ahead without the limit, with the warning (the adapter's recovery mode), never a refusal
+    const respawn = vi.fn(async (...a: unknown[]) => ({ ...(await (respawnPane as any)(...a)), processLimits: notice,
+      warnings: ["process_limits requested, not applied: …"] }));
+    const tmux = { createSession, listPanes, killSession, respawnPane: respawn, setRemainOnExit, signalPaneProcess: signal, isPaneDead,
+      getDefaultShell, getPaneCommand, seatProcessLimitsRecoveryPlan } as unknown as TmuxAdapter;
+    const l = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      sessionEnv: { OPENRIG_HOME: "/home" }, newId: () => "01ABCDEFG", runtimeAdapters: { codex: fakeAdapter("codex") },
+      readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await l.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: true, processLimits: notice });  // the structured warning reaches the caller
+    expect(order[0]).toBe("plan");
+    expect(respawn).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ processLimitsMode: "recovery" }));
+  });
+
+  it("#3253: readiness failure after a respawn without the limit forwards the notice", async () => {
+    const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+    respawnPane.mockResolvedValue({ ok: true, processLimits: notice });
+    checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "start_agent", successorLaunched: true, processLimits: notice });
+  });
+
+  it("#3253: the staged successor (provider switch) is created in recovery mode and carries the notice, also when it fails", async () => {
+    const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+    const line = "process_limits requested, not applied: the user manager timed out";
+    createSession.mockResolvedValue({ ok: true, processLimits: notice, warnings: [line] });
+    const stage = () => launcher().stageSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, canonicalSession: "a@r",
+      stagingSession: "openrig-switch-1", occupantGeneration: "gen-1", onPaneCreated: () => {}, staged: { prepare: async () => [] } });
+    const res = await stage();
+    expect(createSession).toHaveBeenCalledWith("openrig-switch-1", "/w", expect.anything(), { processLimitsMode: "recovery" });
+    expect(res).toMatchObject({ ok: true, processLimits: notice });
+    expect((res as { notes?: string[] }).notes).toContain(line);
+
+    checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+    expect(await stage()).toMatchObject({ ok: false, processLimits: notice });
+    // a step after the create that throws keeps it too
+    listPanes.mockRejectedValueOnce(new Error("lost server"));
+    expect(await stage()).toMatchObject({ ok: false, code: "successor_launch_failed", processLimits: notice });
+  });
+
   it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {
     isPaneDead.mockResolvedValue(false); // never becomes dead
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
@@ -506,6 +631,14 @@ describe("SuccessorSessionLauncher", () => {
     expect(checkReady).toHaveBeenCalledTimes(1);
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+  });
+
+  it("#3044: a readiness failure keeps what the launch applied, for the recovery to commit with the successor", async () => {
+    const appliedLaunch = { axis: "permission", value: "auto", source: "launch" };
+    launchHarness.mockResolvedValue({ ok: true, resumeToken: "t", resumeType: "claude_id", appliedLaunch });
+    checkReady.mockRejectedValueOnce(new Error("tmux socket closed"));
+    const threw = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(threw).toMatchObject({ ok: false, step: "start_agent", successorLaunched: true, appliedLaunch });
   });
 
   it("readiness reports attention_required (auth/trust gate) → structured failure, preserved seat NOT killed", async () => {

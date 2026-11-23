@@ -48,6 +48,7 @@ describe("cold-start stop attribution through real lifecycle writers", () => {
     tmux = new TmuxAdapter();
     tmux.deliveryGuard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
     vi.spyOn(tmux, "hasSession").mockImplementation(async name => live.has(name));
+    vi.spyOn(tmux, "probeSession").mockImplementation(async name => ({ state: live.has(name) ? "present" : "absent" }));
     vi.spyOn(tmux, "probeSession").mockImplementation(async name => live.has(name) ? { state: "present" } : { state: "absent" });
     vi.spyOn(tmux, "killSession").mockImplementation(async name => { live.delete(name); return { ok: true }; });
     stop = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: tmux });
@@ -73,7 +74,7 @@ describe("cold-start stop attribution through real lifecycle writers", () => {
     const logs: string[] = [];
     const guard = tmux.deliveryGuard;
     if (!guard) throw new Error("fixture requires a lifecycle guard");
-    new SeatColdStarter({ db, deliveryGuard: guard, launchSingleNode: launched, hasSession: name => tmux.hasSession(name),
+    new SeatColdStarter({ db, deliveryGuard: guard, launchSingleNode: launched, probeSession: name => tmux.probeSession(name),
       getNodeLaunchRecipe: () => ({ rigSpec: recipe }), log: line => { logs.push(line); } }).notify(target);
     await vi.waitFor(() => expect(logs.length).toBeGreaterThan(0));
     return launched.mock.calls.length;

@@ -3,7 +3,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { createMcpServer, dropUnfilledSeat, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
-import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, startMcpHttpServer } from "../mcp-http.js";
+import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, rotateGrant, startMcpHttpServer } from "../mcp-http.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -146,10 +146,12 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
     .option("--root <name...>", "Shared file roots (OPENRIG_FILES_ALLOWLIST names) whose artifacts it may read")
     .option("--workspace", "Also read the work tree and context (rig_slices, rig_mission, rig_context_*)")
     .option("--owner", "An owner grant: every tool and object, like the local owner")
-    .action(async (name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean }) => {
+    .option("--person <entity_id>", "The registered person (rig gateway human list) this connection may answer the team's questions for, with rig_question_list and rig_question_answer: only what they explicitly say. Never inferred from the seat or --owner")
+    .action(async (name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean; person?: string }) => {
       const file = mcpTokenFilePath();
       try {
-        const issued = await addGrant(file, { name, seat: opts.seat, rigs: opts.rig ?? [], roots: opts.root ?? [], workspace: opts.workspace === true, owner: opts.owner === true });
+        const issued = await addGrant(file, { name, seat: opts.seat, rigs: opts.rig ?? [], roots: opts.root ?? [], workspace: opts.workspace === true, owner: opts.owner === true,
+          ...(opts.person !== undefined ? { person: opts.person } : {}) });
         console.log(`Token for ${name}, shown once (only its hash is kept in ${file}):`);
         console.log(issued);
         console.log(`The client sends it as: Authorization: Bearer <token>. Revoke it with: rig mcp token revoke ${name}`);
@@ -171,7 +173,7 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       if (grants === null) { console.log(`No grants: rig mcp serve --http serves loopback only, unauthenticated (${file} doesn't exist).`); return; }
       if (shown.length === 0) console.log(`No grants left in ${file}: every HTTP request is refused until one is added.`);
       for (const grant of shown) {
-        console.log(`${grant.name}: seat ${grant.seat}${grant.owner ? ", owner" : ""}; rigs ${grant.rigs.join(", ") || "(none)"}; roots ${grant.roots.join(", ") || "(none)"}${grant.workspace ? "; workspace" : ""}`);
+        console.log(`${grant.name}: seat ${grant.seat}${grant.owner ? ", owner" : ""}; rigs ${grant.rigs.join(", ") || "(none)"}; roots ${grant.roots.join(", ") || "(none)"}${grant.workspace ? "; workspace" : ""}${grant.person ? `; answers for ${grant.person}@external` : ""}`);
       }
     });
   token
@@ -181,6 +183,24 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       try {
         if (!(await revokeGrant(mcpTokenFilePath(), name))) { console.error(`No grant named ${name}.`); process.exitCode = 1; return; }
         console.log(`Revoked ${name}: its next request is refused. Its rows and records stay.`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+  token
+    .command("rotate <name>")
+    .description(
+      "Issue a new token for an existing file-backed grant, keeping its name, seat, scopes, flags and createdAt; clients must switch to the new token, the old one stops working at the next authentication, and rotation does not cancel work already authorized",
+    )
+    .action(async (name: string) => {
+      try {
+        const issued = await rotateGrant(mcpTokenFilePath(), name);
+        console.log(`New token for ${name}, shown once (only its hash is kept):`);
+        console.log(issued);
+        console.log("Clients must switch to it: the previous token stops matching at the next authentication, and rotation does not cancel work already authorized.");
+        console.log("File-backed grants only: tokens behind --grant-service and provider credentials are not rotated here.");
+        console.log(`Revoke with: rig mcp token revoke ${name}`);
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

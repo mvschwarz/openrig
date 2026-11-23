@@ -4,6 +4,7 @@ import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} 
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { rigIdForHandle } from "../rig-handle.js";
+import { snapshotRigIds } from "../snapshot-rig-handle.js";
 
 const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
@@ -25,8 +26,42 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
 
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigId = opts.rig;
-      const target = await rigIdForHandle(client, rigId);
-      if (!target.ok) { console.error(target.message); process.exitCode = 1; return; }
+      const candidates = await snapshotRigIds(client, rigId);
+      if (candidates.unreadable) {
+        console.error(`Snapshot history is unresolved: ${candidates.unreadable}. Nothing was restored — no restore was submitted; retry once the read answers.`);
+        process.exitCode = 1;
+        return;
+      }
+      let targetId = candidates.ids[0];
+      let incomplete = false;
+      if (candidates.ids.length > 1) {
+        targetId = undefined;
+        for (const id of candidates.ids) {
+          let snapshot: Awaited<ReturnType<typeof client.get>>;
+          try {
+            snapshot = await client.get(`/api/rigs/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`);
+          } catch (err) {
+            console.error(`Snapshot lookup failed for identity "${id}" before any restore was submitted (${err instanceof Error ? err.message : String(err)}).`);
+            incomplete = true;
+            continue;
+          }
+          if (snapshot.status === 404) continue;
+          if (snapshot.status >= 400) {
+            console.error(`Failed to resolve snapshot for identity "${id}" (HTTP ${snapshot.status}).`);
+            incomplete = true;
+            continue;
+          }
+          targetId = id;
+          break;
+        }
+      }
+      if (targetId === undefined) {
+        if (incomplete) console.error("Snapshot resolution is incomplete; no owner was proved and no restore was submitted. Retry the failed identity reads.");
+        else console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Selected rig identity: ${targetId} (requested: ${rigId})`);
 
       // L3: install a SIGINT/SIGTERM handler that prints an honest message —
       // interrupting the CLI client does NOT stop daemon-side restore work.
@@ -65,13 +100,13 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         attachCommand?: string;
         warnings?: string[];
       }>(
-        `/api/rigs/${encodeURIComponent(target.id)}/restore/${encodeURIComponent(snapshotId)}`,
+        `/api/rigs/${encodeURIComponent(targetId)}/restore/${encodeURIComponent(snapshotId)}`,
         undefined,
         { timeoutMs: LONG_RUNNING_TIMEOUT_MS },
       );
 
       if (res.status === 404) {
-        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
+        console.error(`Snapshot "${snapshotId}" or rig "${targetId}" not found. List snapshots with: rig snapshot list ${targetId}`);
         process.exitCode = 1;
       } else if (res.status === 409) {
         if ((res.data as { code?: string }).code === "pre_restore_validation_failed") {
@@ -81,8 +116,14 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         }
         if ((res.data as { code?: string }).code === "snapshot_unusable") {
           console.error(`Restore refused: ${(res.data as { error?: string }).error ?? "the selected snapshot is not restore-usable"}. Choose a different snapshot.`);
+        } else if ((res.data as { code?: string }).code === "restore_in_progress") {
+          // No attempt id is available here, and `ps --rig` selects by NAME —
+          // with the selected identity's name filtering out other identities
+          // (or vice versa) it would not show this restore. Point at the
+          // existing all-rigs observation and say what it actually covers.
+          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "restore already in progress"}. An existing restore attempt is already running and this response carries no attempt id; the selected identity is listed in the fleet-wide node view with: rig ps --nodes -A --include-archived (all rigs, not specific to this restore)`);
         } else {
-          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${rigId}`);
+          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${targetId}`);
         }
         process.exitCode = 1;
       } else if (res.status >= 400) {
@@ -92,8 +133,9 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         // L3 success path: route returned 202 immediately after restore.started.
         console.log(`Restore attempt id: ${res.data.attemptId}`);
         console.log(`Status: ${res.data.status ?? "started"}`);
-        console.log("Daemon is restoring per-node in the background; follow progress with 'rig ps --nodes' or 'rig restore-check'.");
-        console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${target.id}`);
+        // `rig restore status` is the ID-capable consumer for this attempt;
+        // `ps --rig` would filter by name and miss a differently-named identity.
+        console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${targetId}`);
       } else {
         // Defensive: server responded ok=true but didn't include attemptId.
         // Fall back to the legacy summary if it's present (back-compat with
@@ -145,7 +187,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         originalResult?: { rigResult: string; warnings?: string[] };
         currentIntendedSetVerdict?: string;
         intendedRoster?: unknown[];
-        excludedNodes?: unknown[];
+        excludedNodes?: Array<{ logicalId?: string; reason?: string }>;
         unresolvedIntendedSeats?: Array<{ logicalId: string; status: string }>;
       }>(`/api/rigs/${encodeURIComponent(target.id)}/restore/status/${encodeURIComponent(attemptId)}`);
       if (res.status >= 400 || !res.data.ok) {
@@ -165,7 +207,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       console.log(`Original verdict: ${res.data.originalResult?.rigResult ?? "unknown"}`);
       for (const warning of res.data.originalResult?.warnings ?? []) console.warn(`Original attempt warning: ${warning}`);
       console.log(`Current intended-set verdict: ${res.data.currentIntendedSetVerdict ?? "unknown"}`);
-      console.log(`Intended: ${res.data.intendedRoster?.length ?? 0}; excluded historical: ${res.data.excludedNodes?.length ?? 0}; unresolved: ${res.data.unresolvedIntendedSeats?.length ?? 0}`);
+      // A current seat outside the snapshot's roster (claimed after the topology was recorded) was skipped, not historical.
+      const excluded = res.data.excludedNodes ?? [];
+      const skipped = excluded.filter((node) => node.reason === "current_seat_not_in_intended_roster");
+      console.log(`Intended: ${res.data.intendedRoster?.length ?? 0}; excluded historical: ${excluded.length - skipped.length}; skipped current seats: ${skipped.length}; unresolved: ${res.data.unresolvedIntendedSeats?.length ?? 0}`);
+      for (const node of skipped) console.log(`  ${node.logicalId ?? "unknown"}: skipped — not in this restore's roster`);
       for (const node of res.data.unresolvedIntendedSeats ?? []) console.log(`  ${node.logicalId}: ${node.status}`);
     });
 

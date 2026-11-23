@@ -1,4 +1,20 @@
+import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
+import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
+import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
+import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
+import { seatPoolSchema } from "./migrations/178_seat_pool.js";
+import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
+import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
+import { seatReapStateSchema } from "./migrations/191_seat_reap_state.js";
+import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
+import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
+import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
+import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
+import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
+import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
+import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
+import { coreAppAccessSchema } from "./migrations/175_core_app_access.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -6,6 +22,7 @@ import { workflowInstanceRootObjectiveSchema } from "./migrations/154_workflow_i
 import { queueErasureSchema } from "./migrations/155_queue_erasure.js";
 import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_link_indexes.js";
 import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
+import { workflowBoundPodSchema } from "./migrations/177_workflow_bound_pod.js";
 import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.js";
 import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
 import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
@@ -14,8 +31,12 @@ import { sessionAddressReadIndexesSchema } from "./migrations/162_session_addres
 import { networkInstallationsSchema } from "./migrations/163_network_installations.js";
 import { queueItemsReplyToIndexSchema } from "./migrations/164_queue_items_reply_to_index.js";
 import { queueListReadIndexesSchema } from "./migrations/166_queue_list_read_indexes.js";
-import { seatColdStartsSchema } from "./migrations/167_seat_cold_starts.js";
-import { seatReapStateSchema } from "./migrations/168_seat_reap_state.js";
+import { seatHandoverAttemptsSchema } from "./migrations/167_seat_handover_attempts.js";
+import { contextUsageOccupantGenerationSchema } from "./migrations/168_context_usage_occupant_generation.js";
+import { seatRuntimeHomeRecordsSchema } from "./migrations/169_seat_runtime_home_records.js";
+import { claudeAutoModeSchema } from "./migrations/171_claude_auto_mode.js";
+import { seatHookBridgeSchema } from "./migrations/171_seat_hook_bridge.js";
+import { seatColdStartsSchema } from "./migrations/185_seat_cold_starts.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -337,6 +358,27 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsReplyToIndexSchema,
   runBoundActivityGrantsSchema,
   queueListReadIndexesSchema,
+  seatHandoverAttemptsSchema,
+  contextUsageOccupantGenerationSchema,
+  seatRuntimeHomeRecordsSchema,
+  rigDeliveryDrainsSchema,
+  claudeAutoModeSchema,
+  nodeInputRouteSchema,
+  queueReturnRouteSchema,
+  nodeProcessLimitsSchema,
+  seatHookBridgeSchema,
+  sessionLaunchedCwdSchema,
+  coreAppAccessSchema,
+  nodeStatuslineThrottleSchema,
+  workflowBoundPodSchema,
+  seatPoolSchema,
+  queueTransferStagingSchema,
+  remoteControlObservationsSchema,
   seatColdStartsSchema,
+  sessionStopAttemptSchema,
+  nodeKeepAliveSchema,
+  queueItemsBlockedOnIndexSchema,
+  queueItemsScanIndexesSchema,
+  rigSeatSliceSchema,
   seatReapStateSchema,
 ];

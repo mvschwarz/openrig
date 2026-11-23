@@ -218,9 +218,10 @@ export function resolveRecordedProvenance(
  */
 export const IDENTITY_PRINCIPAL_HEADER = "x-openrig-principal";
 
-/** `principal:v1` is recorded only on the four stores migration 140 gives an identity_principal column; every other row
- *  keeps the IdentityProvenance alphabet, so no other reader meets it. */
-export type RecordedProvenance = IdentityProvenance | "principal:v1";
+/** `principal:v1` records an MCP caller on the four stores with an identity_principal column. Queue transitions also
+ *  record `gateway:slack:v1` with the registered person mapped from a Socket Mode user. Neither is a wire identity:
+ *  gateway attribution grants no permission, and a relay degrades this unfamiliar wire value to claimed:v1. */
+export type RecordedProvenance = IdentityProvenance | "principal:v1" | "gateway:slack:v1";
 
 const MAX_PRINCIPAL_HEADER_BYTES = 512;
 
@@ -230,12 +231,14 @@ export function parseIdentityPrincipal(raw: string | undefined): string | null {
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return null; }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { source, id, grant, version, ...rest } = value as Record<string, unknown>;
+  const { source, id, grant, version, label, ...rest } = value as Record<string, unknown>;
   const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim() !== "" && v.length <= max;
-  if (Object.keys(rest).length > 0 || (source !== "file" && source !== "grant-service") || !text(id, 200)) return null;
+  if (Object.keys(rest).length > 0 || !text(source, 200) || !text(id, 200)) return null;
   if (grant !== undefined && !text(grant, 200)) return null;
   if (version !== undefined && !(typeof version === "number" && Number.isFinite(version)) && !text(version, 64)) return null;
-  return JSON.stringify({ source, id, ...(grant !== undefined ? { grant } : {}), ...(version !== undefined ? { version } : {}) });
+  if (label !== undefined && !text(label, 200)) return null;
+  return JSON.stringify({ source, id, ...(grant !== undefined ? { grant } : {}), ...(version !== undefined ? { version } : {}),
+    ...(label !== undefined ? { label } : {}) });
 }
 
 /** Whether the request's TCP peer is this machine. A request without a socket (an in-process call) isn't. */

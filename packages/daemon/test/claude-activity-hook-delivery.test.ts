@@ -34,7 +34,9 @@ const STATE_DIR = "/custom-instance/O'Brien";
 const RELAY_DEST = `${STATE_DIR}/state/claude-activity-hooks/activity-relay.cjs`;
 const SETTINGS = "/project/.claude/settings.local.json";
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
-const OWNED_CMD = `${shellQuote(process.execPath)} ${shellQuote(RELAY_DEST)}`;
+const OWNED_CMD = `exec ${shellQuote(process.execPath)} ${shellQuote(RELAY_DEST)}`;
+/** The shape OpenRig wrote before #3416 (no leading exec); seats keep it until a launch refreshes it. */
+const PRE_EXEC_OWNED_CMD = OWNED_CMD.replace(/^exec /, "");
 const OWNED_MARKER = "state/claude-activity-hooks/activity-relay.cjs";
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
 
@@ -323,15 +325,15 @@ describe("Claude activity-hook delivery — instance path transition", () => {
 });
 
 describe("Claude activity-hook delivery — DISABLE via the always-run project() seam", () => {
-  function seededManaged(extra?: Record<string, any>) {
+  function seededManaged(extra?: Record<string, any>, command = OWNED_CMD) {
     const hooks: Record<string, any> = {};
-    for (const ev of EVENTS) hooks[ev] = [{ hooks: [{ type: "command", command: OWNED_CMD, timeout: 5 }] }];
+    for (const ev of EVENTS) hooks[ev] = [{ hooks: [{ type: "command", command, timeout: 5 }] }];
     if (extra) for (const [k, v] of Object.entries(extra)) hooks[k] = [...(hooks[k] ?? []), ...v];
     return JSON.stringify({ hooks });
   }
 
-  it("strips owned entries when NO claude_activity_hooks entry is present (production-reachable disable)", async () => {
-    const fs = enableFs({ [SETTINGS]: seededManaged() });
+  it.each([OWNED_CMD, PRE_EXEC_OWNED_CMD])("strips owned entries when NO claude_activity_hooks entry is present (production-reachable disable): %s", async (command) => {
+    const fs = enableFs({ [SETTINGS]: seededManaged(undefined, command) });
     await makeAdapter(fs).project(plan([]), binding());
     expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER))).toEqual([]);
   });

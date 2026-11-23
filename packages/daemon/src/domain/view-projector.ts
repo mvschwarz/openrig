@@ -1,4 +1,4 @@
-import type { ProjectRead } from "./workspace/project-read.js";
+import { projectIds, type ProjectRead } from "./workspace/project-read.js";
 import type Database from "better-sqlite3";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
@@ -53,6 +53,10 @@ interface ViewShowOptions {
   limit?: number;
   mission?: string;
   project?: ProjectRead | null;
+  /** With `project`: every current and former id the catalogued projects claim. */
+  cataloguedProjectIds?: readonly string[];
+  /** The execution view's caller: an aborted signal skips a queued build and stops a running one at its next window. */
+  signal?: AbortSignal;
 }
 
 export interface CustomView {
@@ -149,8 +153,10 @@ export class ViewProjector {
         );
       }
       const build = () => {
+        opts?.signal?.throwIfAborted();
         const deps = this.executionDeps!;
-        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id })
+        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id, signal: opts?.signal,
+          ...(opts?.project ? { projectIds: projectIds(opts.project), cataloguedProjectIds: opts.cataloguedProjectIds, aliasWarnings: opts.project.aliasWarnings } : {}) })
           .then(doc => ({ viewName: "execution" as const, generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 }));
       };
       // A caller inside a transaction keeps its uncommitted visibility: its build starts now, outside the queue.
@@ -355,9 +361,11 @@ export class ViewProjector {
   }
 
   private runCustom(view: CustomView, limit: number): ViewQueryResult {
-    // Custom view definitions are operator-supplied SQL. Append LIMIT if
-    // the operator's SQL does not already include one. We do not parse SQL;
-    // operators are responsible for the definition's correctness.
+    // Custom definitions are operator-supplied SQL, stored unchanged. This method appends LIMIT unless
+    // the text contains "limit"; that is a substring check, not SQL parsing or read-only enforcement.
+    // better-sqlite3 prepares one statement, and a returning write can run through all() when the
+    // resulting SQL is valid. Prepare and execution errors become view_query_failed. Execution uses the
+    // daemon's database connection and is not sandboxed.
     const sql = customDefinitionHasLimit(view.definition)
       ? view.definition
       : `${view.definition.trim().replace(/;$/, "")} LIMIT ${limit}`;
@@ -386,6 +394,8 @@ export class ViewProjector {
    * Register a custom view. UNIQUE on view_name; re-registration of the
    * same name updates the definition (operator-friendly: edit views.yaml,
    * re-register, get the new query).
+   *
+   * The definition is stored as given; what happens to it, and what it may be, is stated at runCustom.
    */
   registerCustomView(input: {
     viewName: string;

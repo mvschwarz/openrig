@@ -494,12 +494,16 @@ describe("the community harness adapter", () => {
     expect(COMMUNITY_HARNESS_RUNG_INVENTORY.rungs.some(r => r.rung === "lifecycle-hooks")).toBe(false);
   });
 
-  it("community contract: the adapter exposes no turn-cancel operation", () => {
+  it("community contract: the adapter exposes no turn-cancel operation; the CLI names an exact native target", () => {
     const { app } = adapter(presets({ "synth.yaml": GOOD }));
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(app)).filter(name => /cancel|interrupt/i.test(name))).toEqual([]);
-    const commands = seatCommand().commands.map(command => command.name());
+    const seat = seatCommand();
+    const commands = seat.commands.map(command => command.name());
     expect(commands).toContain("stop");
-    expect(commands.filter(name => /cancel|interrupt/i.test(name))).toEqual([]);
+    expect(commands.filter(name => /cancel|interrupt/i.test(name))).toEqual(["cancel"]);
+    const cancel = seat.commands.find(command => command.name() === "cancel")!;
+    expect(cancel.options.filter(option => option.mandatory).map(option => option.long))
+      .toEqual(["--run-id", "--native-turn-id", "--request-id"]);
   });
 
   it("community contract: a configured seat model neither changes the preset command nor writes harness settings", async () => {

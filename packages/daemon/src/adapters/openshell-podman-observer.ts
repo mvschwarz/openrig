@@ -3,9 +3,9 @@ import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { hostname } from "node:os";
 import { EnvironmentError, type EnvironmentBinding } from "../domain/environment-platform.js";
-import type { DependentObservation } from "../domain/environment-lifecycle.js";
+import type { DependentObservation, EngineEndpoint, RecreationCleanup } from "../domain/environment-lifecycle.js";
 
-export type PodmanCleanupSelection = { version: 1; socket: string; socketDevice: number; socketInode: number; uid: number; host: string;
+export type PodmanCleanupSelection = EngineEndpoint & { version: 1;
   resourceId: string; workspace: string; workloadId: string; supervisorId: string; volumes: string[] };
 type EngineRead = (socket: string, path: string) => Promise<{ status: number; body: unknown }>;
 const read: EngineRead = (socket, path) => new Promise((resolve, reject) => {
@@ -23,7 +23,7 @@ const read: EngineRead = (socket, path) => new Promise((resolve, reject) => {
 /** Read-only local rootless engine inventory. No engine mutation or global-emptiness requirement. */
 export class OpenShellPodmanObserver {
   constructor(private readonly get: EngineRead = read) {}
-  private socket(path: string): { socket: string; socketDevice: number; socketInode: number; uid: number; host: string } {
+  private socket(path: string): EngineEndpoint {
     if (process.platform !== "linux" || !isAbsolute(path) || process.getuid?.() === 0) throw new EnvironmentError("environment_engine_unsupported", "Select a local non-root Podman socket on the provider host");
     if (realpathSync(path) !== path) throw new EnvironmentError("environment_engine_changed", "The selected engine socket must not be a symlink");
     const stat = lstatSync(path), uid = process.getuid!();
@@ -59,11 +59,28 @@ export class OpenShellPodmanObserver {
     return { version: 1, ...selected, resourceId: id, workspace: binding.placement.workspace, workloadId: workloadContainer.Id, supervisorId: supervisorContainer.Id, volumes };
   }
   async observe(binding: EnvironmentBinding, selected?: PodmanCleanupSelection): Promise<DependentObservation> {
+    const retained = this.retained(binding, selected), now = this.socket(retained.socket);
+    if (now.host !== retained.host || now.uid !== retained.uid || now.socketDevice !== retained.socketDevice || now.socketInode !== retained.socketInode)
+      throw new EnvironmentError("environment_cleanup_unconfirmed", "The selected local engine endpoint changed; absence is not established");
+    return this.inventory(retained);
+  }
+  /** Recreation's read of the predecessor's dependents, on the selected socket path as it is now. A restart or reboot can
+   *  give that path a new socket object (device and inode); that is reported, not refused, and the caller reports the old
+   *  engine instance's cleanup as unknown. A different host or user is a different engine, so it still refuses. Delete
+   *  keeps observe's exact endpoint requirement. */
+  async observeEndpoint(binding: EnvironmentBinding, selected?: PodmanCleanupSelection): Promise<RecreationCleanup> {
+    const retained = this.retained(binding, selected), now = this.socket(retained.socket);
+    if (now.host !== retained.host || now.uid !== retained.uid)
+      throw new EnvironmentError("environment_cleanup_unconfirmed", "The selected engine socket now belongs to another host or user than the predecessor's, so the predecessor's cleanup can't be read there; select the predecessor's own provider host and user");
+    const endpointChanged = now.socketDevice !== retained.socketDevice || now.socketInode !== retained.socketInode;
+    return { remaining: await this.inventory(retained), endpoint: now, endpointChanged };
+  }
+  private retained(binding: EnvironmentBinding, selected?: PodmanCleanupSelection): PodmanCleanupSelection {
     if (!selected || selected.version !== 1 || selected.resourceId !== binding.resource!.id || selected.workspace !== binding.placement.workspace)
       throw new EnvironmentError("environment_cleanup_unconfirmed", "No pre-delete exact local engine inventory is retained");
-    const now = this.socket(selected.socket);
-    if (now.host !== selected.host || now.uid !== selected.uid || now.socketDevice !== selected.socketDevice || now.socketInode !== selected.socketInode)
-      throw new EnvironmentError("environment_cleanup_unconfirmed", "The selected local engine endpoint changed; absence is not established");
+    return selected;
+  }
+  private async inventory(selected: PodmanCleanupSelection): Promise<DependentObservation> {
     const rows = await this.rows(selected.socket);
     const workload = rows.some(row => row.Id === selected.workloadId || row.Labels?.["openshell.ai/sandbox-id"] === selected.resourceId && row.Labels?.["openshell.ai/isolation-role"] === "sandbox");
     const supervisor = rows.some(row => row.Id === selected.supervisorId || Array.isArray(row.Names) && row.Names.some((name: string) => name.replace(/^\//, "") === `openshell-supervisor-${selected.resourceId}`));

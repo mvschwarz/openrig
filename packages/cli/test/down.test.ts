@@ -344,6 +344,23 @@ describe("Down CLI", () => {
     expect(logs).toContain("  /work/project/CLAUDE.md: openrig-seat-skills.md");
   });
 
+  // A session OpenRig didn't start (joined with rig attach --self, adopted, bound or reconciled) keeps running: down
+  // released its seat, says so, and that's a clean result.
+  it("names each seat it released, whose session keeps running as its owner's, and exits 0", async () => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 0, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        released: ["dev-impl@rig-1"],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Released, not stopped: dev-impl@rig-1. OpenRig didn't start these sessions (joined with rig attach --self, adopted, bound or reconciled), so each is left running as its owner's; the seat is no longer bound to it.");
+    expect(exitCode).toBeUndefined();
+  });
+
   it("names each file in a Claude seat's cwd that still holds OpenRig's additions, and keeps the exit code", async () => {
     const kept = "/work/project/.openrig/context-collector.cjs: not the shipped collector's bytes, so it was kept";
     responseOverride = {
@@ -358,6 +375,23 @@ describe("Down CLI", () => {
     });
     expect(logs).toContain("Kept 1 file(s) that still hold OpenRig's additions; check them by hand:");
     expect(logs).toContain(`  ${kept}`);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("names each Claude seat whose launch folder wasn't recorded, and keeps the exit code", async () => {
+    const seat = "dev-impl@rig-1: /work/project";
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        launchFolderUnrecorded: [seat],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("The launch folder was not recorded for 1 Claude seat(s). Only saved and recorded folders can be checked automatically; if one was started elsewhere (rig up --existing --cwd), check that folder's .claude/settings.local.json and .openrig by hand:");
+    expect(logs).toContain(`  ${seat}`);
     expect(exitCode).toBeUndefined();
   });
 
@@ -645,5 +679,17 @@ describe("Down CLI", () => {
     expect(downCallCount).toBe(0); // name path excludes archived -> no match -> halt
     expect(logs.join("\n")).toContain("old-team");
     expect(exitCode).toBe(2);
+  });
+});
+
+describe("rig down help", () => {
+  it("says an external CLI seat keeps its claim only without --delete", () => {
+    let out = "";
+    const cmd = downCommand();
+    cmd.configureOutput({ writeOut: (text) => { out += text; } });
+    cmd.outputHelp();
+    const help = out.replace(/\s+/g, " ");
+    expect(help).toContain("A seat joined with rig attach as an external CLI, outside tmux, is never stopped, and rig down lists it as not stopped.");
+    expect(help).toContain("It keeps its claim, unless --delete removes the rig record, and the claim with it.");
   });
 });

@@ -58,6 +58,7 @@ describe("Ps CLI", () => {
   let port: number;
   let psData: unknown[];
   let nodesData: Record<string, unknown[]>;
+  let requests: string[];
   let savedSessionName: string | undefined;
 
   beforeAll(async () => {
@@ -65,7 +66,9 @@ describe("Ps CLI", () => {
     delete process.env.OPENRIG_SESSION_NAME;
     psData = [];
     nodesData = {};
+    requests = [];
     server = http.createServer(async (req, res) => {
+      requests.push(req.url ?? "");
       // OPR.0.4.4.21: the rig tier always requests ?includeArchived=true
       // (client-side visibility split) — match by prefix, not exact URL.
       if (req.url?.startsWith("/api/ps") && req.method === "GET") {
@@ -499,6 +502,23 @@ describe("Ps CLI", () => {
     expect(output).toContain("test-rig");
   });
 
+  it.each(["compact", "full"])("aligns the %s ps --nodes session column after a wide rig name", async (mode) => {
+    const name = "演示".repeat(9);
+    psData = [{ rigId: "rig-1", name, nodeCount: 1, runningCount: 1, status: "running" }];
+    nodesData["rig-1"] = [{
+      rigId: "rig-1", rigName: name, logicalId: "dev.impl", podNamespace: "dev",
+      canonicalSessionName: "dev-impl@test-rig", nodeKind: "agent", runtime: "claude-code",
+      sessionStatus: "running", startupStatus: "ready", restoreOutcome: "n-a",
+    }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", ...(mode === "full" ? ["--full"] : [])]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const row = logs.find((line) => line.startsWith("演示"))!;
+    expect(row).toContain("dev-impl@test-rig");
+    expect(stringWidth(row.slice(0, row.indexOf("dev-impl@test-rig")))).toBe(header.indexOf("SESSION"));
+  });
+
   it("ps --nodes truncates long rig and session names so the table stays aligned", async () => {
     psData = [
       {
@@ -811,6 +831,48 @@ describe("Ps CLI", () => {
     });
 
     // C9a: --fields UX rejection alignment with --filter pattern.
+
+    it("ps --nodes --json --fields canonicalSessionName,activityState preserves the whole native object, null and omission", async () => {
+      const working = { activity: "working", display: "working", needsInput: { count: 1, reason: "approval" }, decidedBy: "hook", seq: 7 };
+      const unknown = { activity: "unknown", display: "unknown", needsInput: { count: 0, reason: null }, decidedBy: null };
+      psData = [{ rigId: "rig-1", name: "test-rig", status: "running" }];
+      nodesData = { "rig-1": [working, unknown, null, undefined].map((activityState, index) => ({
+        canonicalSessionName: `dev-worker${index}@test-rig`, sessionStatus: "running",
+        ...(activityState === undefined ? {} : { activityState }), resumeToken: "DO-NOT-PROJECT",
+      })) };
+      requests = [];
+      const { logs, exitCode } = await captureLogs(async () => {
+        process.env.OPENRIG_SESSION_NAME = "dev-worker0@test-rig";
+        try {
+          await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--fields", "canonicalSessionName,activityState"]);
+        } finally {
+          delete process.env.OPENRIG_SESSION_NAME;
+        }
+      });
+      expect(logs.join("\n")).not.toContain("Unknown --fields");
+      expect(exitCode).toBeUndefined();
+      expect(JSON.parse(logs.join(""))).toEqual({
+        entries: [
+          { canonicalSessionName: "dev-worker0@test-rig", activityState: working },
+          { canonicalSessionName: "dev-worker1@test-rig", activityState: unknown },
+          { canonicalSessionName: "dev-worker2@test-rig", activityState: null },
+          { canonicalSessionName: "dev-worker3@test-rig" },
+        ], totalNodes: 4, truncated: false,
+      });
+      expect(requests.filter((path) => path.includes("/nodes"))).toEqual(["/api/rigs/rig-1/nodes"]);
+      expect(logs.join("")).not.toContain("DO-NOT-PROJECT");
+    });
+
+    it.each([
+      ["rig-level", ["--json", "--fields", "activityState"], "activityState"],
+      ["dotted path", ["--nodes", "-A", "--json", "--fields", "activityState.activity"], "activityState.activity"],
+    ])("ps keeps rejecting activityState at %s", async (_label, flags, field) => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", ...flags]);
+      });
+      expect(exitCode).toBe(1);
+      expect(logs.join("\n")).toContain(`Unknown --fields key '${field}'`);
+    });
 
     it("ps --json --fields rejects unknown field with sorted supported list (rig-level)", async () => {
       psData = [];

@@ -37,6 +37,18 @@ describe("queue → cold-start notifier wiring (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  // #3173 review round 5 (recommended): the ladder, health diagnosis and stream intake
+  // re-nudges go through maybeNudge, whose failed send previously only recorded the
+  // failure. A delivered wake followed by a seat stop with its binding kept must reach
+  // the cold-start notifier on the next re-nudge, without changing the send's outcome.
+  it("a failed re-nudge for a stopped pane-bound seat requests the cold start", async () => {
+    const f = repo(() => {});
+    f.db.prepare("UPDATE sessions SET status='exited' WHERE session_name='dev-peer@home'").run();
+    await f.repo.maybeNudge("q-1", "dev-peer@home");
+    expect(f.notified).toEqual(["dev-peer@home"]);
+    f.db.close();
+  });
+
   it("fires once per unroutable send", async () => {
     const f = repo(() => {});
     await f.repo.maybeNudge("q-missing", "dev.impl@no-such-rig", undefined);

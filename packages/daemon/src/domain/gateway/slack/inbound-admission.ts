@@ -37,7 +37,7 @@ export function makeInboundSenderResolver(reg: RegistrySurface, home?: string): 
     // else is told to register a person, as before.
     const r = loaded.ok ? reg.resolveSlackHandle(slackUserId, people) : { kind: "unregistered" as const, error: loaded.error };
     if (r.kind === "registered") {
-      return { admitted: true, source: r.address, ...(shared ? { sharedChannel: channelContext(shared, slackUserId, r.address) } : {}) };
+      return { admitted: true, source: r.address, entityId: r.entityId, ...(shared ? { sharedChannel: channelContext(shared, slackUserId, r.address) } : {}) };
     }
     if (shared) return { admitted: true, source: `${shared.id}@external`, sharedChannel: channelContext(shared, slackUserId, null) };
     return { admitted: false, teaching: r.error };

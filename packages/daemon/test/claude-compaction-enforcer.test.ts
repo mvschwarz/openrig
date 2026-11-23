@@ -11,12 +11,22 @@
 // usage data short-circuit, send-failure no-dedup-update semantics.
 
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
-import { ClaudeCompactionEnforcer as ActualEnforcer, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
+import { ClaudeCompactionEnforcer as ActualEnforcer, MANUAL_SEAT_READ_INTERVAL_MS, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
 import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { reportRestoreDeliveryFailure, settleCompactionNotices } from "../src/domain/compaction-restore-notice.js";
+import type { CompactionDebtEnded, RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
 // The home these tests pass explicitly (and assert in prompt text). A fixed path such as
@@ -111,6 +121,19 @@ describe("ClaudeCompactionEnforcer", () => {
 
     expect(outcome).toEqual({ triggered: false, reason: "disabled" });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("#3416 (3): names the sample's time instead of calling the usage current when the sample time is known", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+    const prep = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 82, sampledAt: "2026-11-17T12:00:00.000Z",
+    });
+    expect(prep).toEqual({ triggered: true });
+    const prompt = send.mock.calls[0]![1] as string;
+    expect(prompt).toContain("Context usage was 82% in the latest sample, taken at 2026-11-17T12:00:00.000Z; configured compaction threshold is 80%");
+    expect(prompt).not.toContain("Current context usage");
   });
 
   it("HG-2 + HG-3: threshold crossing first sends the pre-compaction prep prompt, then /compact on the next high-usage tick", async () => {
@@ -280,6 +303,387 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(fourth).toEqual({ triggered: true });
 
     expect(send).toHaveBeenCalledTimes(6);
+  });
+
+  it.each([false, true])("resolves the same restore notice only after all owed stages, even without a usage sample (cancel=%s)", async (cancel) => {
+    const db = createDb(); migrate(db, ALL_MIGRATIONS);
+    try {
+      const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const { transport } = makeSessionTransport();
+      const completion = vi.fn(async (receipt: RestoreDeliveryFailure) => reportRestoreDeliveryFailure(db, queue, receipt, { completed: true }));
+      const width = vi.fn();
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, onRestoreDeliveryComplete: completion, onPostRestoreComplete: width,
+      } as never);
+      const seat = "claude-seat@rig";
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const attemptId = enforcer.getPreparationState(seat)!.attemptId;
+      const id = `qitem-compaction-restore-${attemptId}`;
+      await queue.create({ qitemId: id, sourceSession: seat, destinationSession: "owner@rig", body: "restore owed", nudge: false });
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 2; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      expect(completion).not.toHaveBeenCalled();
+      expect(queue.getById(id)?.state).toBe("pending");
+      if (cancel) enforcer.cancelPreparation(seat);
+      await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      expect(queue.getById(id)?.state).toBe(cancel ? "pending" : "done");
+      expect(completion).toHaveBeenCalledTimes(cancel ? 0 : 1);
+      if (!cancel) expect(completion).toHaveBeenCalledWith(expect.objectContaining({ sessionName: seat, attemptId,
+        lastDelivery: expect.objectContaining({ stage: "compliance_prompt", ok: true }) }));
+      expect(width).not.toHaveBeenCalled();
+    } finally { db.close(); }
+  });
+
+  it("contains a throwing completion notice without changing the successful drain or retrying bookkeeping", async () => {
+    const { transport } = makeSessionTransport();
+    const completion = vi.fn(async () => { throw new Error("storage unavailable"); });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, onRestoreDeliveryComplete: completion,
+      } as never);
+      const sessionName = "claude-seat@rig";
+      await enforcer.maybeAutoCompact({ sessionName, runtime: "claude-code", usedPercentage: 90 });
+      await enforcer.maybeAutoCompact({ sessionName, runtime: "claude-code", usedPercentage: 91 });
+      const input = { sessionName, runtime: "claude-code" };
+      await enforcer.drainPendingPostCompactStage(input);
+      await enforcer.drainPendingPostCompactStage(input);
+      await expect(enforcer.drainPendingPostCompactStage(input)).resolves.toEqual({ triggered: true });
+      expect(completion).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith("[compaction] restore completion notice failed", expect.objectContaining({ sessionName, errorClass: "Error" }));
+      expect(enforcer.getOwedRestore(sessionName)).toBeNull();
+      await expect(enforcer.drainPendingPostCompactStage(input)).resolves.toMatchObject({ reason: "no_pending_stage" });
+      expect(completion).toHaveBeenCalledTimes(1);
+    } finally { warning.mockRestore(); }
+  });
+
+  // #3688: a debt that ends without a delivery settles the notices it opened.
+  describe("a compaction debt that ends without a delivery", () => {
+    const seat = "claude-seat@rig";
+    const settled = () => new Promise(resolve => setImmediate(resolve));
+    async function withQueue(opts: Record<string, unknown> = {}) {
+      const db = createDb(); migrate(db, ALL_MIGRATIONS);
+      const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const ended = vi.fn(async (end: CompactionDebtEnded) => settleCompactionNotices(queue, end));
+      const { transport } = makeSessionTransport();
+      // The live occupant; a test swaps it to model a committed handover.
+      let live: string | null = "gen-1";
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, dedupWindowMs: 0, onCompactionDebtEnded: ended,
+        resolveOccupantGeneration: () => live, ...opts } as never);
+      const notice = async (kind: "restore" | "uptake", attemptId: string) => {
+        const qitemId = `qitem-compaction-${kind}-${attemptId}`;
+        await queue.create({ qitemId, sourceSession: seat, destinationSession: "owner@rig", body: "owed", nudge: false,
+          tags: ["compaction", "restore-delivery", `attempt:${attemptId}`] });
+        return qitemId;
+      };
+      const compactSent = async () => {
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        const attemptId = enforcer.getPreparationState(seat)!.attemptId;
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+        return attemptId;
+      };
+      const reasons = () => (ended.mock.calls as unknown as [CompactionDebtEnded][]).map(([end]) => end.reason);
+      return { db, queue, ended, enforcer, notice, compactSent, reasons, swap: (g: string | null) => { live = g; } };
+    }
+
+    it("rig compact --cancel closes the notice of the attempt it ended, and the cancel's result is unchanged", async () => {
+      const f = await withQueue();
+      try {
+        const attemptId = await f.compactSent();
+        const id = await f.notice("restore", attemptId);
+        const earlier = await f.notice("uptake", "earlier-attempt");
+        const state = f.enforcer.cancelPreparation(seat);
+        expect(state).toMatchObject({ attemptId, status: "stopped", reason: "compaction_cancelled" });
+        expect(f.enforcer.getOwedRestore(seat)).toBeNull();
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "compaction_cancelled", attemptId });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain("the compaction was cancelled");
+        // An attempt the cancel didn't end keeps its notice.
+        expect(f.queue.getById(earlier)?.state).toBe("pending");
+      } finally { f.db.close(); }
+    });
+
+    it("a cancel that ends nothing settles nothing: a posted uptake notice, whose check already ended, stays", async () => {
+      let now = Date.now();
+      let posted: string | undefined;
+      const f = await withQueue({ now: () => now, onRestoreUptakeUnknown: async (u: { attemptId: string }) => { posted = await f.notice("uptake", u.attemptId); } });
+      try {
+        await f.compactSent();
+        for (let i = 0; i < 3; i++) await f.enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        now += 31 * 60_000;
+        await f.enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" });
+        await settled();
+        expect(posted).toBeDefined();
+        const before = f.reasons().length;
+        f.enforcer.cancelPreparation(seat);
+        await settled();
+        expect(f.reasons()).toHaveLength(before);
+        expect(f.queue.getById(posted!)?.state).toBe("pending");
+      } finally { f.db.close(); }
+    });
+
+    it("a new attempt supersedes the earlier attempt's posted uptake notice", async () => {
+      const f = await withQueue();
+      try {
+        const first = await f.compactSent();
+        for (let i = 0; i < 3; i++) await f.enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        const id = await f.notice("uptake", first);
+        await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        const second = f.enforcer.getPreparationState(seat)!.attemptId;
+        expect(second).not.toBe(first);
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "attempt_superseded", attemptId: second });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "superseded" });
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain(`attempt ${second} replaced attempt ${first}`);
+      } finally { f.db.close(); }
+    });
+
+    it.each([["gen-0", "gen-0"], [undefined, "gen-1"]])("a replaced occupant names the retiring generation (passed %s, reported %s)", async (passed, reported) => {
+      const f = await withQueue();
+      try {
+        const attemptId = await f.compactSent();
+        const id = await f.notice("restore", attemptId);
+        // The handover committed: the live occupant is the successor, not the attempt's recorded gen-1.
+        f.swap("gen-2");
+        f.enforcer.invalidateOccupant(seat, passed);
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: reported });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
+        // The enforcer saw an invalidation, not a replacement: a handover or runtime switch can still roll back.
+        const note = f.queue.listTransitions(id).at(-1)?.transitionNote;
+        expect(note).toContain(`OpenRig invalidated the seat's occupant state (retiring generation ${reported})`);
+        expect(note).toContain("before a handover or runtime-switch rollback");
+        expect(note).toContain("If the seat resumed the same conversation, check whether it still needs the restore");
+      } finally { f.db.close(); }
+    });
+
+    it("rig seat launch --fresh invalidates before the new occupant is minted, and the notice still closes", async () => {
+      const f = await withQueue();
+      try {
+        const attemptId = await f.compactSent();
+        const id = await f.notice("restore", attemptId);
+        // The live tenure still reads the retiring generation: the successor's is written after the invalidation.
+        f.enforcer.invalidateOccupant(seat, "gen-1");
+        await settled();
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1" });
+        expect(f.queue.getById(id)).toMatchObject({ state: "done", closureReason: "canceled" });
+      } finally { f.db.close(); }
+    });
+
+    it("a preparing attempt whose occupant a later poll finds replaced settles that occupant's notices", async () => {
+      const f = await withQueue();
+      try {
+        await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        expect(f.enforcer.getPreparationState(seat)?.status).not.toBe("stopped");
+        const id = await f.notice("restore", "earlier-attempt");
+        f.swap("gen-2");
+        f.enforcer.reconcilePreparations();
+        await settled();
+        expect(f.enforcer.getPreparationState(seat)).toMatchObject({ status: "stopped", reason: "stale_generation" });
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1",
+          observedGeneration: { live: "gen-2", when: "poll" } });
+        // The closing reason says what the poll saw: the generation change.
+        expect(f.queue.listTransitions(id).at(-1)?.transitionNote).toContain("OpenRig found on a poll that the seat's occupant generation changed from gen-1 to gen-2");
+      } finally { f.db.close(); }
+    });
+
+    it("a preparing attempt whose occupant can't be read closes nothing, and its occupant's preparation notice says once that the state is unknown", async () => {
+      const f = await withQueue();
+      try {
+        await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        const attempt = f.enforcer.getPreparationState(seat)!;
+        // The occupant's preparation notice from its earlier ended attempts: the reporter's id and tags.
+        const notice = await f.queue.create({ nudge: false, sourceSession: seat, destinationSession: "owner@rig", body: "ended attempts",
+          qitemId: `qitem-compaction-preparation-${createHash("sha256").update(`${seat}\0gen-1`).digest("hex").slice(0, 24)}`,
+          tags: ["compaction", "preparation-delivery", "occupant:gen-1"] });
+        const restore = await f.notice("restore", attempt.attemptId);
+        // A poll while the generation reads: nothing is said.
+        f.enforcer.reconcilePreparations();
+        await settled();
+        expect(f.queue.listTransitions(notice!.qitemId).filter(t => t.actorSession === "system:compaction")).toHaveLength(0);
+        f.swap(null);
+        for (let i = 0; i < 2; i++) { f.enforcer.reconcilePreparations(); await settled(); }
+        expect(f.enforcer.getPreparationState(seat)).toMatchObject({ status: "stopped", reason: "stale_generation" });
+        expect(f.ended).toHaveBeenLastCalledWith({ sessionName: seat, reason: "owed_unknown", occupantGeneration: "gen-1" });
+        expect(f.reasons()).not.toContain("occupant_replaced");
+        expect(f.queue.getById(notice!.qitemId)?.state).toBe("pending");
+        const notes = f.queue.listTransitions(notice!.qitemId).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
+        expect(notes).toEqual([expect.stringContaining("the seat's live occupant generation couldn't be read")]);
+        expect(f.queue.getById(restore)?.state).toBe("pending");
+      } finally { f.db.close(); }
+    });
+
+    it("contains a throwing settle without changing the cancel or the occupant swap", async () => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      // The production settle is synchronous: it throws rather than rejecting.
+      const ended = vi.fn((_end: CompactionDebtEnded) => { throw new Error("storage unavailable"); });
+      try {
+        const { transport } = makeSessionTransport();
+        const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+          postCompactRestoreCooldownMs: 0, onCompactionDebtEnded: ended } as never);
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+        await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+        expect(() => enforcer.cancelPreparation(seat)).not.toThrow();
+        expect(() => enforcer.invalidateOccupant(seat, "retired-generation")).not.toThrow();
+        await settled();
+        expect(enforcer.getOwedRestore(seat)).toBeNull();
+        // The attempt's start, the cancel and the swap each tried to settle; each failure stayed a warning.
+        expect((ended.mock.calls as unknown as [CompactionDebtEnded][]).map(([end]) => end.reason)).toEqual(["attempt_superseded", "compaction_cancelled", "occupant_replaced"]);
+        expect(warning).toHaveBeenCalledWith("[compaction] debt-ended notice failed", expect.objectContaining({ sessionName: seat, reason: "compaction_cancelled", errorClass: "Error" }));
+      } finally { warning.mockRestore(); }
+    });
+  });
+
+  describe("a delivered restore whose uptake can't be seen", () => {
+    const seat = deriveCanonicalSessionName("claude", "seat", "rig");
+    async function toDone(opts: Record<string, unknown> = {}) {
+      // The clock starts at the wall clock's time: the post-restore cooldown is set from Date.now().
+      const doneAt = Date.now();
+      let now = doneAt;
+      const { transport } = makeSessionTransport();
+      const unknown = vi.fn(async () => {});
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, dedupWindowMs: 0, now: () => now, onRestoreUptakeUnknown: unknown, ...opts,
+      } as never);
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const { attemptId, mapPath } = enforcer.getPreparationState(seat)!;
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 3; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      expect(enforcer.getOwedRestore(seat)).toBeNull();
+      return { enforcer, unknown, attemptId, mapPath, doneAt, advance: (ms: number) => { now += ms; },
+        poll: () => enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }) };
+    }
+    // The seat's RESTORED note, written after its map.
+    const writeNote = (mapPath: string) => {
+      const file = join(dirname(mapPath), "RESTORED-20261121-0400.md");
+      writeFileSync(file, "restored\n");
+      const later = new Date(statSync(mapPath).mtimeMs + 1_000);
+      utimesSync(file, later, later);
+    };
+    const settled = () => new Promise(resolve => setImmediate(resolve));
+
+    it("gives no notice when the seat's RESTORED note appears beside the map in time", async () => {
+      const f = await toDone();
+      f.advance(10 * 60_000);
+      writeNote(f.mapPath);
+      await f.poll();
+      f.advance(25 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    it("gives exactly one notice when no note appears within the wait, naming the attempt and its map", async () => {
+      const f = await toDone();
+      f.advance(29 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+      f.advance(2 * 60_000);
+      await f.poll(); await f.poll(); await settled();
+      expect(f.unknown).toHaveBeenCalledTimes(1);
+      expect(f.unknown).toHaveBeenCalledWith({ sessionName: seat, attemptId: f.attemptId, mapPath: f.mapPath,
+        doneAt: new Date(f.doneAt).toISOString(), waitedMinutes: 30 });
+      // A note written late changes nothing: the check already ended.
+      writeNote(f.mapPath);
+      f.advance(60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops the check when a new attempt starts", async () => {
+      const f = await toDone();
+      f.advance(60_000);
+      await f.enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const next = f.enforcer.getPreparationState(seat);
+      expect(next).not.toBeNull();
+      expect(next!.attemptId).not.toBe(f.attemptId);
+      f.advance(30 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    it("drops the check when the seat's compaction is cancelled", async () => {
+      const f = await toDone();
+      f.enforcer.cancelPreparation(seat);
+      f.advance(31 * 60_000);
+      await f.poll(); await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    it("gives no notice when a cancel runs after the poll queued it, before its turn", async () => {
+      const f = await toDone();
+      f.advance(31 * 60_000);
+      // The poll's synchronous part queues the notice; a cancel resuming ahead of it in the same turn of the queue replaces the check.
+      const poll = f.poll();
+      f.enforcer.cancelPreparation(seat);
+      await poll; await settled();
+      expect(f.unknown).not.toHaveBeenCalled();
+    });
+
+    // Seven hours is past the six-hour restart window that bounds resuming restore input; this check sends none.
+    it.each([31, 7 * 60])("keeps the check across a daemon restart, from the done record (%i minutes later)", async (minutes) => {
+      const home = mkdtempSync(join(tmpdir(), "compaction-uptake-restart-")); fixtureHomes.push(home);
+      const f = await toDone({ openrigHome: home, daemonInstance: "before-restart" });
+      const unknown = vi.fn(async () => {});
+      const restarted = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), makeSessionTransport().transport, {
+        openrigHome: home, daemonInstance: "after-restart", now: () => f.doneAt + minutes * 60_000, onRestoreUptakeUnknown: unknown,
+      } as never);
+      await restarted.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+      expect(unknown).toHaveBeenCalledTimes(1);
+      expect(unknown).toHaveBeenCalledWith(expect.objectContaining({ attemptId: f.attemptId, mapPath: f.mapPath }));
+    });
+
+    it("keeps a cancel after done across a daemon restart", async () => {
+      const home = mkdtempSync(join(tmpdir(), "compaction-uptake-cancel-")); fixtureHomes.push(home);
+      const f = await toDone({ openrigHome: home, daemonInstance: "before-restart" });
+      f.enforcer.cancelPreparation(seat);
+      const unknown = vi.fn(async () => {});
+      const restarted = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), makeSessionTransport().transport, {
+        openrigHome: home, daemonInstance: "after-restart", now: () => f.doneAt + 31 * 60_000, onRestoreUptakeUnknown: unknown,
+      } as never);
+      await restarted.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+      expect(unknown).not.toHaveBeenCalled();
+    });
+
+    it("keeps the check when the map's stat fails as the attempt reaches done, and gives one notice", async () => {
+      let now = Date.now();
+      const { transport, send } = makeSessionTransport();
+      const unknown = vi.fn(async () => {});
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, now: () => now, onRestoreUptakeUnknown: unknown } as never);
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const { mapPath } = enforcer.getPreparationState(seat)!;
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 2; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      // The map is there, but its folder can't be searched, so its stat fails with EACCES, not ENOENT.
+      chmodSync(dirname(mapPath), 0o000);
+      try {
+        await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+        expect(enforcer.getOwedRestore(seat)).toBeNull();
+        const sends = send.mock.calls.length;
+        now += 31 * 60_000;
+        await enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" });
+        await enforcer.drainPendingPreparedCompact({ sessionName: seat, runtime: "claude-code" }); await settled();
+        expect(unknown).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls.length).toBe(sends);
+      } finally { chmodSync(dirname(mapPath), 0o700); }
+    });
+
+    it("tries a notice that failed again on the next poll, and stops once one is recorded", async () => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const unknown = vi.fn(async () => {}).mockRejectedValueOnce(new Error("queue unavailable"));
+        const f = await toDone({ onRestoreUptakeUnknown: unknown });
+        f.advance(31 * 60_000);
+        await f.poll(); await settled();
+        expect(unknown).toHaveBeenCalledTimes(1);
+        expect(warning).toHaveBeenCalledWith("[compaction] restore uptake notice failed", expect.objectContaining({ attemptId: f.attemptId, errorClass: "Error" }));
+        await f.poll(); await settled();
+        await f.poll(); await settled();
+        expect(unknown).toHaveBeenCalledTimes(2);
+      } finally { warning.mockRestore(); }
+    });
   });
 
   it("publishes one target-generation-keyed width receipt callback after restore compliance", async () => {
@@ -1199,7 +1603,7 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("preparing");
 
         // DEGRADED duplicate: usedPercentage null (bad-sidecar projection). The guard
-        // now PRECEDES the no_usage_data recordManualFailure path, so it must NOT record
+        // PRECEDES every manual refusal, so it must NOT record
         // skipped-or-failed / erase the preparing marker (the bug rev1-r2 caught).
         const degraded = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: null });
         expect(degraded).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "already_in_progress" });
@@ -1383,14 +1787,79 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(enforcer.getManualCompactionState("codex@rig")?.stage).toBe("skipped-or-failed");
     });
 
-    it("no known usage sample → rejected with no_usage_data (never triggers blind)", async () => {
+    it("no known usage sample: an explicit manual request still prepares and compacts; unknown usage isn't a reason to stop", async () => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000 });
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: null });
-      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "no_usage_data" });
-      expect(send).not.toHaveBeenCalled();
+      expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
+      const texts = send.mock.calls.map((call) => String(call[1]));
+      expect(texts[0]).toContain("OpenRig manual compaction was requested for this seat");
+      expect(texts[0]).not.toContain("null");
+      expect(texts[1]).toMatch(/^\/compact /);
+    });
+
+    it("the preparation request asks for a turn free of approval prompts: file-edit writes and a literal recap-write path", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000 });
+      await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(String(send.mock.calls[0]![1])).toContain("To avoid one cause of approval prompts, which hold /compact until someone answers them: write files with your file-edit tool (acceptEdits covers your working directory, not a preparation root outside it), and if you publish a seat recap, run rig context recap-write --file with the file's literal absolute path, with no shell variable assignment or command substitution, so an allow rule for rig commands can match it.");
+    });
+
+    it("when the idle wait and the /compact send disagree, each round pauses a reading interval, bounded by the deadline", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      // The idle wait reads idle (a hook), while every /compact finds the pane at a prompt and writes nothing.
+      send.mockImplementation(async (_s: string, text: string) => text.startsWith("/compact")
+        ? { ok: false, sent: false, inputPhase: "not_reached", reason: "target_needs_input", activity: { state: "needs_input" } }
+        : { ok: true });
+      let clock = 1_700_000_000_000;
+      const sleeps: number[] = [];
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { manualPrepWaitMs: 20_000, now: () => clock,
+        sleep: async (ms) => { sleeps.push(ms); clock += ms; } });
+
+      const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(outcome).toMatchObject({ triggered: false, reason: "preparation_needs_input" });
+      const compacts = send.mock.calls.filter((call) => String(call[1]).startsWith("/compact")).length;
+      expect(compacts).toBeGreaterThan(1);
+      expect(compacts).toBeLessThanOrEqual(20_000 / MANUAL_SEAT_READ_INTERVAL_MS + 1);
+      // Every deferred send is followed by a pause, the last one running into the deadline.
+      expect(sleeps.filter((ms) => ms === MANUAL_SEAT_READ_INTERVAL_MS).length).toBe(compacts);
+    });
+
+    it("a /compact refused before input because the seat reached a prompt waits again within the deadline, then compacts", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      send.mockImplementationOnce(async () => ({ ok: true })); // the preparation request lands
+      // The seat read idle, then its preparation turn reached a permission prompt before /compact: refused, nothing written.
+      send.mockImplementationOnce(async () => ({ ok: false, sent: false, inputPhase: "not_reached", reason: "target_needs_input" }));
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000, sleep: async () => {} });
+
+      const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
+      const texts = send.mock.calls.map((call) => String(call[1]));
+      expect(texts.filter((text) => text.startsWith("/compact"))).toHaveLength(2);
+      expect(enforcer.getPreparationState(SEAT)).toMatchObject({ status: "compact-sent" });
+    });
+
+    it("a seat still at a prompt when the deadline passes stops naming the prompt, and --state showed what it waited on", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      let clock = 1_700_000_000_000;
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { manualPrepWaitMs: 1000, now: () => clock, sleep: async (ms) => { clock += ms; } });
+      const seen: unknown[] = [];
+      transport.waitUntilIdle = async () => {
+        seen.push(enforcer.getPreparationState(SEAT)?.awaitingInput);
+        return { ok: false, reason: "target_needs_input", error: "fixture", activity: { state: "needs_input" } as any, waitedMs: 0, attempts: 1 } as any;
+      };
+
+      const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(outcome).toMatchObject({ triggered: false, stage: "skipped-or-failed", reason: "preparation_needs_input",
+        preparation: { delivery: "delivered", compact: "not_sent" } });
+      expect(seen.slice(1)).toContainEqual({ since: expect.any(Number), reason: "target_needs_input", observedAt: expect.any(Number), current: true });
+      expect(send.mock.calls.filter((call) => String(call[1]).startsWith("/compact"))).toHaveLength(0);
     });
 
     it("bounded to the triggered seat: only that seat is sent to; no other seat gets manual state", async () => {

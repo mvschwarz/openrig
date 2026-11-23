@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { runningShippedSpecsRoot } from "../src/domain/builtin-startup-files.js";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
@@ -73,7 +74,11 @@ describe("contained Claude restore activity resources", () => {
       createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })),
       sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
       getPaneCommand: vi.fn(async () => "claude"), capturePaneContent: vi.fn(async () => ""),
-      listSessions: async () => [], listWindows: async () => [], listPanes: async () => [],
+      getPanePid: vi.fn(async () => 4242),
+      listSessions: async () => [], listWindows: async () => [],
+      // Startup has a live local runtime. Exact joined-resume proof still has
+      // no native conversation evidence, as the resource tests assert below.
+      listPanes: async () => [{ id: "%1", index: 0, cwd, width: 80, height: 24, active: true }],
       hasSession: async () => false,
     } as unknown as TmuxAdapter;
     const collector = path.join(root, "collector.cjs");
@@ -371,24 +376,29 @@ describe("contained Claude restore activity resources", () => {
   });
 
   // Maintainer review on #2373: a pod-aware agent with no startup context
-  // must get no hooks write from this recovery — it still ends at the
-  // "Harness not started" gate, and the restore itself is unchanged.
-  it("does not project claude hooks for a pod-aware seat with no startup context", async () => {
+  // must get no hooks write from this recovery. With a resume token, restore
+  // tries its resume on an empty plan and names the gap, still with no hooks.
+  it("a pod-aware seat with no startup context resumes with an empty plan and the gap named, and gets no claude hooks", async () => {
     const f = seed(true, false, "claude-code", false);
     const project = vi.spyOn(adapter, "project");
     const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
     const result = await restore(f, adapter, () => {}, desired);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    // It reaches native resume, as a seat with a saved context does here (this fixture gives the joined proof no process).
+    expect(adapter.launchHarness).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
     expect(result.result.nodes[0]).toMatchObject({
-      status: "attention_required", error: "Harness not started: no startup context for p.seat.",
+      status: "attention_required", error: expect.stringContaining("joined restore proof is incomplete"),
+      restoreGaps: ["startup_context: no saved startup context; restore tried the saved conversation without replaying a saved startup plan."],
     });
+    expect(result.result.warnings).toContain("Restore: p.seat: no saved startup context, so restore tries its saved conversation without replaying a saved startup plan.");
     expect(desired).not.toHaveBeenCalled();
     const claudeRecovery = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
     expect(claudeRecovery).toBeUndefined();
     expect(owned()).toEqual([]);
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
-    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    // Nothing is written for it: it still has no saved startup context.
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toBeUndefined();
   });
 
   // CodeRabbit follow-up on #2373: the snapshot node may have no cwd while
@@ -451,6 +461,24 @@ describe("contained Claude restore activity resources", () => {
     }
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // Restore reads a saved hooks resource from the running install, as replay does (#261). A seat saved under another
+  // install (an older version, or one under a home that moved) gets this install's resource instead of a path that's gone.
+  it("projects a saved hooks resource from the running install when it was saved under another install", async () => {
+    const oldSpecs = "/old/lib/node_modules/@openrig/cli/daemon/specs";
+    const shipped = { category: "runtime_resource", resourceType: "claude_activity_hooks", effectiveId: "shared:claude-activity-hooks",
+      sourceSpec: "shared", sourcePath: `${oldSpecs}/agents/shared`, resourcePath: "runtime/claude-activity-hooks.json",
+      absolutePath: `${oldSpecs}/agents/shared/runtime/claude-activity-hooks.json`, mergeStrategy: "managed_block" };
+    const f = seed(false, false, "claude-code", true, cwd, [shipped] as never);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const savedCall = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(savedCall?.[0].entries.find((e) => e.resourceType === "claude_activity_hooks")?.absolutePath)
+      .toBe(path.join(runningShippedSpecsRoot(), "agents", "shared", "runtime", "claude-activity-hooks.json"));
+    expect(result.result.warnings.filter((w) => w.startsWith("Restore activity hooks:"))).toEqual([]);
   });
 
   // CodeRabbit follow-up on #2373: the legacy resume adapter must receive the

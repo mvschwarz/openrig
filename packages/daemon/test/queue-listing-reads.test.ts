@@ -366,14 +366,19 @@ describe("show (getById) is the listing projection of one row", () => {
 
   it("reads the row's last meaningful transition once, not once for the pickup and once for the waiting view", async () => {
     const q = (await repo.create({ sourceSession: "orch@r", destinationSession: "worker@r", body: "work", nudge: false } as never)).qitemId;
-    const prepare = db.prepare.bind(db);
+    // Counts runs of the read, not prepares: the statement is prepared once per connection and reused.
+    type Run = (this: { source: string }, ...args: unknown[]) => unknown;
+    const proto = Object.getPrototypeOf(db.prepare("SELECT 1")) as { get: Run; all: Run };
     let n = 0;
-    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
-      if (sql.includes("actor_session NOT IN ('watchdog@system'")) n++;
-      return prepare(sql);
-    }) as typeof db.prepare);
+    const spies = (["get", "all"] as const).map((method) => {
+      const original = proto[method];
+      return vi.spyOn(proto, method).mockImplementation(function (this: { source: string }, ...args: unknown[]) {
+        if (this.source.includes("actor_session NOT IN ('watchdog@system'")) n++;
+        return original.apply(this, args);
+      });
+    });
     repo.getById(q);
-    spy.mockRestore();
+    for (const spy of spies) spy.mockRestore();
     expect(n).toBe(1);
   });
 });

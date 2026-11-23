@@ -14,6 +14,7 @@ import { i3IdentityProvenanceSchema } from "../src/db/migrations/067_i3_identity
 import { EventBus } from "../src/domain/event-bus.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { streamRoutes } from "../src/routes/stream.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: { eventBus: EventBus; streamStore: StreamStore }): Hono {
@@ -332,5 +333,13 @@ describe("stream routes", () => {
     } finally {
       await res.body?.cancel();
     }
+  });
+
+  it("GET /api/stream/:id/intake says where intake recorded the item: null when it didn't, 404 for an unknown item", async () => {
+    const item = store.emit({ sourceSession: deriveCanonicalSessionName("dev", "build", "starter"), body: "obs" });
+    const res = await app.request(`/api/stream/${item.streamItemId}/intake`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ streamItemId: item.streamItemId, intake: null });
+    expect((await app.request("/api/stream/no-such-item/intake")).status).toBe(404);
   });
 });

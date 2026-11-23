@@ -3,9 +3,11 @@ import { assessLocalDaemonOwner, ForeignLocalDaemonError, type LocalDaemonOwner 
 export { ForeignLocalDaemonError } from "./local-daemon-owner.js";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
-import { getOpenRigHome, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
+import { getOpenRigHome, normalizeOpenRigUrl, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
+import { daemonFetch } from "./daemon-transport.js";
+import { resolveSenderSession, type BindingCheck, type TmuxIdentityReader } from "./sender-identity.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
   const token = resolveTerminalToken();
@@ -35,8 +37,10 @@ export const OCCUPANT_GENERATION_HEADER = "X-OpenRig-Occupant-Generation";
  * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand. A client built for one
  * authenticated caller (`sessionName`) carries that caller's seat instead of the process env.
  */
-export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: string): Record<string, string> {
-  const session = (sessionName ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME"))?.trim();
+export function senderIdentityHeaders(
+  originSelfHostId?: string, sessionName?: string, tmuxReader?: TmuxIdentityReader, isBound?: BindingCheck,
+): Record<string, string> {
+  const session = (sessionName ?? resolveSenderSession(tmuxReader, isBound))?.trim();
   if (!session) return {};
   // Preserve qualified senders; append only a locally derived instance id.
   const value =
@@ -52,15 +56,18 @@ export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: s
   };
 }
 
-/** Construct registered remote clients with the origin derived from this instance's durable store. */
+/** Construct registered remote clients with the origin derived from this instance's durable store, and the seat that made
+ *  the call when it isn't the process env's (the MCP host router builds one per caller). */
 export function remoteDaemonClient(
   clientFactory: (baseUrl: string) => DaemonClient,
   url: string,
   originSelfHostId?: string,
+  sessionName?: string,
 ): DaemonClient {
   const client = clientFactory(url);
   client.originSelfHostId = originSelfHostId;
   client.remoteTarget = true;
+  if (sessionName) client.bindSender(sessionName);
   return client;
 }
 
@@ -163,7 +170,7 @@ interface DaemonClientOptions {
   sessionName?: string;
   /** With sessionName: the caller whose grant the MCP adapter checked, sent as X-OpenRig-Principal (JSON of its source,
    *  id and, for a grant-service grant, grant id and version; never a credential). */
-  principal?: { source: "file" | "grant-service"; id: string; grant?: string; version?: number | string };
+  principal?: { source: string; id: string; grant?: string; version?: number | string; label?: string };
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -193,7 +200,7 @@ export class DaemonClient {
   remoteTarget = false;
   private identity?: Promise<Record<string, string>>;
   private originUnknown = false;
-  private readonly sessionName?: string;
+  private sessionName?: string;
   private readonly principal?: DaemonClientOptions["principal"];
 
   /** Isolated terminal tools require this home's durable identity, even on loopback. */
@@ -283,9 +290,16 @@ export class DaemonClient {
     return { session: headers[SENDER_IDENTITY_HEADER], originUnknown: headers["X-OpenRig-Origin-Unknown"] === "true" };
   }
 
+  /** Bind this client to the seat that made the call, for one built before that seat was known (the MCP host router builds a
+   *  registered remote host's client from its URL, then binds the caller). Before the first request, so no identity is cached. */
+  bindSender(sessionName: string): void {
+    this.sessionName = sessionName;
+    this.identity = undefined;
+  }
+
   constructor(baseUrl?: string, options?: DaemonClientOptions) {
     if (baseUrl) {
-      this.baseUrl = baseUrl;
+      this.baseUrl = normalizeOpenRigUrl(baseUrl);
     } else {
       const envUrl = readOpenRigUrl();
       if (envUrl) {
@@ -303,8 +317,8 @@ export class DaemonClient {
       }
     }
 
-    this.fetchImpl = options?.fetchImpl ?? fetch;
-    this.longFetchImpl = options?.longFetchImpl ?? options?.fetchImpl ?? nodeHttpFetch;
+    this.fetchImpl = options?.fetchImpl ?? daemonFetch(this.baseUrl);
+    this.longFetchImpl = options?.longFetchImpl ?? options?.fetchImpl ?? daemonFetch(this.baseUrl, nodeHttpFetch);
     this.ownerProbe = options?.ownerProbe ?? ((url, timeoutMs) => assessLocalDaemonOwner(url, { fetchImpl: this.fetchImpl, timeoutMs }));
     this.timeoutMs = options?.timeoutMs ?? 5_000;
     this.sessionName = options?.sessionName;

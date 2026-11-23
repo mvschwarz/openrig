@@ -155,6 +155,6 @@ describe("rig ps: connected assistants and their check-in status", () => {
       expect(process.exitCode ?? 0).toBe(0);
     }
     rigs = [];
-    expect((await run([])).join("\n")).toContain("No rigs\n\nConnected assistants: check-in unavailable");
+    expect((await run([])).join("\n")).toContain(`No rigs · daemon http://127.0.0.1:${port}\n\nConnected assistants: check-in unavailable`);
   });
 });

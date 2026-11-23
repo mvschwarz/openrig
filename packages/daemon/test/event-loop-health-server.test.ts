@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { EventLoopMonitor, HEALTHZ_RESPONSIVENESS_BUDGET_MS } from "../src/domain/event-loop-monitor.js";
 import { RouteTimingRecorder } from "../src/domain/route-timing-recorder.js";
+import { TerminalServerReachability } from "../src/domain/terminal-server-reachability.js";
 
 function seedRigWithNodes(db: Database.Database, name: string, nodeCount: number): string {
   const rigId = `rig-${name}`;
@@ -24,6 +25,19 @@ describe("OPR.0.4.3.21 — /healthz enrichment", () => {
     const res = await app.request("/healthz");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ok", pid: process.pid, euid: process.geteuid?.() });
+    db.close();
+  });
+
+  it("#3315 keeps status ok and adds the terminals it reaches, apart from the daemon being up", async () => {
+    const db = createFullTestDb();
+    const terminalReachability = new TerminalServerReachability();
+    terminalReachability.observe("/tmp/openrig-3315.sock", { reachable: false, cause: "no server running on /tmp/openrig-3315.sock" });
+    const { app } = createTestApp(db, { terminalReachability });
+    const body = await (await app.request("/healthz")).json() as Record<string, unknown>;
+    expect(body.status).toBe("ok");
+    expect(body.terminals).toMatchObject({ state: "degraded",
+      servers: [{ socket: "/tmp/openrig-3315.sock", state: "unreachable", cause: "no server running on /tmp/openrig-3315.sock" }] });
+    terminalReachability.stop();
     db.close();
   });
 

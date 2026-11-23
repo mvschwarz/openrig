@@ -1,3 +1,5 @@
+import { OutboxHandler } from "./outbox-handler.js";
+import { redactCoreAppSubmissions } from "./core-app-access.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
@@ -10,7 +12,9 @@ import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
  *   (`content_erased_at` set). The create path's retry identity still finds it, so a retried create makes no new work.
  *   A later note, summary or reclose makes it eligible again.
  * - delete: the row and everything linked to it go. Only its id is kept, in `queue_erased_ids` (no endpoints, no
- *   content), and the create path refuses that id (`qitem_erased`).
+ *   content), and the create path refuses that id (`qitem_erased`). Native delivery receipts additionally retain
+ *   opaque custody tombstones (IDs, run order, binding hash and erased marker), with no native payload or result:
+ *   their deletion would permit blind replay or sequence reuse. Legacy outbox deletion stays physical.
  * The row's own copies follow it: its transitions, live and archived; events whose payload names it; its
  * mission-control audit rows. Copies another party holds (outbox and inbox entries, stream reader actions and
  * dispositions) go only when they're the owner's: both endpoints the account's (members scope) or the row's own
@@ -20,7 +24,8 @@ import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
  * Scope is exact. Account deletion takes the account's recorded membership (exact session names): a row between two
  * members, or between a member and OpenRig, is deleted, whatever its state; a row with one member endpoint and the
  * other outside the account is reported as mixed and left untouched. Named with the account's rig, it also removes
- * the rig's own records that outlive the rig. Routine
+ * the rig's own records that outlive the rig. An empty membership is accepted only with the rig, for an account rig
+ * that never had a session (refuseUnlessNeverHadSession). Routine
  * retention touches only closed rows (done, canceled, denied, handed-off; never failed or open work), aged from the
  * start of their final closed state. A row a workflow still references is reported, never erased.
  *
@@ -45,7 +50,7 @@ const QITEM_SHAPE = /^qitem-[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/;
 
 /** A scrub keeps a closure target only when it names a successor: closure writes don't constrain the target, so text
  *  under a successor reason is cleared like any other note. */
-function keepsClosureTarget(reason: unknown, target: unknown): boolean {
+export function keepsClosureTarget(reason: unknown, target: unknown): boolean {
   return ID_CLOSURE_REASONS.includes(reason as (typeof ID_CLOSURE_REASONS)[number]) && typeof target === "string"
     && target.length <= 256 && (ADDRESS_SHAPE.test(target) || QITEM_SHAPE.test(target));
 }
@@ -79,6 +84,9 @@ export interface EraseOptions {
    *  changes anything, then {batch, committed} once the batch commits or rolls back. The file is opened before the run
    *  writes anything at all */
   ledgerPath?: string;
+  /** For a never-member erase: whose host a host-qualified address names. Without it, this database's own host id is
+   *  this host and anything else is unknown (so it refuses). */
+  classifyHost?: (host: string) => HostClass;
 }
 
 type Stage = "ledger" | "select" | "events" | "rows" | "unlinked" | "rig";
@@ -91,8 +99,8 @@ export interface EraseReport {
   scope: EraseScope["kind"];
   /** false when the run stopped at maxBatches or on an error; rerun to continue */
   complete: boolean;
-  /** complete, and nothing was left: no mixed rows or copies, gaps, unreadable events, or left-over entries or rig
-   *  records */
+  /** Complete with nothing needing further content erasure: no mixed rows/copies, gaps, unreadable events or
+   * leftover entries/rig records. Opaque native custody tombstones are intentional and counted separately. */
   clean: boolean;
   /** why the run stopped early, and where; everything listed in qitems was committed before it */
   error?: { stage: Stage; message: string };
@@ -118,11 +126,12 @@ export interface EraseReport {
   /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected. The
    *  rows they name are kept too (gap unreadable-event), so every rerun finds them again until they're resolved */
   unreadableEvents: Array<{ seq: number; qitemIds: string[] }>;
-  /** copies erased with the rows, or that would be */
-  linked: { transitions: number; archivedTransitions: number; outbox: number; inbox: number; events: number; streamActions: number; missionControl: number };
-  /** members scope: entries no queue row owns between members, or a member and OpenRig; mixed ones are counted and
-   *  left */
-  unlinked?: { outbox: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
+  /** Copies whose content is erased with the rows, or would be. nativeCustodyRetained is the outbox subset kept
+   * as opaque native tombstones rather than physically deleted (legacy outbox delete remains physical). */
+  linked: { transitions: number; archivedTransitions: number; outbox: number; nativeCustodyRetained?: number; inbox: number; events: number; streamActions: number; missionControl: number };
+  /** Members scope: unlinked entries between members, or a member and OpenRig; mixed entries are left. outbox counts physical legacy
+   * deletions; nativeCustodyRetained separately counts native content erasure retaining opaque custody. */
+  unlinked?: { outbox: number; nativeCustodyRetained?: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
   /** members scope with rig: whether the rig was found and verified, its records erased and left per table, the
    *  tables whose records can't be counted (an unverified removed rig), and when its erasure completed */
   rig?: { id: string; found: boolean; verified: boolean; erased: Record<string, number>; left: Record<string, number>; unknown: string[];
@@ -223,9 +232,15 @@ const COPY_KEY: Record<CopyTable, string> = {
   outbox_entries: "outbox_id", inbox_entries: "inbox_id", stream_reader_actions: "action_id", stream_dispositions: "stream_item_id",
 };
 
-function eraseCopies(st: Statements, copies: Copy[], action: EraseAction): void {
+function eraseCopies(st: Statements, copies: Copy[], action: EraseAction, outbox: OutboxHandler, at: string): void {
   for (const table of Object.keys(COPY_KEY) as CopyTable[]) {
-    const keys = copies.filter((copy) => copy.table === table).map((copy) => copy.id);
+    let keys = copies.filter((copy) => copy.table === table).map((copy) => copy.id);
+    if (table === "outbox_entries") {
+      const native = keys.filter(id => outbox.eraseRunner(id, at));
+      // Native-only opaque custody survives physical deletion. Original content is removed at the requested scope;
+      // composed group content/results were scrubbed atomically above, including copies owned by another member.
+      keys = keys.filter(id => !native.includes(id));
+    }
     if (keys.length === 0) continue;
     const params = { keys: JSON.stringify(keys) };
     const where = `${COPY_KEY[table]} IN (SELECT value FROM json_each(@keys))`;
@@ -337,6 +352,175 @@ function membersDigest(members: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify([...new Set(members)].sort())).digest("hex");
 }
 
+/** An account rig is erased with no members only when it never had a session, shown from what this database keeps: no
+ *  session on its nodes (the both-ways membership check), no event of the rig or its nodes naming one, no node removed
+ *  from it (a node's sessions are deleted with it), and no earlier erasure that recorded members for it. Anything less
+ *  is refused: a delete doesn't guess. */
+function refuseUnlessNeverHadSession(db: Database.Database, rigId: string, rigName: string): void {
+  const named = db.prepare(`SELECT 1 FROM events WHERE (rig_id = @rig OR node_id IN (SELECT id FROM nodes WHERE rig_id = @rig))
+      AND (instr(payload, '"sessionName"') > 0 OR instr(payload, '"sessionId"') > 0) LIMIT 1`).get({ rig: rigId });
+  if (named !== undefined) {
+    throw new EraseRefusal("erase_rig_had_sessions", `Rig ${rigName}'s events name a session, so it had members. Name them.`);
+  }
+  if (db.prepare("SELECT 1 FROM events WHERE rig_id = ? AND type = 'node.removed' LIMIT 1").get(rigId) !== undefined) {
+    throw new EraseRefusal("erase_rig_history_unknown",
+      `A node was removed from rig ${rigName}, and its sessions went with it, so it can't be shown that the rig never had a session.`);
+  }
+  const kept = db.prepare("SELECT members_digest AS digest FROM queue_erased_rigs WHERE rig_id = ?").get(rigId) as { digest: string } | undefined;
+  if (kept !== undefined && kept.digest !== membersDigest([])) {
+    throw new EraseRefusal("erase_rig_had_sessions", `An earlier erasure recorded members for rig ${rigName}. Name them.`);
+  }
+}
+
+/** Where queue work keeps a session address. A seat that worked at a rig shows here even with no session row: a
+ *  grant-service caller acting as its grant's seat, or a hosted member. */
+const ADDRESS_COLUMNS: ReadonlyArray<{ table: string; columns: string[] }> = [
+  { table: "queue_items", columns: ["source_session", "destination_session"] },
+  { table: "queue_transitions", columns: ["actor_session"] },
+  { table: "queue_transitions_archive", columns: ["actor_session"] },
+  { table: "inbox_entries", columns: ["sender_session", "destination_session"] },
+  { table: "outbox_entries", columns: ["sender_session", "destination_session"] },
+  { table: "stream_items", columns: ["source_session"] },
+  // A seat listing its own inbox (an MCP grant or hosted seat polling before it has any row) records a check-in.
+  { table: "queue_inbox_checkins", columns: ["session"] },
+  // A reader's decline or other action on a stream item, which leaves no queue row.
+  { table: "stream_reader_actions", columns: ["reader_session"] },
+  // A chatroom post, which an MCP grant or hosted seat can make in any rig's room.
+  { table: "chat_messages", columns: ["sender"] },
+  // A reader seat's stream subscription.
+  { table: "stream_subscriptions", columns: ["reader_session", "created_by"] },
+];
+const ADDRESS_WINDOW = 5_000;
+/** How many matches past the watermark the in-run guard reads per table. */
+const GUARD_PAGE = 100;
+/** A session address at the rig, `<name>@<rig>` or host-qualified `<name>@<rig>@<host>`: matched exactly on the part after
+ *  the first `@` (LIKE would read `_` in a rig name as a wildcard). */
+const AT_RIG = (column: string) => `(instr(${column}, '@') > 0 AND (substr(${column}, instr(${column}, '@') + 1) = @rigName
+    OR substr(${column}, instr(${column}, '@') + 1, length(@rigName) + 1) = @rigName || '@'))`;
+const atRig = (address: unknown, rigName: string): address is string => {
+  if (typeof address !== "string" || !address.includes("@")) return false;
+  const rest = address.slice(address.indexOf("@") + 1);
+  return rest === rigName || rest.startsWith(`${rigName}@`);
+};
+
+/** Whose host a host-qualified address names: this one, another known host, or one that can't be resolved. */
+export type HostClass = "self" | "other" | "unknown";
+/** Whether an address at the rig is evidence of a member of this daemon's rig. Unqualified, or qualified with this
+ *  host: yes. Qualified with another known host: no, that's that host's same-named rig. A host that can't be resolved:
+ *  yes, since unknown refuses. */
+function memberEvidence(address: string, rigName: string, classifyHost: (host: string) => HostClass): boolean {
+  const rest = address.slice(address.indexOf("@") + 1);
+  if (rest === rigName) return true;
+  return classifyHost(rest.slice(rigName.length + 1)) !== "other";
+}
+/** Without a resolver from the caller: this database's own host id is this host, and anything else is unknown. */
+function defaultHostClassifier(db: Database.Database): (host: string) => HostClass {
+  let self: string | null | undefined;
+  return (host) => {
+    if (self === undefined) {
+      try {
+        self = (db.prepare("SELECT host_id FROM self_host_identity WHERE singleton = 1").get() as { host_id: string } | undefined)?.host_id ?? null;
+      } catch {
+        self = null;
+      }
+    }
+    return self !== null && host === self ? "self" : "unknown";
+  };
+}
+
+/** How far each table reached when a never-member proof was taken; whatever lands past it came during the run. */
+type Watermark = { seq: number; rowids: Record<string, number> };
+function watermark(db: Database.Database, tables: Set<string>): Watermark {
+  const rowids: Record<string, number> = {};
+  for (const { table } of ADDRESS_COLUMNS) {
+    if (tables.has(table)) rowids[table] = (db.prepare(`SELECT MAX(rowid) AS n FROM ${table}`).get() as { n: number | null }).n ?? 0;
+  }
+  return { seq: (db.prepare("SELECT MAX(seq) AS n FROM events").get() as { n: number | null }).n ?? 0, rowids };
+}
+
+/** Addresses at the rig in queue work, read in rowid windows with a yield between them (from a watermark: only rows past
+ *  it). At most `limit` are listed. */
+async function addressesAtRig(db: Database.Database, tables: Set<string>, rigName: string, classifyHost: (host: string) => HostClass,
+  limit = 20): Promise<string[]> {
+  const found = new Set<string>();
+  for (const { table, columns } of ADDRESS_COLUMNS) {
+    if (!tables.has(table)) continue;
+    const top = (db.prepare(`SELECT MAX(rowid) AS n FROM ${table}`).get() as { n: number | null }).n ?? 0;
+    const read = db.prepare(`SELECT ${columns.join(", ")} FROM ${table}
+        WHERE rowid > @lo AND rowid <= @hi AND (${columns.map(AT_RIG).join(" OR ")})`);
+    for (let lo = 0; lo < top && found.size < limit; lo += ADDRESS_WINDOW) {
+      for (const row of read.all({ lo, hi: Math.min(lo + ADDRESS_WINDOW, top), rigName }) as Array<Record<string, unknown>>) {
+        for (const column of columns) {
+          const address = row[column];
+          if (atRig(address, rigName) && memberEvidence(address, rigName, classifyHost)) found.add(address);
+        }
+      }
+      await yieldToLoop();
+    }
+  }
+  return [...found].sort().slice(0, limit);
+}
+
+/** A never-member erase rechecks its proof inside each transaction that deletes or records: nothing new for the rig past
+ *  the watermark (an event of the rig or its nodes, a session on its nodes, queue work at its address). A seat that
+ *  arrives while the run yields stops it before its records go, and no receipt is written. */
+function neverMemberGuard(db: Database.Database, tables: Set<string>, rig: { id: string; name: string | null; found: boolean },
+  mark: Watermark, classifyHost: (host: string) => HostClass): (full?: boolean) => void {
+  const params = { rig: rig.id, rigName: rig.name ?? "", seq: mark.seq };
+  const stop = (what: string) => {
+    throw new Error(`rig ${rig.name ?? rig.id} changed during the run (${what}), so nothing more was erased and no receipt was written; rerun to check it again`);
+  };
+  // `full`, in the receipt's own transaction: every row at the rig, not only those past the watermark. A table without
+  // AUTOINCREMENT can give a new row a deleted row's rowid, at or below its watermark. One unindexed pass over each table.
+  return (full = false) => {
+    const event = (db.prepare("SELECT type FROM events WHERE rig_id = @rig AND seq > @seq LIMIT 1").get(params)
+      ?? db.prepare("SELECT type FROM events WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = @rig) AND seq > @seq LIMIT 1").get(params)) as
+      { type: string } | undefined;
+    if (event !== undefined) stop(`event ${event.type}`);
+    if (db.prepare("SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE n.rig_id = @rig LIMIT 1").get(params) !== undefined) stop("a session");
+    if (rig.name === null) return;
+    const rigName = rig.name;
+    const isEvidence = (row: Record<string, unknown>, columns: string[]) =>
+      columns.some((column) => atRig(row[column], rigName) && memberEvidence(row[column] as string, rigName, classifyHost));
+    // A full page could hide evidence past it, and unknown refuses: it stops too (a rerun reads it all again).
+    const evidence = (rows: Array<Record<string, unknown>>, columns: string[]) => rows.length >= GUARD_PAGE
+      || rows.some((row) => isEvidence(row, columns));
+    for (const { table, columns } of ADDRESS_COLUMNS) {
+      if (!tables.has(table)) continue;
+      if (full) {
+        const every = db.prepare(`SELECT ${columns.join(", ")} FROM ${table} WHERE ${columns.map(AT_RIG).join(" OR ")}`);
+        for (const row of every.iterate(params) as Iterable<Record<string, unknown>>) {
+          if (isEvidence(row, columns)) stop(`queue work at the rig in ${table}`);
+        }
+        continue;
+      }
+      const rows = db.prepare(`SELECT ${columns.join(", ")} FROM ${table} WHERE rowid > @after AND (${columns.map(AT_RIG).join(" OR ")}) LIMIT ${GUARD_PAGE}`)
+        .all({ ...params, after: mark.rowids[table] ?? 0 }) as Array<Record<string, unknown>>;
+      if (evidence(rows, columns)) stop(`queue work at the rig in ${table}`);
+    }
+    // An existing row moved to an address at the rig (a fallback reroute, say) leaves a transition, not a new row.
+    if (tables.has("queue_transitions") && tables.has("queue_items")) {
+      const moved = db.prepare(`SELECT q.source_session, q.destination_session FROM queue_transitions t JOIN queue_items q ON q.qitem_id = t.qitem_id
+          WHERE t.transition_id > @after AND (${AT_RIG("q.source_session")} OR ${AT_RIG("q.destination_session")}) LIMIT ${GUARD_PAGE}`)
+        .all({ ...params, after: mark.rowids.queue_transitions ?? 0 }) as Array<Record<string, unknown>>;
+      if (evidence(moved, ["source_session", "destination_session"])) stop("a row moved to an address at the rig");
+    }
+  };
+}
+
+/** After a never-member erase recorded its receipt and the rig was removed: anything of the rig since then that only a
+ *  member leaves (a node or seat event, a session event, one naming a session) means a member came later, so the
+ *  receipt no longer holds. */
+function refuseIfMemberSinceReceipt(db: Database.Database, rigId: string): void {
+  const event = db.prepare(`SELECT type FROM events WHERE rig_id = ?
+      AND (substr(type, 1, 5) IN ('node.', 'seat.') OR substr(type, 1, 8) IN ('session.', 'binding.') OR type = 'rig.expanded'
+        OR instr(payload, '"sessionName"') > 0 OR instr(payload, '"sessionId"') > 0) LIMIT 1`).get(rigId) as { type: string } | undefined;
+  if (event !== undefined) {
+    throw new EraseRefusal("erase_rig_had_sessions",
+      `Rig ${rigId} had a member after its erasure was recorded with none (event ${event.type}). Name its members.`);
+  }
+}
+
 type BatchPlan = {
   rows: Candidate[];
   absent: string[];
@@ -389,6 +573,7 @@ function reconcileLedger(st: Statements, path: string, nowIso: string): { reconc
 /** Erase queue rows in one scope. With apply false it reports exactly what an apply would erase and writes nothing. */
 export async function eraseQueue(db: Database.Database, opts: EraseOptions): Promise<EraseReport> {
   const st = new Statements(db);
+  const erasureOutbox = new OutboxHandler(db);
   const batchSize = opts.batchSize ?? DEFAULT_BATCH;
   const maxBatches = opts.maxBatches ?? DEFAULT_MAX_BATCHES;
   const { scope } = opts;
@@ -397,6 +582,13 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   // members included), and every session of it is a member. A rig already removed is verified only by the record an
   // earlier run kept with this membership.
   let rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null } | null = null;
+  // A never-member erase (no members, with its rig): the tables read, and where they stood when its proof was taken.
+  let tables: Set<string> | undefined;
+  let proofMark: Watermark | undefined;
+  const classifyHost = opts.classifyHost ?? defaultHostClassifier(db);
+  if (scope.kind === "members" && scope.members.length === 0 && scope.rig === undefined) {
+    throw new EraseRefusal("erase_members_invalid", "An empty members list names an account rig that never had a member: give its rig.");
+  }
   if (scope.kind === "members" && scope.rig !== undefined) {
     const name = (db.prepare("SELECT name FROM rigs WHERE id = ?").get(scope.rig) as { name: string } | undefined)?.name ?? null;
     if (name !== null) {
@@ -410,11 +602,36 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           unlisted.length > 0 ? `Rig ${name} has sessions the members don't list: ${unlisted.join(", ")}.` : "",
         ].filter(Boolean).join(" "));
       }
+      if (scope.members.length === 0) {
+        tables ??= tableNames(db);
+        proofMark = watermark(db, tables);
+        refuseUnlessNeverHadSession(db, scope.rig, name);
+        const addresses = await addressesAtRig(db, tables, name, classifyHost);
+        if (addresses.length > 0) {
+          throw new EraseRefusal("erase_rig_had_sessions", `Queue work names seats of rig ${name}: ${addresses.join(", ")}. Name them.`);
+        }
+      }
       rig = { id: scope.rig, name, found: true, verified: true, completedAt: null };
     } else {
       const kept = db.prepare(`SELECT rig_name AS name, members_digest AS digest, completed_at AS completedAt
           FROM queue_erased_rigs WHERE rig_id = ?`).get(scope.rig) as { name: string; digest: string; completedAt: string | null } | undefined;
       const verified = kept !== undefined && kept.digest === membersDigest(scope.members);
+      // With no members, a removed rig is erased only on an earlier run's record that it had none.
+      if (scope.members.length === 0 && !verified) {
+        throw new EraseRefusal("erase_rig_history_unknown",
+          `Rig ${scope.rig} isn't on this daemon, and no earlier erasure recorded it with no members, so it can't be shown that it never had a session.`);
+      }
+      if (scope.members.length === 0) {
+        tables ??= tableNames(db);
+        proofMark = watermark(db, tables);
+        refuseIfMemberSinceReceipt(db, scope.rig);
+        if (kept!.name !== "") {
+          const addresses = await addressesAtRig(db, tables, kept!.name, classifyHost);
+          if (addresses.length > 0) {
+            throw new EraseRefusal("erase_rig_had_sessions", `Queue work names seats of rig ${kept!.name}: ${addresses.join(", ")}. Name them.`);
+          }
+        }
+      }
       rig = { id: scope.rig, name: verified && kept.name !== "" ? kept.name : null, found: false, verified,
         completedAt: verified ? kept.completedAt : null };
     }
@@ -726,10 +943,11 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         ledger([...planned.rows, ...planned.absent.map((qitemId) => ({ qitemId, action: "delete" as const }))], batch);
         for (const [payload, seq] of planned.events.rewrite) rewriteEvent.run(payload, seq);
         for (const seq of planned.events.remove) removeEvent.run(seq);
-        eraseCopies(st, planned.owned.scrub, "scrub");
-        eraseCopies(st, planned.owned.delete, "delete");
+        eraseCopies(st, planned.owned.scrub, "scrub", erasureOutbox, opts.nowIso);
+        eraseCopies(st, planned.owned.delete, "delete", erasureOutbox, opts.nowIso);
         const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
         const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
+        if (scrub.length > 0 || remove.length > 0) redactCoreAppSubmissions(db, [...scrub, ...remove], opts.nowIso);
         if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);
         if (remove.length > 0) deleteRows(st, remove, opts.nowIso, reason);
         return planned;
@@ -739,6 +957,9 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       report.linked.archivedTransitions += plan.counts.archivedTransitions;
       report.linked.missionControl += plan.counts.missionControl;
       report.linked.outbox += all.filter((copy) => copy.table === "outbox_entries").length;
+      const nativeRetained = all.filter(copy => copy.table === "outbox_entries"
+        && (erasureOutbox.runnerPrimary(copy.id) || erasureOutbox.inputRoute(copy.id) === "native")).length;
+      if (nativeRetained) report.linked.nativeCustodyRetained = (report.linked.nativeCustodyRetained ?? 0) + nativeRetained;
       report.linked.inbox += all.filter((copy) => copy.table === "inbox_entries").length;
       report.linked.streamActions += all.filter((copy) => copy.table === "stream_reader_actions" || copy.table === "stream_dispositions").length;
       for (const seq of plan.events.seqs) eventSeqs.add(seq);
@@ -777,11 +998,12 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       stage = "unlinked";
       report.unlinked = eraseUnlinked(db, st, {
         members, plannedActions, plannedDispositions, erasedRows: report.qitems.map((row) => row.qitemId),
-      }, opts.apply);
+      }, opts.apply, opts.nowIso);
       if (rig !== null) {
         stage = "rig";
         report.rig = { id: rig.id, found: rig.found, verified: rig.verified, erased: {}, left: {}, unknown: [] };
-        await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso, report.rig);
+        const guard = proofMark !== undefined && tables !== undefined ? neverMemberGuard(db, tables, rig, proofMark, classifyHost) : undefined;
+        await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso, report.rig, guard);
       }
     }
   } catch (err) {
@@ -803,7 +1025,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
  *  left. Rows and references this run erases are counted as they were before it, so a dry run and an apply report the
  *  same set. */
 function eraseUnlinked(db: Database.Database, st: Statements,
-  plan: { members: string; plannedActions: string[]; plannedDispositions: string[]; erasedRows: string[] }, apply: boolean): NonNullable<EraseReport["unlinked"]> {
+  plan: { members: string; plannedActions: string[]; plannedDispositions: string[]; erasedRows: string[] }, apply: boolean, at: string): NonNullable<EraseReport["unlinked"]> {
   // A row this run erased still owns its copies here: they were reported with it (keptCopies), not as unowned.
   const rows = "(SELECT qitem_id FROM queue_items UNION ALL SELECT value FROM json_each(@rows))";
   // COALESCE: an entry with no pointer is unowned, not unknown (NULL IN (...) would drop it from both counts).
@@ -834,24 +1056,32 @@ function eraseUnlinked(db: Database.Database, st: Statements,
   const referenced = `stream_item_id IN (${references.join(" UNION ")})`;
   const params = { members: plan.members, actions: JSON.stringify(plan.plannedActions), dispositions: JSON.stringify(plan.plannedDispositions),
     rows: JSON.stringify(plan.erasedRows) };
-  const result = {
-    outbox: st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`, params),
-    inbox: st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`, params),
-    streamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND NOT ${referenced}`, params),
-    // A row's own copies are reported with that row (mixed, keptCopies); these are the entries no row owns.
-    mixedEntries: [fromMember, toMember].reduce((sum, where) =>
-      sum + st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${where} AND NOT ${ownedOutbox}`, params)
-      + st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${where} AND NOT ${ownedInbox}`, params), 0),
-    referencedStreamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND ${referenced}`, params),
-  };
-  if (apply) {
-    db.transaction(() => {
+  // Select and erase under the same snapshot: a native source cannot cross account ownership between them.
+  return db.transaction(() => {
+    const outbox = new OutboxHandler(db);
+    const nativeIds = (st.get(`SELECT outbox_id AS id FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}
+      AND (json_extract(guard_delivery,'$.runner') IS NOT NULL OR json_extract(guard_delivery,'$.nativeRequestId') IS NOT NULL OR json_extract(guard_delivery,'$.inputRoute')='native')`)
+      .all(params) as { id: string }[]).map(row => row.id);
+    const result = {
+      ...(nativeIds.length ? { nativeCustodyRetained: nativeIds.length } : {}),
+      outbox: st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`, params) - nativeIds.length,
+      inbox: st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`, params),
+      streamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND NOT ${referenced}`, params),
+      // A row's own copies are reported with that row (mixed, keptCopies); these are the entries no row owns.
+      mixedEntries: [fromMember, toMember].reduce((sum, where) =>
+        sum + st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${where} AND NOT ${ownedOutbox}`, params)
+        + st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${where} AND NOT ${ownedInbox}`, params), 0),
+      referencedStreamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND ${referenced}`, params),
+    };
+    if (apply) {
+      for (const id of nativeIds) outbox.eraseRunner(id, at);
+      // Native sources now have empty endpoints; only legacy rows still match this physical-delete scope.
       st.get(`DELETE FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`).run(params);
       st.get(`DELETE FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`).run(params);
       st.get(`DELETE FROM stream_items WHERE source_session IN ${MEMBERS} AND NOT ${referenced}`).run(params);
-    })();
-  }
-  return result;
+    }
+    return result;
+  })();
 }
 
 // The account rig's own records that outlive the rig (no cascading key to it), in delete order: dependents first.
@@ -895,9 +1125,8 @@ const RIG_RECORDS_CHUNK = 1_000;
  *  what it erased. */
 async function eraseRigRecords(db: Database.Database, st: Statements,
   rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null; members: string; digest: string },
-  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>): Promise<void> {
-  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
-    .map((row) => row.name));
+  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>, guard?: (full?: boolean) => void): Promise<void> {
+  const tables = tableNames(db);
   const params = { rig: rig.id, rigName: rig.name ?? "", members: rig.members };
   const add = (into: Record<string, number>, table: string, n: number) => {
     into[table] = (into[table] ?? 0) + n;
@@ -915,9 +1144,13 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
     }
     add(out.erased, table, 0);
     // In chunks by rowid (every one of these tables has one; a declared key can be NULL), so a large table (events)
-    // never holds the daemon in one statement.
+    // never holds the daemon in one statement. A guard rechecks its proof in each chunk's own transaction.
     const chunk = st.get(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where} LIMIT ${RIG_RECORDS_CHUNK})`);
-    for (let changes = chunk.run(params).changes; changes > 0; changes = chunk.run(params).changes) {
+    const run = db.transaction(() => {
+      guard?.();
+      return chunk.run(params).changes;
+    });
+    for (let changes = run(); changes > 0; changes = run()) {
       add(out.erased, table, changes);
       await yieldToLoop();
     }
@@ -935,7 +1168,8 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
   out.unknown = [...unknown];
   const leftTotal = Object.values(out.left).reduce((sum, n) => sum + n, 0);
   if (rig.completedAt !== null) out.completedAt = rig.completedAt;
-  if (apply && rig.verified) {
+  if (apply && rig.verified) db.transaction(() => {
+    guard?.(true);
     if (rig.found) {
       // While the rig exists, its id and name are kept with this membership, so the run after its removal is verified.
       db.prepare(`INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at, completed_at) VALUES (?, ?, ?, ?, NULL)
@@ -948,5 +1182,9 @@ async function eraseRigRecords(db: Database.Database, st: Statements,
       db.prepare("UPDATE queue_erased_rigs SET rig_name = '', completed_at = ? WHERE rig_id = ?").run(nowIso, rig.id);
       out.completedAt = nowIso;
     }
-  }
+  })();
+}
+
+function tableNames(db: Database.Database): Set<string> {
+  return new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 }

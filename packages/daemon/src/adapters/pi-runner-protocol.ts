@@ -18,6 +18,12 @@
 
 import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
+/** Run-local managed channel input, shared wire only; native execution remains in each runner. */
+export interface PiManagedRequest {
+  version: 1; runId: string; requestId: string; sequence: number; kind: "input" | "wake" | "cancel";
+  payload: { text?: string; question?: string; target?: { runId: string; nativeTurnId: string } };
+}
+
 export type RunnerRuntime = "pi" | "omp";
 
 // ── Seat state layout ────────────────────────────────────────────────────────
@@ -50,8 +56,34 @@ export const PI_RUNNER_ERROR_MARKER = "[pi-runner] ERROR";
 
 // ── Runner-state sidecar ─────────────────────────────────────────────────────
 
+export interface PiCompactionRecord {
+  /** The OpenRig manual-compaction attempt this run answers. Present only for a
+   *  requested run: the runner stamps the id carried by `/openrig-compact <id>`.
+   *  Automatic runs carry none, so an earlier result never answers a new request. */
+  readonly attemptId?: string;
+  readonly requestId?: string;
+  readonly reason?: string;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  readonly result?: { readonly summary?: string; readonly firstKeptEntryId?: string; readonly tokensBefore?: number; readonly estimatedTokensAfter?: number } | null;
+  readonly aborted?: boolean;
+  readonly willRetry?: boolean;
+  readonly errorMessage?: string;
+}
+
 export interface PiRunnerState {
+  /** The latest run, automatic (threshold/overflow) or requested. */
+  compaction?: PiCompactionRecord;
+  /** The last attempt-stamped record, kept BESIDE `compaction`: a later
+   *  automatic run replaces `compaction` without erasing a completed request. */
+  requestedCompaction?: PiCompactionRecord;
+  /** The attempt the newest `/openrig-compact <id>` input named, written before
+   *  the native compact RPC is sent. It survives a daemon restart, so the newest
+   *  request reads uncertain instead of falling back to an older completion. */
+  pendingCompaction?: { readonly attemptId: string; readonly requestedAt: string };
   ready: boolean;
+  /** This live runner's read-only recovery endpoint; absent on older runners. */
+  recovery?: { port: number; pid: number; childPid: number };
   /** Launch-attempt scope (guard fold, code-review):
    *  the adapter mints a launchId per attempt, pre-writes a pending sidecar
    *  carrying it, and passes --launch-id to the runner; the runner stamps it

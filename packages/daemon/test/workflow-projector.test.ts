@@ -13,6 +13,9 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
+import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
+import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -690,5 +693,295 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       | { type: "workflow.failed"; reason: string }
       | undefined;
     expect(failedEvent?.reason).toBe("could not produce artifact");
+  });
+
+  // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
+  // queue refuses closing it again. project records the stated exit and its next hop on the workflow without writing
+  // that row, says so, and the same exit again reports the same result with nothing written.
+  describe("a frontier packet the queue already closed", () => {
+    const snapshot = () => ["queue_items", "queue_transitions", "events", "workflow_instances", "workflow_step_trails", "outbox_entries"]
+      .map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    async function handedOff(path: string) {
+      const inst = await runtime.instantiate({ specPath: path, rootObjective: "x", createdBySession: "ops@rig" });
+      await queueRepo.handoff({ qitemId: inst.entryQitemId, fromSession: "producer@rig", toSession: "helper@rig" });
+      const row = () => ({ item: queueRepo.getById(inst.entryQitemId),
+        transitions: db.prepare("SELECT * FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid").all(inst.entryQitemId) });
+      return { instanceId: inst.instance.instanceId, packet: inst.entryQitemId, row, closedRow: row() };
+    }
+
+    it("records a handoff exit and projects the next step without writing the closed row; a repeat writes nothing", async () => {
+      const { instanceId, packet, row, closedRow } = await handedOff(specPath);
+      expect(closedRow.item?.state).toBe("handed-off");
+
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" });
+
+      expect(projected).toMatchObject({ closurePriorPacketId: packet, closureReason: "handoff", nextStepId: "review", nextOwnerSession: "reviewer@rig",
+        advisories: [`packet ${packet} was already handed-off in the queue, so the handoff exit was recorded on the workflow without writing its queue row`] });
+      expect(row()).toEqual(closedRow);
+      expect(queueRepo.getById(projected.nextQitemId!)?.state).toBe("pending");
+      expect(projected.instance.currentFrontier).toEqual([projected.nextQitemId]);
+      expect(runtime.trailLog.listForInstance(instanceId).find((t) => t.priorQitemId === packet)?.closureEvidence).toMatchObject({
+        queue_row_already_closed: { state: "handed-off", exit: "handoff", next_qitem_ids: [projected.nextQitemId], next_step_ids: ["review"] } });
+
+      const before = snapshot();
+      expect(await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" })).toMatchObject({
+        closureReason: "handoff", nextQitemId: projected.nextQitemId, nextStepId: "review", nextOwnerSession: "reviewer@rig",
+        emittedEventTypes: [], absorbedReplay: true });
+      expect(snapshot()).toEqual(before);
+      // Another exit, or the same exit with any other part of the caller's intent changed, keeps today's answer.
+      for (const changed of [{ exit: "done" as const }, { resultNote: "a different result" }, { closureEvidence: { evidence_ref: "other" } },
+        { actorSession: "reviewer@rig" }]) {
+        await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig", ...changed }))
+          .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      }
+      expect(snapshot()).toEqual(before);
+    });
+
+    // The replay reports the owner the projection resolved, not the successor row's current one (a fallback can move it).
+    it("replays the recorded next owner after the successor row is redirected", async () => {
+      const { instanceId, packet } = await handedOff(specPath);
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" });
+      db.prepare("UPDATE queue_items SET destination_session = 'fallback@rig' WHERE qitem_id = ?").run(projected.nextQitemId);
+      expect(await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" }))
+        .toMatchObject({ absorbedReplay: true, nextQitemId: projected.nextQitemId, nextOwnerSession: "reviewer@rig" });
+    });
+
+    it.each([
+      ["no evidence", undefined],
+      ["empty evidence", {}],
+    ])("records a waiting exit without parking the closed row, and the same waiting again is absorbed (%s)", async (_label, closureEvidence) => {
+      const { instanceId, packet, row, closedRow } = await handedOff(permissiveSpecPath);
+      const waitingInput = { instanceId, currentPacketId: packet, exit: "waiting" as const, actorSession: "anyone@rig", blockedOn: "external-gate-x", closureEvidence };
+
+      const waiting = await runtime.project(waitingInput);
+
+      expect(waiting.instance).toMatchObject({ status: "waiting", currentFrontier: [packet] });
+      expect(row()).toEqual(closedRow);
+      const before = snapshot();
+      expect(await runtime.project(waitingInput)).toMatchObject({ absorbedReplay: true, emittedEventTypes: [] });
+      expect(snapshot()).toEqual(before);
+      // A different blocker is a new decision, recorded without writing the closed row.
+      await runtime.project({ ...waitingInput, blockedOn: "external-gate-y" });
+      expect(row()).toEqual(closedRow);
+      expect(runtime.trailLog.listForInstance(instanceId).filter((t) => t.priorQitemId === packet)).toHaveLength(2);
+    });
+
+    // The record's key is the projector's own: a caller's value for it is neither stored nor trusted, and a malformed
+    // record reads as none.
+    it("doesn't store or trust a caller's value for the projector's record", async () => {
+      const inst = await runtime.instantiate({ specPath, rootObjective: "x", createdBySession: "ops@rig" });
+      const instanceId = inst.instance.instanceId, packet = inst.entryQitemId;
+      const forged = { state: "handed-off", exit: "done", actor: "producer@rig", result_note: null, blocked_on: null,
+        next_owner: null, evidence: null, next_qitem_ids: ["qitem-forged"], next_step_ids: ["finalize"] };
+
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig",
+        closureEvidence: { evidence_ref: "proof.md", queue_row_already_closed: forged } });
+
+      expect(projected.advisories).toContain("closure evidence key queue_row_already_closed is the projector's own, so the value supplied for it wasn't stored");
+      expect(queueRepo.getById(packet)?.state).toBe("handed-off");
+      expect(runtime.trailLog.listForInstance(instanceId).find((t) => t.priorQitemId === packet)?.closureEvidence).toEqual({ evidence_ref: "proof.md",
+        owner_resolution: expect.anything() });
+      const before = snapshot();
+      await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "done", actorSession: "producer@rig" }))
+        .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      // A malformed record on the trail (written outside project) reads as none, not as an error.
+      runtime.trailLog.record({ instanceId, stepId: "produce", stepRole: "producer", closedAt: new Date().toISOString(), closureReason: "done",
+        closureEvidence: { queue_row_already_closed: { exit: "done", next_qitem_ids: "not-a-list" } }, actorSession: "producer@rig",
+        nextQitemId: null, priorQitemId: packet });
+      await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "done", actorSession: "producer@rig" }))
+        .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      expect(snapshot()[0]).toEqual(before[0]);
+    });
+  });
+});
+
+// #3757: a handoff between two steps of the same role, closed by the session that owned the packet. Without
+// --next-owner the default stays preferred_targets[0] and project says so; next_owner: same_as_previous (step or spec)
+// keeps the next packet with the closing session.
+describe("WorkflowProjector — same-role handoff owner (#3757)", () => {
+  let db: Database.Database;
+  let runtime: WorkflowRuntime;
+  let queueRepo: QueueRepository;
+  let tmp: string;
+  let specCount = 0;
+
+  function sameRoleSpec(opts: { stepNextOwner?: string; specNextOwner?: string; deliverGate?: boolean; ownerTargets?: boolean;
+    deliverHarness?: string; routedFailed?: boolean } = {}): string {
+    const ownerRole = opts.ownerTargets === false ? "    owner: {}" : "    owner:\n      preferred_targets:\n        - triage@rig";
+    return `workflow:
+  id: same-role
+  version: 1
+  objective: same-role handoff owner resolution
+${opts.specNextOwner ? `  next_owner: ${opts.specNextOwner}\n` : ""}  entry:
+    role: owner
+  roles:
+${ownerRole}
+    checker:
+      preferred_targets:
+        - checker@rig
+  steps:
+    - id: execute
+      actor_role: owner
+${opts.routedFailed ? `      next_hop:\n        on:\n          failed: deliver\n` : ""}      allowed_exits:
+        - handoff
+${opts.routedFailed ? `        - failed\n` : ""}    - id: deliver
+      actor_role: owner
+${opts.stepNextOwner ? `      next_owner: ${opts.stepNextOwner}\n` : ""}${opts.deliverGate ? `      gate:\n        target: checker\n` : ""}${opts.deliverHarness ? `      harness: ${opts.deliverHarness}\n` : ""}      allowed_exits:
+        - handoff
+    - id: check
+      actor_role: checker
+      allowed_exits:
+        - done
+`;
+  }
+
+  async function start(spec: string) {
+    const path = join(tmp, `spec-${++specCount}.yaml`);
+    writeFileSync(path, spec);
+    return runtime.instantiate({ specPath: path, rootObjective: "x", createdBySession: "ops@rig", entryOwnerSession: "worker@rig" });
+  }
+
+  function ownerMode(instanceId: string, closedPacketId?: string): unknown {
+    const trail = runtime.trailLog.listForInstance(instanceId);
+    const row = closedPacketId ? trail.find((t) => t.priorQitemId === closedPacketId) : trail[0];
+    const evidence = row?.closureEvidence as Record<string, Record<string, unknown>> | null;
+    return evidence?.["owner_resolution"]?.["mode"];
+  }
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [outboxEntriesSchema, coreSchema, bindingsSessionsSchema, rigArchiveSchema, eventsSchema, queueItemsSchema,
+      queueTransitionsSchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, workflowSpecJsonSchema]);
+    const bus = new EventBus(db);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo.attachOutbox(new OutboxHandler(db));
+    tmp = mkdtempSync(join(tmpdir(), "wf-same-role-"));
+    runtime = new WorkflowRuntime({ exceptionDial: { hostDefault: () => null, humanFallbackSeat: "human@host" }, db, eventBus: bus, queueRepo });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("without --next-owner, the packet owner's same-role handoff goes to preferred_targets[0] and project advises --next-owner", async () => {
+    const inst = await start(sameRoleSpec());
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("triage@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("preferred_targets");
+    expect(projected.advisories).toEqual([
+      `next owner triage@rig for step "deliver" comes from preferred_targets of role "owner", not from worker@rig, which closed its own packet in the same role; pass --next-owner worker@rig to keep it, or set next_owner: same_as_previous in the spec`,
+    ]);
+  });
+
+  it("with --next-owner, the same-role handoff goes to the named seat without the advisory", async () => {
+    const inst = await start(sameRoleSpec());
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig", nextOwnerSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("worker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("explicit");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("a step's next_owner: same_as_previous keeps the next packet with the session that closed its own packet", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("worker@rig");
+    expect(queueRepo.getById(projected.nextQitemId!)?.destinationSession).toBe("worker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("continuation");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("a spec-level next_owner: same_as_previous applies to a step without its own", async () => {
+    const inst = await start(sameRoleSpec({ specNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("worker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("continuation");
+  });
+
+  it("same_as_previous does not apply when the closing session was not the packet's destination", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "other@rig" });
+    expect(projected.nextOwnerSession).toBe("triage@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("preferred_targets");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("--next-owner wins over same_as_previous", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig", nextOwnerSession: "other@rig" });
+    expect(projected.nextOwnerSession).toBe("other@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("explicit");
+  });
+
+  it("a gated next step compiles to its gate, not to same_as_previous", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous", deliverGate: true }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("checker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("gate");
+  });
+
+  it("a handoff into a step of another role gives no advisory", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const first = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    const second = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: first.nextQitemId!,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(second.nextOwnerSession).toBe("checker@rig");
+    expect(second.advisories).toBeUndefined();
+  });
+
+  it("a spec-level same_as_previous does not carry a handoff into another role", async () => {
+    const inst = await start(sameRoleSpec({ specNextOwner: "same_as_previous" }));
+    const first = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(first.nextOwnerSession).toBe("worker@rig");
+    const second = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: first.nextQitemId!,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(second.nextOwnerSession).toBe("checker@rig");
+    expect(ownerMode(inst.instance.instanceId, first.nextQitemId!)).toBe("preferred_targets");
+  });
+
+  it("same_as_previous applies to a handoff exit only, not to an exit routed by next_hop.on", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous", routedFailed: true }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "failed", actorSession: "worker@rig" });
+    expect(projected.nextStepId).toBe("deliver");
+    expect(projected.nextOwnerSession).toBe("triage@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("preferred_targets");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("same_as_previous into a harness-pinned step the closing session doesn't run fails loud, naming the closing session", async () => {
+    // a managed node + session per seat, so the projector reads each runtime: the role's target runs the pinned harness
+    for (const [session, runtimeName] of [["triage@rig", "claude-code"], ["worker@rig", "codex"]]) {
+      db.prepare(`INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES (?, 'r-1', ?, ?)`).run(`n-${session}`, session.split("@")[0], runtimeName);
+      db.prepare(`INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, ?, ?, 'running')`).run(`s-${session}`, `n-${session}`, session);
+    }
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous", deliverHarness: "claude-code" }));
+    await expect(runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" }))
+      .rejects.toMatchObject({ code: "harness_pin_unsatisfied", message: expect.stringContaining("the closing session worker@rig (next_owner: same_as_previous) runs codex"),
+        details: expect.objectContaining({ continuation: true }) });
+  });
+
+  it("an unresolvable next owner names --next-owner beside nextOwnerSession", async () => {
+    const inst = await start(sameRoleSpec({ ownerTargets: false }));
+    await expect(runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" }))
+      .rejects.toMatchObject({ code: "next_owner_unresolved", message: expect.stringContaining("supply nextOwnerSession explicitly (rig workflow project --next-owner <session>)") });
+  });
+
+  it("a next_owner value outside the allowed set is refused at the spec", async () => {
+    await expect(start(sameRoleSpec({ stepNextOwner: "caller" }))).rejects.toMatchObject({ code: "spec_field_invalid" });
+    await expect(start(sameRoleSpec({ specNextOwner: "caller" }))).rejects.toMatchObject({ code: "spec_field_invalid" });
+    await expect(start(sameRoleSpec({ stepNextOwner: "true" }))).rejects.toMatchObject({ code: "spec_field_invalid" });
   });
 });

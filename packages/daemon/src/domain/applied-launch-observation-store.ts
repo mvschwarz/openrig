@@ -5,6 +5,12 @@ import type {
   AppliedLaunchState,
   CodexObservedApprovalPolicy,
 } from "./permission-drift.js";
+import type { AppliedClaudeAutoMode } from "./claude-auto-mode.js";
+
+/** "null" records a launch that sent no block; anything unreadable reads as unknown. */
+function parseAppliedAutoMode(json: string): AppliedClaudeAutoMode | undefined {
+  try { return JSON.parse(json) as AppliedClaudeAutoMode; } catch { return undefined; }
+}
 
 export interface StoredAppliedLaunchObservation extends AppliedLaunchObservation {
   generationUuid: string;
@@ -20,6 +26,7 @@ interface ObservationRow {
   reason: string | null;
   approval_policy: CodexObservedApprovalPolicy | null;
   daemon_opt_out?: number | null;
+  claude_auto_mode_json?: string | null;
   observed_at: string;
 }
 
@@ -33,6 +40,7 @@ function rowToStoredObservation(row: ObservationRow): StoredAppliedLaunchObserva
     ...(row.reason ? { reason: row.reason } : {}),
     ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
     ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
+    ...(row.claude_auto_mode_json != null ? { claudeAutoMode: parseAppliedAutoMode(row.claude_auto_mode_json) } : {}),
     observedAt: row.observed_at,
   };
 }
@@ -48,40 +56,66 @@ export class AppliedLaunchObservationStore {
 
   recordGeneration(generationUuid: string, observation: AppliedLaunchObservation): boolean {
     try {
-      const result = this.db.prepare(`
-        INSERT INTO applied_launch_observations (
-          generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, daemon_opt_out, observed_at
-        )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
-         WHERE NOT EXISTS (
-           SELECT 1
-             FROM applied_launch_observation_invalidations
-            WHERE generation_uuid = ?
-         )
-        ON CONFLICT(generation_uuid) DO UPDATE SET
-          runtime = excluded.runtime,
-          axis = excluded.axis,
-          observation_state = excluded.observation_state,
-          value = excluded.value,
-          reason = excluded.reason,
-          approval_policy = excluded.approval_policy,
-          daemon_opt_out = excluded.daemon_opt_out,
-          observed_at = excluded.observed_at
-      `).run(
-        generationUuid,
-        observation.runtime,
-        observation.axis,
-        observation.state,
-        observation.value,
-        observation.reason ?? null,
-        observation.approvalPolicy ?? null,
-        observation.daemonOptOut === undefined ? null : observation.daemonOptOut ? 1 : 0,
-        generationUuid,
-      );
-      return result.changes > 0;
+      const autoModeColumn = this.hasAutoModeColumn();
+      const block = observation.claudeAutoMode;
+      if (!autoModeColumn || block === undefined) return this.upsert(generationUuid, observation, autoModeColumn);
+      try {
+        return this.db.transaction(() => {
+          if (!this.upsert(generationUuid, observation, true)) return false;
+          this.db.prepare("UPDATE applied_launch_observations SET claude_auto_mode_json = ? WHERE generation_uuid = ?")
+            .run(JSON.stringify(block), generationUuid);
+          return true;
+        })();
+      } catch {
+        // A failed block write re-records the block as unknown. If that fallback also fails, the previous observation stays.
+        return this.upsert(generationUuid, observation, true);
+      }
     } catch {
       return false;
     }
+  }
+
+  /** Writes the permission observation. Where the column exists it resets the auto mode block to unknown (NULL). */
+  private upsert(generationUuid: string, observation: AppliedLaunchObservation, autoModeColumn: boolean): boolean {
+    return this.db.prepare(`
+      INSERT INTO applied_launch_observations (
+        generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, daemon_opt_out, observed_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
+       WHERE NOT EXISTS (
+         SELECT 1
+           FROM applied_launch_observation_invalidations
+          WHERE generation_uuid = ?
+       )
+      ON CONFLICT(generation_uuid) DO UPDATE SET
+        runtime = excluded.runtime,
+        axis = excluded.axis,
+        observation_state = excluded.observation_state,
+        value = excluded.value,
+        reason = excluded.reason,
+        approval_policy = excluded.approval_policy,
+        daemon_opt_out = excluded.daemon_opt_out,${autoModeColumn ? "\n        claude_auto_mode_json = NULL," : ""}
+        observed_at = excluded.observed_at
+    `).run(
+      generationUuid,
+      observation.runtime,
+      observation.axis,
+      observation.state,
+      observation.value,
+      observation.reason ?? null,
+      observation.approvalPolicy ?? null,
+      observation.daemonOptOut === undefined ? null : observation.daemonOptOut ? 1 : 0,
+      generationUuid,
+    ).changes > 0;
+  }
+
+  private autoModeColumn: boolean | undefined;
+
+  /** Databases without migration 171 have no auto mode column; they still record the permission observation. */
+  private hasAutoModeColumn(): boolean {
+    this.autoModeColumn ??= (this.db.prepare("PRAGMA table_info(applied_launch_observations)").all() as { name: string }[])
+      .some(column => column.name === "claude_auto_mode_json");
+    return this.autoModeColumn;
   }
 
   invalidateGeneration(generationUuid: string): boolean {

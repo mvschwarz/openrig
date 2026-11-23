@@ -13,7 +13,8 @@ vi.mock("../src/daemon-lifecycle.js", async (original) => {
 vi.mock("../src/system-preflight.js", () => ({ SystemPreflight: class { run = async () => ({ ready: true, checks: [] }); }, quietPreflightExec: async () => "" }));
 
 const OFFER = [
-  "No person is registered yet, so OpenRig's questions to a person, such as another machine asking to pair, can't reach anyone.",
+  "No person is registered yet, so OpenRig can't reach anyone with its questions to a person, such as a team seat's permission prompt or another machine asking to pair.",
+  "An agent the person is talking to can still bring them the team's questions. Registering records them as the person for those questions: without a connector such as Slack, they reach them only in the TUI's Feed and Steering.",
   "If you're setting OpenRig up for someone, offer to register them now. Ask the name to use, and only on their yes run:",
   '  rig gateway human add <id> --display-name "<name>" --delivery-class B --default',
 ];
@@ -52,5 +53,18 @@ it("an unreadable registry is not read as nobody registered: no offer, and the s
   writeFileSync(join(home, "gateway", "humans", "ada.yaml"), "entityId: [unclosed\n");
   await start();
   expect(logs).toEqual(["Daemon started on port 7433 (pid 4242)"]);
+  expect(process.exitCode).toBeUndefined();
+});
+
+it("says a workspace.root holding a project of its own was left as it is, as the daemon's log does", async () => {
+  // After a move, workspace.root named the person's own project, and only the daemon's log said so.
+  const root = join(home, "my-project");
+  mkdirSync(root);
+  writeFileSync(join(root, "project.yaml"), "id: my-project\n");
+  vi.stubEnv("OPENRIG_WORKSPACE_ROOT", root);
+  expect(addHumanFragment({ entityId: "ada", class: "human", displayName: "Ada", address: "ada@external", connectorBindings: [], prefs: { deliveryClass: "B" } }, home).ok).toBe(true);
+  await start();
+  expect(logs).toEqual(["Daemon started on port 7433 (pid 4242)",
+    `workspace.root holds a project of its own (${join(root, "project.yaml")}); OpenRig left it as it is and reads that project's own id.`]);
   expect(process.exitCode).toBeUndefined();
 });

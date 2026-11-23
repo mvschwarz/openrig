@@ -10,6 +10,7 @@ import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { resolveRigRepresentativeNodeId } from "../queue-owner.js";
 import { NetworkBindingError, readPrivateToken, writePrivateToken, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 
 export interface NetworkInstallation {
@@ -111,7 +112,7 @@ export class NetworkInstallationStore {
     const site = validSite(input.site, input.allowHttp === true);
     const existing = this.db.prepare("SELECT * FROM network_installations WHERE site = ?").get(site) as Row | undefined;
     if (existing && input.replace !== true) {
-      throw new NetworkBindingError("already_enrolled", `This daemon is already enrolled at ${site} (${existing.id}). To enroll again with a new code, add --replace.`, 409);
+      throw new NetworkBindingError("already_enrolled", `This daemon is already enrolled at ${site} (${existing.id}). Already connected; carry on with rig network connect.`, 409);
     }
     const instance = this.instance();
     const until = this.deadline();
@@ -151,7 +152,7 @@ export class NetworkInstallationStore {
     if (answer.status !== 200) {
       const error = errorCode(answer.body);
       if (answer.status === 400 || answer.status === 409) {
-        throw new NetworkBindingError(error ?? "enroll_refused", `The account refused the code (${error ?? answer.status}). Get a new one from the account page; each is single-use and short-lived.`, answer.status);
+        throw new NetworkBindingError(error ?? "enroll_refused", `The account refused the code (${error ?? answer.status}). Get a new code from your account page.`, answer.status);
       }
       throw new NetworkBindingError("account_unavailable", `The account couldn't answer (${answer.status}). If the code is still current, try again with it; otherwise get a new one.`, 503);
     }
@@ -163,10 +164,11 @@ export class NetworkInstallationStore {
   }
 
   /** The new key goes in beside the old one and takes its place, then the row and the old installation's active bindings
-   *  change in one transaction. A failure before that commits puts the old key back (with no old key, it removes the new
-   *  one), so nothing here changes, though the account has already made the new installation and nothing here holds its
-   *  key. After the commit the replace has happened: the ended bindings' names are returned, since the old installation
-   *  may still list them and this key can't drop them, with any cleanup that didn't finish. */
+   *  change in one transaction. A failure before that commits leaves the row and bindings as they were and puts the old
+   *  key back (with no old key, it removes the new one), though the account has already made the new installation.
+   *  Moving key files happens outside the transaction, so a put-back or cleanup that also fails is named in the error,
+   *  with where each key is. After the commit the replace has happened: the ended bindings' names are returned, since
+   *  the old installation may still list them and this key can't drop them, with any cleanup that didn't finish. */
   private replace(bindings: NetworkBindingStore, old: NetworkInstallation, next: { id: string; name: string | null }, key: string, allowHttp: number): EnrollResult {
     const file = networkInstallationKeyFile(this.home, old.id);
     const staged = `${file}.next`;
@@ -175,19 +177,40 @@ export class NetworkInstallationStore {
     rmSync(staged, { force: true });
     const cleanup = writePrivateToken(staged, key);
     const hadKey = existsSync(file);
+    let movedOld = false;
+    let movedNew = false;
     try {
-      if (hadKey) renameSync(file, kept);
+      if (hadKey) { renameSync(file, kept); movedOld = true; }
       renameSync(staged, file);
+      movedNew = true;
       this.db.transaction(() => {
         this.db.prepare("UPDATE network_installations SET installation_id = ?, name = ?, allow_http = ? WHERE id = ?").run(next.id, next.name, allowHttp, old.id);
         bindings.markDisconnected(ending.map((b) => b.id), REPLACED_REASON);
       })();
     } catch (error) {
-      if (!hadKey) rmSync(file, { force: true });
-      else if (existsSync(kept)) renameSync(kept, file);
-      cleanup();
-      throw new NetworkBindingError("replace_failed",
-        `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)}), so nothing here changed. The account now has a new installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.`, 500);
+      // Putting a key back or removing the staged one can fail too (a full or read-only disk). Then say where each key
+      // is, from the moves that finished, and say the new key is held nowhere only when that's established.
+      const byHand: string[] = [];
+      const newKeyAt: string[] = [];
+      try {
+        if (!hadKey) rmSync(file, { force: true });
+        else if (movedOld) renameSync(kept, file);
+      } catch (restore) {
+        const why = (restore as Error).message.slice(0, 200);
+        if (movedNew) newKeyAt.push(file);
+        byHand.push(hadKey
+          ? `The earlier key couldn't be put back (${why}); it's at ${kept}${movedNew ? `, and ${file} holds the new installation's key` : ""}. Move ${kept} back to ${file} before you go on.`
+          : `The new key couldn't be removed (${why}): delete ${file} by hand.`);
+      }
+      try { cleanup(); } catch (left) {
+        if (!movedNew) newKeyAt.push(staged);
+        byHand.push(`The staged new key couldn't be removed (${(left as Error).message.slice(0, 200)}): delete ${staged} by hand.`);
+      }
+      const failed = `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)})`;
+      const held = newKeyAt.length === 0 ? "whose key nothing here holds" : `whose key is in ${newKeyAt.join(" and ")} until then`;
+      throw new NetworkBindingError("replace_failed", byHand.length === 0
+        ? `${failed}, so nothing here changed. The account now has a new installation ${held}: remove it on the account page, then enroll again with a new code.`
+        : `${failed}. Its record and bindings here are unchanged, but its key files need a step by hand. ${byHand.join(" ")} The account now has a new installation ${held}: remove it on the account page, then enroll again with a new code.`, 500);
     }
     const problems: string[] = [];
     try {
@@ -224,14 +247,14 @@ export class NetworkInstallationStore {
       // In this installation's turn: checked again, with the enrollment as it is now (a replace may have run while this
       // waited), and every list sent reads the names to keep afresh.
       const current = this.get(installation.id);
-      bindings.freeSeat(input.session);
+      const connecting = { ...bindings.freeSeat(input.session), name };
       if (this.listedNames(bindings, current).includes(name)) throw new NetworkBindingError("participant_already_connected", `${name} is already connected here.`, 409);
       const others = () => this.listedNames(bindings, current).filter((n) => n !== name);
-      let answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
+      let answer = await this.setParticipants(bindings, current, () => [...others(), name], until, connecting);
       let bearer = answer.participants.find((p) => p.name === name)?.bearer;
       if (!bearer) {
         await this.setParticipants(bindings, current, others, until);
-        answer = await this.setParticipants(bindings, current, () => [...others(), name], until);
+        answer = await this.setParticipants(bindings, current, () => [...others(), name], until, connecting);
         bearer = answer.participants.find((p) => p.name === name)?.bearer;
         if (!bearer) throw new NetworkBindingError("account_unexpected", `The account listed ${name} without a bearer, twice.`, 502);
       }
@@ -298,12 +321,24 @@ export class NetworkInstallationStore {
     return Date.now() + (this.opts.timeoutMs ?? ACCOUNT_DEADLINE_MS);
   }
 
-  private async setParticipants(bindings: NetworkBindingStore, installation: NetworkInstallation, names: () => string[], until: number): Promise<Identities> {
+  private async setParticipants(bindings: NetworkBindingStore, installation: NetworkInstallation, names: () => string[], until: number, connecting?: { nodeId: string; name: string }): Promise<Identities> {
     const instance = this.instance();
     const repair = `Get a new code from the account page and run rig network enroll <code> --site ${installation.site} --replace.`;
     const key = readPrivateToken(networkInstallationKeyFile(this.home, installation.id),
       (file) => `The installation key for ${installation.id} isn't at ${file}. ${repair}`);
-    const put = () => this.call(installation.site, "PUT", "/api/connector/identities", key, { instance, participants: names() }, until);
+    const put = () => {
+      const participants = names();
+      const candidates = bindings.active().filter((binding) => binding.installationId === installation.id && binding.participantName)
+        .map((binding) => ({ name: binding.participantName!, nodeId: binding.nodeId }));
+      if (connecting) candidates.push(connecting);
+      const leads = [...new Set(candidates.filter((candidate) => {
+        if (!participants.includes(candidate.name)) return false;
+        const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(candidate.nodeId) as { rig_id: string } | undefined;
+        return node && resolveRigRepresentativeNodeId(this.db, node.rig_id) === candidate.nodeId;
+      }).map((candidate) => candidate.name))];
+      // Keep the existing string list: older services ignore the additive top-level lead declarations.
+      return this.call(installation.site, "PUT", "/api/connector/identities", key, { instance, participants, ...(leads.length ? { leads } : {}) }, until);
+    };
     let answer = await put();
     // The account couldn't apply a drop while something else changed this installation: the list is read and sent once more.
     if (answer.status === 409 && errorCode(answer.body) === "drop_failed") answer = await put();

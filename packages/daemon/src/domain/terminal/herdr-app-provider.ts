@@ -45,6 +45,27 @@ const TERM_GUARD = 'if ! (command -v infocmp >/dev/null 2>&1 && infocmp "$TERM" 
 /** Waits after the tile ends, so the terminal never ends on its own; OpenRig rewrites the cell, then ends it. */
 const VIEWER_ENDED = 'status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
 const VIEWER_WRAPPER = `shift; ${TERM_GUARD} "$@"; ${VIEWER_ENDED}`;
+/** herdr-core runs a terminal that no pane shows at its headless size, 200x120 unless the person configured another
+ *  (herdr-core `config.rs`), and a client of the seat at that size would size the seat's window for everyone else. */
+export const HEADLESS_SIZE = { cols: 200, rows: 120 };
+/** Beside the writable tile: while the cell's terminal is at the headless size, so no pane shows it, the tile's tmux
+ *  client ignores size; at any other size it sizes the seat like any client a person types in. tmux 3.2 or later sets
+ *  client flags at runtime (refresh-client -f); with an older tmux this does nothing and the tile behaves as before.
+ *  Reads the writable tile's own positional contract (openrig-tile, session, tmux, server arguments) from "$@" and
+ *  leaves $w set to the watcher, which ends with the wrapper. */
+const HEADLESS_WATCH = [
+  'w=; t=$(tty 2>/dev/null) || t=;',
+  'case "$t" in /dev/*) (p=$$; x=$3; shift 3;',
+  // tmux 3.0 and 3.1 (with or without a patch letter, such as 3.1c) have no client flags at runtime; 3.10 and later do.
+  'case "$("$x" -V 2>/dev/null)" in "tmux "[12].*|"tmux 3.0"|"tmux 3.0"[!0-9]*|"tmux 3.1"|"tmux 3.1"[!0-9]*) exit 0;; esac;',
+  // tmux keeps flags per client, and the tile attaches a new client on the same terminal when the seat is replaced: while the
+  // cell is at the headless size the flag is set again about once a second, so a new client never sizes the seat for long. At any
+  // other size a new client already sizes it, as a client a person types in should.
+  'd=; c=0; while kill -0 "$p" 2>/dev/null; do n=$(stty size <"$t" 2>/dev/null) || break; c=$((c + 1));',
+  `if [ "$n" != "$d" ] || { [ "$n" = "${HEADLESS_SIZE.rows} ${HEADLESS_SIZE.cols}" ] && [ "$c" -ge 5 ]; }; then c=0; if [ "$n" = "${HEADLESS_SIZE.rows} ${HEADLESS_SIZE.cols}" ]; then k=ignore-size; else k=!ignore-size; fi;`,
+  '"$x" "$@" refresh-client -t "$t" -f "$k" 2>/dev/null && d=$n; fi;',
+  'sleep 0.2 2>/dev/null || sleep 1; done) </dev/null >/dev/null 2>&1 & w=$!;; esac;',
+].join(" ");
 /** An interactive local viewer until the app has shown it: the read-only tile (it shows the seat and takes no input)
  *  runs until OpenRig writes this viewer's gate file, then the view's writable tile runs in its place. Input that came
  *  before (typed in the cell, or written to the terminal with hc send) is dropped, never delivered late. If the gate's
@@ -60,7 +81,8 @@ const GATED_WRAPPER = [
   'if [ -e "$g" ] && kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null;',
   // Non-blocking reads until one comes back empty: whatever was waiting on the terminal is gone.
   'if [ -t 0 ]; then stty -icanon min 0 time 0 2>/dev/null; while [ "$(dd bs=65536 count=1 2>/dev/null | wc -c)" -gt 0 ]; do :; done; stty sane 2>/dev/null; fi;',
-  '"$a" "$b" "$c" "$@";',
+  HEADLESS_WATCH,
+  '"$a" "$b" "$c" "$@"; s=$?; if [ -n "$w" ]; then kill "$w" 2>/dev/null; fi; (exit "$s");',
   // The window ended with the gate still closed: no tile at all from here, and the cell says why.
   'elif kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null; printf "\\033[H\\033[2J\\r\\n%s\\r\\n" "$m"; exec tail -f /dev/null;',
   'else wait "$v"; fi;',

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   postWebhook,
+  postChatMessage,
   callWebApi,
   downloadPrivateFile,
   verifyScopes,
@@ -8,6 +9,19 @@ import {
   openSocketConnection,
   type FetchImpl,
 } from "../src/domain/gateway/slack/slack-api.js";
+
+it("preserves preview controls and thread on a rate-limit retry", async () => {
+  const bodies: unknown[] = [];
+  const fetchImpl: FetchImpl = async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return bodies.length === 1
+      ? new Response("rate limited", { status: 429, headers: { "Retry-After": "1" } })
+      : new Response(JSON.stringify({ ok: true, ts: "2.0" }), { status: 200 });
+  };
+  const result = await postChatMessage("synthetic", { channel: "C", text: "link", thread_ts: "1.0", unfurl_links: false, unfurl_media: false }, fetchImpl, 1000, async () => {});
+  expect(result.ok).toBe(true);
+  expect(bodies).toEqual([expect.objectContaining({ thread_ts: "1.0", unfurl_links: false, unfurl_media: false }), bodies[0]]);
+});
 
 // Fake Slack: routes by URL, returns real Response objects (headers + json).
 function fakeSlack(spec: {
@@ -80,12 +94,26 @@ describe("Slice-11 slack-api — GRANTED-scope-from-headers (item 5, the setup t
 
 describe("Slice-11 slack-api — channel membership + socket (item 5, inbound)", () => {
   it("verifyChannelMembership reflects is_member", async () => {
-    const inFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: true, name: "founder" } } } } });
+    const inFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: true, is_private: true, name: "founder" } } } } });
     const inR = await verifyChannelMembership("xoxb-t", "C1", inFetch);
-    expect(inR).toMatchObject({ ok: true, isMember: true, name: "founder" });
+    expect(inR).toMatchObject({ ok: true, isMember: true, isPrivate: true, name: "founder" });
 
-    const outFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: false } } } } });
-    expect((await verifyChannelMembership("xoxb-t", "C1", outFetch)).isMember).toBe(false);
+    const outFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: false, is_private: false } } } } });
+    expect(await verifyChannelMembership("xoxb-t", "C1", outFetch)).toMatchObject({ ok: true, isMember: false, isPrivate: false });
+  });
+
+  it.each([
+    { name: "absent", channel: { is_member: true } },
+    { name: "string", channel: { is_member: true, is_private: "true" } },
+    { name: "number", channel: { is_member: true, is_private: 1 } },
+  ])("projects the $name privacy field as unknown", async ({ channel }) => {
+    const fetchImpl = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel } } } });
+    expect(await verifyChannelMembership("xoxb-t", "C1", fetchImpl)).toMatchObject({ ok: true, isMember: true, isPrivate: null });
+  });
+
+  it("keeps failed conversations.info privacy unknown", async () => {
+    const fetchImpl = fakeSlack({ methods: { "conversations.info": { status: 403, json: { ok: false, error: "channel_not_found" } } } });
+    expect(await verifyChannelMembership("xoxb-t", "C1", fetchImpl)).toMatchObject({ ok: false, isMember: false, isPrivate: null, error: "channel_not_found" });
   });
 
   it("openSocketConnection returns the ws url", async () => {

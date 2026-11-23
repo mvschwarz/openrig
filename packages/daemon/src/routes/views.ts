@@ -1,4 +1,4 @@
-import { selectedProject, projectMission, projectReadResponse } from "../domain/workspace/project-read.js";
+import { listProjects, projectIds, selectedProject, projectMission, projectReadResponse } from "../domain/workspace/project-read.js";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
@@ -123,11 +123,15 @@ export function viewsRoutes(): Hono {
     const mission = c.req.query("mission") || undefined;
     try {
       let project;
+      let cataloguedProjectIds: string[] | undefined;
       try {
         project = viewName === "execution" ? selectedProject(c) : null;
         if (project && mission) projectMission(project, mission);
+        // Every id a catalogued project claims, current or former, so the view can count the rows none of them claims.
+        if (project) cataloguedProjectIds = listProjects(c).projects.flatMap(projectIds);
       } catch (err) { return projectReadResponse(err); }
-      const result = await getProjector(c).show(viewName, { rig, limit, mission, project });
+      // The request's signal aborts when the client closes the connection first, so an abandoned execution read stops.
+      const result = await getProjector(c).show(viewName, { rig, limit, mission, project, cataloguedProjectIds, signal: c.req.raw.signal });
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);

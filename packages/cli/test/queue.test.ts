@@ -29,7 +29,10 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 interface StubResponse {
   status: number;
   data: unknown;
+  headers?: Headers;
 }
+
+const STUB_SENDER = "stub@rig";
 
 function makeDeps(opts?: {
   routes?: Record<string, StubResponse | StubResponse[]>;
@@ -41,10 +44,37 @@ function makeDeps(opts?: {
     deps: {
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: () => ({
+        // The sender this stub stamps; the transitions it synthesizes record it as their actor, as the daemon does.
+        senderIdentity: async () => ({ session: STUB_SENDER, originUnknown: false }),
         get: vi.fn(async (path: string) => {
           calls.push({ method: "GET", path });
           const route = routes[`GET ${path}`];
-          return (Array.isArray(route) ? route.shift() : route) ?? { status: 200, data: {} };
+          if (route) return Array.isArray(route) ? route.shift() : route;
+          const transitionMatch = /^\/api\/queue\/([^/]+)\/transitions$/.exec(path);
+          if (transitionMatch) {
+            const qitemId = decodeURIComponent(transitionMatch[1]!);
+            const update = [...calls].reverse().find((call) => call.method === "POST"
+              && call.path === `/api/queue/${encodeURIComponent(qitemId)}/update`);
+            const transitionNote = update?.body && typeof update.body === "object"
+              ? (update.body as { transitionNote?: unknown }).transitionNote
+              : undefined;
+            return { status: 200, data: [
+              { transitionId: 1, transitionNote: null, actorSession: STUB_SENDER },
+              ...(typeof transitionNote === "string" ? [{ transitionId: 2, transitionNote, actorSession: STUB_SENDER }] : []),
+            ] };
+          }
+          const match = /^\/api\/queue\/([^/]+)$/.exec(path);
+          if (match) {
+            const qitemId = decodeURIComponent(match[1]!);
+            const update = [...calls].reverse().find((call) => call.method === "POST"
+              && call.path === `/api/queue/${encodeURIComponent(qitemId)}/update`);
+            if (update?.body && typeof update.body === "object") {
+              const body = Object.fromEntries(Object.entries(update.body as Record<string, unknown>)
+                .filter(([key, value]) => value !== undefined && !["transitionNote", "actorSession", "reopen"].includes(key)));
+              return { status: 200, data: { qitemId, ...body } };
+            }
+          }
+          return { status: 200, data: {} };
         }),
         getText: vi.fn(async (path: string) => {
           calls.push({ method: "GET", path });
@@ -83,6 +113,7 @@ describe("rig queue CLI", () => {
     // AMBIENT OPENRIG_SESSION_NAME (which masked the env-less break in a managed runner). Per-test stubs
     // that need a specific seat override this.
     vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig");
+    vi.stubEnv("TMUX_PANE", "");
     logs = [];
     errors = [];
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
@@ -574,6 +605,16 @@ describe("rig queue CLI", () => {
       expect(reads).toBe(1);
     });
 
+    it("a hosted member's waiting work keeps the failed outcome, and its receipt says no wake is sent", async () => {
+      const wakeResult = "awaiting-pickup: 'helper@hub' is a hosted member with no wake trigger, so no wake is sent.";
+      const { result, reads } = await verify([{ lastNudgeResult: wakeResult }]);
+      expect(result).toMatchObject({ outcome: "failed", wakeResult });
+      expect(result.detail).toMatch(/^The qitem is saved\. No wake is sent \(awaiting-pickup: /);
+      expect(result.detail).toContain("): the work waits in the member's queue until it reads it.");
+      expect(result.detail).not.toContain("The wake failed");
+      expect(reads).toBe(1);
+    });
+
     it("a claimed row's unconfirmed wake reads claimed, not indeterminate, and is never verified", async () => {
       const { result, reads } = await verify([{ lastNudgeResult: "claimed", state: "in-progress", claimedAt: "2026-10-11T20:00:00.000Z", pickup: { state: "working" } }]);
       expect(reads).toBe(1);
@@ -603,6 +644,13 @@ describe("rig queue CLI", () => {
       expect(result.detail).toContain("nothing was typed into the pane");
       expect(result.detail).toContain("not retried automatically");
       expect(result.detail).not.toMatch(/ladder retries/);
+    });
+
+    it("a draft-aware held wake says it's tried again on the seat's next idle report, within the cap (#48)", async () => {
+      const { result } = await verify([{ lastNudgeResult: "retained:draft_aware" }]);
+      expect(result).toMatchObject({ outcome: "retained", nextAction: "rig seat held-messages bob@rig" });
+      expect(result.detail).toContain("tried again when the seat next reports idle while it's still in draft-aware mode");
+      expect(result.detail).not.toContain("not retried automatically");
     });
 
     it("only a missing wake result waits, up to the bound, then stays still-pending", async () => {
@@ -1203,6 +1251,37 @@ describe("rig queue CLI", () => {
       evidenceRef: undefined,
       transitionNote: "audit bytes",
     });
+    expect(calls.some((c) => c.method === "GET" && c.path === "/api/queue/qitem-note")).toBe(true);
+  });
+
+  it("update reports success only after canonical read-back matches the requested state", async () => {
+    const row = { qitemId: "qitem-verified", state: "in-progress", summary: "working" };
+    const { deps, calls } = makeDeps({ routes: {
+      "POST /api/queue/qitem-verified/update": { status: 200, data: { qitemId: "qitem-verified", state: "in-progress" } },
+      "GET /api/queue/qitem-verified": { status: 200, data: row },
+    } });
+    await createProgram({ queueDeps: deps }).parseAsync([
+      "node", "rig", "queue", "update", "qitem-verified", "--state", "in-progress", "--summary", "working", "--json",
+    ]);
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      "POST /api/queue/qitem-verified/update",
+      "GET /api/queue/qitem-verified",
+    ]);
+    expect(JSON.parse(logs.at(-1)!)).toMatchObject(row);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("update fails closed when canonical read-back does not contain the requested state", async () => {
+    const { deps } = makeDeps({ routes: {
+      "POST /api/queue/qitem-mismatch/update": { status: 200, data: { qitemId: "qitem-mismatch", state: "in-progress" } },
+      "GET /api/queue/qitem-mismatch": { status: 200, data: { qitemId: "qitem-mismatch", state: "pending" } },
+    } });
+    await createProgram({ queueDeps: deps }).parseAsync([
+      "node", "rig", "queue", "update", "qitem-mismatch", "--state", "in-progress", "--json",
+    ]);
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(errors.at(-1)!)).toMatchObject({ error: "queue_update_readback_failed" });
+    expect(logs).toEqual([]);
   });
 
   it("update forwards an explicitly accepted closure deadline without a state change", async () => {
@@ -1251,6 +1330,30 @@ describe("rig queue CLI", () => {
       state: "blocked",
       blockedOn: "external:cooldown",
       transitionNote: "continuation: resume after the cooldown",
+      wakeAfterSeconds: 90,
+    });
+  });
+
+  it.each([
+    { label: "note only", flags: ["--note", "checked the source"], expected: "checked the source" },
+    { label: "note and continuation", flags: ["--note", "checked the source", "--continuation", "resume the review"], expected: "continuation: resume the review\n\nchecked the source" },
+    { label: "multiline note and continuation", flags: ["--note", "checked the source\nkept the evidence", "--continuation", "resume the review"], expected: "continuation: resume the review\n\nchecked the source\nkept the evidence" },
+    { label: "empty continuation", flags: ["--note", "checked the source", "--continuation", ""], expected: "checked the source" },
+    { label: "whitespace-only continuation with note", flags: ["--note", "checked the source", "--continuation", " \t\n "], expected: "checked the source" },
+    { label: "whitespace-only continuation without note", flags: ["--continuation", " \t\n "], expected: "parked on external:cooldown" },
+    { label: "neither flag", flags: [], expected: "parked on external:cooldown" },
+  ])("block preserves the audit note: $label", async ({ flags, expected }) => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "block", "qitem-park",
+      "--on", "external:cooldown", "--wake-after", "90s", ...flags, "--json",
+    ]);
+    expect(calls.find((c) => c.path === "/api/queue/qitem-park/update")?.body).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:cooldown",
+      transitionNote: expected,
       wakeAfterSeconds: 90,
     });
   });
@@ -1730,6 +1833,39 @@ describe("rig queue CLI", () => {
     expect(process.exitCode).toBe(1);
     expect(logs.join("\n")).toContain("filter_unsupported");
     expect(logs.join("\n")).not.toContain("qitem-unfiltered");
+  });
+
+  it("list says on stderr when the daemon cut the page, and leaves stdout as it was (#3572)", async () => {
+    const rows = [{ qitemId: "qitem-newest" }, { qitemId: "qitem-next" }];
+    // The notice names the limit the daemon says it applied, not the one asked for.
+    const page = (truncated: string) => new Headers({ "X-OpenRig-Limit": "7", "X-OpenRig-Truncated": truncated });
+    const { deps } = makeDeps({
+      routes: {
+        "GET /api/queue/list?limit=2": [
+          { status: 200, data: rows, headers: page("1") },
+          { status: 200, data: rows, headers: page("1") },
+          { status: 200, data: rows, headers: page("0") },
+          { status: 200, data: rows },
+        ],
+      },
+    });
+    const run = async (...extra: string[]) => {
+      logs.length = 0; errors.length = 0;
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "--full", "--all", "--all-rigs", "--limit", "2", ...extra]);
+      return { stdout: [...logs], stderr: [...errors] };
+    };
+    const notice = "this page stops at --limit 7 and more rows match; pass a larger --limit to see the rest";
+
+    // Cut, in JSON and in the default output: the rows unchanged on stdout, one line on stderr naming the limit.
+    expect(await run("--json")).toEqual({ stdout: [JSON.stringify(rows)], stderr: [notice] });
+    expect(await run()).toEqual({ stdout: [JSON.stringify(rows, null, 2)], stderr: [notice] });
+    // Exactly the limit matched: nothing on stderr.
+    expect(await run("--json")).toEqual({ stdout: [JSON.stringify(rows)], stderr: [] });
+    // A daemon that doesn't send the marker: nothing on stderr either.
+    expect(await run("--json")).toEqual({ stdout: [JSON.stringify(rows)], stderr: [] });
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("list -a includes history (no activeOnly param)", async () => {

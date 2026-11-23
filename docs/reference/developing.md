@@ -33,7 +33,7 @@ suite. Both sets are readable in the root `package.json` scripts.
 
 | Lane | Command | Meaning |
 |---|---|---|
-| Portability report | `node scripts/portability-report.mjs` | lists added lines with machine-specific values; findings never fail it (`.github/workflows/portability-report.yml`) |
+| Portability report | `node scripts/portability-report.mjs` | lists added lines with machine-specific values; findings don't fail it by default, and `--strict` exits 1 when it finds any. The workflow (`.github/workflows/portability-report.yml`) runs it without `--strict`. |
 
 ## The norm (web-UI freeze at 0.5.0)
 

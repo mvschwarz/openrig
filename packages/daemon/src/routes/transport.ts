@@ -7,6 +7,9 @@ import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runti
 import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type Database from "better-sqlite3";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
+import type { EventBus } from "../domain/event-bus.js";
+import { recordRefusal } from "../domain/refusal-trace.js";
+import type { QueueRepository, QueueDestinationAdvisory } from "../domain/queue-repository.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
 // S2 (OPR.0.5.4.3) — the sender-side half of two-ended honesty: appended to any
@@ -120,11 +123,48 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const switchHeld = runtimeSwitchCustodyRefusal(db, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
     if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
-    // Check for ambiguity first
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) {
+      // Status is best-effort teaching only after transport finds no receiver.
+      // Resolved and ambiguous sends never read the roster or human registry.
+      let destinationStatus: QueueDestinationAdvisory | undefined;
+      if (resolved.code === "not_found") {
+        try {
+          destinationStatus = (c.get("queueRepo" as never) as QueueRepository | undefined)?.destinationAdvisory(body.session) ?? undefined;
+        } catch {
+          destinationStatus = { code: "destination_status", status: "unknown", destinationSession: body.session,
+            availableDestinations: [], message: "Destination status unknown: registry lookup unavailable." };
+        }
+      }
+      if (resolved.code === "not_found" && destinationStatus
+        && ["missing", "archived", "hosted", "unknown"].includes(destinationStatus.status ?? "")
+        && !expectedIdentity && !body.submitOnly && !body.typeWithoutChecking) {
+        // Preserve the ordinary message in the existing sender outbox. This is
+        // a failed direct delivery audit, not guard-bound retention or a retry.
+        let recordId: string | undefined;
+        try {
+          const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
+          if (!outbox) throw new Error("outbox unavailable");
+          const entry = outbox.record({ senderSession: derivedActor ?? "unknown", destinationSession: body.session,
+            body: typeof body.exactText === "string" ? body.exactText : body.text, ...sendIdentity });
+          recordId = entry.outboxId;
+          outbox.markFailed(recordId);
+          return c.json({ ok: true, outcome: "recorded", sent: false, verified: false, persisted: true,
+            sessionName: body.session, destinationStatus, outboxIds: [recordId],
+            warning: "Message recorded in the sender outbox, not delivered. No forwarding or automatic reassignment was performed." });
+        } catch {
+          // Only when no record was written is the refusal itself what the log keeps (#3728); a kept record is read from the outbox.
+          if (!recordId) recordRefusal(c.get("eventBus" as never) as EventBus | undefined, { type: "transport.send_refused", senderSession: derivedActor,
+            session: body.session, reason: "destination_not_found_unrecorded", status: 503 });
+          return c.json({ ok: false, outcome: "unconfirmed", sent: false, persisted: null, destinationStatus,
+            ...(recordId ? { outboxIds: [recordId] } : {}), error: "Message-record storage is unconfirmed; no delivery was attempted." }, 503);
+        }
+      }
       const status = resolved.code === "ambiguous" ? 409 : 404;
-      return c.json({ ok: false, error: resolved.error }, status);
+      // #3728: nothing was saved for this send (no outbox record), so the refusal itself is what the log keeps.
+      recordRefusal(c.get("eventBus" as never) as EventBus | undefined, { type: "transport.send_refused", senderSession: derivedActor,
+        session: body.session, reason: resolved.code === "ambiguous" ? "ambiguous_destination" : "destination_not_found", status });
+      return c.json({ ok: false, error: resolved.error, ...(destinationStatus ? { destinationStatus } : {}) }, status);
     }
 
     const exactText = typeof body.exactText === "string" ? body.exactText : undefined;
@@ -397,8 +437,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       ...(body.urgent === true ? { urgent: { by: derivedActor ?? "unknown" } } : {}),
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
       ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
-      // Recipients not yet started when the caller goes away are not written; started ones keep their results.
-      signal: c.req.raw.signal,
+      // With waitForIdleMs (a direct API caller; the CLI refuses --wait-for-idle on a fan-out), recipients not
+      // yet started when the caller goes away are not written, as for a single send (#1513): a canceled wait
+      // must not type later. Without it (every `rig broadcast` and `rig send --to/--pod/--rig`), the fan-out runs
+      // to the end after the caller goes away, so a client deadline doesn't drop the recipients it hadn't reached
+      // yet (#3726); each one's outcome is recorded below as usual.
+      ...(body.waitForIdleMs !== undefined ? { signal: c.req.raw.signal } : {}),
     });
 
     // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED

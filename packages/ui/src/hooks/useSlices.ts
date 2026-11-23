@@ -10,8 +10,8 @@ import { keepPreviousData, useQueries, useQuery, useMutation, useQueryClient } f
 import { withHostParam } from "../lib/host-param.js";
 import { useSelectedHostId } from "./useHosts.js";
 
-export type SliceStatus = "active" | "done" | "blocked" | "draft";
-export type SliceFilter = "all" | "active" | "done" | "blocked";
+export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
+export type SliceFilter = "all" | "active" | "done" | "closed" | "blocked";
 
 export interface ProofReadiness { state: string; revision: string; configured?: boolean; historicalStatus?: string | null; slices?: Array<{ readiness: { configured: boolean } }> }
 

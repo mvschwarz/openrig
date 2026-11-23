@@ -2,6 +2,7 @@ import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import type { Context } from "hono";
 import { expectedConversation, resolveExpectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
 import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
+import { RemoteControlObservationStore } from "../domain/remote-control-observations.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
 import { observeInventoryHandler } from "../domain/request-phase-observer.js";
@@ -23,6 +24,7 @@ import {
   getNodeDetail,
   getNodeInventoryWithContext,
   getNodeDetailWithContext,
+  deriveCanonicalFromEntry,
 } from "../domain/node-inventory.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
@@ -41,13 +43,14 @@ import { validateResumeToken } from "../domain/resume-token-validation.js";
 import type { PermissionDriftReader } from "../domain/permission-drift-observer.js";
 import { ProcessCensus } from "../domain/process-census.js";
 import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
+import { effectiveRuntimeHome } from "../domain/seat-runtime-home.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 import { runSyncSiteWhenSlow } from "../domain/sync-site-wrap.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
-const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
+const generationThreadIds = new CodexThreadIdResolver();
 
 /** The node inventory's synchronous steps run one at a time, each after a turn of the event loop. They're SQLite work
  *  that can't yield, so concurrent requests ran their whole builds back to back and a read queued behind a burst (a
@@ -94,6 +97,34 @@ function getDeps(c: { get: (key: string) => unknown }) {
     rigLifecycleService: c.get("rigLifecycleService" as never) as RigLifecycleService | undefined,
     restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined,
   };
+}
+
+/** A seat a launch names: its logical or node id, as before, or else a session name, matched against this rig's
+ *  inventory by the name each seat records (an adopted seat's raw tmux name) or derives, never by converting the string.
+ *  The ref is compared as given and, when it has no `@`, also as `ref@<rig>`. One seat is the seat. More than one, or
+ *  none, names the rig's candidate seats with their session names. */
+function resolveLaunchSeat(db: Parameters<typeof getNodeInventory>[0], rigId: string, rig: { rig: { name: string }; nodes: Array<{ id: string; logicalId: string }> }, ref: string):
+  { ok: true; logicalId: string }
+  | { ok: false; code: "node_not_found"; error: string }
+  | { ok: false; code: "seat_ambiguous"; error: string; candidates: Array<{ logicalId: string; sessionName: string | null }> } {
+  const direct = rig.nodes.find((node) => node.logicalId === ref || node.id === ref);
+  if (direct) return { ok: true, logicalId: direct.logicalId };
+  const inventory = getNodeInventory(db, rigId);
+  const wanted = new Set(ref.includes("@") ? [ref] : [ref, `${ref}@${rig.rig.name}`]);
+  const named = (name: string | null | undefined) => name != null && wanted.has(name);
+  const sessionName = (entry: (typeof inventory)[number]) => entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry);
+  const matches = [...new Map(inventory
+    .filter((entry) => named(entry.canonicalSessionName) || named(deriveCanonicalFromEntry(entry)))
+    .map((entry) => [entry.logicalId, entry])).values()];
+  if (matches.length === 1) return { ok: true, logicalId: matches[0]!.logicalId };
+  const listed = (entries: typeof inventory) => entries.map((entry) => `${entry.logicalId} (${sessionName(entry) ?? "no session name"})`).join(", ");
+  return matches.length > 1
+    ? {
+      ok: false, code: "seat_ambiguous",
+      error: `"${ref}" matches more than one seat in rig "${rig.rig.name}": ${listed(matches)}. Name one by its logical id.`,
+      candidates: matches.map((entry) => ({ logicalId: entry.logicalId, sessionName: sessionName(entry) ?? null })),
+    }
+    : { ok: false, code: "node_not_found", error: `Node "${ref}" not found in rig "${rig.rig.name}"${inventory.length > 0 ? `. Its seats: ${listed(inventory)}` : ""}.` };
 }
 
 function narrowLaunchErrorStatus(code: string | undefined): 404 | 409 | 500 {
@@ -199,8 +230,20 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const hostSelfId = getSelfHostId();
   const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
   const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
+  // #3513: the Remote Control session the seat's own hooks last reported, for its current occupant and conversation;
+  // null when none applies. An observation with its time ("last seen"), not proof of a live connection.
+  const remoteControlStore = new RemoteControlObservationStore(deps.rigRepo.db);
+  const remoteControlOf = (nodeId: string) => {
+    try {
+      return remoteControlStore.current({ nodeId,
+        isCurrentOccupant: (generation) => deps.sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation) });
+    } catch {
+      return null;
+    }
+  };
   const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
     modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
+    remoteControl: remoteControlOf(n.nodeId),
   }));
   return c.json(nodes);
 });
@@ -293,10 +336,9 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json({ ok: false, code: "rig_not_found", error: `Rig "${rigId}" not found` }, 404);
   }
 
-  const node = rig.nodes.find((entry) => entry.logicalId === logicalId || entry.id === logicalId);
-  if (!node) {
-    return c.json({ ok: false, code: "node_not_found", error: `Node "${logicalId}" not found in rig "${rigId}"` }, 404);
-  }
+  const seat = resolveLaunchSeat(rigRepo.db, rigId, rig, logicalId);
+  if (!seat.ok) return c.json({ ok: false, code: seat.code, error: seat.error }, seat.code === "seat_ambiguous" ? 409 : 404);
+  const node = rig.nodes.find((entry) => entry.logicalId === seat.logicalId)!;
 
   const body = await c.req.json().catch(() => ({})) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string } };
   if (body.retryStartupFrom !== undefined) {
@@ -307,7 +349,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
     if (!instantiator) return c.json({ ok: false, code: "internal_error", message: "Pod instantiator unavailable" }, 500);
     const result = await instantiator.retryFirstStart(rigId, node.id, retry.member, retry.rigRoot);
-    return c.json(result, result.ok ? 201 : result.code === "failed" ? 500 : 409);
+    return c.json(result, result.ok ? 201 : processLimitsStatus(result.code) ?? (result.code === "failed" ? 500 : 409));
   }
 
   if (node.podId || body.snapshotId !== undefined) {
@@ -316,7 +358,8 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
       const firstStart = await instantiator?.launchFirstMaterializedNode(rigId, node.id);
       if (firstStart) {
         if (firstStart.ok) (c.get("snapshotCapture" as never) as SnapshotCapture | undefined)?.captureSnapshot(rigId, "auto-rehydrate");
-        return c.json(firstStart, firstStart.ok ? 201 : firstStart.code === "target_liveness_unknown" ? 503 : 409);
+        return c.json(firstStart, firstStart.ok ? 201
+          : processLimitsStatus(firstStart.code) ?? (firstStart.code === "target_liveness_unknown" ? 503 : 409));
       }
     }
     const { restoreOrchestrator } = getDeps(c);
@@ -353,18 +396,28 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json(result);
   }
 
-  const result = await nodeLauncher.launchNode(rigId, logicalId);
+  const result = await nodeLauncher.launchNode(rigId, node.logicalId);
 
   if (!result.ok) {
     const status = result.code === "node_not_found" ? 404
       : result.code === "already_bound" ? 409
       : result.code === "invalid_session_name" ? 400
+      // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry.
+      : result.code === "process_limits_unverified" ? 409
+      : /^process_limits_/.test(result.code) ? 422
       : 500;
     return c.json(result, status);
   }
 
   return c.json(result, 201);
 });
+
+/** #3253: the HTTP status of a launch refused for the seat's process limit, as the legacy launch maps it (only an
+ *  unverified check may pass on retry: 409; the rest are 422); undefined for any other code. */
+function processLimitsStatus(code: string | undefined): 409 | 422 | undefined {
+  if (code === "process_limits_unverified") return 409;
+  return code !== undefined && /^process_limits_/.test(code) ? 422 : undefined;
+}
 
 // POST /api/rigs/:rigId/nodes/launch-subset — multi-target managed subset launch
 nodesRoutes.post("/launch-subset", async (c) => {
@@ -377,11 +430,29 @@ nodesRoutes.post("/launch-subset", async (c) => {
   if (!Array.isArray(body.seats) || body.seats.length === 0) {
     return c.json({ ok: false, code: "invalid_request", error: "Request body must include a non-empty 'seats' array of logical IDs" }, 400);
   }
+  // Each seat may be named by its session name too. A name more than one seat answers to isn't launched: it's reported in
+  // `ambiguousSeats` with its candidates, beside `unmatchedIds`, and the other seats go ahead. One that matches nothing is
+  // passed on as given, and the launch reports it unmatched as before.
+  const rig = getDeps(c).rigRepo.getRig(rigId);
+  const seats: string[] = [];
+  const ambiguousSeats: Array<{ seat: string; candidates: Array<{ logicalId: string; sessionName: string | null }>; message: string }> = [];
+  for (const ref of body.seats) {
+    const seat = rig && typeof ref === "string" ? resolveLaunchSeat(getDeps(c).rigRepo.db, rigId, rig, ref) : null;
+    if (seat && !seat.ok && seat.code === "seat_ambiguous") {
+      ambiguousSeats.push({ seat: ref, candidates: seat.candidates, message: seat.error });
+      continue;
+    }
+    seats.push(seat?.ok ? seat.logicalId : ref);
+  }
+  const ambiguity = ambiguousSeats.length > 0 ? { ambiguousSeats } : {};
+  if (seats.length === 0) {
+    return c.json({ ok: false, code: "seat_ambiguous", error: "Each seat named matches more than one seat, so there is nothing to launch.", ...ambiguity }, 409);
+  }
   const result = body.plan === true
-    ? restoreOrchestrator.planNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, nonTargetMode: body.nonTargetMode })
-    : await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
+    ? restoreOrchestrator.planNodeSubset(rigId, seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, nonTargetMode: body.nonTargetMode })
+    : await restoreOrchestrator.launchNodeSubset(rigId, seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
   if (!result.ok) {
-    return c.json(result, narrowLaunchErrorStatus(result.code));
+    return c.json({ ...result, ...ambiguity }, narrowLaunchErrorStatus(result.code));
   }
   // OPR.0.4.3.20 FR-7 — a target that landed awaiting-decision / attention_required /
   // failed is NOT launched (no running session). Success requires at least one running
@@ -391,7 +462,7 @@ nodesRoutes.post("/launch-subset", async (c) => {
   const nonRunning = launchedEntries.filter((n) => !launchStatusIsRunning(n.status));
   const running = launchedEntries.filter((n) => launchStatusIsRunning(n.status));
   const status = nonRunning.length > 0 ? 409 : running.length > 0 ? 201 : 200;
-  return c.json({ ...result, ok: nonRunning.length === 0 && result.ok }, status);
+  return c.json({ ...result, ...ambiguity, ok: nonRunning.length === 0 && result.ok }, status);
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId/preview?lines=N
@@ -795,24 +866,35 @@ const generationRecord = async (c: Context) => {
       if (!pid || pid !== verifiedPanePid) {
         return c.json({ error: "record_identity_unverified", message: `The bound pane for '${sessionName}' no longer matches its verified occupant.` }, 409);
       }
-      let verifiedNativeThreadId: string | undefined;
+      // Match the expected-identity reader: select this seat's home, then carry the
+      // positive PID/start-time lookup's home into the transcript lookup as well.
+      const codexHome = effectiveRuntimeHome(registry.db, context!.nodeId, "codex", process.env.CODEX_HOME || undefined);
+      const threads = codexHome ? new CodexThreadIdResolver({ codexHome }) : generationThreadIds;
+      let verifiedNativeThreadId: string | undefined, verifiedHome: string | undefined;
+      const homes = new Set<string>();
       const live = await resolveLiveCodexThreadId(binding.tmuxPane, {
         getPanePid: async () => pid,
-        listProcesses: () => generationCensus.list(),
+        listProcesses: (opts) => generationCensus.list(opts),
         readThreadIdByPid: async (nativePid, startedAt) => {
-          const threadId = startedAt ? await generationThreadIds.resolve(nativePid, startedAt) : undefined;
-          if (nativePid === identity.evidence.observedPid) verifiedNativeThreadId = threadId;
-          return threadId;
+          if (!startedAt) return undefined;
+          const read = await threads.resolveWithHome(nativePid, startedAt, nativePid === identity.evidence.observedPid);
+          if (read.thread && read.codexHome) homes.add(read.codexHome);
+          if (nativePid === identity.evidence.observedPid) { verifiedNativeThreadId = read.thread; verifiedHome = read.codexHome; }
+          return read.thread;
         },
       });
       if (!live.ok) return c.json({ error: "record_identity_unverified", message: live.reason }, 409);
       sessionId = live.id;
-      transcriptPath = store.readCodexTranscriptPath(sessionId);
       // Dual-PID verdicts must name the process whose thread was selected; legacy verdicts only identify the root. A different
       // conversation under a surviving wrapper isn't a binding change, so it says what it is.
       if (identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId) {
         return c.json({ error: "record_identity_unverified", message: `The Codex conversation in the pane for '${sessionName}' isn't the one its verified process owned, so no generation record is served.` }, 409);
       }
+      const recordHome = verifiedHome ?? (homes.size === 1 ? [...homes][0] : undefined);
+      if (!recordHome) {
+        return c.json({ error: "record_identity_unverified", message: `The current native process's record home for '${sessionName}' could not be established.` }, 409);
+      }
+      transcriptPath = store.readCodexTranscriptPath(sessionId, recordHome);
       if (registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
         || registry.getBindingForNode(context!.nodeId)?.tmuxPane !== binding.tmuxPane
         || await tmuxAdapter.getPanePid?.(binding.tmuxPane) !== pid) {

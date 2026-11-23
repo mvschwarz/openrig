@@ -11,12 +11,19 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import type { QueueNudgeTransport } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
 import {
   QUEUE_NUDGE_SUMMARY_MAX_CHARS,
   renderQueueHandoffNudge,
 } from "../src/domain/queue-nudge-text.js";
 
-function makeHarness(opts?: { isSenderSendable?: (sender: string) => boolean }) {
+function makeHarness(opts?: {
+  isSenderSendable?: (sender: string) => boolean;
+  canRecordDestination?: (sessionRef: string) => boolean;
+  loadHumanRegistry?: () => LoadResult;
+  readSharedChannels?: () => ReadonlyArray<{ entityId: string; address: string }> | null;
+}) {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   const calls: Array<{ session: string; text: string }> = [];
@@ -118,7 +125,133 @@ describe("queue wake nudge carries the stored summary", () => {
     } finally { await settle(); h.db.close(); }
   });
 
-  it.each(["human@kernel", "human@host"])("a wake from %s offers a reply accepted by the real queue writer", async (sender) => {
+  it("#3268: a message from an @external source that isn't registered offers no reply command the queue would refuse", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [{ entityId: "alex", address: "alex@external" } as HumanFragment] });
+    const h = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
+      loadHumanRegistry: registry,
+      readSharedChannels: () => [],
+    });
+    try {
+      const row = await h.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      const envelope = h.calls[0]!.text;
+      expect(envelope.split("\n").at(-1)).toBe("↩ No reply route: some-team@external isn't a registered person (rig gateway human list lists who's registered).");
+      expect(envelope).not.toContain("rig queue create");
+      // The command the old hint named is the one the queue refuses.
+      await expect(h.repo.create({ sourceSession: "dev@rig", destinationSession: "some-team@external", humanIntent: "update",
+        replyTo: row.qitemId, summary: "s", body: "b", nudge: false })).rejects.toMatchObject({ code: "unknown_destination_rig" });
+      // A registered person keeps the reply hint.
+      const registered = await h.repo.create({ sourceSession: "alex@external", destinationSession: "dev@rig", body: "hi" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(2));
+      expect(h.calls[1]!.text.split("\n").at(-1)).toBe(`↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to ${registered.qitemId} --summary "<one line>" --body "..." --verify`);
+    } finally { await settle(); h.db.close(); }
+  });
+
+  const replyHint = (to: string, qitemId: string) =>
+    `↩ Reply if needed: rig queue create --destination ${to} --human-intent update --reply-to ${qitemId} --summary "<one line>" --body "..." --verify`;
+
+  it("#3268: a registry that can't be read isn't proof of absence, so the sender keeps today's reply line", async () => {
+    const broken = (): LoadResult => ({ ok: false, error: "registry projection HAND-EDITED" });
+    const unreadableRegistry = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: broken, sharedChannels: () => [] })),
+      loadHumanRegistry: broken,
+      readSharedChannels: () => [],
+    });
+    try {
+      const row = await unreadableRegistry.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(unreadableRegistry.calls).toHaveLength(1));
+      expect(unreadableRegistry.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("some-team@external", row.qitemId));
+    } finally { await settle(); unreadableRegistry.db.close(); }
+  });
+
+  it("#3268: a participant file that can't be read isn't proof of absence either", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [] });
+    const unreadableParticipants = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
+      loadHumanRegistry: registry,
+      readSharedChannels: () => null,
+    });
+    try {
+      const row = await unreadableParticipants.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(unreadableParticipants.calls).toHaveLength(1));
+      expect(unreadableParticipants.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("ops@external", row.qitemId));
+    } finally { await settle(); unreadableParticipants.db.close(); }
+  });
+
+  it("#3268: the note comes from one snapshot, so a later read that can't read doesn't turn a registered channel into 'no route'", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [] });
+    const h = makeHarness({
+      // A second read of the participant file, as admission does it, can't read and collapses to an empty list.
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry,
+        sharedChannels: () => [] })),
+      loadHumanRegistry: registry,
+      // The first read succeeds and lists the channel.
+      readSharedChannels: () => [{ entityId: "ops", address: "ops@external" }],
+    });
+    try {
+      const row = await h.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("ops@external", row.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("#3268: a registered shared channel keeps its reply hint", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [] });
+    const h = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry,
+        sharedChannels: () => [{ entityId: "ops", address: "ops@external" }] })),
+      loadHumanRegistry: registry,
+      readSharedChannels: () => [{ entityId: "ops", address: "ops@external" }],
+    });
+    try {
+      const row = await h.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("ops@external", row.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  // The destination checks the queue runs succeed; only the sender lookup the reply line adds throws.
+  const throwingLookup = () => makeHarness({
+    canRecordDestination: () => true,
+    loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    readSharedChannels: () => { throw new Error("participant file read failed"); },
+  });
+
+  it("#3268: if the reply-line lookup throws, a new item still delivers its notification with today's reply line", async () => {
+    const h = throwingLookup();
+    try {
+      const row = await h.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("some-team@external", row.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("#3268: if the reply-line lookup throws, a handoff still goes through and delivers with today's reply line", async () => {
+    const h = throwingLookup();
+    try {
+      const row = await h.repo.create({ sourceSession: "lead@rig", destinationSession: "dev@rig", body: "work", nudge: false });
+      const { created } = await h.repo.handoff({ qitemId: row.qitemId, fromSession: "some-team@external", toSession: "reviewer@rig", body: "next" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.session).toBe("reviewer@rig");
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("some-team@external", created.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("a wake from human@host says that address names no person, and offers no reply command", async () => {
+    const h = makeHarness();
+    try {
+      const row = await h.repo.create({ sourceSession: "human@host", destinationSession: "dev@rig", body: "Please check the build." });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      const envelope = h.calls[0]!.text;
+      expect(envelope).toContain("From: human@host\nTo: dev@rig\n");
+      expect(envelopeBody(envelope)).toEqual([`Queue handoff: ${row.qitemId} - check your queue.`]);
+      expect(envelope.split("\n").at(-1)).toBe("↩ human@host names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).");
+      expect(envelope).not.toContain("rig queue create");
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it.each(["human@kernel"])("a wake from %s offers a reply accepted by the real queue writer", async (sender) => {
     const h = makeHarness();
     try {
       const row = await h.repo.create({ sourceSession: sender, destinationSession: "dev@rig", body: "Please check the build." });

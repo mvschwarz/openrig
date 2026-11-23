@@ -178,3 +178,39 @@ assertFixtureScopedHome(OPENRIG_HOME);
 // in-process fixture registers its origin (allowFetchTarget) when it binds.
 const { installFetchGuard } = await import("../packages/cli/test/fetch-guard.js");
 installFetchGuard();
+
+// Close-all discovers tmux sessions even in an otherwise Herdr-only test.
+// Consumer suites own their scopes and clean their servers before retiring roots.
+// Reject sockets outside registered roots before the service reaches an executor.
+// This is a test-only dependency wrapper; the production class remains real.
+if (process.env["VITEST"]) {
+  const { vi } = await import("vitest");
+  const { assertPrivateTerminalTmux } = await import("./terminal-tmux-isolation.js");
+  vi.doMock("../packages/daemon/src/domain/terminal/terminal-service.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../packages/daemon/src/domain/terminal/terminal-service.js")>();
+    const server = await import("../packages/daemon/src/adapters/tmux-server.js");
+    return { ...actual, TerminalService: class TerminalService extends actual.TerminalService {
+      private closeAllDepth = 0;
+      constructor(deps: import("../packages/daemon/src/domain/terminal/terminal-service.js").TerminalServiceDeps) {
+        let instance: TerminalService;
+        // Keep live fixture mutations visible, as the production constructor does.
+        super(new Proxy(deps, { get(target, property, receiver) {
+          if (property !== "tmuxServerArgs") return Reflect.get(target, property, receiver);
+          return () => {
+            const args = target.tmuxServerArgs?.() ?? server.daemonTmuxServerArgs();
+            // Composition only embeds this value in a plan. Close-all can execute
+            // against it, so every read during that operation remains guarded.
+            if (instance.closeAllDepth > 0) assertPrivateTerminalTmux(args, process.env);
+            return args;
+          };
+        } }));
+        instance = this;
+      }
+      override async closeAll(req: Parameters<typeof actual.TerminalService.prototype.closeAll>[0]) {
+        this.closeAllDepth++;
+        try { return await super.closeAll(req); }
+        finally { this.closeAllDepth--; }
+      }
+    } };
+  });
+}

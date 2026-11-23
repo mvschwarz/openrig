@@ -1,8 +1,16 @@
 # Delivery conformance suite
 
-This kit proves OpenRig's typed delivery against the real Claude Code and Codex terminal programs. It covers 25 cases, from idle and busy seats to drafts, dialogs, copy mode, ordering, `/clear`, compaction and restart. Quality owns the expected result for each case. This directory holds the code that drives the cases.
+This kit proves OpenRig's typed delivery against the real Claude Code and Codex terminal programs. The delivery measurement case list (kept outside this repository) plans 25 cases, from idle and busy seats to drafts, dialogs, copy mode, ordering, `/clear`, compaction and restart. Quality owns the expected result for each case. This directory holds the code that drives the cases.
 
-**Built so far:** the stand-in model servers, the case harness, the release-run entry point, and the first cases (D01 idle, D02 busy, D03 and D04 drafts, D08 copy mode, D09 order, D15 multi-line paste) on both programs. Dialogs and guards, lifecycle, and fault injection come next.
+**Registered and runnable today:** only the cases `cases/index.mjs` lists.
+- **On both programs:** D01 idle, D02 busy, D03 and D04 drafts, D05 permission prompt, D06 other dialog (the model picker), D08 copy mode, D09 order, D15 multi-line paste, and issue #3076's two late-gap cells (`R3076-notice`, `R3076-send`).
+- **D18, registered on both programs:** the six runnable typing-guard modes `off`, `draft-aware`, `openrig-urgent`, `urgent-only`, `sends-only` and `hold`. `D18-queue-only` is registered as NOT RUN because the oracle has no expected outcome for it yet.
+- **On Claude Code only:** D12, managed compaction followed by a restore. Its cells are `D12-A` (the whole sequence on an empty input box, with F's refocus check), `D12-Bg-*` and `D12-Bd-*` (a person's draft at the preparation, at `/compact` and at the restore, under the draft-aware guard and the defaults), `D12-Cg` and `D12-Cd` (an unreadable input box, NOT RUN: see `cases/d12.mjs`), `D12-D` (a permission prompt during preparation) `D12-E` (no usage reading at the trigger) and `D12-W` (Quality's hard wall: `rig compact --skip-map` at Claude's native "Context limit reached" screen, with no usage reading). Codex is not applicable: managed compaction targets Claude seats.
+- **0.7.19 D5's C7 entries** (`cases/c7-0719.mjs`; `C7_0719_ITEMS` maps all nine items to what runs them, and `packages/daemon/test/delivery-c7-0719.test.ts` checks none is dropped or merged): `C7-3311-current-binding` and `C7-3243-same-binding` (a queue wake that failed before input, retried once on the seat's current binding or its same one), `C7-3176-send` and `C7-3176-notice` (a person's draft typed after OpenRig's paste and before the read that precedes its Enter), on both programs; `C7-AUQ` (Claude's AskUserQuestion dialog), on Claude Code; and `C7-3339-withdrawal`, registered and recorded NOT RUN with its source reason, since no runner in this kit can take #3339's native route. Fixture actions that aren't a person's are recorded as the fixture operator's.
+
+`run.mjs` runs nothing else, and `--cases` refuses an id that isn't registered (`no case D10 in this suite yet`).
+
+**Planned, not fixtures yet:** `cases/expected.yaml` already states the expected result for D07, D14 and D19, and its `later` list names D10, D12, D16 and D25. D12's full expected entry is Quality's to bind on this kit: its fixture is registered here, its oracle still the `later` line. Restart has no fixture yet.
 
 ## Running a release
 
@@ -25,7 +33,7 @@ It writes `RESULT.json` and `RESULT.md`: every cell's PASS, FAIL or NOT RUN, its
 - `packageTree`, a digest of the whole installed package;
 - `lockfileIntegrity`, npm's integrity, written at install.
 
-A cell that can't run is NOT RUN with its reason, never left out. So is a cell whose evidence wasn't banked, whose bank holds credential-shaped text, whose stand-in failed, or whose seat conversation couldn't be identified: no credit without evidence. Each `--out` holds one run, and each cell has a time limit (`--cell-timeout`, 15 minutes by default) after which it closes itself and the parent reaps anything left.
+A cell that can't run is NOT RUN with its reason, never left out. So is a cell whose evidence wasn't banked, whose bank holds credential-shaped text, whose stand-in failed, or whose seat conversation couldn't be identified: no credit without evidence. Each `--out` holds one run, and each cell has a time limit (`--cell-timeout`, 15 minutes by default) after which it closes itself and the parent reaps anything left. `--tmux <path>` runs every cell on that tmux binary instead of the one on PATH (the daemon's calls, its server and the harness's own reads): its version is what the binary itself reports, pinned with its path and sha256, and a binary that's missing or reports no version makes every cell NOT RUN with the reason.
 
 **Program transforms.** A program can rewrite pasted input itself: Claude Code 2.1.322 turns a pasted tab into four spaces. Quality lists each such rewrite in `expected.yaml` (`program_transforms`), pinned to the versions it was seen on. A cell applies one only as its exact inverse: undoing it must restore bytes OpenRig itself recorded writing. The cell then reports `PASS (program transform: <id>)`, so the content limit stays visible. Any other difference, or a new unlisted rewrite, is a FAIL.
 
@@ -67,6 +75,51 @@ There are two cells, each with its own verdict: an ordinary `rig send` (the send
 - **draft loss:** whether the draft's own bytes are lost or changed.
 
 This is the real TUI with timing injected at the wrapper boundary, after the guard's final check and before `paste-buffer`. Broker input on either side of the guard's final check, text already present before the read, and a real plain `tmux attach` client are separate controls, not covered here.
+
+### D18: every typing-guard mode
+
+`cases/d18.mjs` walks each mode through idle, draft, copy mode, busy and the model picker, each with a deliberate send, an urgent one and a watchdog reminder. It judges every attempt from OpenRig's own record of it, never from silence:
+
+- **A `rig send`** is judged by its JSON result.
+- **A reminder** is judged by its occurrence's entry in the watchdog's history (`rig watchdog status <job> --json`): sent, retained with its held ids, or refused with its input phase.
+- **No record** (a send with no JSON result, or no occurrence within 40 seconds) is NOT RUN, unless an effect the matrix forbids was observed anyway. That's FAIL:
+  - a write to the pane, or a delivery, where nothing may arrive;
+  - a paste that never arrived;
+  - one observed delivery whose body didn't arrive intact.
+- **Pane writes** are read after the 3-second no-arrival observation, so a late paste is seen.
+- **A held result's** returned outboxIds must name exactly its held messages. A reminder's may also name its own occurrence: the outbox row from `watchdog@system` whose `auditPointer` is the reminder's job (`rig queue outbox-list watchdog@system`). If that row can't be read, the occurrence id isn't confirmed: that check is NOT RUN, never passed by the id's prefix.
+- **Each fixture** (draft, copy mode, busy, the picker) starts from an input box positively read as clean. Otherwise that combination is NOT RUN.
+
+**Reasons.** Where the matrix names a reason, the recorded one must match. Where the version records none, the combination is NOT RUN. OpenRig 0.7.12 records none for a reminder held by its mode or refused at a dialog.
+
+**Deliveries** are judged as the first cases' are: the complete body, exactly once after a final re-read. A merge must carry the draft in the very turn that carried the message.
+
+**Busy.** A busy turn's answer is held on a stand-in gate named after its marker until the attempt is over. So the attempt meets a running turn by construction, not by a longer wait. The input box read at that moment picks the matrix's row: empty (deliver) or unreadable (held, `draft_input_unknown`). A join must show OpenRig's paste and Enter before the gate opened: OpenRig wrote into the running turn instead of waiting for idle. That doesn't pin how the program then places the text in its conversation, whether in the same request or a following item.
+
+**Never replayed.** One held message stays active through an observed effective change to off (pending:false), and the cell watches 15 seconds for a replay before retiring it. Retiring it is then watched for 3 seconds: retirement delivers nothing. A replay already observed fails the control even when its preconditions weren't met. Every other held message is retired after its combination, and a retire that fails is a failed check, since the later combinations rely on the freed quota.
+
+A refused reminder's occurrence stays owed and can retry after the cell ends. That retry is outside what a cell observes.
+
+### Claude's updater in D04-footer
+
+`cases/d04.mjs` needs Claude Code's own auto-update failure footer, so its Claude cell turns the updater on:
+- `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are removed.
+- `NPM_CONFIG_REGISTRY` points at the stand-in, which serves a newer version whose tarball is a 404 (`registry` in the script).
+- `NPM_CONFIG_PREFIX` is inside the cell's home.
+
+**The boundary.** The containment is a loopback-only network namespace plus a directed HOME, config, cache and npm prefix. **It is not filesystem confinement.** The cell's `claude` is a link to the shared pinned install, which the same uid can write. A post-run hash of that install is an integrity check, not confinement.
+
+**The evidence is scoped to the exercised pin.** For Claude Code 2.1.322:
+- Its npm-global updater runs `npm install -g` with the cell's environment. npm's own log in the cell (`home/.npm/_logs`) shows it loading its global config from the cell's prefix, then the tarball's 404.
+- The shared install's package-tree digest was unchanged after the runs.
+
+**The limit.** Another version's updater could write elsewhere on the local filesystem. The network namespace stops only its fetches.
+
+### What a result is bound to
+
+A run's `RESULT.json` pins the programs, OpenRig, `expected.yaml` and the containment. From this version it also pins the suite itself: its git commit, whether the tree was clean, and a digest of `cases/`, `harness/` and `stand-ins/`. Those digests are in-band hashes of the suite code that ran. `clean` is `git status` of the delivery folder, so it covers that subtree only. A run made before that binds to a suite revision only by the worktree it ran from: that's testimony, not a record.
+
+The unit tests' result is evidence only when its JSON report is kept with the run (`vitest --reporter=json --outputFile=…`), named with the commit it ran on. The report carries no hash of the sources, so its binding to that commit is run-order testimony, unless the sources' hashes are recorded beside it.
 
 
 ## Stand-in model servers
@@ -112,11 +165,13 @@ This script is not the stub runtime's script (`packages/test-system/scenarios/sc
 
 Optional fields on any rule:
 
-- **`gate`** holds the answer until the case calls `POST /_stand-in/release/<gate>`, so a case controls exactly when a turn ends.
+- **`gate`** holds the answer until the case calls `POST /_stand-in/release/<gate>`, so a case controls exactly when a turn ends. `{{marker}}` in the name becomes the turn's first marker, so each turn can have a gate of its own.
 - **`delayMs`** waits before the answer starts.
 - **`times`** limits how many requests the rule answers.
 - **`on`** says which kind of turn the rule answers.
 - **`when`** matches the turn's text.
+
+At the script's top level, **`registry`** (`{ "<package>": "<version>" }`) answers an npm registry's metadata request for each package, with that version as every dist-tag and a tarball the stand-in doesn't serve: a program's updater sees a newer version it can't install.
 
 A script is checked when it loads: `rules` must be a list (an absent one means the fallback answers everything), every rule needs exactly one action, and every `when` and `marker` pattern must compile.
 

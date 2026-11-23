@@ -47,6 +47,40 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
   }
 }
 
+const CODEX_DATABASE = /\/(?:logs|state)_\d+\.sqlite$/;
+
+/** How the Linux reader lists a process's fd links; tests inject one. */
+export interface ProcFdReader {
+  readdir(dir: string): Promise<string[]>;
+  readlink(link: string): Promise<string>;
+}
+const procFds: ProcFdReader = { readdir: dir => fs.promises.readdir(dir), readlink: link => fs.promises.readlink(link) };
+
+/** The one directory whose Codex logs or state databases `pid` holds open: Linux's /proc fd links, else lsof. Codex 0.162.1
+ *  opens both in its sqlite_home. Undefined when there's none or several; throws when the OS can't say. */
+export async function defaultOpenCodexDatabaseHomeByPid(pid: number,
+  fds: ProcFdReader | undefined = process.platform === "linux" ? procFds : undefined): Promise<string | undefined> {
+  let files: string[];
+  if (fds) {
+    const fdDir = `/proc/${pid}/fd`;
+    files = [];
+    for (const fd of await fds.readdir(fdDir)) {
+      // An fd closed since the listing reads ENOENT. Any other failure leaves the list incomplete, so it isn't one home.
+      try { files.push(await fds.readlink(nodePath.join(fdDir, fd))); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  } else {
+    const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-Fn"], { timeout: 1000, maxBuffer: 1024 * 1024 });
+    files = stdout.split("\n").filter(line => line.startsWith("n")).map(line => line.slice(1));
+  }
+  const homes = new Set(files.filter(file => CODEX_DATABASE.test(file)).map(file => nodePath.dirname(file)));
+  return homes.size === 1 ? [...homes][0] : undefined;
+}
+
+function sameDirectory(a: string, b: string): boolean {
+  try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return nodePath.resolve(a) === nodePath.resolve(b); }
+}
+
 export function readCodexThreadIdFromCandidateHomes(
   pid: number,
   candidateHomes: Array<string | undefined>,
@@ -114,6 +148,8 @@ export class CodexThreadIdResolver {
       /** Explicit provider root; never search another home's logs on a miss. */
       codexHome?: string;
       resolveHomeDirByPid?: ResolveHomeDirByPid;
+      /** The directory of the Codex databases a process holds open (tests); default: the OS's open-file list. */
+      openDatabaseHomeByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
       readFromLogs?: (pid: number, homeDir: string, report?: CodexCaptureReporter, startSecond?: StartSecondRows) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
@@ -130,6 +166,35 @@ export class CodexThreadIdResolver {
       now?: () => number;
     } = {},
   ) {}
+
+  /** The home of the positive PID/start-time log read, carried with its thread. With `followOpenDatabases` (a verified
+   *  native process), once the explicit home is shown to hold none of this process's rows, it reads the one home whose
+   *  Codex databases this process holds open, as the OS reports it, with the same gate: a process relaunched under another
+   *  CODEX_HOME, or with its own sqlite_home, logs there; that read too must find and read every logs and state database.
+   *  Ambiguous, unjoined or unreadable proof, an incomplete discovery, or no explicit home (whose search doesn't record
+   *  discovery) stays unknown. Never a search of other homes. */
+  async resolveWithHome(pid: number, identity: string, followOpenDatabases = false): Promise<{ thread?: string; codexHome?: string }> {
+    let codexHome: string | undefined;
+    const misses: CodexCaptureDiagnostic[] = [];
+    const thread = await this.resolveWithDiagnostics(pid, identity, miss => misses.push(miss), "exclude", home => { codexHome = home; });
+    if (thread) return { thread, codexHome };
+    if (!followOpenDatabases || !this.opts.codexHome || misses[0]?.reason !== "no_log_row") return {};
+    // Absence is established by the same home read again with discovery and readability recorded (the first may be incremental).
+    const declared = await this.resolveWithReadability(pid, identity);
+    if (declared.thread || declared.reason !== "no_log_row" || !declared.fullyReadable) return {};
+    const open = await this.openDatabaseHome(pid);
+    if (!open || sameDirectory(open, this.opts.codexHome)) return {};
+    // A lone joined conversation isn't the one when a database there went unread or unfound: it could hold another.
+    const readability: Readability = { complete: true, unreadable: false };
+    const opened = readCodexThreadIdFromLogs(pid, "", undefined, lstartToMinTs(identity), open, undefined, "exclude", readability);
+    return opened && readability.complete ? { thread: opened, codexHome: open } : {};
+  }
+
+  /** The one directory whose Codex logs or state databases `pid` holds open, or undefined when there's none, several,
+   *  or the OS can't say. */
+  async openDatabaseHome(pid: number): Promise<string | undefined> {
+    try { return await (this.opts.openDatabaseHomeByPid ?? defaultOpenCodexDatabaseHomeByPid)(pid); } catch { return undefined; }
+  }
 
   /**
    * Resolve a codex thread id for `pid`. IDENTITY IS REQUIRED (S10 follow-on, r1 owed item 3): the
@@ -181,9 +246,9 @@ export class CodexThreadIdResolver {
   }
 
   private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter,
-    startSecond: StartSecondRows = "exclude"): Promise<string | undefined> {
+    startSecond: StartSecondRows = "exclude", resolvedHome?: (codexHome: string) => void): Promise<string | undefined> {
     const diagnostics: CodexCaptureDiagnostic[] = [];
-    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic), startSecond);
+    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic), startSecond, resolvedHome);
     if (!token) {
       // A default-home miss followed by a successful alternate-home read is not a failure.
       const priority = { no_log_row: 0, no_cli_thread: 1, ambiguous_threads: 2, sqlite_unreadable: 3 };
@@ -194,11 +259,15 @@ export class CodexThreadIdResolver {
   }
 
   private async resolveInternal(pid: number, identity: string | undefined, report: CodexCaptureReporter,
-    startSecond: StartSecondRows): Promise<string | undefined> {
+    startSecond: StartSecondRows, resolvedHome?: (codexHome: string) => void): Promise<string | undefined> {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
-    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report, startSecond);
+    if (this.opts.codexHome) {
+      const thread = readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report, startSecond);
+      if (thread) resolvedHome?.(this.opts.codexHome);
+      return thread;
+    }
     const injected = this.opts.readFromLogs;
     const readFromLogs = injected
       ? (p: number, home: string, report?: CodexCaptureReporter) => injected(p, home, report, startSecond)
@@ -207,8 +276,13 @@ export class CodexThreadIdResolver {
     const now = this.opts.now ?? Date.now;
     const ttl = this.opts.homeTtlMs ?? 60_000;
 
+    const readAtHome = (home: string) => {
+      const thread = readFromLogs(pid, home, report);
+      if (thread) resolvedHome?.(nodePath.join(home, ".codex"));
+      return thread;
+    };
     // 1. Default home: no subprocess.
-    const fromDefault = readFromLogs(pid, defaultHome, report);
+    const fromDefault = readAtHome(defaultHome);
     if (fromDefault) return fromDefault;
 
     // 2. FRESH cached home for this (pid, identity): no subprocess. A reused
@@ -220,7 +294,7 @@ export class CodexThreadIdResolver {
     const cached = this.homeByKey.get(key);
     if (cached) {
       if (cached.settled || now() - cached.at <= ttl) {
-        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home, report);
+        return cached.home === defaultHome ? undefined : readAtHome(cached.home);
       }
       this.homeByKey.delete(key);
     }
@@ -258,7 +332,7 @@ export class CodexThreadIdResolver {
     })();
     const home = await homePromise;
     if (!home || home === defaultHome) return undefined;
-    return readFromLogs(pid, home, report);
+    return readAtHome(home);
   }
 
   private cacheHome(key: string, home: string, settled: boolean): void {
@@ -303,6 +377,86 @@ export type StartSecondRows =
 /** Whether a read met no detected incompleteness: every database it opened was read, and both discoveries were complete. */
 interface Readability { complete: boolean; unreadable: boolean }
 
+/** The thread ids a process logged after its start second: Codex's `logs` table has no index this can use, so it reads
+ *  every row that names a thread, in every process. */
+const FULL_LOGGED_THREADS = "SELECT DISTINCT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?";
+
+/** The logs migrations whose writers were read before trusting an incremental read. Codex 0.153.4 and 0.162.1 both ship
+ *  logs migrations 1 and 2, and outside tests their only writes to `logs` are inserts (AUTOINCREMENT ids, so a new row
+ *  always has a higher id) and deletes (10-day retention, per-thread and per-process size limits, a deleted thread).
+ *  No supported writer changes an existing row's thread_id, ts or process_uuid. A database with any other migration
+ *  set, or none, reads in full. */
+const INCREMENTAL_LOGS_MIGRATIONS = "1,2";
+const MAX_INCREMENTAL_READS = 512;
+/** Codex bounds rows per thread, not threads per process, so an entry keeps at most this many; past it the read's own
+ *  answer is returned and nothing is remembered. */
+const MAX_REMEMBERED_THREADS = 64;
+
+/** A file's identity as stat reports it, or null when it can't be read. */
+function fileIdentity(file: string): string | null {
+  try { const st = fs.statSync(file); return [st.dev, st.ino, st.birthtimeMs].join(":"); } catch { return null; }
+}
+
+/** One database's earlier read for one process: the highest id it covered, that row's content (rows don't change in
+ *  place, so a different row there means a different database), and the threads it found. */
+type IncrementalRead = { highWater: number; highWaterRow: string; threads: Set<string> };
+const incrementalReads = new Map<string, IncrementalRead>();
+
+/** How often the default read was answered cold, warm or in full. For tests and measurement. */
+export const incrementalLogReadCounts = { cold: 0, warm: 0, full: 0 };
+/** Forget every earlier read, so the next read of each database is cold. */
+export function clearIncrementalLogReads(): void { incrementalReads.clear(); }
+
+/**
+ * {@link FULL_LOGGED_THREADS} for one database, answered from the rows added since this process's last read there.
+ * Each read runs in one read transaction: it takes the current highest id, keeps each earlier thread only while a
+ * qualifying row still names it (Codex deletes rows), and adds the threads in rows past the earlier high-water id. The
+ * set is the full query's. A cold read (no earlier read, a replaced file, or a high-water row that changed or went) is
+ * the full query itself. Returns null when this database isn't a verified schema, when the read throws, or when the
+ * file's identity after the read isn't the one taken before the open (it was replaced meanwhile), so the caller runs
+ * the full query on the same handle and reports what it reports today. Such a read is never remembered, nor is one that
+ * found more than {@link MAX_REMEMBERED_THREADS} threads, whose answer is still returned whole.
+ */
+function readLoggedThreadsIncrementally(db: Database.Database, dbPath: string, opened: string, pid: number, minTs: number | undefined): string[] | null {
+  let applied: string | null | undefined;
+  try {
+    applied = (db.prepare("SELECT group_concat(version) AS applied FROM (SELECT version FROM _sqlx_migrations WHERE success = 1 ORDER BY version)")
+      .get() as { applied: string | null } | undefined)?.applied;
+  } catch { applied = null; }
+  if (applied !== INCREMENTAL_LOGS_MIGRATIONS) { incrementalLogReadCounts.full++; return null; }
+  const pattern = `pid:${pid}:%`, since = minTs ?? 0;
+  let key: string, read: { warm: boolean; entry: IncrementalRead };
+  try {
+    key = [dbPath, opened, pid, minTs ?? 0].join("|");
+    const rowAt = db.prepare("SELECT ts, ts_nanos, process_uuid, thread_id FROM logs WHERE id = ?");
+    const content = (id: number) => { const row = rowAt.get(id); return row ? JSON.stringify(row) : null; };
+    read = db.transaction(() => {
+      const highWater = (db.prepare("SELECT max(id) AS hi FROM logs").get() as { hi: number | null }).hi ?? 0;
+      const earlier = incrementalReads.get(key);
+      const warm = earlier !== undefined && highWater >= earlier.highWater
+        && (earlier.highWater === 0 || content(earlier.highWater) === earlier.highWaterRow);
+      const threads = new Set<string>();
+      if (warm) {
+        const stillLogged = db.prepare("SELECT 1 FROM logs WHERE thread_id = ? AND ts > ? AND process_uuid LIKE ? LIMIT 1");
+        for (const thread of earlier.threads) if (stillLogged.get(thread, since, pattern)) threads.add(thread);
+        const added = db.prepare("SELECT DISTINCT thread_id FROM logs WHERE id > ? AND id <= ? AND process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?")
+          .all(earlier.highWater, highWater, pattern, since) as Array<{ thread_id: string }>;
+        for (const row of added) threads.add(row.thread_id);
+      } else {
+        for (const row of db.prepare(FULL_LOGGED_THREADS).all(pattern, since) as Array<{ thread_id: string }>) threads.add(row.thread_id);
+      }
+      return { warm, entry: { highWater, highWaterRow: highWater === 0 ? "" : content(highWater) ?? "", threads } };
+    })();
+  } catch { incrementalLogReadCounts.full++; return null; }
+  if (fileIdentity(dbPath) !== opened) { incrementalReads.delete(key); incrementalLogReadCounts.full++; return null; }
+  if (read.warm) incrementalLogReadCounts.warm++; else incrementalLogReadCounts.cold++;
+  incrementalReads.delete(key);
+  if (read.entry.threads.size > MAX_REMEMBERED_THREADS) return [...read.entry.threads];
+  if (incrementalReads.size >= MAX_INCREMENTAL_READS) incrementalReads.delete(incrementalReads.keys().next().value!);
+  incrementalReads.set(key, read.entry);
+  return [...read.entry.threads];
+}
+
 function readCodexThreadIdFromLogs(
   pid: number,
   homeDir: string,
@@ -327,12 +481,15 @@ function readCodexThreadIdFromLogs(
   const loggedBefore = new Set<string>(); // process_uuids with a row before the start second
   for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome, logsDiscovery)) {
     try {
+      // The default read can be incremental; a readability or by-process read always reads in full. The file's identity
+      // is taken before the open, so the read it labels is the opened handle's.
+      const opened = startSecond === "exclude" && !readability ? fileIdentity(dbPath) : null;
       const db = new Database(dbPath, { readonly: true });
       try {
+        const incremental = opened ? readLoggedThreadsIncrementally(db, dbPath, opened, pid, minTs) : null;
         // Strict start-second gate preserves the existing PID reuse boundary.
-        const rows = db.prepare(
-          "SELECT DISTINCT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?"
-        ).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
+        const rows = incremental ? [] : db.prepare(FULL_LOGGED_THREADS).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
+        for (const id of incremental ?? []) loggedIds.add(id);
         for (const row of rows) loggedIds.add(row.thread_id);
         if (startSecond === "by-process" && minTs !== undefined) {
           const inSecond = db.prepare(

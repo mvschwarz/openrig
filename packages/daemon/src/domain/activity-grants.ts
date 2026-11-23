@@ -7,6 +7,7 @@
 
 import type Database from "better-sqlite3";
 import { createHash, randomBytes } from "node:crypto";
+import { OutboxHandler } from "./outbox-handler.js";
 import { SessionRegistry } from "./session-registry.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { monotonicFactory } from "ulid";
@@ -116,7 +117,7 @@ export class ActivityGrantStore {
       if (active?.runId && active.grantId > grant.grantId && this.bindingMatch(active, true) !== false) return false;
       const session = this.currentSession(grant.nodeId)!;
       // Only this pending, Core-selected launch may fill an empty declaration; never overwrite a conflicting record.
-      if (grant.binding!.runtime !== "pi" && session.agent_app == null && session.agent_runner == null) {
+      if (grant.binding!.runtime !== "pi" && grant.binding!.runtime !== "omp" && session.agent_app == null && session.agent_runner == null) {
         this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
           .run(grant.binding!.runtime, grant.binding!.runner, session.id);
       }
@@ -125,6 +126,7 @@ export class ActivityGrantStore {
         .run(at, grant.nodeId, grantId);
       this.db.prepare("UPDATE activity_grants SET activated_at = ?, session_id = ? WHERE grant_id = ? AND revoked_at IS NULL")
         .run(at, session.id, grantId);
+      new OutboxHandler(this.db).replaceRunnerRun(grant.nodeId, grant.runId);
       return true;
     })();
   }
@@ -146,7 +148,7 @@ export class ActivityGrantStore {
           && this.adoptionAnchorMatches(grant, session.session_name))));
       if (candidates.length === 1) {
         const grant = candidates[0]!;
-        if (grant.binding!.runtime !== "pi" && session.agent_app == null && session.agent_runner == null) {
+        if (grant.binding!.runtime !== "pi" && grant.binding!.runtime !== "omp" && session.agent_app == null && session.agent_runner == null) {
           this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
             .run(grant.binding!.runtime, grant.binding!.runner, session.id);
         }
@@ -211,9 +213,10 @@ export class ActivityGrantStore {
     try {
       const anchor = grant.binding, session = this.currentSession(grant.nodeId);
       if (!anchor || !session || session.tmux_pane !== anchor.pane || session.runtime !== anchor.runtime) return false;
-      if (anchor.runtime !== "pi" && ((session.agent_app != null && session.agent_app !== anchor.runtime)
+      if (anchor.runtime === "omp" && (anchor.runner !== 0 || session.agent_app != null || (session.agent_runner ?? 0) !== 0)) return false;
+      if (anchor.runtime !== "pi" && anchor.runtime !== "omp" && ((session.agent_app != null && session.agent_app !== anchor.runtime)
         || (session.agent_runner != null && session.agent_runner !== anchor.runner))) return false;
-      const declarationMissing = anchor.runtime !== "pi" && (session.agent_app == null || session.agent_runner == null)
+      const declarationMissing = anchor.runtime !== "pi" && anchor.runtime !== "omp" && (session.agent_app == null || session.agent_runner == null)
         && !(allowUnrecorded && session.agent_app == null && session.agent_runner == null && [1, 2].includes(anchor.runner));
       const registry = new SessionRegistry(this.db);
       const current = registry.currentOccupantTenure(grant.nodeId)?.generationUuid;

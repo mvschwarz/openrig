@@ -4,12 +4,20 @@
 // event→activity mapping, the get_state identity capture + sidecar, the
 // durable catch-up cursor, and honest pi-exit reporting. No live pi.
 
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import readline from "node:readline";
 import {
-  createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
-  prepareRunnerSidecar, startHeartbeatTimer,
+  createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, MAX_UNANCHORED_REFRESH_HOLD_TURNS, RunnerCore, mapPiEvent, parseRunnerArgs,
+  prepareRunnerSidecar, readSessionTailEntryId, SESSION_TAIL_READ_LIMIT_BYTES, startHeartbeatTimer,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
 import { PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, buildPiRunnerCommand, buildPiChildArgs, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
@@ -338,6 +346,26 @@ describe("streaming heartbeat", () => {
     expect(c.beats().map(a => a.turnId)).toEqual(["2", "3"]);
     const sequences = c.f.activity.map(a => Number(a.sequence)).filter(Number.isFinite);
     expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+  });
+
+  it.each([false, true])("accepts custom hosted person input exactly once with a bound channel=%s", bound => {
+    const f = fakeIo(), posts: Record<string, unknown>[] = [];
+    f.io.postActivity = payload => { f.activity.push(payload); };
+    if (bound) f.io.postRunner = async body => { posts.push(body); return true; };
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", runId: "custom-run" }, { runtime: "omo" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE } }));
+    const turns = () => f.activity.filter(a => a.hookEvent === "UserPromptSubmit").map(a => a.turnId);
+    core.handleUserBlock("idle words");
+    expect(turns()).toEqual([]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    expect(turns()).toEqual(["1"]);
+    core.handleUserBlock("busy words");
+    core.handleUserBlock("/followup later words");
+    expect(turns()).toEqual(["1", "2", "3"]);
+    expect(f.rpc.filter(r => r.type === "prompt" || r.type === "follow_up").map(r => r.message))
+      .toEqual(["idle words", "busy words", "later words"]);
+    expect(posts.some(p => p.type === "turn" || p.nativeTurnId !== undefined || p.acceptedTurnId !== undefined)).toBe(false);
   });
 
   it("opens no turn for a prompt Pi handles without a run, so the idle beat goes on", () => {
@@ -1391,5 +1419,1021 @@ describe("managed run identity retries", () => {
     expect(f.activity.filter(p => p.eventFamily === "session_identity").at(-1)).toMatchObject({ runId: "actual-run" });
     core.retrySessionIdentity();
     expect(count()).toBe(initial + 1);
+  });
+});
+
+
+describe("managed Pi input and attributed wake", () => {
+  function managed(retain?: (body: Record<string, unknown>) => void | boolean | Promise<void | boolean>, withdrawNativeTurn?: RunnerIo["withdrawNativeTurn"], preflightState?: (reply: () => void) => void, postEndState = true, settleOnEnd = true) {
+    const f = fakeIo(), posts: Record<string, unknown>[] = [];
+    let nativeBusy = false, nativePendingCount = 0, aborted = false;
+    const core = new RunnerCore({ ...f.io, withdrawNativeTurn, sendRpc: command => {
+      f.rpc.push(command);
+      if (command.type === "get_state" && (String(command.id).startsWith("openrig-native-idle-") || postEndState && String(command.id).startsWith("openrig-cancel-state-")))
+        queueMicrotask(() => core.handlePiLine(JSON.stringify({ type: "response", id: command.id, success: true, data: { isStreaming: nativeBusy, pendingMessageCount: nativePendingCount } })));
+      if (command.type === "get_state" && String(command.id).startsWith("openrig-cancel-preflight-")) {
+        const reply = () => core.handlePiLine(JSON.stringify({ type: "response", id: command.id, success: true, data: { isStreaming: nativeBusy, pendingMessageCount: nativePendingCount } }));
+        if (preflightState) preflightState(reply); else queueMicrotask(reply);
+      }
+      if (command.type === "clear_queue") queueMicrotask(() => {
+        nativePendingCount = 0; core.handlePiLine(JSON.stringify({ type: "queue_update", steering: [], followUp: [] }));
+        core.handlePiLine(JSON.stringify({ type: "response", id: command.id, success: true }));
+      });
+    }, postActivity: async body => { f.activity.push(body); return { tokenPersisted: true }; }, postRunner: async (body: Record<string, unknown>) => { posts.push(body); return await retain?.(body) !== false; } },
+      { sessionName: SESSION, runId: "run" });
+    core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "native", isStreaming: false, pendingMessageCount: 0 } }));
+    const frame = (id: string, sequence: number, kind: "input" | "wake") => ({ version: 1, requestId: id, runId: "run", sequence, kind,
+      payload: kind === "wake" ? { question: id } : { text: id } });
+    const event = (type: string, extra: Record<string, unknown> = {}) => {
+      if (type === "queue_update") nativePendingCount = (extra.steering as string[]).length + (extra.followUp as string[]).length;
+      if (type === "agent_start") nativeBusy = true; else if (type === "agent_end") nativeBusy = false;
+      if (type === "message_end") aborted = (extra.message as { stopReason?: string })?.stopReason === "aborted";
+      core.handlePiLine(JSON.stringify({ type, ...extra }));
+      if (type === "agent_end" && settleOnEnd) core.handlePiLine(JSON.stringify({ type: "agent_settled", aborted }));
+    };
+    const response = (id: string, success = true) => event("response", { id: `openrig-native-${id}`, command: "prompt", success, data: { disposition: "started" } });
+    return { ...f, posts, core, frame, event, response };
+  }
+  it.each(["plain", "followup"].flatMap(mode => ["before-end", "after-end"].map(phase => [mode, phase])))("submitted cancellation holds a %s person prompt (%s) until native settlement and starts F once", async (mode, phase) => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false); f.core.handleUserBlock("E");
+    const e = f.rpc.find(command => command.message === "E")!; f.event("response", { id: e.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "settle-E", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    f.event("agent_settled", { aborted: true }); // An earlier scope's event cannot settle still-running E.
+    if (phase === "before-end") f.core.handleUserBlock(mode === "plain" ? "person F" : "/followup person F");
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end");
+    if (phase === "after-end") f.core.handleUserBlock(mode === "plain" ? "person F" : "/followup person F");
+    expect(f.rpc.filter(command => command.message === "person F")).toEqual([]);
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "settle-E")).toEqual([]);
+    f.event("agent_settled", { aborted: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "settle-E", result: expect.objectContaining({ outcome: "cancelled", confirmed: true }) }));
+    f.event("agent_settled", { aborted: true }); expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
+  it("retained native input reports only known request IDs and waiting F at settlement, never copied words", async () => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false); f.core.handleUserBlock("E");
+    f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("retained words", 1, "input")); f.event("response", { id: "openrig-native-retained words", success: true, data: { disposition: "queued" } });
+    f.event("queue_update", { steering: ["retained words"], followUp: [] });
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "retained-E", sequence: 2, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); await f.core.acceptRunnerRequest(f.frame("waiting F", 3, "wake"));
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end"); f.event("agent_settled", { aborted: true });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "retained-E", result: expect.objectContaining({ outcome: "requested", confirmed: false,
+      continuation: { inputRequestIds: ["retained words"], pendingRequestIds: ["waiting F"], unmatchedCount: 0 } }) }));
+  });
+  it.each(["intervening start", "start before end", "exit"])("settlement wait preserves later work when %s supersedes the captured cancelled run", async mode => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false); f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "superseded-settle", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); if (mode !== "start before end") f.event("agent_end"); f.core.handleUserBlock("person held");
+    if (mode === "exit") f.core.handlePiExit(7); else { f.event("agent_start"); f.event("agent_settled", { aborted: true }); }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "superseded-settle", result: expect.objectContaining({ outcome: "requested", confirmed: false }) }));
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
+  it.each(["rejected", "handled-wake"])("held person followup dispatches after %s without another native event", async mode => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("first", 1, mode === "rejected" ? "input" : "wake"));
+    await new Promise(resolve => setImmediate(resolve)); f.core.handleUserBlock("/followup person F");
+    f.event("response", { id: "openrig-native-first", success: mode !== "rejected", data: { disposition: "handled" } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+  });
+  it.each(["missing", "negative", "positive", "delayed", "normal"])("native settlement releases without a post-end probe or %s abort ACK", async ack => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, false);
+    f.core.handleUserBlock("E");
+    f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } });
+    f.event("agent_start");
+    const cancel = { version: 1, runId: "run", requestId: "cancel-E", sequence: 1, kind: "cancel" as const, payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
+    await f.core.acceptRunnerRequest(cancel); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("managed F", 2, "input"));
+    if (["negative", "positive", "normal"].includes(ack)) f.event("response", { id: "openrig-cancel-cancel-E", success: ack !== "negative" });
+    expect(f.rpc.filter(command => command.message === "managed F")).toHaveLength(0);
+    f.event("message_end", { message: { role: "assistant", stopReason: ack === "normal" ? "stop" : "aborted" } }); f.event("agent_end");
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "managed F")).toHaveLength(1);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: ack !== "normal" ? "cancelled" : "requested", confirmed: ack !== "normal" }) }));
+    if (ack === "delayed") { f.event("response", { id: "openrig-cancel-cancel-E", success: true }); await new Promise(resolve => setImmediate(resolve)); }
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "clear_queue")).toEqual([]);
+  });
+  it.each([false, true])("bare settlement releases submitted cancellation without inventing aborted evidence (prior proof=%s)", async priorProof => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false);
+    f.core.handleUserBlock("E"); f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "bare-E", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    f.event("message_end", { message: { role: "assistant", stopReason: priorProof ? "aborted" : "stop" } }); f.event("agent_end"); f.core.handleUserBlock("person F");
+    expect(f.rpc.filter(command => command.message === "person F")).toEqual([]);
+    f.event("agent_settled"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "bare-E", result: expect.objectContaining({ outcome: priorProof ? "cancelled" : "requested", confirmed: priorProof }) }));
+    f.event("agent_settled"); expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1); expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+  });
+  it.each((["withdrawal", "preflight", "ACK"] as const).flatMap(phase => ["before", "after"].flatMap(timing => [true, false].map(success => [phase, timing, success] as const))))
+    ("prewrite %s callback %s bare settlement (success=%s) never releases person input early or aborts F", async (phase, timing, success) => {
+    let release!: () => void, failPreflight!: () => void; let withdrawals = 0;
+    const f = managed(phase === "ACK" ? body => body.type === "ack" && body.requestId === "waiting-E" ? new Promise<boolean>(resolve => { release = () => resolve(success); }) : true : undefined,
+      phase === "withdrawal" ? () => { withdrawals++; return new Promise(resolve => { release = () => resolve(success ? { confirmed: true } : null); }); }
+        : async () => { withdrawals++; return { confirmed: true }; },
+      phase === "preflight" ? resume => { release = success ? resume : () => failPreflight(); } : undefined, true, false);
+    failPreflight = () => f.event("response", { id: "openrig-cancel-preflight-waiting-E", success: false });
+    f.core.handleUserBlock("E"); f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    const target = { runId: "run", nativeTurnId: "pi-invocation-1" };
+    const pending = f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "waiting-E", sequence: 1, kind: "cancel", payload: { target } });
+    await new Promise(resolve => setImmediate(resolve)); await f.core.acceptRunnerRequest(f.frame("managed F", 2, "input"));
+    f.event("agent_end"); f.core.handleUserBlock("person F");
+    expect(f.rpc.filter(command => command.message === "person F" || command.message === "managed F")).toEqual([]);
+    expect(f.core.recheckNativeCancellation(target)).toBe(true);
+    if (timing === "before") { release(); await pending; await new Promise(resolve => setImmediate(resolve)); }
+    expect(f.rpc.filter(command => command.message === "person F")).toEqual([]);
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "waiting-E")).toEqual([]);
+    f.event("agent_settled"); if (timing === "after") release(); await pending; await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    const results = f.posts.filter(post => post.type === "result" && post.requestId === "waiting-E");
+    if (phase === "ACK" && !success) expect(results).toEqual([]);
+    else { expect(results).toHaveLength(1); expect(results[0]).toMatchObject({ result: { outcome: "not-this-turn", confirmed: false } }); }
+    expect(withdrawals).toBe(phase === "ACK" ? 0 : 1);
+    f.event("response", { id: f.rpc.find(command => command.message === "person F")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await new Promise(resolve => setImmediate(resolve)); expect(f.rpc.filter(command => command.message === "managed F")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
+  });
+  it.each(["rejected withdrawal", "retry loop", "new opening"])("ended preparation keeps its settlement boundary across %s", async mode => {
+    let reject!: (error: Error) => void, resolve!: (value: { confirmed: boolean }) => void; let calls = 0;
+    const f = managed(undefined, () => { calls++; return mode === "retry loop" ? Promise.resolve({ confirmed: false }) : new Promise((done, fail) => { resolve = done; reject = fail; }); }, undefined, true, false);
+    f.core.handleUserBlock("E"); f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "late-prepare", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(done => setImmediate(done)); f.event("agent_end"); f.core.handleUserBlock("person F");
+    if (mode === "rejected withdrawal") reject(new Error("late transport failure"));
+    if (mode === "retry loop") await new Promise(done => setTimeout(done, 300));
+    await new Promise(done => setImmediate(done)); expect(f.rpc.filter(command => command.message === "person F")).toEqual([]); expect(calls).toBe(1);
+    if (mode === "new opening") { f.event("agent_start"); resolve({ confirmed: true }); }
+    else f.event("agent_settled");
+    await new Promise(done => setImmediate(done));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "late-prepare", result: expect.objectContaining({ outcome: "not-this-turn", confirmed: false }) }));
+    if (mode !== "new opening") expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
+  });
+  it("failed local preparation is rejected as not applied without disabling managed capability", async () => {
+    const f = managed(undefined, async () => null); f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "failed", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "rejected", requestId: "failed", result: { kind: "cancel", reason: "preparation_failed", applied: false } }));
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]); expect(f.core.nativeChannelCapabilities().input).toBe(true);
+  });
+  it.each([false, true])("a rejected preparation promise retires only its captured operation (stale=%s)", async stale => {
+    let rejectFirst!: (error: Error) => void; let releaseSecond!: (value: { confirmed: boolean }) => void; let calls = 0;
+    const f = managed(undefined, () => ++calls === 1 ? new Promise((_, reject) => { rejectFirst = reject; }) : new Promise(resolve => { releaseSecond = resolve; }));
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    const frame = { version: 1, runId: "run", requestId: "rejected-first", sequence: 1, kind: "cancel" as const, payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
+    await f.core.acceptRunnerRequest(frame); await new Promise(resolve => setImmediate(resolve));
+    if (stale) f.core.handleUserBlock("person supersedes first");
+    else rejectFirst(new Error("failed transport"));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "rejected", requestId: "rejected-first", result: expect.objectContaining({ applied: false }) }));
+    await f.core.acceptRunnerRequest({ ...frame, requestId: "second", sequence: 2 }); await new Promise(resolve => setImmediate(resolve));
+    if (stale) { rejectFirst(new Error("late failure")); await new Promise(resolve => setImmediate(resolve)); }
+    releaseSecond({ confirmed: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
+  it.each([false, true])("malformed native queue evidence preserves uncertainty (known pending first=%s)", async knownPending => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, false);
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "queue-evidence", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    if (knownPending) f.event("queue_update", { steering: ["known words"], followUp: [] });
+    f.event("queue_update", { steering: "malformed", followUp: [] });
+    f.event("response", { id: "openrig-cancel-queue-evidence", success: true });
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "queue-evidence", result: expect.objectContaining({ outcome: "requested", confirmed: false }) }));
+    expect(f.rpc.filter(command => command.type === "clear_queue")).toEqual([]);
+  });
+  it("person input supersedes only local prewrite preparation, invalidates stale state and retains its accepted association", async () => {
+    let reply!: () => void;
+    const f = managed(undefined, async () => ({ confirmed: true }), resume => { reply = resume; });
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "superseded", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); f.core.handleUserBlock("person steer"); reply(); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person steer")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "rejected", requestId: "superseded", result: expect.objectContaining({ applied: false }) }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "turn", acceptedTurnIds: ["1", "2"] }));
+  });
+  it("known person's queued steer is never deleted and does not quarantine the run", async () => {
+    const f = managed(undefined, async () => ({ confirmed: true })); f.core.handleUserBlock("E"); f.event("agent_start");
+    f.core.handleUserBlock("person steer"); f.event("queue_update", { steering: ["person steer"], followUp: [] });
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "person-queue", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => ["abort", "clear_queue"].includes(String(command.type)))).toEqual([]);
+    expect(f.core.nativeChannelCapabilities().input).toBe(true);
+  });
+  it("a second local cancellation is rejected busy without disturbing the first preparation", async () => {
+    let release!: (value: { confirmed: boolean }) => void;
+    const f = managed(undefined, () => new Promise(resolve => { release = resolve; })); f.core.handleUserBlock("E"); f.event("agent_start");
+    const cancel = { version: 1, runId: "run", requestId: "R1", sequence: 1, kind: "cancel" as const, payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
+    await f.core.acceptRunnerRequest(cancel); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest({ ...cancel, requestId: "R2", sequence: 2 }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "rejected", requestId: "R2", result: { kind: "cancel", reason: "cancellation_in_progress", applied: false } }));
+    release({ confirmed: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
+  it("a request-local ACK refusal releases a later accepted request", async () => {
+    let release!: (accepted: boolean) => void;
+    const f = managed(body => body.type === "ack" && body.requestId === "first"
+      ? new Promise<boolean>(resolve => { release = resolve; }) : Promise.resolve(true));
+    const first = f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    expect(f.rpc.filter(command => command.type === "prompt")).toHaveLength(0);
+    release(false); await first;
+    expect(f.rpc.filter(command => command.type === "prompt")).toEqual([expect.objectContaining({ message: "later" })]);
+  });
+  it("a permanently unavailable run holds later managed work while person input remains usable", async () => {
+    let release!: (accepted: boolean) => void;
+    const f = managed(body => body.type === "ack" && body.requestId === "first"
+      ? new Promise<boolean>(resolve => { release = resolve; }) : Promise.resolve(true));
+    const first = f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    f.core.quarantineManagedChannel(); release(false); await first;
+    f.core.handleUserBlock("person still usable");
+    expect(f.rpc.filter(command => command.type === "prompt")).toEqual([expect.objectContaining({ message: "person still usable" })]);
+    expect(f.core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+  });
+  it("reporting-authority loss preserves in-flight native custody and its terminal receipt", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start"); f.core.quarantineManagedChannel();
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "existing work" }], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: "existing work", completion: "completed" }) }));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(0);
+  });
+  it("a rejected person preflight reports the existing diagnostic once and releases queued work", async () => {
+    const f = managed(); f.core.handleUserBlock("person startup");
+    await f.core.acceptRunnerRequest(f.frame("later", 1, "input"));
+    const person = f.rpc.find(command => command.message === "person startup")!;
+    f.event("response", { id: person.id, success: false, error: "person prompt failed" });
+    expect(f.lines.filter(line => line.includes("ERROR rpc: person prompt failed"))).toHaveLength(1);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(1);
+  });
+  it.each(["handled", "queued", "started", "unknown"])("input disposition %s releases pending start only when explicitly handled", async disposition => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    f.event("response", { id: "openrig-native-first", success: true, data: { disposition } });
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(disposition === "handled" ? 1 : 0);
+  });
+  it("permanent reporting refusal releases only an unsubmitted cancellation preparation and keeps person controls usable", async () => {
+    let release!: (withdrawal: { confirmed: boolean }) => void;
+    const f = managed(undefined, () => new Promise(resolve => { release = resolve; }));
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    const cancel = { version: 1, runId: "run", requestId: "revoked-preparation", sequence: 1, kind: "cancel" as const,
+      payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
+    await f.core.acceptRunnerRequest(cancel); await new Promise(resolve => setImmediate(resolve));
+    f.core.quarantineManagedChannel(); f.core.handleUserBlock("person after refusal");
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person after refusal" }));
+    release({ confirmed: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
+    await f.core.acceptRunnerRequest(cancel);
+    expect(f.posts.filter(post => post.type === "ack" && post.requestId === cancel.requestId)).toHaveLength(1);
+    expect(f.posts.some(post => (post.result as { outcome?: string })?.outcome === "cancelled")).toBe(false);
+  });
+  it.each([false, true])("named cancel releases successors on matching native settlement without waiting for abort acknowledgement (reporting unavailable=%s)", async unavailable => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false);
+    f.core.handleUserBlock("start"); f.event("agent_start");
+    const cancel = { version: 1 as const, runId: "run", requestId: "cancel-E", sequence: 1, kind: "cancel" as const,
+      payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
+    await f.core.acceptRunnerRequest(cancel); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual({ type: "abort", id: "openrig-cancel-cancel-E" });
+    if (unavailable) f.core.quarantineManagedChannel();
+    f.core.handleUserBlock("/followup successor");
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end");
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.some(command => command.message === "successor")).toBe(false);
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "cancel-E")).toEqual([]);
+    f.event("agent_settled", { aborted: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.some(command => command.message === "successor")).toBe(true);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: "cancelled", confirmed: true }) }));
+    f.event("response", { id: "openrig-cancel-cancel-E", success: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: "cancelled" }) }));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "successor" }));
+    await f.core.acceptRunnerRequest(cancel);
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
+  it.each(["steering", "followUp"] as const)("never writes global abort or clear for an unknown native %s queue and releases manual input", async family => {
+    const f = managed(undefined, async () => ({ confirmed: true })); f.core.handleUserBlock("owned E"); f.event("agent_start");
+    f.event("queue_update", { steering: family === "steering" ? ["UNKNOWN NATIVE"] : [], followUp: family === "followUp" ? ["UNKNOWN NATIVE"] : [] });
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "unsafe", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => ["abort", "clear_queue"].includes(String(command.type)))).toEqual([]);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "rejected", result: expect.objectContaining({ applied: false, reason: "native_queue_ownership_unknown" }) }));
+    f.core.handleUserBlock("/followup person F"); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person F" }));
+    await f.core.acceptRunnerRequest(f.frame("managed F", 2, "input"));
+    expect(f.core.nativeChannelCapabilities().input).toBe(true);
+  });
+  it("rechecks exact E after correlated pre-abort state await before writing a global abort", async () => {
+    let reply!: () => void;
+    const f = managed(undefined, async () => ({ confirmed: true }), resume => { reply = resume; });
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "preflight", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); expect(reply).toBeTypeOf("function");
+    f.event("agent_end"); f.event("agent_start");
+    // A cached positive state response must not authorize aborting the now-current F.
+    f.event("response", { id: "openrig-cancel-preflight-preflight", success: true, data: { isStreaming: true, pendingMessageCount: 0 } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", result: expect.objectContaining({ outcome: "not-this-turn" }) }));
+  });
+  it("a correlated pre-abort state response with unknown queues retires preparation without native writes", async () => {
+    let reply!: () => void;
+    const f = managed(undefined, async () => ({ confirmed: true }), resume => { reply = resume; });
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "state-unknown", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); expect(reply).toBeTypeOf("function");
+    f.event("queue_update", { steering: [], followUp: ["UNKNOWN FUTURE"] });
+    reply(); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => ["abort", "clear_queue"].includes(String(command.type)))).toEqual([]);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "rejected", result: expect.objectContaining({ applied: false }) }));
+    f.core.handleUserBlock("/followup person F"); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person F" }));
+  });
+  it("a late duplicate of refused A cannot clear B's post-write successor fence", async () => {
+    const f = managed(body => body.type === "ack" && body.requestId === "A" ? false : undefined, async () => ({ confirmed: true }));
+    f.core.handleUserBlock("E"); f.event("agent_start");
+    const a = { version: 1 as const, runId: "run", requestId: "A", sequence: 1, kind: "cancel" as const, payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
+    await f.core.acceptRunnerRequest(a); f.event("agent_end"); f.core.handleUserBlock("F"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ ...a, requestId: "B", sequence: 2, payload: { target: { runId: "run", nativeTurnId: "pi-invocation-2" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual({ type: "abort", id: "openrig-cancel-B" });
+    await f.core.acceptRunnerRequest(a); f.core.handleUserBlock("/followup person G"); f.event("agent_end");
+    await new Promise(resolve => setImmediate(resolve)); expect(f.rpc.some(command => command.message === "person G")).toBe(true);
+    f.event("response", { id: "openrig-cancel-B", success: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person G" }));
+  });
+  it("permanent cancel acknowledgement refusal releases only pre-effect preparation and leaves person input usable", async () => {
+    let withdrawals = 0;
+    const f = managed(body => body.type === "ack" ? false : undefined, async () => { withdrawals++; return { confirmed: true }; });
+    f.core.handleUserBlock("owned E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "refused", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    f.core.handleUserBlock("/followup person F"); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person F" }));
+    expect(f.rpc.filter(command => ["abort", "clear_queue"].includes(String(command.type)))).toEqual([]);
+    expect(withdrawals).toBe(0);
+  });
+  it.each([true, false])("preserves queued words and releases successors without clearing native queues (personOwned=%s)", async owned => {
+    const f = managed(undefined, async () => ({ confirmed: true })); f.core.handleUserBlock("start"); f.event("agent_start");
+    if (owned) f.core.handleUserBlock("owned steer");
+    if (owned) f.event("queue_update", { steering: ["owned steer"], followUp: [] });
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "residual", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    if (!owned) f.event("queue_update", { steering: ["unknown extension"], followUp: [] });
+    f.core.handleUserBlock("/followup future");
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end");
+    f.event("response", { id: "openrig-cancel-residual", success: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.some(command => command.type === "clear_queue")).toBe(false);
+    expect(f.rpc.some(command => command.message === "future")).toBe(true);
+    expect(f.posts.some(post => post.type === "result" && (post.result as { outcome?: string })?.outcome === "cancelled")).toBe(false);
+  });
+  it("normal native completion after abort submission stays requested and never becomes cancelled", async () => {
+    const f = managed(undefined, async () => ({ confirmed: true })); f.core.handleUserBlock("start"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "normal", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    f.event("message_end", { message: { role: "assistant", stopReason: "stop" } }); f.event("agent_end");
+    f.event("response", { id: "openrig-cancel-normal", success: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", result: expect.objectContaining({ outcome: "requested", confirmed: false, detail: "native_end_without_cancellation_proof" }) }));
+    expect(f.posts.some(post => (post.result as { outcome?: string })?.outcome === "cancelled")).toBe(false);
+  });
+  it("a target ending during permission withdrawal never sends native abort", async () => {
+    let release!: () => void;
+    const f = managed(undefined, () => new Promise(resolve => { release = () => resolve({ confirmed: true }); }));
+    f.core.handleUserBlock("start"); f.event("agent_start");
+    const accepting = f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "late", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); f.event("agent_end"); release(); await accepting; await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", result: expect.objectContaining({ outcome: "not-this-turn" }) }));
+  });
+  function retainedInput() {
+    const db = createDb(); migrate(db, [outboxEntriesSchema]); db.exec("ALTER TABLE outbox_entries ADD COLUMN guard_delivery TEXT");
+    const outbox = new OutboxHandler(db);
+    const f = managed(body => {
+      if (!body.requestId) return;
+      outbox.updateRunner("node", "run", String(body.requestId), Number(body.sequence),
+        body.type === "ack" ? "accepted" : body.type === "result" ? "completed" : body.type as "submitted" | "rejected",
+        { ...(body.nativeTurnId ? { nativeTurnId: String(body.nativeTurnId) } : {}),
+          ...(body.acceptedTurnId ? { acceptedTurnId: String(body.acceptedTurnId) } : {}),
+          ...(body.result ? { result: body.result as Record<string, unknown> } : {}) });
+    });
+    const frame = (id: string) => {
+      const receipt = outbox.admitRunner({ outboxId: id, nodeId: "node", runId: "run", kind: "input", inputRoute: "native",
+        payload: { text: id }, senderSession: "person", destinationSession: SESSION, body: id });
+      outbox.updateRunner("node", "run", id, receipt.sequence, "offered");
+      return f.frame(id, receipt.sequence, "input");
+    };
+    return { ...f, db, outbox, frame };
+  }
+  it("retains the actual invocation mapping when prompt acceptance precedes agent_start", async () => {
+    const f = retainedInput();
+    try {
+      const first = f.frame("first");
+      await f.core.acceptRunnerRequest({ ...first, runId: "other-run" });
+      expect(f.rpc.filter(command => command.message === "first")).toEqual([]);
+      expect(f.outbox.runnerReceipt("first")).toMatchObject({ stage: "offered" });
+      await f.core.acceptRunnerRequest(first); f.response("first");
+      await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("first")).toMatchObject({ stage: "submitted" });
+      expect(f.posts.filter(post => post.type === "result")).toEqual([]);
+      f.event("agent_start"); await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("first")).toMatchObject({ stage: "completed", nativeTurnId: "pi-invocation-1", acceptedTurnId: "1", result: { kind: "input", accepted: true } });
+      // Both busy steers keep their own accepted ordinal while sharing that execution epoch.
+      for (const id of ["second", "third"]) { await f.core.acceptRunnerRequest(f.frame(id)); f.response(id); }
+      await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("second")).toMatchObject({ nativeTurnId: "pi-invocation-1", acceptedTurnId: "2" });
+      expect(f.outbox.runnerReceipt("third")).toMatchObject({ nativeTurnId: "pi-invocation-1", acceptedTurnId: "3" });
+    } finally { f.db.close(); }
+  });
+  it.each(["handled", "agentInvokedFalse"])("local-only %s completes without inheriting a later unrelated invocation", async mode => {
+    const f = retainedInput();
+    try {
+      await f.core.acceptRunnerRequest(f.frame("local"));
+      f.event("response", { id: "openrig-native-local", success: true, data: mode === "handled" ? { disposition: "handled" } : { agentInvoked: false } });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("local")).toMatchObject({ stage: "completed", result: { accepted: true } });
+      expect(f.outbox.runnerReceipt("local")?.nativeTurnId).toBeUndefined();
+      await f.core.acceptRunnerRequest(f.frame("next"));
+      expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "next" }));
+      f.response("next"); f.event("agent_start"); await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("next")).toMatchObject({ nativeTurnId: "pi-invocation-1" });
+      expect(f.posts.filter(post => post.requestId === "local").some(post => post.nativeTurnId !== undefined)).toBe(false);
+    } finally { f.db.close(); }
+  });
+  it("maps normally when agent_start precedes the prompt response and never completes a start that never arrives", async () => {
+    const f = retainedInput();
+    try {
+      await f.core.acceptRunnerRequest(f.frame("first")); f.event("agent_start"); f.response("first");
+      await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("first")).toMatchObject({ stage: "completed", nativeTurnId: "pi-invocation-1", acceptedTurnId: "1" });
+      f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+      await f.core.acceptRunnerRequest(f.frame("never opens")); f.response("never opens");
+      await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("never opens")).toMatchObject({ stage: "submitted" });
+      f.core.handlePiExit(1); await new Promise(resolve => setImmediate(resolve));
+      expect(f.outbox.runnerReceipt("never opens")).toMatchObject({ stage: "submitted" });
+      expect(f.outbox.runnerReceipt("never opens")?.nativeTurnId).toBeUndefined();
+      expect(f.rpc.filter(p => p.message === "never opens")).toHaveLength(1);
+    } finally { f.db.close(); }
+  });
+  it("reports one native invocation for two steers and inner model turns", async () => {
+    const f = managed(); f.core.handleUserBlock("start"); f.event("agent_start");
+    f.core.handleUserBlock("steer one"); f.event("turn_start"); f.core.handleUserBlock("steer two");
+    await new Promise(resolve => setImmediate(resolve));
+    const opened = f.posts.filter(p => p.type === "turn" && p.state === "opened");
+    expect(opened.at(-1)).toMatchObject({ runId: "run", nativeTurnId: "pi-invocation-1", acceptedTurnIds: ["1", "2", "3"] });
+    expect(new Set(opened.map(p => p.nativeTurnId)).size).toBe(1);
+    f.event("agent_end"); f.core.handleUserBlock("next"); f.event("agent_start");
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "turn", state: "closed", nativeTurnId: "pi-invocation-1" }));
+    expect(f.posts.at(-1)).toMatchObject({ type: "turn", state: "opened", nativeTurnId: "pi-invocation-2" });
+  });
+  it("keeps person input usable across preparation while managed successors wait for exact target recheck", async () => {
+    const f = managed(); f.core.handleUserBlock("start"); f.event("agent_start");
+    expect(f.core.prepareNativeCancellation({ runId: "run", nativeTurnId: "pi-invocation-1" })).toBe(true);
+    f.core.handleUserBlock("/followup future"); f.core.handleUserBlock("person future");
+    await f.core.acceptRunnerRequest(f.frame("managed future", 1, "input"));
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ message: "person future" }));
+    expect(f.rpc.filter(p => p.message === "managed future")).toEqual([]);
+    expect(f.core.recheckNativeCancellation({ runId: "run", nativeTurnId: "pi-invocation-1" })).toBe(false);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "future" }));
+    expect(f.rpc.filter(p => p.type === "abort")).toEqual([]);
+    expect(f.core.nativeChannelCapabilities().cancel).toBe(false);
+  });
+  it("holds native followups in the runner and refuses accepted-ordinal or stale cancellation targets", () => {
+    const f = managed(); f.core.handleUserBlock("start"); f.event("agent_start");
+    f.core.handleUserBlock("/followup next");
+    expect(f.rpc.filter(p => p.type === "follow_up")).toEqual([]);
+    expect(f.core.prepareNativeCancellation({ runId: "run", nativeTurnId: "1" })).toBe(false);
+    expect(f.core.prepareNativeCancellation({ runId: "other", nativeTurnId: "pi-invocation-1" })).toBe(false);
+  });
+  it("a person/startup preflight cannot race a dedicated wake before agent_start", async () => {
+    const f = managed(); f.core.handleUserBlock("person startup");
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(0);
+    const person = f.rpc.find(command => command.message === "person startup")!;
+    f.event("response", { id: person.id, success: true, data: { disposition: "started" } });
+    f.event("agent_start"); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+  });
+  it("person steering stays usable but mixed output is not returned as the dedicated answer", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start"); f.core.handleUserBlock("person steer");
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "mixed output" }], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person steer" }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
+  });
+  it.each(["queued", "handled", "started"])("authoritative %s disposition cannot adopt earlier native/extension events", async disposition => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "wake"));
+    f.event("agent_start");
+    if (disposition === "queued") f.event("response", { id: "openrig-native-question", success: true, data: { disposition } });
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "unrelated execution" }], stopReason: "stop" } });
+    f.event("agent_end");
+    // Native terminal alone cannot commit an answer or release a preflight awaiting disposition.
+    await new Promise(resolve => setImmediate(resolve));
+    if (disposition !== "queued") {
+      expect(f.posts.filter(post => post.type === "result")).toHaveLength(0);
+      f.event("response", { id: "openrig-native-question", success: true, data: { disposition } });
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown", ownershipUnknown: true }) }));
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.event("agent_start"); f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "queued followup" }], stopReason: "stop" } }); f.event("agent_end");
+    f.core.handleUserBlock("person still works");
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person still works" }));
+    expect(f.core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "question")).toHaveLength(1);
+  });
+  it("a queued disposition holds managed dispatch through native terminal without guessing ownership", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.event("agent_start");
+    f.event("response", { id: "openrig-native-question", success: true, data: { disposition: "queued" } });
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts.filter(post => post.type === "result")).toHaveLength(0);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", result: expect.objectContaining({ completion: "unknown", answer: null }) }));
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+  });
+  it("queues busy wakes, protects the dedicated answer, and deduplicates offers", async () => {
+    const f = managed(); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("steer", 1, "input"));
+    expect(f.rpc).toContainEqual({ id: "openrig-native-steer", type: "prompt", message: "steer", streamingBehavior: "steer" });
+    f.response("steer");
+    await f.core.acceptRunnerRequest(f.frame("question", 2, "wake"));
+    await f.core.acceptRunnerRequest(f.frame("later", 3, "input"));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(1);
+    f.response("question"); f.event("agent_start");
+    f.event("message_end", { message: { role: "toolResult", content: [{ type: "text", text: "unrelated tool" }] } });
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "actual answer" }], stopReason: "stop" } });
+    expect(f.rpc.filter(r => r.message === "later")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("question", 2, "wake"));
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ kind: "wake", answer: "actual answer", completion: "completed" }) }));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(r => r.message === "later")).toHaveLength(1);
+  });
+  it("a native end without assistant text gives no fabricated wake answer", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start");
+    f.event("message_end", { message: { role: "assistant", content: [], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
+  });
+  it.each(["aborted", "error"])("a terminal %s releases the barrier with no fabricated answer", async stopReason => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("next", 2, "wake"));
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: stopReason === "aborted" ? "interrupted" : "failed" }) }));
+    expect(f.rpc.filter(r => r.message === "next")).toHaveLength(1);
+  });
+});
+
+describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and tail reader", () => {
+  it("uses since saved cursor, restores main live event persistence (OMP event.id vs Pi entryId-only), falls back to local tail, and keeps full reads for Pi --usage-facts", async () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-10" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s1" } }));
+
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-10", id: "pi-runner-cursor-refresh" });
+
+    // extension_ui_request returns early before cursor selection and must not overwrite lastEntryId.
+    core.handlePiLine(JSON.stringify({ type: "extension_ui_request", id: "ui-99", method: "setStatus" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-10");
+
+    // Restores main's OMP event-driven persistence: non-UI OMP events carrying event.id advance and persist the cursor.
+    core.handlePiLine(JSON.stringify({ type: "message_end", id: "e-11-omp" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-11-omp");
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-11-omp", id: "pi-runner-cursor-refresh:2" });
+
+    // Explicit event.entryId also advances and persists immediately.
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-12" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-12");
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-12", id: "pi-runner-cursor-refresh:3" });
+
+    // Pi control (#2117): generic event.id never becomes the cursor on Pi, while explicit event.entryId still does.
+    const fPi = fakeIo();
+    const piCore = new RunnerCore(fPi.io, { sessionName: SESSION, launchId: "launch-pi" }, { runtime: "pi", catchUpSince: "e-pi-1" });
+    piCore.start();
+    piCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-pi" } }));
+    piCore.handlePiLine(JSON.stringify({ type: "message_end", id: "pi-generic-99" }));
+    expect(fPi.sidecars.at(-1)?.lastEntryId).toBe("e-pi-1");
+    piCore.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-pi-2" }));
+    expect(fPi.sidecars.at(-1)?.lastEntryId).toBe("e-pi-2");
+    piCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fPi.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-pi-2", id: "pi-runner-cursor-refresh" });
+
+    // Unseeded runner uses local session tail for a bounded refresh and confirms anchorId on an empty success reply.
+    const fTail = fakeIo();
+    fTail.io.readLastEntryId = () => "e-20";
+    const tailCore = new RunnerCore(fTail.io, { sessionName: SESSION, launchId: "launch-2" }, { runtime: "omp" });
+    tailCore.start();
+    tailCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s2" } }));
+    tailCore.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fTail.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-20", id: "pi-runner-cursor-refresh" });
+    tailCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] } }));
+    expect(fTail.sidecars.at(-1)?.lastEntryId).toBe("e-20");
+
+    // Active Pi --usage-facts keeps full get_entries refreshes without since and retries an unaccepted usage fact.
+    const fUsage = fakeIo();
+    const postedUsage: Array<Record<string, unknown>> = [];
+    let postAttempt = 0;
+    fUsage.io.readFirstLine = () => JSON.stringify({ type: "session", version: 3, id: "s3", timestamp: "2026-10-14T12:00:00Z" });
+    fUsage.io.postUsageFacts = async (payload) => {
+      postedUsage.push(payload);
+      return ++postAttempt > 1;
+    };
+    const usageCore = new RunnerCore(
+      fUsage.io,
+      { sessionName: SESSION, launchId: "launch-3" },
+      { runtime: "pi", catchUpSince: "e-30", usageFacts: true },
+    );
+    usageCore.start();
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s3" } }));
+    const usageEntry = {
+      type: "message",
+      id: "e-31",
+      parentId: "e-30",
+      timestamp: "2026-10-14T12:00:01Z",
+      message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } },
+    };
+    usageCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [usageEntry] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(postedUsage).toHaveLength(1);
+    expect((postedUsage[0]!.facts as Array<{ entryId: string }>).map((fact) => fact.entryId)).toEqual(["e-31"]);
+
+    // First post returned false (unaccepted); the second full refresh re-posts the same fact.
+    usageCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [usageEntry] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(postedUsage).toHaveLength(2);
+    expect((postedUsage[1]!.facts as Array<{ entryId: string }>).map((fact) => fact.entryId)).toEqual(["e-31"]);
+
+    // Second post returned true (accepted); a third full refresh does not re-post the already-accepted fact.
+    usageCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+    usageCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", command: "get_entries", success: true, data: { entries: [usageEntry] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(postedUsage).toHaveLength(2);
+  });
+
+  it.each(["pi", "omp"] as const)(
+    "unanchored full refreshes without v2 hold for three completed turns and allow a new full read on the fourth (%s)",
+    (runtime) => {
+      expect(MAX_UNANCHORED_REFRESH_HOLD_TURNS).toBe(3);
+      const endTurn = () => JSON.stringify(runtime === "omp" ? { type: "agent_end", isTerminal: true } : { type: "agent_end" });
+      const getEntriesCalls = (rpc: Record<string, unknown>[]) => rpc.filter((cmd) => cmd.type === "get_entries");
+
+      // Case 1: slow valid reply within 3 completed turns does not cause an overlapping full read.
+      const fSlow = fakeIo();
+      fSlow.io.readLastEntryId = () => null;
+      const slowCore = new RunnerCore(fSlow.io, { sessionName: SESSION, launchId: `launch-slow-${runtime}` }, { runtime });
+      slowCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      slowCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-slow-${runtime}` } }));
+
+      slowCore.handlePiLine(endTurn());
+      expect(getEntriesCalls(fSlow.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      slowCore.handlePiLine(endTurn()); // Turn 2: held
+      slowCore.handlePiLine(endTurn()); // Turn 3: held
+      expect(getEntriesCalls(fSlow.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      slowCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-slow-3" }] } }));
+      expect(fSlow.sidecars.at(-1)?.lastEntryId).toBe("e-slow-3");
+      slowCore.handlePiLine(endTurn()); // Turn 4: anchored bounded refresh
+      expect(fSlow.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-slow-3", id: "pi-runner-cursor-refresh:2" });
+
+      // Case 2: truncated/invalid-JSON lost reply holds through turns 2 and 3, then sends a new full read on turn 4 (and turn 7).
+      const fTrunc = fakeIo();
+      fTrunc.io.readLastEntryId = () => null;
+      const truncCore = new RunnerCore(fTrunc.io, { sessionName: SESSION, launchId: `launch-trunc-${runtime}` }, { runtime });
+      truncCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      truncCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-trunc-${runtime}` } }));
+
+      truncCore.handlePiLine(endTurn()); // Turn 1
+      expect(getEntriesCalls(fTrunc.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      const truncatedReply = '{"type":"response","id":"pi-runner-cursor-refresh"';
+      truncCore.handlePiLine(truncatedReply);
+      expect(fTrunc.lines).toContain(truncatedReply);
+      expect(fTrunc.lines.some((line) => line.startsWith("[omp-runner] ERROR rpc frame:"))).toBe(false);
+
+      truncCore.handlePiLine(endTurn()); // Turn 2: held
+      truncCore.handlePiLine(endTurn()); // Turn 3: held
+      expect(getEntriesCalls(fTrunc.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+
+      truncCore.handlePiLine(endTurn()); // Turn 4: previous full read treated as lost -> new full read
+      expect(getEntriesCalls(fTrunc.rpc)).toEqual([
+        { type: "get_entries", id: "pi-runner-cursor-refresh" },
+        { type: "get_entries", id: "pi-runner-cursor-refresh:2" },
+      ]);
+
+      truncCore.handlePiLine(endTurn()); // Turn 5: held by #2
+      truncCore.handlePiLine(endTurn()); // Turn 6: held by #2
+      expect(getEntriesCalls(fTrunc.rpc)).toHaveLength(2);
+
+      truncCore.handlePiLine(endTurn()); // Turn 7: #2 treated as lost -> new full read #3
+      expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+
+      // Live entryId switches immediately to bounded since without waiting for the 3-turn window.
+      truncCore.handlePiLine(JSON.stringify({ type: "message_end", entryId: "live-1" }));
+      truncCore.handlePiLine(endTurn());
+      expect(fTrunc.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-1", id: "pi-runner-cursor-refresh:4" });
+
+      // Case 3a: silent/unanswered lost reply sends a new full read on turn 4; late stale reply after #2 settles is ignored.
+      const fUnans = fakeIo();
+      fUnans.io.readLastEntryId = () => null;
+      const unansCore = new RunnerCore(fUnans.io, { sessionName: SESSION, launchId: `launch-unans-${runtime}` }, { runtime });
+      unansCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-unans-${runtime}` } }));
+
+      unansCore.handlePiLine(endTurn()); // Turn 1 -> #1
+      unansCore.handlePiLine(endTurn()); // Turn 2 -> held
+      unansCore.handlePiLine(endTurn()); // Turn 3 -> held
+      expect(getEntriesCalls(fUnans.rpc)).toEqual([{ type: "get_entries", id: "pi-runner-cursor-refresh" }]);
+      unansCore.handlePiLine(endTurn()); // Turn 4 -> #2
+      expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "e-recovered-4" }] } }));
+      expect(fUnans.sidecars.at(-1)?.lastEntryId).toBe("e-recovered-4");
+      unansCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-stale-1" }] } }));
+      expect(fUnans.sidecars.at(-1)?.lastEntryId).toBe("e-recovered-4");
+      unansCore.handlePiLine(endTurn());
+      expect(fUnans.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-recovered-4", id: "pi-runner-cursor-refresh:3" });
+
+      // Case 3b: late reply to #1 arriving after turn 4 dispatched #2 (before #2 settles) still advances, then #2 advances further.
+      const fLate = fakeIo();
+      fLate.io.readLastEntryId = () => null;
+      const lateCore = new RunnerCore(fLate.io, { sessionName: SESSION, launchId: `launch-late-${runtime}` }, { runtime });
+      lateCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      lateCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-late-${runtime}` } }));
+
+      lateCore.handlePiLine(endTurn()); // Turn 1 -> #1
+      lateCore.handlePiLine(endTurn()); // Turn 2 -> held
+      lateCore.handlePiLine(endTurn()); // Turn 3 -> held
+      lateCore.handlePiLine(endTurn()); // Turn 4 -> #2
+      expect(fLate.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+      lateCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-late-1" }] } }));
+      expect(fLate.sidecars.at(-1)?.lastEntryId).toBe("e-late-1");
+      lateCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "e-fresh-2" }] } }));
+      expect(fLate.sidecars.at(-1)?.lastEntryId).toBe("e-fresh-2");
+
+      // Case 4: valid JSON reply without entries settles #1 immediately so turn 2 can send #2.
+      const fEmptyShape = fakeIo();
+      fEmptyShape.io.readLastEntryId = () => null;
+      const emptyShapeCore = new RunnerCore(fEmptyShape.io, { sessionName: SESSION, launchId: `launch-shape-${runtime}` }, { runtime });
+      emptyShapeCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      emptyShapeCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-shape-${runtime}` } }));
+      emptyShapeCore.handlePiLine(endTurn());
+      emptyShapeCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: {} }));
+      emptyShapeCore.handlePiLine(endTurn());
+      expect(fEmptyShape.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+
+      // Control 1: unrelated non-JSON stdout noise without v2 still preserves a valid pending refresh reply.
+      const fNoise = fakeIo();
+      fNoise.io.readLastEntryId = () => null;
+      const noiseCore = new RunnerCore(fNoise.io, { sessionName: SESSION, launchId: `launch-noise-${runtime}` }, { runtime });
+      noiseCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      noiseCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-noise-${runtime}` } }));
+      noiseCore.handlePiLine(endTurn());
+      noiseCore.handlePiLine("unrelated non-json stdout noise");
+      noiseCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [{ id: "e-after-noise" }] } }));
+      expect(fNoise.sidecars.at(-1)?.lastEntryId).toBe("e-after-noise");
+
+      // Control 2: a confirmed transport-limit oversized error without v2 still suppresses later unanchored full reads past turn 4.
+      const fBig = fakeIo();
+      fBig.io.readLastEntryId = () => null;
+      const bigCore = new RunnerCore(fBig.io, { sessionName: SESSION, launchId: `launch-big-${runtime}` }, { runtime });
+      bigCore.start(runtime === "omp" ? { type: "ready" } : undefined);
+      bigCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: `s-big-${runtime}` } }));
+      bigCore.handlePiLine(endTurn());
+      bigCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "RPC response exceeded the transport limit" }));
+      const rpcCountAfterOversized = fBig.rpc.length;
+      for (let turn = 2; turn <= 5; turn++) {
+        bigCore.handlePiLine(endTurn());
+      }
+      expect(fBig.rpc).toHaveLength(rpcCountAfterOversized);
+    },
+  );
+
+  it("explicit empty OMP entryId takes precedence and leaves lastEntryId unchanged, matching main", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-empty-entry" }, { runtime: "omp", catchUpSince: "e-10" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-empty" } }));
+    const beforeSidecars = f.sidecars.length;
+
+    // Explicit empty entryId string must not fall through to generic event.id on OMP (matches main).
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "", id: "e-ignored-on-empty-entry" }));
+    expect(f.sidecars).toHaveLength(beforeSidecars);
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-10");
+
+    // Without entryId, ordinary non-empty OMP event.id still advances and persists the cursor.
+    core.handlePiLine(JSON.stringify({ type: "message_end", id: "e-11-omp" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-11-omp");
+
+    // Explicit non-empty entryId overrides event.id when both are present.
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-12-explicit", id: "e-other" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-12-explicit");
+  });
+
+  it.each([
+    { label: "OMP unknown_since code", payload: { code: "unknown_since", error: "Cursor not in session" } },
+    { label: "Entry not found message", payload: { error: "Entry not found: e-stale" } },
+    { label: "Unknown entries cursor message", payload: { error: "Unknown entries cursor: e-stale" } },
+  ])("recovers from refused cursor on turn-end refresh via bounded local tail or single unanchored fallback ($label)", ({ payload }) => {
+    const REPLAY_LOSS_NOTICE = "[omp-runner] Startup restore replay was lost; later cursor refreshes will advance without replaying missed history.";
+
+    // Case 1: OMP refuses startup catch-up as unknown -> prints ERROR and one-time replay-loss notice BEFORE bounded tail recovery.
+    let tailId: string | null = "e-live";
+    const fBounded = fakeIo();
+    let noticePrintedBeforeRecoveryRpc = false;
+    const origSendRpc = fBounded.io.sendRpc;
+    fBounded.io.sendRpc = (cmd) => {
+      if (cmd.id === "pi-runner-cursor-refresh") {
+        noticePrintedBeforeRecoveryRpc = fBounded.lines.includes(REPLAY_LOSS_NOTICE);
+      }
+      origSendRpc(cmd);
+    };
+    fBounded.io.readLastEntryId = () => tailId;
+    const bounded = new RunnerCore(fBounded.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-stale" });
+    bounded.start();
+    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s1" } }));
+    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, ...payload }));
+    expect(noticePrintedBeforeRecoveryRpc).toBe(true);
+    expect(fBounded.lines.filter((line) => line.startsWith("[omp-runner] ERROR rpc:"))).toHaveLength(1);
+    expect(fBounded.lines.filter((line) => line === REPLAY_LOSS_NOTICE)).toHaveLength(1);
+    expect(fBounded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-live", id: "pi-runner-cursor-refresh" });
+    // Recovery saves the tail past unreplayed history (empty delta confirms tailId) without duplicating the replay-loss notice.
+    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] } }));
+    expect(fBounded.sidecars.at(-1)?.lastEntryId).toBe("e-live");
+    bounded.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fBounded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-live", id: "pi-runner-cursor-refresh:2" });
+    bounded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "e-live-2" }] } }));
+    expect(fBounded.sidecars.at(-1)?.lastEntryId).toBe("e-live-2");
+    expect(fBounded.lines.filter((line) => line === REPLAY_LOSS_NOTICE)).toHaveLength(1);
+
+    // Case 2: turn-end refresh fails with unknown cursor and local tail still matches the refused cursor -> one unanchored fallback, no loop, no startup replay-loss notice.
+    tailId = "e-stale";
+    const fFallback = fakeIo();
+    fFallback.io.readLastEntryId = () => tailId;
+    const fallback = new RunnerCore(fFallback.io, { sessionName: SESSION, launchId: "launch-2" }, { runtime: "omp", catchUpSince: "e-stale" });
+    fallback.start();
+    fallback.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s2" } }));
+    fallback.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFallback.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-stale", id: "pi-runner-cursor-refresh" });
+    fallback.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, ...payload }));
+    expect(fFallback.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+    expect(fFallback.lines).not.toContain(REPLAY_LOSS_NOTICE);
+    const countAfterRecovery = fFallback.rpc.length;
+    fallback.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, ...payload }));
+    expect(fFallback.rpc).toHaveLength(countAfterRecovery);
+  });
+
+  it("remembers a rejected file-tail position instead of repeating it on every turn, and allows one eligible fallback", () => {
+    // Case 1: unseeded runner selects local file tail "e-bad-tail", which the child rejects with unknown_since.
+    let tailId: string | null = "e-bad-tail";
+    const fFresh = fakeIo();
+    fFresh.io.readLastEntryId = () => tailId;
+    const fresh = new RunnerCore(fFresh.io, { sessionName: SESSION, launchId: "launch-fresh" }, { runtime: "omp" });
+    fresh.start();
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-fresh" } }));
+    fresh.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-bad-tail", id: "pi-runner-cursor-refresh" });
+
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, code: "unknown_since", error: "Cursor not in session" }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+
+    // If the recovery read fails transiently, the next turn still skips the refused "e-bad-tail" rather than repeating it.
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, error: "temporarily busy" }));
+    fresh.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+
+    // Once a new tail entry appears in the file, bounded refresh resumes from the new tail.
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", command: "get_entries", success: false, error: "temporarily busy" }));
+    tailId = "e-good-tail";
+    fresh.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-good-tail", id: "pi-runner-cursor-refresh:4" });
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:4", command: "get_entries", success: true, data: { entries: [] } }));
+    expect(fFresh.sidecars.at(-1)?.lastEntryId).toBe("e-good-tail");
+
+    // Case 2: seeded runner rejects saved "e-stale", recovers with distinct file tail "e-bad-tail", and child rejects that tail too.
+    let recoveryTail: string | null = "e-bad-tail";
+    const fSeeded = fakeIo();
+    fSeeded.io.readLastEntryId = () => recoveryTail;
+    const seeded = new RunnerCore(fSeeded.io, { sessionName: SESSION, launchId: "launch-seeded" }, { runtime: "omp", catchUpSince: "e-stale" });
+    seeded.start();
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-seeded" } }));
+    seeded.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fSeeded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-stale", id: "pi-runner-cursor-refresh" });
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, code: "unknown_since", error: "Cursor not in session" }));
+    expect(fSeeded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-bad-tail", id: "pi-runner-cursor-refresh:2" });
+
+    // Rejecting the recovery tail must not recurse immediately, and the next turn skips both "e-stale" and "e-bad-tail".
+    const rpcCountAfterRecovery = fSeeded.rpc.length;
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, code: "unknown_since", error: "Cursor not in session" }));
+    expect(fSeeded.rpc).toHaveLength(rpcCountAfterRecovery);
+    seeded.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fSeeded.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", command: "get_entries", success: true, data: { entries: [{ id: "e-recovered" }] } }));
+    expect(fSeeded.sidecars.at(-1)?.lastEntryId).toBe("e-recovered");
+  });
+
+  it("out-of-order refreshes, live entryId updates, and late startup catch-up replies never regress lastEntryId", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-1" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s1" } }));
+
+    // Dispatch refresh #1 and refresh #2; refresh #2 settles first.
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", success: true, data: { entries: [{ id: "e-20" }] } }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-20");
+
+    // Stale refresh #1 arrives late -> ignored.
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "e-10" }] } }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-20");
+
+    // Late startup catch-up arrives after refresh #2 already advanced -> does not regress.
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-catch-up", success: true, data: { entries: [{ id: "e-2" }, { id: "e-3" }] } }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-20");
+
+    // Refresh #3 in flight when a live entryId advances -> stale refresh #3 without e-30 does not regress.
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-30" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-30");
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", success: true, data: { entries: [{ id: "e-25" }] } }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-30");
+  });
+
+  it("readSessionTailEntryId reads the last complete non-header entry boundedly and rejects torn, header-only, oversized, and non-file inputs", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-tail-reader-"));
+    try {
+      expect(SESSION_TAIL_READ_LIMIT_BYTES).toBe(8 * 1024 * 1024);
+      // Multi-chunk (> 64 KiB) multibyte UTF-8 final entry crossing read blocks with earlier invalid JSONL prefix.
+      const multiChunk = path.join(dir, "multi.jsonl");
+      const header = JSON.stringify({ type: "session", id: "sess-1" });
+      const multiChunkRecord = JSON.stringify({ type: "message", id: "utf8-tail-id", text: "é".repeat(45_000) });
+      fs.writeFileSync(multiChunk, `${header}\nnot-json-prefix\n${multiChunkRecord}\n`);
+      expect(Buffer.byteLength(multiChunkRecord, "utf8")).toBeGreaterThan(64 * 1024);
+      expect(readSessionTailEntryId(multiChunk)).toBe("utf8-tail-id");
+
+      // Header-only session file returns null.
+      const headerOnly = path.join(dir, "header.jsonl");
+      fs.writeFileSync(headerOnly, `${JSON.stringify({ type: "session", id: "sess-1" })}\n`);
+      expect(readSessionTailEntryId(headerOnly)).toBeNull();
+
+      // Missing trailing newline (partial write) returns null.
+      const torn = path.join(dir, "torn.jsonl");
+      fs.writeFileSync(torn, JSON.stringify({ type: "message", id: "e-torn" }));
+      expect(readSessionTailEntryId(torn)).toBeNull();
+
+      // Concurrent append changing file size across the read returns null.
+      const racing = path.join(dir, "racing.jsonl");
+      fs.writeFileSync(racing, `${JSON.stringify({ type: "message", id: "e-1" })}\n`);
+      expect(
+        readSessionTailEntryId(racing, 1024, {
+          afterRead: () => fs.appendFileSync(racing, `${JSON.stringify({ type: "message", id: "e-2" })}\n`),
+        }),
+      ).toBeNull();
+
+      // Trailing line larger than limitBytes returns null.
+      const oversized = path.join(dir, "oversized.jsonl");
+      fs.writeFileSync(oversized, `${JSON.stringify({ type: "message", id: "e-big", pad: "a".repeat(2048) })}\n`);
+      expect(readSessionTailEntryId(oversized, 512)).toBeNull();
+
+      // Directory and non-regular FIFO (!isFile()) return null without blocking.
+      expect(readSessionTailEntryId(dir)).toBeNull();
+      if (process.platform !== "win32") {
+        const fifo = path.join(dir, "pipe.jsonl");
+        execFileSync("mkfifo", [fifo]);
+        expect(readSessionTailEntryId(fifo)).toBeNull();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

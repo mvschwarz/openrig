@@ -11,7 +11,9 @@ import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { chooseRestoreSnapshot, joinAutomaticRestore, JOINED_AUTOMATIC_RESTORE_WARNING, runExistingRigRestore, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
-import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
+import { normalizeCwdOverride } from "../domain/cwd-resolution.js";
+import { buildRestorePlanPreview, collectPreviewSessionRows, type RestorePermissionSeat } from "../domain/restore-plan-preview.js";
+import { planRestorePermission } from "../domain/permission-account.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
 import { MultiRigLauncher } from "../domain/topology/multi-rig-launcher.js";
@@ -98,14 +100,17 @@ function getDeps(c: { get: (key: string) => unknown }) {
  * Used by /api/up (rig_name). The Explorer's /api/rigs/:rigId/up keeps its own request and response
  * contract and shares joinAutomaticRestore.
  */
-async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean) {
+async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean, requestedCwd?: string) {
   const { snapshotRepo } = deps;
+  // Read once, as a fresh launch reads it: a remote `rig up --host` sends --cwd as typed, and a blank value is no override.
+  const cwdOverride = normalizeCwdOverride(requestedCwd);
   // Daemon start restores a kernel a reboot left down. A request for that same restore, made while it
   // runs or just after, gets its outcome instead of a second launch or a refusal; see
   // joinAutomaticRestore for when the seats still count as that restore's. A request for something
   // else (--fresh seats, a different non-interruptive choice, a plan) takes the ordinary path.
   const sameLaunchChoice = () => nonInterruptive === undefined || nonInterruptive === deps.rigRepo.getRigNonInterruptive(rigId);
-  if (!plan && !freshLogicalIds?.length && sameLaunchChoice()) {
+  // A different launch directory (`--cwd`) is a different launch: it takes the ordinary path, not the automatic one.
+  if (!plan && !freshLogicalIds?.length && !cwdOverride && sameLaunchChoice()) {
     const joined = await joinAutomaticRestore(deps, rigId);
     if (joined && sameLaunchChoice()) return renderExistingRestore(rigId, rigName, deps, c, joined, true);
   }
@@ -120,13 +125,18 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   // snapshot capture (itself a mutation) is reported as would-happen, never
   // performed.
   if (plan) {
-    return c.json(buildRestorePlanPreview(rig, choice.snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, choice.snapshot ?? null, true), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id)), 200);
+    // Each seat's permission as this restore will start it: restore's own posture rule through the launch's resolver.
+    const restorer = deps.restoreOrchestrator;
+    const permissionOf = restorer ? (seat: RestorePermissionSeat) =>
+      planRestorePermission(snapshotRepo.db, { ...seat, restorePosture: () => restorer.resolveRestorePosture(seat.nodeId, rig.rig.id) }) : undefined;
+    return c.json(buildRestorePlanPreview(rig, choice.snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, choice.snapshot ?? null, true), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id), undefined, permissionOf), 200);
   }
 
   const fs = await import("node:fs");
   const run = await runExistingRigRestore(deps, choice, {
     freshLogicalIds,
     nonInterruptive,
+    ...(cwdOverride ? { cwdOverride } : {}),
     exists: (p: string) => fs.existsSync(p),
   });
   return renderExistingRestore(rigId, rigName, deps, c, { ok: true, staleSnapshot: choice.staleSnapshot, ...run }, false);
@@ -172,6 +182,10 @@ async function renderExistingRestore(
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
+    // Seats this restore didn't start, with why; rig up names the ones still in the rig.
+    excludedNodes: result.result.excludedNodes,
+    // Seats this restore left stopped on purpose (a drained seat pool agent), outside `nodes` and the rig result.
+    keptDown: result.result.keptDown,
     warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "The selected restore snapshot did not match current occupant state; captured current DB state as auto-rehydrate snapshot for reboot recovery."
@@ -224,7 +238,8 @@ upRoutes.post("/", async (c) => {
       const freshLogicalIds = Array.isArray(body["freshLogicalIds"])
         ? (body["freshLogicalIds"] as unknown[]).filter((v): v is string => typeof v === "string")
         : undefined;
-      return restoreByRigId(rigs[0]!.id, sourceRef, getDeps(c), c, freshLogicalIds, plan, nonInterruptive) as any;
+      // `rig up <rig> --existing --cwd <dir>`: the launch directory for every restored seat, this run only.
+      return restoreByRigId(rigs[0]!.id, sourceRef, getDeps(c), c, freshLogicalIds, plan, nonInterruptive, cwdOverride) as any;
     }
 
     // File-based: resolve path now

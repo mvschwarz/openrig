@@ -1,3 +1,4 @@
+import { RunnerChannel } from "../domain/runner-channel.js";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import { OutboxHandler } from "../domain/outbox-handler.js";
 import { Hono, type Context } from "hono";
@@ -24,7 +25,7 @@ import { OPENRIG_HOME } from "../openrig-compat.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import type { SessionTransport } from "../domain/session-transport.js";
-import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
+import { DeliveryGuardError, UNATTRIBUTED_GUARD_ACTOR } from "../domain/seat-delivery-guard.js";
 import { PERMISSIONS_DENY } from "../domain/runner-permissions.js";
 
 export const seatRoutes = new Hono();
@@ -38,6 +39,80 @@ seatRoutes.use("*", async (c, next) => {
   const refusal = rigRepo ? runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER)) : null;
   if (refusal) return c.json(refusal.body, refusal.status);
   return next();
+});
+
+seatRoutes.post("/set-input-route/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || !["typed", "native"].includes(String(body.route)) || typeof body.reason !== "string" || !body.reason.trim())
+    return c.json({ error: "Supply typed or native route and a reason." }, 400);
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  const repo = c.get("rigRepo" as never) as RigRepository;
+  if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    await guard.custody([target.nodeId], async () => {
+      const node = repo.db.prepare("SELECT rig_id,input_route FROM nodes WHERE id=?").get(target.nodeId) as { rig_id: string; input_route: "typed" | "native" };
+      if (node.input_route === body.route) return;
+      const events = c.get("eventBus" as never) as EventBus | undefined;
+      const event = repo.db.transaction(() => {
+        repo.setNodeInputRoute(target.nodeId, body.route as "typed" | "native");
+        return events?.persistWithinTransaction({ type: "node.input_route_changed", rigId: node.rig_id, nodeId: target.nodeId,
+          from: node.input_route, to: body.route as "typed" | "native", reason: (body.reason as string).trim(), actor: transportSenderSession(c) ?? null });
+      })();
+      if (event) events!.notifySubscribers(event);
+    });
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    return c.json({ nodeId: target.nodeId, inputRoute: body.route, nativeInput: { input: channel?.capable(target.nodeId, "input") ?? false,
+      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: channel?.capable(target.nodeId, "cancel") ?? false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+  } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
+});
+
+seatRoutes.post("/command/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (body?.type === "cancel") {
+    const named = body.target as { runId?: unknown; nativeTurnId?: unknown } | undefined;
+    if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 512
+      || !named || typeof named.runId !== "string" || !named.runId || named.runId.length > 1024
+      || typeof named.nativeTurnId !== "string" || !named.nativeTurnId || named.nativeTurnId.length > 1024)
+      return c.json({ error: "Supply requestId and exact target {runId,nativeTurnId}." }, 400);
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+    if (!channel || !guard) return c.json({ error: "Native cancellation unavailable." }, 503);
+    try {
+      const target = guard.target(c.req.param("seatRef"));
+      const receipt = await guard.custody([target.nodeId], async () => {
+        if (c.req.raw.signal.aborted && !channel.outbox.runnerReceipt(body.requestId as string))
+          throw Object.assign(new Error("Caller cancelled before native admission."), { code: "caller_cancelled" });
+        return channel.cancel(target.nodeId, { requestId: body.requestId as string,
+          sender: transportSenderSession(c) ?? "unknown", destination: target.session, target: { runId: named.runId as string, nativeTurnId: named.nativeTurnId as string } });
+      });
+      return c.json({ receipt }, ["completed", "rejected"].includes(receipt.stage) ? 200 : 202);
+    } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code,
+      ...((error as { code?: string; retryable?: boolean }).retryable || (error as { code?: string }).code === "runner_grant_unverified" ? { retryable: true } : {}) }, 409); }
+  }
+  if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
+    || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
+    return c.json({ error: "Supply wake type, opaque requestId and question." }, 400);
+  const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+  if (!transport?.deliveryGuard) return c.json({ error: "Native transport unavailable." }, 503);
+  try {
+    const target = transport.deliveryGuard.target(c.req.param("seatRef"));
+    const result = await transport.sendNativeWake(target.session, body.question, body.requestId, transportSenderSession(c) ?? "unknown");
+    return c.json(result, result.ok ? result.runnerReceipt?.stage === "completed" ? 200 : 202 : 409);
+  } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
+});
+
+seatRoutes.get("/command/:seatRef", c => {
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    const id = c.req.query("requestId");
+    if (!id) return c.json({ error: "requestId required." }, 400);
+    const receipt = new OutboxHandler(guard.db).runnerReceipt(id);
+    if (!receipt || receipt.nodeId !== target.nodeId) return c.json({ error: "Request unavailable." }, 404);
+    return c.json({ receipt });
+  } catch (error) { return c.json({ error: (error as Error).message }, 409); }
 });
 
 // S09 is an independent delivery preference, never a lifecycle or permission change.
@@ -90,8 +165,9 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
   if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
   const body = await c.req.json<Record<string, unknown>>();
-  const actor = transportSenderSession(c);
-  if (!actor || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Sender identity and reason required" }, 400);
+  // The transport alone names the actor; an ordinary terminal has no seat identity (#3587).
+  const actor = transportSenderSession(c) ?? UNATTRIBUTED_GUARD_ACTOR;
+  if (typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Reason required" }, 400);
   try {
     const target = guard.target(c.req.param("seatRef"));
     const outbox = new OutboxHandler(guard.db); const id = c.req.param("id");
@@ -101,7 +177,7 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
   } catch (error) { return c.json({ error: (error as Error).message }, 409); }
 });
 
-seatRoutes.get("/status/:seatRef", (c) => {
+seatRoutes.get("/status/:seatRef", async (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
     compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
@@ -110,9 +186,36 @@ seatRoutes.get("/status/:seatRef", (c) => {
   if (result.ok) {
     const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
     const target = guard?.maybeTarget(c.req.param("seatRef")!);
-    const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
+    const node = rigRepo.getRig(result.status.rig_id)?.nodes.find((candidate) => candidate.logicalId === result.status.logical_id);
+    const nodeId = node?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
-    return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
+    // #3253: a seat with process limits says where they stand, read back from its process, never from the spec alone. A
+    // stored value that can't be read is this seat's `invalid`, never a failed status read. Whether it runs decides
+    // (a stopped seat keeps its last session name); the read is of the seat's own pane, or, when none is recorded, of its
+    // session's active pane, and the report says which.
+    let limits: import("../adapters/tmux.js").SeatProcessLimits | undefined;
+    let limitsError: string | undefined;
+    try { limits = nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined; }
+    catch (error) { limitsError = (error as Error).message; }
+    const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+    const running = result.status.session_status === "running";
+    const pane = node?.binding?.tmuxPane ?? null;
+    const readTarget = pane ?? result.status.current_occupant;
+    const readFrom = pane ? "the seat's pane" : "the session's active pane (no pane is recorded for the seat)";
+    const processLimits: import("../adapters/tmux.js").SeatProcessLimitsReport | null = limitsError
+      ? { state: "invalid", reason: `${limitsError}; the stored value is kept` }
+      : limits
+        ? running && readTarget
+          ? tmux ? { ...(await tmux.readSeatProcessLimits(readTarget, limits, nodeId)),
+            // A guest seat's report is not read from its pane at all.
+            ...(nodeId && tmux.seatInEnvironmentGuest?.(nodeId) ? {} : { readFrom }) }
+            : { state: "unknown", requested: { ...limits }, reason: "this daemon has no terminal adapter to read the seat's process" }
+          : { state: "not_applied", requested: { ...limits }, reason: "the seat is not running; the limit applies at its next fresh launch" }
+        // No limit stored: nothing is read, so a seat without process_limits is unchanged.
+        : null;
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    const nativeTurn = channel && nodeId ? channel.currentTurn(nodeId) : null;
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: channel.capable(nodeId, "cancel"), unresolved: channel.unresolved(nodeId), recovery: "The person operating this seat or its responsible agent can inspect these request IDs and destinations. Evidence from earlier runs does not mean current input is held. A submitted Pi cancellation holds person prompts until its named run emits agent_settled; normal input/wake readiness still applies. Continue retained native words with a new plain prompt in that pane, without resending them. This is distinct from /abort or stopping the seat, is not cancellation proof, and never restores withdrawn approvals. Responsible-agent work uses its ordinary queue route; if no independent agent can act, the person operating this seat can take that step. Explicit manual choice: rig seat stop <seat> --reason <text>. No automatic restart or replay.", target: nativeTurn ? { runId: nativeTurn.runId, nativeTurnId: nativeTurn.nativeTurnId } : null } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }
@@ -349,6 +452,25 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   return c.json(result, 404);
 });
 
+// #2985 / #2861: adopt the running successor of a handover that failed after launching it, keeping its conversation.
+seatRoutes.post("/handover/:seatRef/recover", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const service = new SeatHandoverService(handoverDeps(c));
+  const result = await service.recover({
+    seatRef: c.req.param("seatRef")!,
+    reason: typeof body["reason"] === "string" ? body["reason"] : null,
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json("plan" in result ? result.plan : result.result);
+  if (result.code === "missing_reason" || result.code === "seat_ref_required") return c.json(result, 400);
+  if (result.code === "no_handover_to_recover" || result.code === "discovered_not_found") return c.json(result, 404);
+  if (result.code === "recover_runtime_unsupported") return c.json(result, 501);
+  if (result.code === "tmux_probe_failed") return c.json(result, 502);
+  if (result.code === "handover_commit_failed") return c.json(result, 500);
+  if (result.code === "seat_not_found") return c.json(result, 404);
+  return c.json(result, 409);
+});
+
 // S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model / stop / clean.
 // One service, one resolution path, one status mapping shared by all three verbs.
 export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleService {
@@ -362,6 +484,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     nodeLauncher: c.get("nodeLauncher" as never) as import("../domain/node-launcher.js").NodeLauncher,
     startupOrchestrator: (c.get("startupOrchestrator" as never) as import("../domain/startup-orchestrator.js").StartupOrchestrator | undefined) ?? undefined,
+    armContinuity: (c.get("armSeatContinuity" as never) as import("../domain/seat-lifecycle-service.js").SeatLifecycleDeps["armContinuity"]) ?? undefined,
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
@@ -371,16 +494,19 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
   });
 }
 
-function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
+function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
-    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
+    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy" || code === "invalid_statusline_throttle"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
-    || code === "missing_permissions_to" || code === "permissions_to_not_a_person") return 400;
+    || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
+    || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
+  // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry (409).
+  if (code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_invalid") return 422;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
-    || code === "permissions_to_unavailable") return 500;
+    || code === "effort_unavailable" || code === "statusline_throttle_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
+    || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -406,13 +532,15 @@ const setPermissionsHandler = async (c: Context) => {
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   if (!body || Array.isArray(body)) return c.json({ error: "mode is required" }, 400);
-  const given = [body.mode, body.rules, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
+  // autoMode: null clears the seat's block.
+  const given = [body.mode, body.rules, body.autoMode, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
   if (given === 0) return c.json({ error: "mode is required" }, 400);
-  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, codexPermissions or codexProfile" }, 400);
+  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, autoMode, codexPermissions or codexProfile" }, 400);
   if (body.mode !== undefined && typeof body.mode !== "string") return c.json({ error: "mode must be a string" }, 400);
   if (body.codexProfile !== undefined && typeof body.codexProfile !== "string") return c.json({ error: "codexProfile must be a string" }, 400);
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
   const choice = typeof body.mode === "string" ? { mode: body.mode } : body.rules !== undefined ? { rules: body.rules }
+    : body.autoMode !== undefined ? { autoMode: body.autoMode }
     : body.codexPermissions !== undefined ? { codexPermissions: body.codexPermissions } : { codexProfile: body.codexProfile as string };
   const result = await seatLifecycleService(c).setPermissions({
     ...settingTarget(c), ...choice, reason: body.reason, actor,
@@ -462,6 +590,30 @@ seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });
 
+// A seat's runtime home and what a recording is made against; read only.
+seatRoutes.get("/runtime-home/:seatRef", (c) => {
+  const result = seatLifecycleService(c).runtimeHome(c.req.param("seatRef"));
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
+// Record an operator-selected runtime home for a seat's next launch. Every expectation is required and passed through
+// as sent (null for none), so a stale read is a conflict, never a guess.
+seatRoutes.post("/record-runtime-home/:seatRef", async (c) => {
+  const value: unknown = await c.req.json().catch(() => null);
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const result = seatLifecycleService(c).recordRuntimeHome({
+    seatRef: c.req.param("seatRef"),
+    home: body.home,
+    expectedOccupant: body.expectedOccupant,
+    expectedOriginal: body.expectedOriginal,
+    expectedRevision: body.expectedRevision,
+    operationId: body.operationId,
+    reason: typeof body.reason === "string" ? body.reason : "",
+    operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
 // OPR.0.7.0.7 — save (or, with clear: true, remove) one seat's effort choice for its next
 // managed continuation. A distinct route fails closed against daemons without it.
 const setEffortHandler = async (c: Context) => {
@@ -479,6 +631,28 @@ const setEffortHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
 seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
+
+// #3416 (3): save (or, with clear: true, remove) a Claude seat's status line throttle for its next launch.
+const setStatuslineThrottleHandler = async (c: Context) => {
+  // A body that isn't a JSON object (null, an array, a number) reads as an empty one: the check below answers 400.
+  const parsed: unknown = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown> : {};
+  const clear = body["clear"] === true;
+  if (clear === (body["seconds"] !== undefined)) {
+    return c.json({ ok: false, code: "invalid_statusline_throttle", message: "Pass seconds or clear, exactly one." }, 400);
+  }
+  const result = seatLifecycleService(c).setStatuslineThrottle({
+    ...settingTarget(c),
+    seconds: clear ? null : typeof body["seconds"] === "number" ? body["seconds"] : Number.NaN,
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+};
+seatRoutes.post("/set-statusline-throttle/:seatRef", setStatuslineThrottleHandler);
+seatRoutes.post("/set-statusline-throttle/node/:nodeId", setStatuslineThrottleHandler);
 
 // Choose (or, with clear: true, remove) the registered person who answers this seat's runner permission requests.
 // Audited; like set-permissions, the actor is required.
@@ -569,12 +743,15 @@ seatRoutes.get("/stop-precondition/:seatRef", c => {
 
 seatRoutes.post("/stop/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
-  // Neither body claims nor the caller-controlled transport header may name an internal daemon actor.
-  const operator = transportSenderSession(c);
+  // Record the transport sender, else the body's --operator (the CLI's documented contract).
+  // Neither source may name an internal daemon actor, so a caller cannot forge reaper attribution.
+  const sender = transportSenderSession(c);
+  const claimed = sender ?? (typeof body["operator"] === "string" ? body["operator"] : null);
+  const operator = claimed?.startsWith("daemon:") ? null : claimed;
   const result = await seatLifecycleService(c).stopSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: operator?.startsWith("daemon:") ? null : operator ?? null,
+    operator,
     ...(Object.prototype.hasOwnProperty.call(body, "expected") ? { expected: body["expected"] } : {}),
   });
   if (result.ok) return c.json(result);

@@ -160,9 +160,14 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   `:780`; if `status === "restoring"` the node is skipped with a warning and
   reported as `fresh`, `:783–785`; `degraded` only adds a warning).
 - Reuses the seat's durably bound tmux session name when the prior binding
-  has a usable one, and otherwise falls back to the derived name. A missing
-  binding after the latest session's recorded intentional exit is quiet;
-  unclean/legacy missing bindings and incomplete or invalid binding rows still warn.
+  has a usable one: a canonical or legacy name, or any other name that tmux
+  creates and finds as given and OpenRig's address readers read back
+  unchanged, such as an adopted seat's own session name
+  (`boundSessionNameProblem`, `session-name.ts`). Otherwise it launches the
+  derived name and says so before the launch, old name to planned name, with
+  the reason. A missing binding after the latest session's recorded
+  intentional exit is quiet; unclean/legacy missing bindings and incomplete
+  binding rows still warn.
 - Replays restore-safe startup using persisted startup context;
   prefilters missing optional artifacts into warnings; **hard-fails a node if
   a required startup file is missing** (`:1161` — status `"failed"`, error
@@ -306,6 +311,43 @@ cited here by number with the code that carries them):
   `seat-handover-service.ts:1151`), which is separate from the CLI
   `rig restore-packet` below. The rebuild source primes from the seat's
   durable chain (`buildRebuildPrimingChain`, `rebuild-priming-chain.ts:22`).
+- **Seat handover recovery** (#2985, #2861) — a handover that fails after
+  the in-place respawn with its Claude successor launched records the attempt
+  in `seat_handover_attempts` (migration 167; `seat-handover-attempts.ts`):
+  the generation it reserved, the pane, the session id it generated for
+  the launch and its frozen executable (a `#!` script or not, #2341).
+  `rig seat handover <seat> --recover --reason <reason>` calls
+  `POST /api/seat/handover/:seatRef/recover`, which runs
+  `SeatHandoverService.recover`: under the seat's lifecycle lease it checks
+  the attempt still replaces the current occupant, proves the session's only
+  pane holds exactly one foreground Claude naming that session id (two
+  samples, unchanged PID, with the launch's executable as readiness has it),
+  takes the conversation that process holds now from Claude's
+  `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
+  does; a `/clear` rotates it, and the conversation title is not compared)
+  as the seat's resume target. Recovery also reads the fork parent's process
+  file, checking that its pane belongs to the parent session before and after
+  the read. This applies even when the conversation is the
+  retiring occupant's or a fork parent's (`recoveredConversation`: the result
+  says so, and a fork on its parent's conversation reports `forkId: "none"`,
+  not a distinct fork; the token is written to the successor's session row only,
+  so the parent's binding and process are untouched), then commits through the same `commit()` with
+  the reserved generation (rolled back if it doesn't register). A classic
+  launch (one not in a native Claude permission mode: the `floor` and
+  `full_bypass` postures included) records no executable, so a Claude a `#!`
+  wrapper starts without exec is proven only when it is itself one the proof
+  recognizes (`claude`, the native installer's version, Nix); as `node cli.js`
+  or a renamed binary it is not, and when the foreground runs the launch's
+  conversation with no such Claude (nor a native one whose executable path
+  this sample could not read), the refusal says `--recover` can't prove it
+  (to run it again only once the pane shows a waiting wrapper has started
+  Claude), but only when a second sample,
+  `UNPROVABLE_CONFIRM_MS` (3 s) later, finds the same foreground: a `#!`
+  wrapper in its start window has not yet exec'd or started its Claude.
+  The result and
+  `seat.handover_completed` carry `recoveredFrom`. Codes: 404
+  `no_handover_to_recover`, 409 `handover_attempt_superseded` and
+  `successor_identity_unproven`, 501 `recover_runtime_unsupported`.
 
 ## 5. Daemon-side restore-check and CLI restore-packet
 

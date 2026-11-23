@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("node-addressed seat settings", () => {
   let db: Database.Database;
@@ -179,4 +180,103 @@ describe("node-addressed seat settings", () => {
       expect(db.prepare("SELECT COUNT(*) n FROM nodes WHERE id=? AND codex_config_profile IS NOT NULL").get(selected.node.id))
         .toEqual({ n: 0 });
     });
+});
+
+describe("#3253 status processLimits", () => {
+  let db: Database.Database;
+  let app: ReturnType<typeof createTestApp>;
+  let read: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = createFullTestDb(); app = createTestApp(db);
+    read = vi.fn(async (_target: string, requested: { tasksMax?: number; memoryMax?: number }) => ({ state: "applied", requested, pidsMax: String(requested.tasksMax),
+      pidsCurrent: 3, limitHits: 0, scope: "openrig-seat-worker_one-1a2b3c4d.scope" }));
+    Object.assign(app.tmuxAdapter, { readSeatProcessLimits: read });
+  });
+  afterEach(() => db.close());
+
+  /** A seat with a limit (or none), its session in `status`, and its binding's pane (null: none recorded). */
+  function seat(opts: { tasksMax?: number; memoryMax?: number; status?: string; pane?: string | null }) {
+    const rig = app.rigRepo.createRig("one");
+    const node = app.rigRepo.addNode(rig.id, "worker", { runtime: "codex", model: "m",
+      ...(opts.tasksMax || opts.memoryMax ? { processLimits: {
+        ...(opts.tasksMax ? { tasksMax: opts.tasksMax } : {}), ...(opts.memoryMax ? { memoryMax: opts.memoryMax } : {}) } } : {}) });
+    if (opts.status) {
+      const session = app.sessionRegistry.registerSession(node.id, "worker@one");
+      app.sessionRegistry.updateStatus(session.id, opts.status);
+      if (opts.pane !== undefined) app.sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "worker@one", tmuxPane: opts.pane });
+    }
+    return node;
+  }
+  const status = async () => {
+    const res = await app.app.request("/api/seat/status/worker@one");
+    expect(res.status).toBe(200);
+    return await res.json() as { current_occupant: string | null; processLimits?: Record<string, unknown> };
+  };
+
+  it("a stopped seat whose session name is still recorded reads not_applied, without reading tmux", async () => {
+    seat({ tasksMax: 256, status: "exited", pane: "%7" });
+    const body = await status();
+    expect(body.current_occupant).toBe("worker@one");
+    expect(body.processLimits).toEqual({ state: "not_applied", requested: { tasksMax: 256 },
+      reason: "the seat is not running; the limit applies at its next fresh launch" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("a stopped seat with only memory_max reads not_applied with that request, without reading tmux", async () => {
+    seat({ memoryMax: 4294967296, status: "exited", pane: "%7" });
+    expect((await status()).processLimits).toEqual({ state: "not_applied", requested: { memoryMax: 4294967296 },
+      reason: "the seat is not running; the limit applies at its next fresh launch" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("a stopped seat with both limits reads not_applied with both requested, without reading tmux", async () => {
+    seat({ tasksMax: 128, memoryMax: 1073741824, status: "exited", pane: "%7" });
+    expect((await status()).processLimits).toEqual({ state: "not_applied", requested: { tasksMax: 128, memoryMax: 1073741824 },
+      reason: "the seat is not running; the limit applies at its next fresh launch" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable stored value reads invalid, with a 200", async () => {
+    const node = seat({ tasksMax: 256, status: "running", pane: "%7" });
+    db.prepare("UPDATE nodes SET process_limits = 'BAD' WHERE id = ?").run(node.id);
+    expect((await status()).processLimits).toMatchObject({ state: "invalid", reason: expect.stringMatching(/the stored value is kept$/) });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("a running seat is read from its bound pane, not its session's active pane", async () => {
+    const node = seat({ tasksMax: 256, status: "running", pane: "%7" });
+    expect((await status()).processLimits).toMatchObject({ state: "applied", readFrom: "the seat's pane" });
+    expect(read).toHaveBeenCalledWith("%7", { tasksMax: 256 }, node.id);
+  });
+
+  it("a running seat with no pane recorded falls back to its session and says so", async () => {
+    const node = seat({ tasksMax: 256, status: "running", pane: null });
+    expect((await status()).processLimits).toMatchObject({ state: "applied",
+      readFrom: "the session's active pane (no pane is recorded for the seat)" });
+    expect(read).toHaveBeenCalledWith("worker@one", { tasksMax: 256 }, node.id);
+  });
+
+  it("no limit stored and not in a seat scope: no processLimits", async () => {
+    seat({ status: "running", pane: "%7" });
+    expect(await status()).not.toHaveProperty("processLimits");
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("a stopped seat with no limit reads nothing from tmux", async () => {
+    seat({ status: "exited", pane: "%7" });
+    expect(await status()).not.toHaveProperty("processLimits");
+  });
+
+  it("a seat in an environment guest reads not_applied, never applied, and nothing is read from its pane", async () => {
+    const node = seat({ tasksMax: 256, status: "running", pane: "%7" });
+    const real = new TmuxAdapter(async () => { throw new Error("no tmux in this test"); });
+    real.seatInEnvironmentGuest = (id) => id === node.id;
+    const getPanePid = vi.spyOn(real, "getPanePid");
+    Object.assign(app.tmuxAdapter, { readSeatProcessLimits: real.readSeatProcessLimits.bind(real), seatInEnvironmentGuest: real.seatInEnvironmentGuest });
+    const limits = (await status()).processLimits;
+    expect(limits).toMatchObject({ state: "not_applied", requested: { tasksMax: 256 }, reason: expect.stringMatching(/environment guest/) });
+    expect(limits).not.toHaveProperty("readFrom");
+    expect(getPanePid).not.toHaveBeenCalled();
+  });
 });

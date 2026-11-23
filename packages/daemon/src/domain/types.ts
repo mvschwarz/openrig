@@ -1,4 +1,6 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { readSendOutcome } from "./connection-contract.js";
+import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
   id: string;
@@ -27,6 +29,7 @@ export interface ContinuityState {
 }
 
 export interface Node {
+  inputRoute?: "typed" | "native";
   id: string;
   rigId: string;
   logicalId: string;
@@ -40,6 +43,15 @@ export interface Node {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
+  /** The seat's own process limits (spec `process_limits`, #3253): applied to its new launches; null/absent = none. */
+  processLimits?: import("./process-limits.js").ProcessLimits | null;
+  /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
+  processLimitsError?: string;
+  /** #2940: the seat declares keep_alive (resolved member > profile > agent defaults); present only when on. */
+  keepAlive?: boolean;
+  /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
+   *  null/absent = none. */
+  statuslineThrottle?: number | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -127,9 +139,29 @@ export interface Session {
 export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+/** A seat's current usage-limit reading: when OpenRig recorded it, and the reset it states. */
+export type UsageLimitReading = { asOf: string; resetsAt: string };
+
+/** Facts a runner reports about its own process; launch authentication is not independent native verification. */
+export interface RunnerObservations {
+  session?: { nativeRef: string };
+  model?: { id: string };
+  context?: { usedTokens?: number; windowTokens?: number; usedPercentage?: number; inputTokens?: number; outputTokens?: number };
+}
+export interface RunnerObservation {
+  nodeId: string;
+  sessionRowId: string;
+  generation: string;
+  runId: string;
+  grantId: string;
+  family: "observation";
+  sequence: number;
+  occurredAt: string;
+  receivedAt: string;
+  observations: RunnerObservations;
+}
 
 export type RigEvent =
-  | import("./seat-reaper-events.js").SeatReapedEvent
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
@@ -150,24 +182,40 @@ export type RigEvent =
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
+  | { type: "node.input_route_changed"; rigId: string; nodeId: string; from: "typed" | "native"; to: "typed" | "native"; reason: string; actor: string | null }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
   | { type: "node.removed"; rigId: string; nodeId: string }
   | { type: "binding.updated"; rigId: string; nodeId: string }
   | { type: "session.status_changed"; rigId: string; nodeId: string; status: string }
   | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
+  // #3315 — the daemon's tmux server stopped or started answering (terminal-server-reachability.ts): one event per
+  // change, never per attempt. The daemon stays up through both; neither event says a seat's session is gone.
+  | { type: "tmux.server_gone"; socket: string; cause: string; since: string }
+  | { type: "tmux.server_back"; socket: string; since: string; goneSince: string }
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "seat.runtime_home_recorded"; rigId: string; nodeId: string; logicalId: string; runtime: string; from: string | null; to: string;
+      slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
+      reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.statusline_throttle_changed"; rigId: string; nodeId: string; logicalId: string; from: number | null; to: number | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
+  | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only"; replaced?: unknown }
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null }
+  | import("./seat-reaper-events.js").SeatReapedEvent
+  // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
+  // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
+  | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
+  | { type: "seat.keep_alive.recovered"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status: string }
+  | { type: "seat.keep_alive.exhausted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status?: string; lastError?: string }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
@@ -186,7 +234,8 @@ export type RigEvent =
   // failed/attention_required restoreOutcome to operator_recovered after
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
-  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: import("./runtime-recovery.js").RecoveryEvidence | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
@@ -198,7 +247,24 @@ export type RigEvent =
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
-      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
+      /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
+      outcome: ReturnType<typeof readSendOutcome>;
+      /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
+       *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
+       *  named by `transport.hook_bridge_fallback` instead. */
+      hookBridgeUnavailable?: string;
+      /** The seat's current usage-limit reading when the send started, for a send whose text reached the input: its
+       *  agent isn't expected to read the text before the stated reset. */
+      usageLimit?: UsageLimitReading }
+  /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
+   *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
+   *  queued messages were handed back to typed delivery because the bridge had no live arm. */
+  | { type: "transport.hook_bridge_armed"; nodeId: string; sessionName: string; armId: string; hookEvent: string; generation: string | null }
+  | { type: "transport.hook_bridge_wake"; nodeId: string; sessionName: string; armId: string; outboxIds: string[]; hookEvent: string }
+  | { type: "transport.hook_bridge_expired"; nodeId: string; sessionName: string; armId: string }
+  | { type: "transport.hook_bridge_fallback"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
+  | { type: "transport.hook_bridge_uncertain"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -212,7 +278,11 @@ export type RigEvent =
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
-  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }
+  | { type: "agent.runner_turn"; nodeId: string; runId: string; sequence: number; nativeTurnId: string;
+      state: "opened" | "closed"; acceptedTurnIds: string[] }
+  | { type: "agent.runner_turn_fenced"; nodeId: string; generation: string; runId: string; nativeTurnId: string }
+  | { type: "agent.runner_map_lost"; nodeId: string; runId: string }
+  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" | "launcher" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
   // (`reconcile_capture`). NEVER carries the raw token (credential-class);
@@ -268,11 +338,16 @@ export type RigEvent =
        *  record (not just the command response) carries what primed the successor:
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
-        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
+        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string };
       /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
        *  session. The seat list marks the seat while this session is its current one. */
-      startedWithoutRequired?: string[]; successorSessionId?: string }
+      startedWithoutRequired?: string[]; successorSessionId?: string;
+      /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
+      /** #3218 item 6: the recovery recorded the conversation its launch named because the successor's current one could
+       *  not be read (Claude's session file for its process); the warning the command printed, kept in the history. */
+      conversationUnconfirmed?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -287,7 +362,9 @@ export type RigEvent =
   | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_model_passed"; rigId: string; nodeId: string; sessionId: string; model: string; resume: boolean }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; guidanceLaunchInstructions?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; guidanceLaunchInstructions?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence;
+      /** A readiness failure's last readiness code; `returned_to_shell` means the harness left the pane as a proven idle shell. */
+      readinessCode?: string }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
@@ -318,6 +395,12 @@ export type RigEvent =
   // (null for legacy/omitted — always present, never absent, so consumers
   // can title feed cards without a second fetch).
   | { type: "queue.created"; qitemId: string; sourceSession: string; destinationSession: string; priority: string; tier: string | null; summary: string | null }
+  // #3728: a queue write or send the daemon refused or could not settle, so it stays diagnosable when the caller loses
+  // stderr. Three outcomes stay apart: these refusals (nothing stored), a send kept as a failed message in the sender's
+  // outbox (queue outbox list, not an event), and a forwarded write whose result is unknown. Never carries the body.
+  | { type: "queue.create_refused"; sourceSession: string | null; destinationSession: string | null; reason: string; status: number; hostId: string | null }
+  | { type: "queue.create_remote_unknown"; qitemId: string | null; sourceSession: string | null; destinationSession: string | null; hostId: string; failureClass: string }
+  | { type: "transport.send_refused"; senderSession: string | null; session: string | null; reason: string; status: number }
   | { type: "queue.handed_off"; qitemId: string; fromSession: string; toSession: string; closureReason: "handed_off_to"; summary: string | null }
   | { type: "queue.claimed"; qitemId: string; destinationSession: string; claimedAt: string; closureRequiredAt: string | null; summary: string | null }
   | { type: "queue.unclaimed"; qitemId: string; destinationSession: string; reason: string; summary: string | null }
@@ -347,12 +430,17 @@ export type RigEvent =
   | { type: "classifier.dead"; leaseId: string; classifierSession: string; lastHeartbeat: string; detectedAt: string }
   | { type: "classifier.reclaimed"; leaseId: string; previousClassifierSession: string; reclaimedBySession: string; reason: string; reclaimedAt: string }
   | { type: "view.changed"; viewName: string; cause: string }
+  // settings.changed: an HTTP caller set or reset a setting that defines what this daemon may reach.
+  // Stored, so a person asking later why the file surface changed has something to find.
+  | { type: "settings.changed"; key: string; action: "set" | "reset" }
   // PL-004 Phase C: daemon-native Watchdog supervision tree events.
   // Three policies in scope (periodic-reminder, artifact-pool-ready,
   // edge-artifact-required); workflow-keepalive deferred to Phase D.
   // Pure `not_due` polls are NOT recorded in history and NOT emitted
   // as events; only meaningful evaluations + lifecycle transitions are.
-  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string }
+  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string;
+      /** With a queue-only status (queued_as_row, noted_on_queued_row): the queue row the reminder became or was noted on. */
+      queuedQitemId?: string }
   | { type: "watchdog.evaluation_skipped"; jobId: string; policy: string; skipReason: string }
   | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
   | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
@@ -368,11 +456,11 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number }
+  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number; ownerSession?: string; ownerSource?: "named" | "resolved" }
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -461,6 +549,10 @@ export interface SnapshotData {
   continuityStates?: ContinuityState[];
   nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
   envReceipt?: EnvReceipt | null;
+  /** Each seat's latest operator-recorded runtime home at capture: the home, the original conversation and occupant it
+   *  was recorded against, and its revision. A restore review shows it beside the seat's current record, so a later
+   *  correction is a visible choice bound by the review's revision. Absent when no seat has one. */
+  runtimeHomeRecordsByNode?: Record<string, RuntimeHomeRecordRef>;
 }
 
 export type SnapshotOccupantState =
@@ -490,7 +582,9 @@ export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
 export interface RestoreExcludedNode {
   nodeId: string;
   logicalId: string;
-  reason: "historical_not_in_intended_roster";
+  /** Historical: no longer a node of the rig. Current: still a node of the rig (a seat claimed after the rig's topology was
+   *  recorded), which this restore skipped. */
+  reason: "historical_not_in_intended_roster" | "current_seat_not_in_intended_roster";
 }
 
 export interface Snapshot {
@@ -527,6 +621,17 @@ export interface RestoreResult {
   snapshotSelection?: RestoreSnapshotSelection;
   intendedRoster?: Array<{ nodeId: string; logicalId: string }>;
   excludedNodes?: RestoreExcludedNode[];
+  /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
+  /** Seats this restore left stopped on purpose, outside `nodes` so they don't count in `rigResult`: a seat pool agent
+   *  the pool drained (#3395) stays down until the pool brings it back. Present only when there is one. */
+  keptDown?: RestoreKeptDownNode[];
+}
+
+export interface RestoreKeptDownNode {
+  nodeId: string;
+  logicalId: string;
+  reason: "drained pool agent, not started";
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -543,6 +648,11 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
+  intendedNodeId?: string;
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so.
+   *  `resume_rolled_back`: its resume failed and the blank session it launched was rolled back, so no agent runs in it. */
+  stage?: "harness_not_started" | "resume_rolled_back";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
@@ -552,6 +662,14 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
   sourceSessionId?: string;
   resultSessionId?: string;
+  /** Set by an explicit selected-history startup, and by a keep_alive relaunch refused for a daemon shutdown (#2940):
+   *  this launch was rolled back (every terminal it started was stopped, tmux confirmed it), and the seat's binding and
+   *  sessions as they were before it were put back. */
+  compensated?: true;
+  /** Set by an explicit selected-history startup, and by a keep_alive relaunch refused for a daemon shutdown (#2940):
+   *  this seat's restore returned before its launch, so no terminal was started, no session registered and no resume
+   *  sent. */
+  notStarted?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
   // outcome after `restore.outcome_reconciled`; never produced directly by
@@ -589,6 +707,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
+   *  applies it). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export type RestoreOutcome =
@@ -719,6 +840,7 @@ export interface SeatIdentityVerdict {
     | "pane_pid_gone"
     | "binding_pane_missing"
     | "session_missing"
+    | "session_missing_tmux_unavailable"
     | "pane_exited"
     | "tmux_unavailable"
     | null;
@@ -735,10 +857,11 @@ export interface SeatIdentityVerdict {
   observedAt: string;
 }
 
-/** Only a confirmed missing session proves the seat is no longer running.
+/** Only a confirmed missing session proves the seat is no longer running. A later unreadable sample
+ * retains that evidence and notes its uncertainty; it is not a new absence observation.
  * Callers must first gate the verdict to the current session and binding. */
 export function identityVerdictConfirmsSessionMissing(verdict: SeatIdentityVerdict | null | undefined): boolean {
-  return verdict?.reason === "session_missing";
+  return verdict?.reason === "session_missing" || verdict?.reason === "session_missing_tmux_unavailable";
 }
 
 /** Positive executor absence only. Unknown identity or an unreadable pane never proves an exit.
@@ -785,6 +908,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Configured Claude account label, not an observation of the active login. */
+  configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */
@@ -794,6 +919,14 @@ export interface NodeInventoryEntry {
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
+  /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
+  stopRequested?: boolean;
+  /** #2940: the seat declares keep_alive, so the daemon relaunches it when it falls; absent = off. */
+  keepAlive?: boolean;
+  /** #2940: the keep_alive seat's current recovery incident, when it has one: the attempts spent, whether they ran out
+   *  (the seat then waits for a person, as lifecycle `attention_required` while it isn't running), the last error and
+   *  when the last attempt started. */
+  keepAliveIncident?: { attempts: number; exhausted: boolean; lastError: string | null; lastAttemptAt: string | null };
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -820,6 +953,8 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
+  /** The stage of this session's own startup failure, read only while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // Extended fields
   model: string | null;
   /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
@@ -882,6 +1017,8 @@ export interface NodeInventoryEntry {
     decidedBy: string | null;
     seq: number;
     lastSwap: { generation: string; at: string } | null;
+    /** A typed usage limit ended the last turn (the activity reads unknown): when it was seen and its stated reset. */
+    usageLimit?: { rung: string; observedAt: string; resetsAt: string | null };
   } | null;
   /**
    * ARCH RULING 3a947fb1 (FR-7 additive) — the seat's RAW `lastActivityAt`
@@ -1062,6 +1199,8 @@ export interface StartupBlock {
 }
 
 export type StartupFailureStage =
+  /** Restore didn't start the harness at all (no startup context or no adapter): the pane holds only a shell. */
+  | "harness_not_started"
   | "permission_selection"
   | "proof_selection"
   | "projection"
@@ -1089,6 +1228,9 @@ export interface LifecycleDefaults {
    *  is a materialization-time refusal for apprentice-handover. */
   mechanic?: string;
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
+  /** #2940: relaunch the seat when it falls while the daemon runs (not when it is stopped on purpose). Absent at every
+   *  level = off; unlike the fields above, the defaults level doesn't materialize it. */
+  keepAlive?: boolean;
 }
 
 /** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
@@ -1176,12 +1318,17 @@ export interface LegacyRigSpecNode {
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1302,6 +1449,7 @@ export interface RigSpecPodMember {
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
@@ -1309,6 +1457,16 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
+  /** #3395: the seat pool this member is the model of (`pool:`), stored on its node; `null` is `pool: {}`, which
+   *  clears a stored block on re-apply; absent leaves it unchanged. */
+  pool?: import("./seat-pool-spec.js").SeatPoolSpec | null;
+  /** #3395: a `pool:` block that can't be used, as authored. It raised an advisory, is stored on the node as it is (it
+   *  holds that pool rather than removing it) and is never serialized back into a spec. */
+  unusablePool?: { raw: unknown };
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
@@ -1320,6 +1478,8 @@ export interface RigSpecPodMember {
   env?: Record<string, string>;
   cwd: string;
   restorePolicy?: string;
+  /** #2940: spec `keep_alive`; overrides the agent spec's lifecycle.keep_alive (most-specific-wins). Absent = inherit. */
+  keepAlive?: boolean;
   /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
    *  deprecated-alias spelling, normalized at resolution). Absent = inherit. */
   compactionStrategy?: string;
@@ -1403,9 +1563,14 @@ export interface WorkspaceSpec {
   knowledgeRoot?: string;
 }
 
+/** #80: how a rig groups its seats' systemd scopes. `rig`: beneath the rig's own slice under openrigseats.slice. */
+export type SeatSliceMode = "rig";
+
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
+  /** #80: spec `seat_slice`; absent keeps today's launch paths. */
+  seatSlice?: SeatSliceMode;
   version: string;
   name: string;
   summary?: string;
@@ -1417,6 +1582,8 @@ export interface RigSpec {
   env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
+  /** Override the daemon's default onboarding pack setting for this rig. */
+  defaultOnboardingPack?: boolean;
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;
@@ -1606,6 +1773,7 @@ export interface ExpansionPodFragment {
     effort?: unknown;
     codexConfigProfile?: string;
     claudePermissions?: unknown;
+    claudeAutoMode?: unknown;
     claudeToken?: unknown;
     claudeMcp?: unknown;
     codexPermissions?: unknown;
@@ -1665,6 +1833,7 @@ export type ContextAvailability = "known" | "unknown";
 
 export type ContextUnknownReason =
   | "unsupported_runtime"
+  | "window_capacity_unknown"
   | "not_managed"
   | "missing_sidecar"
   | "parse_error"
@@ -1676,7 +1845,11 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | null;
+  // "pi_usage_entries" is Pi's OWN persisted usage (fed by the runner's posted
+  // entries) — kept distinct from "runner_reported" because the token
+  // threshold's reader treats runner_reported rows as non-samples, and `rig ps`
+  // renders the two labels differently.
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "pi_usage_entries" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;
@@ -1690,4 +1863,6 @@ export interface ContextUsage {
   fresh: boolean;
   /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
   clientCostEstimateUsd?: number | null;
+  /** Claude only: the occupant generation the status-line collector recorded with this sample; null when none. */
+  occupantGeneration?: string | null;
 }

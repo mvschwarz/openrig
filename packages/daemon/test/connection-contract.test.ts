@@ -21,6 +21,7 @@ describe("readWakeOutcome: every recorded nudge result reads as a delivery fact"
     ["failed:webhook (hook) not rung: the URL is invalid (bad scheme)", { fact: "not-delivered", route: "hosted-trigger" }],
     ["gateway-owned: 'slack:U1@external' is a virtual @external destination", { fact: "unknown", route: "gateway" }],
     ["unroutable: 'm@r' is a hosted member with no wake trigger", { fact: "not-delivered", route: "none" }],
+    ["awaiting-pickup: 'm@r' is a hosted member with no wake trigger, so no wake is sent", { fact: "not-delivered", route: "none" }],
     ["indeterminate:wake send timed out", { fact: "unknown", route: "terminal" }],
     ["indeterminate:earlier delivery unconfirmed; retry failed:x", { fact: "unknown", route: "terminal" }],
     ["indeterminate: parked-owner wake delivery — timed out", { fact: "unknown", route: "terminal" }],

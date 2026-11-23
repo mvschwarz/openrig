@@ -156,6 +156,9 @@ export class HealthDiagnosisService {
       if (now - latestOwnerPresentation < policy.cooldownSeconds * 1000) {
         actions.push({ ...base, action: "deferred", reason: "owner cooldown" }); continue;
       }
+      if (old && this.deps.queue.deliveryDrains.holds(old.row.destinationSession)) {
+        actions.push({ ...base, action: "deferred", reason: "delivery drain" }); continue;
+      }
       actions.push({ ...base, action: old ? "represent" : "create" });
       latestOwnerPresentation = now;
       if (!apply) continue;

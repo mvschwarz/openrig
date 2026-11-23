@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { DaemonClient, launchNodeNotice } from "../src/daemon-client.js";
-import { StartupController, startupLines, type StartupSeat } from "../src/startup.js";
+import { StartupController, daemonOnlyNotice, startupLines, type StartupSeat } from "../src/startup.js";
 import { createViewState, emptySnapshot } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
 
@@ -118,6 +118,11 @@ describe("TUI startup choices", () => {
     expect(f.startDaemon).toHaveBeenCalledTimes(1);
     expect(f.posts).toEqual([]);
     expect(f.controller.state.page).toBe("rigs");
+    // It names the existing way back for the kernel, and claims nothing about why it isn't running.
+    expect(f.controller.state.notice).toBe("Daemon started; this start didn't start any seats. The kernel is listed first: choose it to see its seats and resume one.");
+  });
+  it("with no kernel rig, a daemon-only start points at choosing a rig or setting up a kernel", () => {
+    expect(daemonOnlyNotice([{ name: "work" }])).toBe("Daemon started; this start didn't start any seats. Choose a rig, or press k to set up a kernel.");
   });
   it("decline and refresh invalidate fresh consent with no launch effect", async () => {
     const f = fixture(); await chooseOperator(f);

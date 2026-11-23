@@ -57,6 +57,7 @@ describe("SeatHandoverService", () => {
   let checkReady: ReturnType<typeof vi.fn>;
   let readSidecar: ReturnType<typeof vi.fn>;
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
+  let captureClaudeSessionId: ReturnType<typeof vi.fn>;
   let claudeProcessStartedAt: ((sessionName: string) => Promise<string | null>) | undefined;
   let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
   let declareOccupantSwap: ReturnType<typeof vi.fn>;
@@ -95,6 +96,7 @@ describe("SeatHandoverService", () => {
     // B2 — discovered-mode derive-helper deps (Codex thread-id capturer by default).
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
+    captureClaudeSessionId = vi.fn(async () => undefined);
     claudeProcessStartedAt = undefined;
     invalidateRetiringOccupant = vi.fn();
     declareOccupantSwap = vi.fn();
@@ -131,7 +133,7 @@ describe("SeatHandoverService", () => {
       newSuccessorId: () => "01SUCCID0",
       runtimeAdapters: { [runtime]: { ...codexAdapter(), runtime } },
       contextUsageStore: { readSidecar } as never,
-      resumeTokenCapturer: { captureCodexThreadId } as never,
+      resumeTokenCapturer: { captureCodexThreadId, captureClaudeSessionId } as never,
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
       occupantInvalidator,
       activityOracle: { declareOccupantSwap },
@@ -193,7 +195,9 @@ describe("SeatHandoverService", () => {
     expect(sessionRegistry.getSessionsForRig(rig.id).find(session => session.id === sessionId)?.status).toBe("superseded");
     const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
     expect(JSON.parse(event.payload)).toMatchObject({ nodeId: node.id, previousOccupant: "dev-impl@seat-rig", currentOccupant: "dev-impl@seat-rig", source });
-    expect(db.prepare("SELECT origin FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id)).toEqual({ origin: "launched" });
+    // #3409: it records the folder it was launched in (the seat's saved folder), so rig down doesn't name it as unrecorded.
+    expect(db.prepare("SELECT origin, launched_cwd FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id))
+      .toEqual({ origin: "launched", launched_cwd: "/project" });
   });
 
   // #875: a Codex seat whose launch carried its guidance as developer instructions left none in the repository AGENTS.md,
@@ -959,16 +963,17 @@ describe("SeatHandoverService", () => {
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result.ok).toBe(true);
+    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
+    // the reused name, so the node's live generation now DIFFERS from the retiring one it received.
+    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+    expect(successorGen).not.toBe(retiringGen);
     expect(invalidateRetiringOccupant).toHaveBeenCalledTimes(1);
     expect(invalidateRetiringOccupant).toHaveBeenCalledWith({
       retiringSessionName: "dev-impl@seat-rig",
       successorSessionName: "dev-impl@seat-rig",
       retiringGeneration: retiringGen, // captured pre-mint = the RETIREE's gen, not the successor's
+      successorGeneration: successorGen, // #3044 C3: the generation the commit registered, so a sample it wrote is kept
     });
-    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
-    // the reused name, so the node's live generation now DIFFERS from what the invalidator received.
-    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
-    expect(successorGen).not.toBe(retiringGen);
   });
 
   it("does NOT invalidate the retiring occupant when the handover fails before commit (no re-key on a non-committed handover)", async () => {
@@ -1293,6 +1298,83 @@ describe("SeatHandoverService", () => {
       detail: expect.stringContaining("without additional writable directory grants, as on a read-only fresh launch") } } } });
   });
 
+  it("rebuild keeps the saved filesystem policy instead of carrying a broader observed predecessor", async () => {
+    const { node } = seedSeat();
+    const own = { approval: "never", filesystem: { ":minimal": "read", "/work": "write", "/work/private": "deny" }, network_access: false };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+    currentCodexPermissions.mockResolvedValue({ state: "observed", envelope: { approvalPolicy: "never", sandboxPolicy: { type: "danger-full-access" } },
+      profile: null, processStartedAt: "Mon Apr 20 12:00:00 2026", observedAt: "2026-04-20T12:01:00Z" });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+    expect(result).toMatchObject({ ok: true, result: { sourceOutcome: { permissions: { state: "selection_used",
+      detail: expect.stringContaining("explicit filesystem policy and no additional writable directory grants") } } } });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding.codexRebuildPermissions).toBeUndefined();
+    expect(binding.codexPermissions).toEqual(own);
+  });
+
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])(
+    "keeps the predecessor running when filesystem preflight refuses before %s handover", async source => {
+      const { node, sessionId } = seedSeat();
+      if (!sessionId) throw new Error("fixture requires a current session");
+      sessionRegistry.updateResumeToken(sessionId, "native-thread", "codex_id");
+      const own = { approval: "never", filesystem: { ":minimal": "read", "/project": "write" } };
+      db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(own), node.id);
+      const before = sessionRegistry.getBindingForNode(node.id);
+      const remedy = "Fix: Remove the conflicting lower-layer access before another handover.";
+      const verifyFilesystemPolicy = vi.fn(async () => ({ ok: false as const, error: `native policy refuses successor\n${remedy}` }));
+      const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
+        fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, listFiles: () => [] } });
+      const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+        tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
+      expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source, reason: "check successor policy" }))
+        .toMatchObject({ ok: false, code: "successor_create_failed", message: expect.stringContaining("native policy"),
+          guidance: expect.stringContaining(remedy) });
+      expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ codexHome: "/seat-home", cwd: "/project" }));
+      expect(signalPaneProcess).not.toHaveBeenCalled();
+      expect(respawnPane).not.toHaveBeenCalled();
+      expect(killSession).not.toHaveBeenCalled();
+      expect(sessionRegistry.getBindingForNode(node.id)).toEqual(before);
+    });
+
+  it("checks the saved filesystem policy before signaling the predecessor and then hands over", async () => {
+    const { node } = seedSeat();
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
+      .run(JSON.stringify({ approval: "never", filesystem: { ":minimal": "read" } }), node.id);
+    const verifyFilesystemPolicy = vi.fn(async () => ({ ok: true as const, verified: true as const }));
+    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
+      fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {} } });
+    vi.spyOn(adapter, "launchHarness").mockImplementation(launchHarness);
+    vi.spyOn(adapter, "checkReady").mockImplementation(checkReady);
+    signalPaneProcess.mockImplementation(async () => {
+      expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(1);
+      return { ok: true };
+    });
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
+    expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source: "fresh", reason: "check successor policy" }))
+      .toMatchObject({ ok: true });
+    expect(signalPaneProcess).toHaveBeenCalledTimes(1);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues handover with the authored policy when native verification is inconclusive", async () => {
+    const { node } = seedSeat();
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
+      .run(JSON.stringify({ approval: "never", filesystem: { ":minimal": "read" } }), node.id);
+    const verifyFilesystemPolicy = vi.fn(async () => ({ ok: true as const, verified: false as const, reason: "native read timed out" }));
+    const adapter = new CodexRuntimeAdapter({ tmux: tmux(), codexHome: "/seat-home", verifyFilesystemPolicy,
+      fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {} } });
+    vi.spyOn(adapter, "launchHarness").mockImplementation(launchHarness);
+    vi.spyOn(adapter, "checkReady").mockImplementation(checkReady);
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { codex: adapter }, sleep: async () => {}, readinessTimeoutMs: 50 });
+    expect(await handover.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "keep authored policy" }))
+      .toMatchObject({ ok: true, result: { warnings: expect.arrayContaining(["policy not verified: native read timed out"]) } });
+    expect(verifyFilesystemPolicy).toHaveBeenCalledTimes(1);
+    expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({ codexPermissions: { filesystem: { ":minimal": "read" } } });
+    expect(signalPaneProcess).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["observed", "unverified"] as const)("rebuild keeps saved-envelope launch additions when predecessor permissions are %s", async state => {
     const { node } = seedSeat({ codexConfigProfile: "locked" });
     const own = { sandbox: "workspace-write", approval: "on-request", writable_roots: ["/shared/state"],
@@ -1496,6 +1578,23 @@ describe("SeatHandoverService", () => {
     expect(startedAt).toHaveBeenCalledWith("successor-session");
   });
 
+  it("B2 (claude-code): with no status-line sidecar, reads the current process's file from the seat's own directory", async () => {
+    readSidecar.mockReturnValue({ ok: false, reason: "missing_sidecar" });
+    captureClaudeSessionId.mockResolvedValue("44444444-4444-4444-8444-444444444444");
+    const { node } = seedSeat({ runtime: "claude-code" });
+    const discovered = seedDiscovery({ runtimeHint: "claude-code" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "mvp-proof", source: `discovered:${discovered.id}` });
+
+    expect(result.ok).toBe(true);
+    // The seat's directory goes with it, as adoption's does, so a relative CLAUDE_CONFIG_DIR resolves where the seat runs.
+    expect(captureClaudeSessionId).toHaveBeenCalledWith("successor-session", { nodeId: node.id, cwd: "/project" });
+    const newSession = db.prepare(
+      "SELECT resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ?"
+    ).get(node.id, "successor-session") as Record<string, string | null>;
+    expect(newSession).toMatchObject({ resume_token: "44444444-4444-4444-8444-444444444444", resume_provenance: "adoption" });
+  });
+
   it("B2: honest redacted skip when the discovered token cannot be derived", async () => {
     const { node } = seedSeat({ runtime: "codex" });
     const discovered = seedDiscovery();
@@ -1533,6 +1632,21 @@ describe("SeatHandoverService", () => {
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(durableRows()).toBe(before);
   });
+
+  it.each([["readiness", true], ["launch", false]] as const)(
+    "#3253: a handover whose %s fails after a respawn without the limit forwards the notice", async (_step, launched) => {
+      seedSeat();
+      const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+      respawnPane.mockResolvedValue({ ok: true, processLimits: notice });
+      if (launched) checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+      else launchHarness.mockResolvedValue({ ok: false, error: "codex binary not found" });
+
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+      expect(result).toMatchObject({ ok: false, code: "successor_create_failed", processLimits: notice });
+      // one source: the structured notice (the CLI renders its line); the guidance doesn't repeat it
+      expect((result as { guidance: string }).guidance).not.toMatch(/process_limits requested/);
+    });
 
   it("maps a listPanes THROW resolving the departing pane to a loud successor_create_failed (no rejection, seat untouched)", async () => {
     const { node } = seedSeat();
@@ -1900,6 +2014,22 @@ describe("SeatHandoverService", () => {
     });
   });
 
+  it("wires the recover route: a seat with no failed handover has nothing to adopt, and a reason is required (#2985)", async () => {
+    const setup = createTestApp(db, { tmux: { hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter });
+    const rig = setup.rigRepo.createRig("seat-rig");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    const post = (body: unknown) => setup.app.request("/api/seat/handover/dev-impl%40seat-rig/recover", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const none = await post({ reason: "adopt" });
+    expect(none.status).toBe(404);
+    expect(await none.json()).toMatchObject({ ok: false, code: "no_handover_to_recover" });
+    const noReason = await post({});
+    expect(noReason.status).toBe(400);
+    expect(await noReason.json()).toMatchObject({ ok: false, code: "missing_reason" });
+  });
+
   it.each([undefined, "none"] as const)("carries current rules, model, Advisor and MCP selection (%s) to the successor", async claudeMcp => {
     const { node } = seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
     rigRepo.setNodeClaudeMcp(node.id, claudeMcp ?? null);
@@ -1907,6 +2037,8 @@ describe("SeatHandoverService", () => {
     const rules = { allow: [], deny: ["Read(./private/**)"] };
     const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
     expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", rules, actor: "operator@seat-rig", reason: "Set successor rules" })).toMatchObject({ ok: true });
+    const claudeAutoMode = { environment: ["$defaults", "Source control: github.com/acme"] };
+    expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", autoMode: claudeAutoMode, actor: "operator@seat-rig", reason: "Set successor auto mode" })).toMatchObject({ ok: true });
     launchHarness.mockResolvedValue({ ok: true, resumeToken: "claude-successor", resumeType: "claude_id" });
     const claudeService = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
@@ -1916,7 +2048,7 @@ describe("SeatHandoverService", () => {
     });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
     expect(launchHarness).toHaveBeenCalledTimes(1);
-    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeMcp });
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeAutoMode, claudeMcp });
   });
 
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {

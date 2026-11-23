@@ -344,6 +344,36 @@ describe("SeatAttentionReconciler", () => {
     });
   });
 
+  it("clear-attention retains confirmed session absence when tmux cannot be read", async () => {
+    const rig = rigRepo.createRig("r-stopped-rebind");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@r-stopped-rebind");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%old" });
+    while (Date.now() <= decodeTime(session.id)) await new Promise((resolve) => setTimeout(resolve, 1));
+    new SeatIdentityStore(db).upsert({
+      nodeId: node.id, verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      sessionName: session.sessionName, observedAt: new Date().toISOString(),
+      evidence: { registeredPane: "%old", observedPid: null, observedCommand: null, matchedLayer: null },
+    });
+    expect(getNodeInventory(db, rig.id)[0]!.sessionStatus).toBe("detached");
+    const paneReconciler = new SeatAttentionReconciler({
+      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
+      tmux: {
+        listPanes: vi.fn(async () => { throw new Error("can't find session: worker@r-stopped-rebind"); }),
+        getPanePid: vi.fn(async () => null), getPaneCommand: vi.fn(async () => null),
+      },
+    });
+
+    expect((await paneReconciler.clearAttention(session.sessionName)).ok).toBe(false);
+    expect(new SeatIdentityStore(db).getForNode(node.id)).toMatchObject({
+      verdict: "pane_missing", reason: "session_missing_tmux_unavailable", evidenceSource: "tmux_session",
+      evidence: { registeredPane: "%old" },
+    });
+    expect(getNodeInventory(db, rig.id)[0]!).toMatchObject({ sessionStatus: "detached", storedSessionStatus: "running" });
+  });
+
   // Audit event emitted with distinct clearedBy
   it("emits seat.attention_cleared event on evidence-gated clear", async () => {
     const { rigId, nodeId } = seedAttentionSeat("r9", "worker@r9");
@@ -557,13 +587,14 @@ describe("SeatAttentionReconciler", () => {
     return { rigId: rig.id, nodeId: node.id, sessionId: session.id, attemptId: started.seq };
   }
 
-  function strictDerivedReconciler() {
+  function strictDerivedReconciler(stillAtPrompt: (nodeId: string) => boolean = () => false) {
     return new SeatAttentionReconciler({
       sessionRegistry,
       eventBus,
       agentActivityStore: activityStore,
       db,
       reconcileRestoreOutcome: async (rigId, nodeId) => {
+        if (stillAtPrompt(nodeId)) return { ok: false as const, code: "pane_not_usable", detail: "Still at the picker." };
         const started = db.prepare(
           "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1",
         ).get(rigId) as { seq: number };
@@ -1063,7 +1094,8 @@ describe("SeatAttentionReconciler", () => {
       const elsewhere = seat(other.id, "worker", "worker@r-2622-elsewhere");
       eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
       eventBus.emit({ type: "restore.started", rigId: other.id, snapshotId: "snap-1" });
-      const checked = strictDerivedReconciler();
+      // At completion every flagged seat in the rig is checked; the one still at its picker doesn't prove out.
+      const checked = strictDerivedReconciler((nodeId) => nodeId === waiting);
 
       // Answered and settled while the rest of the rig was still restoring: nothing to reconcile yet.
       expect(await checked.onSeatActivity("early@r-2622-early", "idle")).toBe(false);
@@ -1081,6 +1113,123 @@ describe("SeatAttentionReconciler", () => {
       expect(attention(rig.id, early).needsAttention).toBe(false);
       expect(attention(rig.id, waiting).needsAttention).toBe(true);
       expect(attention(other.id, elsewhere).needsAttention).toBe(true);
+    });
+
+    // A subset launch (`rig launch --seats`) records only its completion; that completion is the attempt.
+    function seedSubsetAtPrompt(rigName: string, sessionName: string): { rigId: string; nodeId: string; attemptId: number } {
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, sessionName);
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      sessionRegistry.updateStatus(session.id, "running");
+      const completed = eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }], warnings: [],
+      } } as any);
+      return { rigId: rig.id, nodeId: node.id, attemptId: completed.seq };
+    }
+    // Stands in for the restore owner's proof: it appends the attempt-scoped recovery when the live seat proves out.
+    const subsetProof = (proves: boolean) => vi.fn(async (rigId: string, nodeId: string) => {
+      if (!proves) return { ok: false as const, code: "process_lineage_mismatch", detail: "The pane runs another conversation." };
+      const attemptId = (db.prepare("SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.subset_completed' ORDER BY seq DESC LIMIT 1")
+        .get(rigId) as { seq: number }).seq;
+      const evidence = { tmux: true, fgProcess: "claude" as const, resumeTokenUsed: true, paneState: "usable" as const };
+      eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId, from: "attention_required", to: "operator_recovered", evidence });
+      return { ok: true as const, attemptId, from: "attention_required" as const, to: "operator_recovered" as const, evidence };
+    });
+
+    it("a subset-launched seat's first positive activity runs the strict reconciler, and a proven resume stops needing attention", async () => {
+      const { rigId, nodeId, attemptId } = seedSubsetAtPrompt("r-subset-resumed", "worker@r-subset-resumed");
+      const strict = subsetProof(true);
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      expect(attention(rigId, nodeId)).toEqual({ lifecycleState: "attention_required", needsAttention: true });
+
+      expect(await checked.onSeatActivity("worker@r-subset-resumed", "running")).toBe(true);
+
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+      const subset = db.prepare("SELECT seq FROM events WHERE type = 'restore.subset_completed'").all() as { seq: number }[];
+      expect(subset.map((row) => row.seq)).toEqual([attemptId]);
+      expect(attention(rigId, nodeId).needsAttention).toBe(false);
+    });
+
+    it("a subset-launched seat whose proof fails keeps its outcome, with nothing appended or refused", async () => {
+      const { rigId, nodeId } = seedSubsetAtPrompt("r-subset-other", "worker@r-subset-other");
+      const strict = subsetProof(false);
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      const before = eventCount();
+
+      expect(await checked.onSeatActivity("worker@r-subset-other", "idle")).toBe(false);
+
+      expect(strict).toHaveBeenCalledTimes(1);
+      expect(eventCount()).toBe(before);
+      expect(attention(rigId, nodeId)).toEqual({ lifecycleState: "attention_required", needsAttention: true });
+    });
+
+    it("a seat that settled before its subset launch completed is checked once at that completion", async () => {
+      const rig = rigRepo.createRig("r-subset-early");
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, "worker@r-subset-early");
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      sessionRegistry.updateStatus(session.id, "running");
+      const strict = subsetProof(true);
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      expect(await checked.onSeatActivity("worker@r-subset-early", "idle")).toBe(false);
+      eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }], warnings: [],
+      } } as any);
+
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(1);
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(0);
+      expect(strict).toHaveBeenCalledTimes(1);
+      expect(attention(rig.id, node.id).needsAttention).toBe(false);
+    });
+
+    // A seat whose activity never reads running or idle (an unrecognized runtime version, say) is still checked once when
+    // its launch completes. The proof decides: a resumed seat clears, and one that isn't stays flagged with nothing appended.
+    it("at a subset launch's completion, seats whose activity never read running or idle are checked, and only a proven one clears", async () => {
+      const rig = rigRepo.createRig("r-subset-unknown");
+      const seat = (logicalId: string) => {
+        const node = rigRepo.addNode(rig.id, logicalId, { role: "worker", runtime: "codex" });
+        const session = sessionRegistry.registerSession(node.id, `${logicalId}@r-subset-unknown`);
+        sessionRegistry.updateStartupStatus(session.id, "ready");
+        sessionRegistry.updateStatus(session.id, "running");
+        return node.id;
+      };
+      const resumed = seat("resumed"), other = seat("other");
+      const completed = eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: resumed, logicalId: "resumed", status: "attention_required" }, { nodeId: other, logicalId: "other", status: "attention_required" }],
+        warnings: [],
+      } } as any);
+      const strict = vi.fn(async (rigId: string, nodeId: string) => {
+        if (nodeId !== resumed) return { ok: false as const, code: "process_lineage_mismatch", detail: "The pane runs another conversation." };
+        const evidence = { tmux: true, fgProcess: "codex" as const, resumeTokenUsed: true, paneState: "usable" as const };
+        eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId: completed.seq, from: "attention_required", to: "operator_recovered", evidence });
+        return { ok: true as const, attemptId: completed.seq, from: "attention_required" as const, to: "operator_recovered" as const, evidence };
+      });
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      await checked.onSeatActivity("other@r-subset-unknown", "unknown");
+
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(1);
+
+      expect(strict.mock.calls.map(([, nodeId]) => nodeId).sort()).toEqual([resumed, other].sort());
+      expect(attention(rig.id, resumed).needsAttention).toBe(false);
+      expect(attention(rig.id, other)).toEqual({ lifecycleState: "attention_required", needsAttention: true });
+    });
+
+    it("a subset seat cleared by rig seat clear-attention isn't proved again when a launch completes", async () => {
+      const { rigId } = seedSubsetAtPrompt("r-subset-cleared", "worker@r-subset-cleared");
+      const strict = subsetProof(true);
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      const cleared = await checked.clearAttention("worker@r-subset-cleared", { reason: "Saw the resumed conversation in the pane" });
+      expect(cleared).toMatchObject({ ok: true });
+      const recorded = (db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[])
+        .map((row) => JSON.parse(row.payload).attemptId);
+      expect(recorded).toEqual([0]);
+
+      expect(await checked.onRestoreCompleted(rigId)).toBe(0);
+      expect(strict).not.toHaveBeenCalled();
     });
   });
 });

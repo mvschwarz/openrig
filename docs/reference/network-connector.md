@@ -21,8 +21,8 @@ rig network connect <seat> --as <name>
 ```
 
 - `enroll` trades the code, with this daemon's host id, for an installation key. The key is stored like a participant's
-  token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A code is
-  single-use and short-lived; a refused one says why, so get a new one from the page. If the account doesn't answer,
+  token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A refused
+  code says why; get a new one from the account page. If the account doesn't answer,
   whether it took the code is unknown: try again with the same code, and get a new one if that's refused.
 - Enrolling trusts the site with where your connected seats' work goes: for each name, the account answers the front
   and rig the binding reaches.
@@ -55,7 +55,8 @@ again with a new code from the account page:
 rig network enroll <code> --site <site URL> --replace
 ```
 
-Without `--replace`, a second enroll at the same site is refused and the code isn't spent. With it, the replace first
+Without `--replace`, a second enroll at the same site is refused and the code isn't spent: the daemon is already
+connected, so carry on with `rig network connect`. With it, the replace first
 waits for any other change to this enrollment to finish, within the same 30 seconds; one that runs out of time while
 waiting says so and doesn't send the code. The account makes a new installation, with a new key, for the new code. Here,
 that key takes the old one's place and the bindings made through the old installation end, in one step:
@@ -83,7 +84,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 - `<participant>` is the participant's address in the hub (`member@rig`), and the token file holds its bearer.
 - The binding follows the seat's node, so a relaunched or renamed seat keeps it.
 - The token is stored at `<OpenRig home>/network-secrets/<binding>/credential.json` (a 0700 folder and a 0600 file). It
-  is never returned by the API or shown in status. A token in the hub URL is refused.
+  is never returned by the API or shown in status. A user name or password in the hub URL is refused: put the token in its token file, not in the URL.
 - A plain-http hub URL needs `--allow-http` (see Limits).
 - One active binding per local seat, and one per hub participant.
 - On a daemon with an operator bearer configured, `connect` and `disconnect` send `OPENRIG_AUTH_BEARER_TOKEN`, as the
@@ -92,7 +93,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 ## What the connector does
 
 The daemon runs the connector for every active binding. It normally polls every 30 seconds
-(`OPENRIG_NETWORK_POLL_SECONDS`, at least 5); a failing hub, backoff or a backlog can delay it. Each binding's pass has
+(`OPENRIG_NETWORK_POLL_SECONDS`; a value under 5 is ignored); a failing hub, backoff or a backlog can delay it. Each binding's pass has
 a deadline of 60 seconds, so one slow hub doesn't hold the others. With no active binding it makes no network call.
 
 1. It lists the participant's own items on the hub, claims each pending one, and creates a local queue item for the
@@ -144,7 +145,13 @@ a replaced installation. `--json` adds the connector's view: each binding's next
 - **The seat has no session:** its hub items stay pending and unclaimed, and the last error says why. They're taken
   once the seat has a session again. A stopped seat still has its session, so it still takes items; they wait for it.
 - **The hub can't be reached, or a pass runs past its deadline:** the binding stays active, the error is recorded, and
-  retries back off, doubling up to 5 minutes. A failure on this machine is recorded as local, not as the hub's.
+  retries back off, doubling to 5 minutes by default, or to the poll interval when that is longer, with up to 20%
+  jitter either way. A failure on this machine is recorded as local, not as the hub's.
+- **A new connection is still being set up:** a network answers a new participant's first requests with 503
+  `grant_authority_unavailable` until it has set them up. On a binding that has never had contact, status reads "The
+  network is still finishing setup for this agent. Try again in a moment.", and for its first minute the connector asks
+  again every 5 seconds (or every poll interval, when that's shorter) instead of backing off. After that, the same
+  answer backs off as above. Once a binding has had contact, the answer reads as the hub's own error.
 - **The hub refuses the credential** (HTTP 401): the binding is marked revoked and its credential removed. No new work
   comes in; local items and results stay.
 

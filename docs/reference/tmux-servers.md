@@ -176,6 +176,39 @@ session names on the selected server.
 Dedicated selection requires POSIX tmux. On native Windows (not a supported platform;
 the [README](../../README.md) covers WSL2), psmux retains its existing server behavior; requesting `isolated` produces a status note and a pending choice.
 
+## When the server stops answering
+
+The tmux server can go away while the daemon keeps running: something kills it, or
+its socket is removed. The daemon records that once, when it happens (the
+`tmux.server_gone` event and a log line), and again once when the server answers
+(`tmux.server_back`). The record is kept in memory, so "once" holds per daemon
+run: a daemon restarted during a loss records it again. In between:
+
+- Automatic delivery to the seats on that server is held. Watchdog reminders, park wakes,
+  queue wakes, the wake ladder and the stuck sweep keep the work owed without
+  spending retries or escalating it, and send it when the server answers again.
+  An explicit `rig send` is still attempted and says the server could not be
+  reached.
+- Holding is not a verdict on the seats: `rig ps` still reads each seat from its
+  own evidence (a seat whose process went with the server reads stopped). Seats
+  on another tmux server, and seats that are not on tmux, are not held, and the
+  hook bridge, which reaches a live agent without tmux, keeps delivering.
+- Only a server that a running seat depends on counts. tmux exits with its last
+  session, so no server while no seat runs is the normal idle state, not a loss.
+- The daemon checks for the return with a read-only probe, every few seconds at
+  first and at most once a minute. It does not restart the server or the seats;
+  `rig up <rig>` (or whatever brought the server back) does. When the server
+  answers, held wakes go out to the seats that run on it.
+- A return probe that can't be read (a permission error, for example) is not
+  evidence the server is still gone: the daemon reads it as `unknown`, keeps the
+  loss as history, and stops holding, so ordinary delivery resumes. It does not
+  record a return. The next delivery's own probe records the loss again or the
+  return.
+- `rig status` and `rig ps` print a `Terminals:` line naming the socket and since
+  when it has not answered, `rig doctor` fails the `terminal_server` check, and
+  healthz carries the state in `terminals` while `status` stays `ok`, because the
+  daemon itself is up.
+
 ## Two instances on one machine
 
 Isolation selects only a tmux server. Give each daemon its own OpenRig home,
@@ -221,3 +254,22 @@ runs over skips the next tick, the Codex working-frame proof expires, and a work
 can briefly read idle. At 2000 ms the remaining 1 s margin is also what a lagging event loop
 uses up. The two settings compose: `OPENRIG_TMUX_CONTROL=1` makes each tmux command cheaper,
 and this one makes there be fewer of them.
+
+The seat identity reconciler is a third poller: every 5 s it reads each running seat's pane
+process from tmux, and for some seats the host's process table, to record whether the pane still
+runs the seat's agent. The setting `daemon.identity_poll_interval_ms` slows it down, from the
+5000 ms default up to 30000 ms. Set it with `rig config set daemon.identity_poll_interval_ms 15000`
+or with `OPENRIG_IDENTITY_POLL_INTERVAL_MS`, which overrides the saved value. Like the seat poll
+interval, it is startup-only (a change takes a daemon restart), `rig config set` refuses a value
+outside 5000..30000, and an environment value outside it is dropped with a warning.
+The cost is staleness. A longer interval can delay the sweep noticing a stopped seat or a changed
+pane process, updating the seat's identity verdict, and revoking the activity grants that go with
+it. The verdict feeds the running and active views, and sends and reads that name an expected
+identity (and resume of the original conversation) need a verified one: a seat that `rig up` has
+just launched answers those with `expected_identity_unavailable` until a sweep verifies it.
+The setting caps the cadence: the first scheduled sweep comes one interval after daemon start,
+and then at most one sweep starts per interval. It is not a freshness deadline. A tick that
+comes due while a sweep's reads are still pending is skipped (more than one can be), and a
+change seen after a sweep began waits for a later sweep, so a successful verification, or a
+revocation, can take longer than one interval. Keep the default unless the reconciler's reads
+are a measured share of the daemon's load.
