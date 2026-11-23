@@ -42,7 +42,46 @@ start each model is ensured on its own, so one that fails is reported and the ot
 Stopping a `seat-pool` job (`rig watchdog stop`) is allowed while the pool has agents. The agents stay as plain
 members of the rig.
 
+## What the job does each time it runs
+
+Once armed, each evaluation of the job reads the pool afresh: the model's stored block, its slot rows, each pool
+agent's latest session, its activity, its open rows and its held messages, and the rows waiting for the model.
+
+- **Moving waiting rows.** A pending row addressed to the model (with `dispatch_tag`, only a row carrying the tag) that
+  has waited `dispatch_after_s` is moved to a free pool agent: in phase `live`, its latest session running, idle at its
+  prompt, with no open row and no held message. The check is repeated just before the move, under the model's custody
+  lease, and the move only happens while the row is still pending and still addressed where it was read. A row
+  claimed or rerouted in between is skipped and named in the job's notes; it is not a failure. The stored block is
+  read again before each move: when a re-apply has changed it since the evaluation planned (any value, cleared or
+  unreadable), that move and the rest are skipped with `pool_block_changed`, and the next evaluation plans against the
+  block as it is then.
+- **Rows left with a drained agent.** A pending row addressed to a `drained` pool agent, under any of its names, is
+  moved to a free pool agent the same way, whatever its tags.
+- **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
+  evaluation, up to one more interval later. That is not a dispatch deadline: a row moves only to an agent that is
+  free when it is checked, so with more waiting rows than free agents, the rest stay pending for later evaluations.
+- **Holds.** The whole pool is held, and nothing is moved, while:
+  - the job is not `active` (stopped by an operator, or ended);
+  - the stored block can't be read (the notes carry an advisory; nothing is removed);
+  - the rig's latest `rig.stopped` has no `restore.completed` after it. Any later `restore.completed` ends the hold,
+    whatever its result. A `rig up` refused before it starts (`not_attempted`), a restore that throws and
+    `rig launch --seats` do not end it; the next `rig up` that completes does. After `rig launch --seats`, run
+    `rig down`, then `rig up`.
+
+  Each evaluation of an active job records the cause in the job's notes, for example `held: rig stopped (event 42)`,
+  unless the watchdog engine defers it (`rig_delivery_drain`): that evaluation records nothing, even if rows have
+  already moved. A stopped job records no note either: the scheduler evaluates only active jobs, and the watchdog
+  engine returns `job_not_active`, with no history, when the job is no longer active before the policy runs or after
+  it returns. So a job stopped during an evaluation records nothing; the executor's own check only stops the moves
+  left in that evaluation.
+
+### When the model node is deleted
+
+Deleting a model node removes its slot rows but leaves its agent nodes and sessions as ordinary members of the rig,
+so their pool association and any phase or hold kept only on a slot go with it. Recreating a model with the same name
+doesn't recover its former slot numbers. While the model node is gone, its job moves nothing and reports
+`held: model node gone`.
+
 ## What the job does not do yet
 
-For now the job's policy only reads the model's stored block and its pool agents and records them in the job's
-evaluation notes. It does not move rows to pool agents, add agents, drain them or bring drained agents back.
+It does not add agents, drain them or bring drained agents back.
