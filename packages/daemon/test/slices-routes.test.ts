@@ -3702,6 +3702,66 @@ describe("GET /api/slices observed queue counts", () => {
       }
     });
 
+    it("discards partial counts and degrades to unknown when countQueueRowsCooperatively throws mid-count", async () => {
+      db.close();
+      db = createDb(path.join(root, "openrig-count-catch-wal.sqlite"));
+      migrate(db, ALL_MIGRATIONS);
+      addSlice("alpha", "shipping", "blocked-slice", "active");
+      addSlice("alpha", "shipping", "none-slice", "active");
+      row("wal-blocked", "blocked", scope("blocked-slice"));
+      const { app, indexer } = route("alpha", false);
+
+      const injectMidCountThrow = () =>
+        vi.spyOn(indexer, "countQueueRowsCooperatively").mockImplementationOnce(async (rows, countRow) => {
+          expect(rows.length).toBeGreaterThan(0);
+          countRow(rows[0]!);
+          throw new Error("injected cooperative count failure");
+        });
+
+      const spyAll = injectMidCountThrow();
+      try {
+        const res = await app.request("/api/slices");
+        expect(res.status).toBe(200);
+        const body = await res.json() as { slices: Entry[] };
+        expect(body.slices.map((s) => [s.name, s.queueCounts, s.derivedState]).sort()).toEqual([
+          ["blocked-slice", null, "unknown"],
+          ["none-slice", null, "unknown"],
+        ]);
+        expect(spyAll).toHaveBeenCalledTimes(1);
+      } finally {
+        spyAll.mockRestore();
+      }
+
+      const spyBlocked = injectMidCountThrow();
+      try {
+        const res = await app.request("/api/slices?derived=blocked");
+        expect(res.status).toBe(200);
+        const body = await res.json() as { slices: Entry[] };
+        expect(body.slices.map((s) => s.name)).toEqual([]);
+        expect(spyBlocked).toHaveBeenCalledTimes(1);
+      } finally {
+        spyBlocked.mockRestore();
+      }
+
+      const spyUnknown = injectMidCountThrow();
+      try {
+        const res = await app.request("/api/slices?derived=unknown");
+        expect(res.status).toBe(200);
+        const body = await res.json() as { slices: Entry[] };
+        expect(body.slices.map((s) => s.name).sort()).toEqual(["blocked-slice", "none-slice"]);
+        expect(spyUnknown).toHaveBeenCalledTimes(1);
+      } finally {
+        spyUnknown.mockRestore();
+      }
+
+      // After the transient fault clears, the next request returns normal observed counts.
+      const recovered = await list(app);
+      expect(recovered.map((s) => [s.name, s.derivedState, s.queueCounts]).sort()).toEqual([
+        ["blocked-slice", "blocked", { ...ZERO, blocked: 1 }],
+        ["none-slice", "none", ZERO],
+      ]);
+    });
+
     it("keeps the whole WAL cooperative list operation bound to the captured physical root when a symlink root retargets before the walk", async () => {
       db.close();
       db = createDb(path.join(root, "openrig-retarget-wal.sqlite"));
