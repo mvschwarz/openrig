@@ -14,6 +14,7 @@ import { seatLaunchAdditionsForLaunch, seatLaunchAdditionsForNode } from "./seat
 import { isAbsolute, normalize } from "node:path";
 import { validateSafePath } from "./path-safety.js";
 import { SeatPoolSlotsRepository } from "./seat-pool-slots.js";
+import { RigSpecCodec } from "./rigspec-codec.js";
 
 /** The member-local id of a pod node: `impl` for `dev.impl`; a logical id without a pod is its own. */
 function memberLocalId(logicalId: string): string {
@@ -136,22 +137,26 @@ export class RigSpecExporter {
     return members.length === 1 ? { root: source.root, member: members[0]! } : null;
   }
 
-  private memberStartupSource(rigId: string, node: import("./types.js").NodeWithBinding): {
-    startup?: import("./types.js").StartupBlock; reason?: "source unavailable" | "different source root";
+  /**
+   * The member's own startup and whether its files resolve from `root`. The rig export compares against the rig's one
+   * stored root; a seat pool agent compares against its model's launch root, the root its add is given (#3395).
+   */
+  private memberStartupSource(rigId: string, node: import("./types.js").NodeWithBinding, against: "export root" | "launch root" = "export root"): {
+    startup?: import("./types.js").StartupBlock; reason?: "source unavailable" | "different source root"; declared?: true;
   } {
     const authored = this.authoredMember(rigId, node);
     if (!authored) return { reason: "source unavailable" };
     const startup = authored.member.startup;
     if (!startup) return {};
     if (!Array.isArray(startup.files) || !Array.isArray(startup.actions)
-      || startup.files.some(file => !file || validateSafePath(file.path, "member startup"))) return { reason: "source unavailable" };
-    const exportRoot = this.rigRepo.getRigStartupLayers(rigId)?.root;
+      || startup.files.some(file => !file || validateSafePath(file.path, "member startup"))) return { reason: "source unavailable", declared: true };
+    const root = against === "export root" ? this.rigRepo.getRigStartupLayers(rigId)?.root : this.rigRepo.getNodeLaunchRecipe(node.id)?.rigRoot;
     // The wire format has one rig root and prohibits absolute/traversing startup paths.
     // Do not silently resolve a second source's files against the first source.
     // Without a stored original root, a non-portable legacy declaration cannot
     // honestly be exported as if its files resolved from the output folder.
-    if (startup.files.length && (!exportRoot || !isAbsolute(authored.root) || !isAbsolute(exportRoot)
-      || normalize(authored.root) !== normalize(exportRoot))) return { reason: "different source root" };
+    if (startup.files.length && (!root || !isAbsolute(authored.root) || !isAbsolute(root)
+      || normalize(authored.root) !== normalize(root))) return { reason: "different source root", declared: true };
     return { startup };
   }
 
@@ -286,7 +291,25 @@ export class RigSpecExporter {
     return this.memberFromNode(rigId, node, restorePolicyOf(this.sessionRegistry.getSessionsForRig(rigId), node));
   }
 
-  private memberFromNode(rigId: string, node: import("./types.js").NodeWithBinding, restorePolicy: string | undefined): RigSpecPodMember {
+  /**
+   * #3395: the same member in the spec's own keys (`agent_ref`, `claude_mcp`, ...), the fragment a pod member add takes.
+   * It goes through the rig codec's own serializer (a one-pod spec written and read back), so it has exactly the keys
+   * the export writes. Unlike the rig export, the member's startup resolves from the node's own launch root, the root
+   * the add is given; a declared startup that can't is an error.
+   */
+  exportedRawMemberFromNode(rigId: string, nodeId: string): Record<string, unknown> {
+    const node = this.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) throw new Error(`Cannot export node '${nodeId}': no such node in rig '${rigId}'`);
+    const member = this.memberFromNode(rigId, node, restorePolicyOf(this.sessionRegistry.getSessionsForRig(rigId), node), "launch root");
+    const spec: RigSpec = { version: "0.2", name: "member", pods: [{ id: "pod", label: "pod", members: [member], edges: [] }], edges: [] };
+    const written = RigSpecCodec.parse(RigSpecCodec.serialize(spec)) as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    return written.pods[0]!.members[0]!;
+  }
+
+  private memberFromNode(
+    rigId: string, node: import("./types.js").NodeWithBinding, restorePolicy: string | undefined,
+    startupFrom: "export root" | "launch root" = "export root",
+  ): RigSpecPodMember {
     if (!node.runtime) {
       throw new Error(`Cannot export node '${node.logicalId}': runtime is required but missing`);
     }
@@ -326,8 +349,15 @@ export class RigSpecExporter {
     if (envelope !== undefined) member.codexPermissions = envelope;
     if (node.env) member.env = node.env;
     if (node.sessionSource) member.sessionSource = node.sessionSource;
-    const ownStartup = this.memberStartupSource(rigId, node).startup;
-    if (ownStartup) member.startup = ownStartup;
+    const ownStartup = this.memberStartupSource(rigId, node, startupFrom);
+    // A pool agent's member startup resolves from its model's launch root. A declared startup that can't be read or
+    // carried from there is an error, never a silent drop: the add would launch an agent without it. The export names
+    // it instead. With no spec source to read (no launch recipe, or one the repository can't read), the startup can't be
+    // known and stays out, as in the export.
+    if (startupFrom === "launch root" && ownStartup.declared) {
+      throw new Error(`the member startup can't be read or its files resolved from the model's launch root`);
+    }
+    if (ownStartup.startup) member.startup = ownStartup.startup;
     // #3395: a usable stored block exports with its model; one that can't be read is left out and named by poolNotCarried.
     const pool = this.rigRepo.getNodePool(node.id);
     if (pool !== undefined && "spec" in pool) member.pool = pool.spec;
@@ -434,6 +464,7 @@ export class RigSpecExporter {
       ...(cultureFile ? { cultureFile } : {}),
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
+      ...(this.rigRepo.getRigSeatSlice(rigId) ? { seatSlice: "rig" as const } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
       ...(startupLayers?.defaultOnboardingPack !== undefined ? { defaultOnboardingPack: startupLayers.defaultOnboardingPack } : {}),

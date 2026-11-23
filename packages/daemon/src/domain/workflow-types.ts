@@ -71,6 +71,9 @@ export interface WorkflowRoleSpec {
 export interface WorkflowStepSpec {
   /** Stable step identifier within the workflow (e.g., "produce"). */
   id: string;
+  /** Optional short name a person sees for the step (e.g., "QA pass"). Display only: `id` stays the step's identity and
+   *  its display when no label is set, and `objective` stays its instruction. */
+  label?: string;
   /** Role name; resolved against `roles` map. */
   actor_role: string;
   /** Human description of the step's intent. */
@@ -291,6 +294,8 @@ export interface WorkflowInstance {
   startedSpec?: StartedWorkflowSpec | null;
   /** #2730 (migration 154): the root objective it was started with. null for instances from before it: not recorded. */
   rootObjective?: string | null;
+  /** Optional operator-visible title for this particular run. */
+  runTitle?: string | null;
 }
 
 export interface WorkflowFrontierBinding {

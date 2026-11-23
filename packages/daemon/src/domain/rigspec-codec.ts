@@ -105,6 +105,7 @@ export class RigSpecCodec {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
+    if (spec.seatSlice) doc["seat_slice"] = spec.seatSlice;
     if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.defaultOnboardingPack !== undefined) doc["default_onboarding_pack"] = spec.defaultOnboardingPack;
@@ -150,6 +151,8 @@ export class RigSpecCodec {
         p["continuity_policy"] = cp;
       }
       if (pod.startup) p["startup"] = serializeStartupBlock(pod.startup);
+      // #2829 slice 1: the pod-level cold-start default round-trips too.
+      if (pod.coldStart !== undefined) p["cold_start"] = pod.coldStart;
 
       p["members"] = pod.members.map((m) => {
         const member: Record<string, unknown> = {
@@ -199,6 +202,8 @@ export class RigSpecCodec {
         if (m.starterRef) {
           member["starter_ref"] = { name: m.starterRef.name };
         }
+        // #2829 slice 1: the cold-start opt-in round-trips with the rest of the member.
+        if (m.coldStart !== undefined) member["cold_start"] = m.coldStart;
         return member;
       });
 
