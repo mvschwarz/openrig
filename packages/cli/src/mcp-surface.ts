@@ -4,3 +4,4 @@
 export { startMcpHttpServer, McpHttpConfigError } from "./mcp-http.js";
 export type { McpHttpOptions, McpPrincipal, McpGrant, GrantServiceOptions } from "./mcp-http.js";
 export type { McpAccess } from "./mcp-server.js";
+export type { CallerResolver, CallerResolution } from "./mcp-caller-resolver.js";
