@@ -39,11 +39,16 @@ export interface SeatReaperDeps {
   readonly workspaceProbe?: (paths: readonly string[]) => Promise<WorkspaceProbe>;
   /** Test seam for the in-lease re-check deadline; production keeps the 20 s default. */
   readonly workspaceRecheckDeadlineMs?: number;
+  /** #3836 review: a seat owing a post-compact restore stage can read idle-at-prompt while
+   *  the stage is still owed — reap-proof it (checked both before the threshold and in-lease). */
+  readonly postCompactStagePending?: (sessionName: string) => boolean;
 }
 
 export class SeatReaperService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private shuttingDown = false;
+  private activePass: Promise<void> | null = null;
   private activated = false;
   private failures = 0;
   private lastTick: number | null = null;
@@ -57,15 +62,29 @@ export class SeatReaperService {
     this.store = new SeatReaperStore(deps.db); this.now = deps.now ?? Date.now;
   }
   start(): void {
-    if (this.timer || this.ended) return;
+    if (this.timer || this.ended || this.shuttingDown) return;
     this.timer = setInterval(() => { void this.tick().catch(error => console.error("[seat-reaper] pass failed", error)); }, 60_000);
     this.timer.unref();
   }
-  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  stop(): void {
+    // Shutdown: no new passes start; a pass already in flight is awaited via drain()
+    // (its capture persisted, so a stop it was about to make is skipped, not lost silently).
+    this.shuttingDown = true;
+    if (this.timer) clearInterval(this.timer); this.timer = null;
+  }
+  /** #3836 review: awaits the in-flight pass (capture / workspace check / stopSeat) so a
+   *  daemon shutdown cannot exit with the pass's effect or uncertainty receipt unwritten. */
+  drain(): Promise<void> { return this.activePass ?? Promise.resolve(); }
 
   async tick(): Promise<void> {
-    if (this.running || this.ended) return;
+    if (this.running || this.ended || this.shuttingDown) return;
     this.running = true; this.failed = false; this.passId = randomUUID();
+    const pass = this.runPass();
+    this.activePass = pass;
+    try { await pass; } finally { this.running = false; if (this.activePass === pass) this.activePass = null; }
+  }
+
+  private async runPass(): Promise<void> {
     try {
       const settings = (this.deps.settings ?? readSeatReaperSettings)();
       if (!settings.enabled) {
@@ -98,7 +117,7 @@ export class SeatReaperService {
           this.failed ||= workspace === "defer-probe-failed"; continue;
         }
         for (const seat of seats) {
-          if (this.ended) break;
+          if (this.ended || this.shuttingDown) break;
           await this.consider(seat, settings, async () => {
             const currentRig = z.object({ workspace_json: z.string().nullable() }).parse(
               this.deps.db.prepare("SELECT workspace_json FROM rigs WHERE id=? AND archived_at IS NULL").get(rig.id));
@@ -107,7 +126,7 @@ export class SeatReaperService {
             return settleWithin(probe, this.deps.workspaceRecheckDeadlineMs ?? WORKSPACE_RECHECK_DEADLINE_MS, "defer-probe-failed" as WorkspaceProbe);
           });
         }
-        if (this.ended) break;
+        if (this.ended || this.shuttingDown) break;
       }
       this.failures = this.failed ? this.failures + 1 : 0;
       if (this.failures >= 3) this.terminate("failed-passes");
@@ -117,7 +136,7 @@ export class SeatReaperService {
       if (++this.failures >= 3) this.terminate("failed-passes");
       if (!(error instanceof Error)) throw error;
       console.warn("[seat-reaper] defer-probe-failed", { passId: this.passId, error: error.name });
-    } finally { this.running = false; }
+    }
   }
 
   /** Review finding (slice 2): a decision event per seat per tick flooded the ledger
@@ -154,6 +173,15 @@ export class SeatReaperService {
         }
         const since = this.store.observe({ nodeId: seat.nodeId, sessionId: proof.session.id, generation: proof.generation, activitySeq: proof.activitySeq }, this.now());
         if (since === null || Math.floor((this.now() - since) / 60_000) < settings.idleThresholdMinutes) return;
+        // #3836 review: a seat owing a post-compact restore stage reads idle at the prompt
+        // with an empty inbox; reaping it would stop the seat before its restore runs. The
+        // idle clock keeps running (observe above) — the stage makes the seat not reapable-YET,
+        // not not-idle — so it reaps on the first tick after the stage settles.
+        if (this.deps.postCompactStagePending?.(current.canonicalSessionName)) {
+          this.emitDecisionOnce(seat.nodeId, "post-compact-stage-owed", { rigId: seat.rigId });
+          return;
+        }
+        if (since === null || Math.floor((this.now() - since) / 60_000) < settings.idleThresholdMinutes) return;
         const common = { rigId: seat.rigId, rigName: seat.rigName, nodeId: seat.nodeId, sessionName: current.canonicalSessionName,
           idleMinutes: Math.floor((this.now() - since) / 60_000), thresholdMinutes: settings.idleThresholdMinutes,
           eligibility: { ...proof.snapshot, workspace: "clean" as const, protectedRig: false as const, optedIn: true as const, deliveryLease: true as const } };
@@ -189,6 +217,10 @@ export class SeatReaperService {
         const after = reapEligibility(this.deps.db, refreshed, this.deps.activity.getSeatStateBySession(current.canonicalSessionName));
         if (!after.eligible || after.activitySeq !== proof.activitySeq || after.session?.id !== proof.session.id || after.generation !== proof.generation) {
           this.store.reset(seat.nodeId); return;
+        }
+        if (this.shuttingDown) { this.store.reset(seat.nodeId); return; }
+        if (this.deps.postCompactStagePending?.(current.canonicalSessionName)) {
+          this.emitDecisionOnce(seat.nodeId, "post-compact-stage-owed", common); return;
         }
         this.emit({ ...common, phase: "capture", sessionId: proof.session.id, resumeToken: captured.token, resumeType: captured.resumeType });
         const finalProof = reapEligibility(this.deps.db, current, this.deps.activity.getSeatStateBySession(current.canonicalSessionName));

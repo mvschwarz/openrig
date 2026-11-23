@@ -2834,6 +2834,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.watchdogScheduler = watchdogScheduler;
     deps.seatReaper = new SeatReaperService({
       db, eventBus, activity: seatActivityService, guard: tmuxAdapter.deliveryGuard,
+      postCompactStagePending: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
       lifecycle: new SeatLifecycleService({ db, eventBus, rigRepo, sessionRegistry, tmuxAdapter }),
       capture: seat => deriveResumeToken({ runtime: seat.runtime, sessionName: seat.canonicalSessionName ?? "", nodeId: seat.nodeId }, {
         contextUsageStore, claudeProcessStartedAt, resumeTokenCapturer: resumeMetadataRefresher,

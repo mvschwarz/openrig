@@ -508,7 +508,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
-      ["seat-reaper", () => deps.seatReaper?.stop()],
+      ["seat-reaper", async () => { deps.seatReaper?.stop(); await deps.seatReaper?.drain(); }],
       ["terminal-reachability", () => deps.terminalReachability?.stop()],
       ["network-connector", () => deps.networkConnector?.stop()],
       ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],

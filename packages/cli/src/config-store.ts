@@ -1176,7 +1176,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
     positiveIntegerConstraint("policies.seat_scale.idle_threshold_minutes")(raw, value);
     if (typeof value !== "number" || value < 60 || value > 525600) throw new RangeError("Seat idle threshold must be 60..525600 whole minutes");
   },
-  "policies.seat_scale.max_reaps_per_24h": positiveIntegerConstraint("policies.seat_scale.max_reaps_per_24h"),
+  "policies.seat_scale.max_reaps_per_24h": (raw, value) => {
+    // #3836 review: match the daemon reader's supported range (1..10000).
+    positiveIntegerConstraint("policies.seat_scale.max_reaps_per_24h")(raw, value);
+    if (typeof value !== "number" || value > 10000) throw new RangeError("Seat reap cap must be 1..10000 reaps per 24h");
+  },
   "policies.seat_scale.protected_rigs": seatScaleRigListConstraint,
   "policies.seat_scale.opt_in_rigs": seatScaleRigListConstraint,
   "policies.idle_gate_qitem.active_wake_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.active_wake_interval_seconds"),

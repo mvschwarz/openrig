@@ -62,3 +62,20 @@ it("includes every declared repository plus seat directories and rejects missing
   expect(paths).toEqual(["/one", "/two", "/knowledge", "/extra"]);
   expect(await probeReapWorkspace([])).toBe("defer-probe-failed");
 });
+
+// #3836 review: inherited repo-location variables (GIT_DIR/GIT_WORK_TREE/…) can point the
+// probe at another clean repository, reporting a dirty workspace as clean — the destructive
+// direction. The probe strips them, so it still reads the workspace it was given.
+it("ignores inherited git repo-location variables when probing", async () => {
+  const repo = repository();
+  writeFileSync(join(repo.root, "untracked"), "work");
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  process.env.GIT_DIR = join(tmpdir(), "elsewhere.git");
+  process.env.GIT_WORK_TREE = tmpdir();
+  try {
+    expect(await probeReapWorkspace([repo.root])).toBe("dirty-workspace");
+  } finally {
+    if (saved.GIT_DIR === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved.GIT_DIR;
+    if (saved.GIT_WORK_TREE === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = saved.GIT_WORK_TREE;
+  }
+});

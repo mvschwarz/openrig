@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { fixture } from "./seat-reaper-fixture.js";
+import { SeatReaperService } from "../src/domain/seat-reaper-service.js";
 
 // Review finding (slice 2): a decision event per seat per tick flooded the events
 // ledger (~72k rows/day on a 50-seat fleet). A seat's decision is recorded when it
@@ -56,3 +57,41 @@ it("defers instead of holding the delivery lease when the workspace re-check ove
   expect(f.stops).toHaveLength(0);
   expect(f.events().some(event => event.phase === "decision" && event.decision === "defer-probe-failed")).toBe(true);
 }, 30_000);
+
+// #3836 review: shutdown must not exit with an in-flight pass unwritten. stop() prevents
+// new passes; drain() awaits the active one (its capture persisted, no stop after shutdown).
+it("drains the in-flight pass at shutdown and starts no new one afterwards", async () => {
+  const f = fixture();
+  let releaseWorkspace: ((value: "clean") => void) | undefined;
+  // The in-lease workspace re-check parks until the test releases it: a pass in flight.
+  f.deps.workspaceProbe = () => new Promise(resolve => { releaseWorkspace = resolve; });
+  const service = new SeatReaperService(f.deps);
+  const ticked = service.tick();
+  const drained = service.drain();
+  service.stop();
+  releaseWorkspace?.("clean");
+  await drained; await ticked;
+  // The pass completed under shutdown, and no new pass starts afterwards.
+  expect(f.stops).toHaveLength(0);
+  const eventsAfterShutdown = f.bus.replayAll(0).length;
+  await service.tick();
+  expect(f.bus.replayAll(0).length).toBe(eventsAfterShutdown);
+});
+
+// #3836 review: a seat owing a post-compact restore stage reads idle at the prompt with an
+// empty inbox; it must be reap-proof both before the threshold and at the in-lease re-check.
+it("never reaps a seat that owes a post-compact stage", async () => {
+  const f = fixture();
+  // Owed through the whole first window: the seat is reap-proof despite proven idle.
+  let stagePending = true;
+  f.deps.postCompactStagePending = () => stagePending;
+  await f.mature();
+  expect(f.stops).toHaveLength(0);
+  // The stage settles: the next tick may reap.
+  console.error("PRED before flip:", f.deps.postCompactStagePending?.());
+  stagePending = false;
+  console.error("PRED after flip:", f.deps.postCompactStagePending?.(), "stagePending:", stagePending);
+  await f.tick();
+  console.error("PRED after tick:", f.deps.postCompactStagePending?.(), "stops:", f.stops.length);
+  expect(f.stops).toHaveLength(1);
+});

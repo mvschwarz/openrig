@@ -945,7 +945,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, KeyConstraint>> = {
     positiveIntegerConstraint("policies.seat_scale.idle_threshold_minutes")(raw, value);
     if (typeof value !== "number" || value < 60 || value > 525600) throw new RangeError("Seat idle threshold must be 60..525600 whole minutes");
   },
-  "policies.seat_scale.max_reaps_per_24h": positiveIntegerConstraint("policies.seat_scale.max_reaps_per_24h"),
+  "policies.seat_scale.max_reaps_per_24h": (raw, value) => {
+    // #3836 review: both writers must reject what the zod reader rejects (>10000), else a
+    // bad write turns every read into a failed pass and the reaper terminates itself.
+    positiveIntegerConstraint("policies.seat_scale.max_reaps_per_24h")(raw, value);
+    if (typeof value !== "number" || value > 10000) throw new RangeError("Seat reap cap must be 1..10000 reaps per 24h");
+  },
   "policies.seat_scale.protected_rigs": seatScaleRigListConstraint,
   "policies.seat_scale.opt_in_rigs": seatScaleRigListConstraint,
   "terminal.tmux_server": choiceConstraint(["inherit", "isolated"],

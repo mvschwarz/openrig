@@ -109,14 +109,19 @@ notification is sent per seat in this slice.
   terminal receipt and marks that seat `attention_required`.
 
 Self-termination is a safety stop, not a crash. To restore reaping after an
-operator has investigated, clear the control row in the daemon database:
+operator has investigated, clear the control row in the daemon database
+**while the daemon is down**, then start the daemon again — the terminal
+reason is read once per pass and latches an in-memory `ended` flag that the
+daemon caches until restart:
 
 ```sql
 UPDATE seat_reaper_control SET terminal_reason = NULL WHERE singleton = 1;
 ```
 
-There is no CLI verb for this in this slice; the breaker reset is a deliberate
-operator action.
+Clearing the row alone does not restore reaping: the running daemon keeps
+its `ended` flag and rejects `start()` after self-termination. There is no
+CLI verb for this in this slice; the breaker reset is a deliberate operator
+action.
 
 ## Rollout and recovery
 
