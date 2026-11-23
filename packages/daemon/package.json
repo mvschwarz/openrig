@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./topology-trace": { "types": "./dist/topology-trace-surface.d.ts", "import": "./dist/topology-trace-surface.js" },
     "./queue-transfer-export": { "types": "./dist/queue-transfer-export-surface.d.ts", "import": "./dist/queue-transfer-export-surface.js" },
     "./queue-transfer-staging": { "types": "./dist/queue-transfer-staging-surface.d.ts", "import": "./dist/queue-transfer-staging-surface.js" },
     "./terminal-viewer-guard": { "types": "./dist/terminal-viewer-guard-surface.d.ts", "import": "./dist/terminal-viewer-guard-surface.js" },

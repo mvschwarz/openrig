@@ -61,6 +61,11 @@ try {
     assert.equal(typeof entry.startMcpHttpServer, "function");
     assert.equal(entry.startMcpHttpServer, deep.startMcpHttpServer);
     assert.equal(entry.McpHttpConfigError, deep.McpHttpConfigError);
+    // CLI context trace must retain its shared resolver after the release daemon-import rewrite.
+    const trace = await import("@openrig/cli/dist/lib/topology-trace.js");
+    const traced = trace.traceTopologyChain({ topologyRoot: "/unused-topology", legacyRigsRoot: "/unused-legacy", rig: "team", seat: "worker", name: "LEARNED.md",
+      fs: { exists: () => false, read: () => { throw new Error("unexpected file read"); } } });
+    assert.deepEqual(traced.levels.map((level) => [level.altitude, level.source]), [["instance", "absent"], ["rig", "absent"], ["seat", "absent"]]);
     const require = createRequire(import.meta.url);
     assert.equal(require.resolve("@openrig/cli/dist/client"), fileURLToPath(import.meta.resolve("@openrig/cli/dist/client.js")));
     assert.equal(fileURLToPath(import.meta.resolve("@openrig/cli/mcp.js")), ${JSON.stringify(path.join(modules, "@openrig/cli/mcp.js"))});
