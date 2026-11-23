@@ -22,7 +22,7 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bxapp-[A-Za-z0-9-]{10,}/g, // Slack app-level tokens
   /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/g, // Slack incoming webhook URLs
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
-  /(\baws_secret_access_key["']?\s{0,8}[=:]\s{0,8}["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named
+  /(\baws_secret_access_key["']?\s*[=:]\s*["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named
   /\bAIza[0-9A-Za-z_-]{35}/g, // Google API keys
   /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JSON Web Tokens
   // Private keys: the BEGIN line, its base64 body and the END line when it's there (a body cut off before its END

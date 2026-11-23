@@ -44,6 +44,22 @@ describe("transcript redaction keeps identifiers", () => {
     expect(redactTranscriptContent(`a ${privateKey} b`)).toBe("a [REDACTED] b");
   });
 
+  it("handles a long unmatched AWS-secret formatting gap in linear time", () => {
+    const text = "aws_secret_access_key" + " ".repeat(100_000);
+    const started = performance.now();
+    expect(redactTranscriptContent(text)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it("masks named AWS secrets with wider formatting whitespace", () => {
+    const value = "wJalr" + "X".repeat(35);
+    for (const width of [0, 1, 8, 9, 32, 256]) {
+      const context = `aws_secret_access_key${" ".repeat(width)}=${" ".repeat(width)}`;
+      expect(redactTranscriptContent(context + value)).toBe(context + "[REDACTED]");
+      expect(hasTranscriptSecret(context + value)).toBe(true);
+    }
+  });
+
   it("is the rule the CLI's restore packets import", () => {
     expect(surface.TRANSCRIPT_SECRET_PATTERNS).toBe(TRANSCRIPT_SECRET_PATTERNS);
     expect(surface.redactTranscriptContent).toBe(redactTranscriptContent);
@@ -71,6 +87,8 @@ describe("GET /api/transcripts/:session/full through createApp", () => {
     const node = rigRepo.addNode(rig.id, "dev-impl", { role: "worker", runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
     sessionRegistry.updateStatus(session.id, "running");
+    const awsSecret = "wJalr" + "Y".repeat(35);
+    const awsContext = "aws_secret_access_key" + " ".repeat(12) + "=" + " ".repeat(12);
     store.ensureTranscriptDir("my-rig");
     writeFileSync(store.getTranscriptPath("my-rig", "dev-impl@my-rig"), [
       `merged ${commit} for ${row} (short ${shortSha})`,
@@ -78,6 +96,7 @@ describe("GET /api/transcripts/:session/full through createApp", () => {
       `wrote ${longPath} and ${hyphenatedPath}`,
       `pasted ${apiKey} and ${bearer}`,
       privateKey,
+      awsContext + awsSecret,
       "trailing line",
     ].join("\n"));
 
@@ -88,6 +107,8 @@ describe("GET /api/transcripts/:session/full through createApp", () => {
     for (const identifier of [commit, hash, longPath, hyphenatedPath, row, shortSha]) {
       expect(body.content, identifier).toContain(identifier);
     }
+    expect(body.content).not.toContain(awsSecret);
+    expect(body.content).toContain(awsContext + "[REDACTED]");
     expect(body.content).not.toContain(apiKey);
     expect(body.content).not.toContain(bearer);
     expect(body.content).not.toContain("MIIEvMIIEv");

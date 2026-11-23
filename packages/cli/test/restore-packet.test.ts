@@ -357,6 +357,7 @@ describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
       slackWebhook: "https://hooks" + ".slack.com/services/" + "T000/B000/" + "x".repeat(24),
       awsKeyId: "AKIA" + "ABCDEFGH" + "IJKLMNOP",
       awsSecret: "aws_secret_access_key = " + "wJalr" + "X".repeat(35),
+      awsFormattedSecret: "aws_secret_access_key" + " ".repeat(12) + "=" + " ".repeat(12) + "wJalr" + "Y".repeat(35),
       google: "AIza" + "Sy" + "A".repeat(33),
       jwt: "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0In0" + "." + "s".repeat(20),
       privateKey: "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----",
@@ -1780,6 +1781,8 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
     // Synthetic credentials, assembled at run time. NOT real tokens.
     const key = "sk-" + "Fake".repeat(5);
     const privateKey = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----";
+    const awsSecret = "wJalr" + "Y".repeat(35);
+    const awsContext = "aws_secret_access_key" + " ".repeat(12) + "=" + " ".repeat(12);
     const src = path.join(tmpRoot, "with-identifiers.jsonl");
     fs.writeFileSync(src, [
       JSON.stringify({ type: "session_meta", payload: { cwd: "/x", id: "ids-driver@ids-rig" } }),
@@ -1788,7 +1791,7 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
         payload: {
           type: "message",
           role: "assistant",
-          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}` }],
+          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}\n${awsContext}${awsSecret}` }],
         },
       }),
     ].join("\n"), "utf8");
@@ -1811,6 +1814,8 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
     for (const name of transcripts) {
       const text = fs.readFileSync(path.join(target, name), "utf-8");
       for (const identifier of [commit, hash, longPath, row]) expect(text, `${name}: ${identifier}`).toContain(identifier);
+      expect(text, name).not.toContain(awsSecret);
+      expect(text, name).toContain(awsContext + "[REDACTED]");
       expect(text, name).not.toContain(key);
       expect(text, name).not.toContain("MIIEvMIIEv");
       expect(text, name).toContain("[REDACTED]");
