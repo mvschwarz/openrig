@@ -37,7 +37,7 @@ export function createCommand(depsOverride?: StatusDeps): Command {
     .action(async (name: string, opts: { runtime: string; cwd: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
       let agentRef: string;

@@ -70,7 +70,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
 
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
 
       const resolution = await resolveRigHandle(client, rigId);
