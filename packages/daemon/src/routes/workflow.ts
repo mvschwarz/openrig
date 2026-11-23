@@ -209,6 +209,7 @@ export function workflowRoutes(): Hono {
       .json<{
         specPath?: string;
         rootObjective?: string;
+        runTitle?: unknown;
         createdBySession?: string;
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
@@ -221,6 +222,7 @@ export function workflowRoutes(): Hono {
       .catch(() => ({} as never));
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
+    if (body.runTitle !== undefined && (typeof body.runTitle !== "string" || !body.runTitle.trim() || body.runTitle.length > 120 || /[\r\n\x00-\x1f\x7f]/.test(body.runTitle))) return c.json({ error: "runTitle must be a nonempty single-line string of at most 120 characters" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
     if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
@@ -251,6 +253,7 @@ export function workflowRoutes(): Hono {
       const result = await getRuntime(c).instantiate({
         specPath: body.specPath,
         rootObjective: body.rootObjective,
+        runTitle: typeof body.runTitle === "string" ? body.runTitle.trim() : undefined,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,

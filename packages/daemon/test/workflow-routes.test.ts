@@ -32,6 +32,7 @@ import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_j
 import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
 import { workflowInstanceScopeSchema } from "../src/db/migrations/110_workflow_instance_scope.js";
+import { workflowRunTitleSchema } from "../src/db/migrations/191_workflow_run_title.js";
 
 const SPEC = `workflow:
   id: routes-fixture
@@ -104,6 +105,27 @@ describe("workflow routes (PL-004 Phase D)", () => {
   afterEach(() => {
     db.close();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("accepts a title at the public start endpoint and rejects invalid titles before creating anything", async () => {
+    migrate(db, [queueItemSummarySchema, workflowRunTitleSchema]);
+    const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo.attachOutbox(new OutboxHandler(db));
+    runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
+    app = buildApp({ eventBus: bus, runtime });
+    const request = (runTitle: unknown) => app.request("/api/workflow/instantiate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, rootObjective: "full objective", createdBySession: "ops@rig", runTitle }),
+    });
+    for (const invalid of ["", "  ", "two\nlines", "x".repeat(121), 123]) {
+      expect((await request(invalid)).status).toBe(400);
+    }
+    expect((db.prepare("SELECT count(*) AS n FROM workflow_instances").get() as { n: number }).n).toBe(0);
+    const response = await request("  Release  ");
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result.instance.runTitle).toBe("Release");
+    expect(queueRepo.getById(result.entryQitemId)?.summary).toBe("Release — produce");
   });
 
   it("POST /validate returns ok=true for a valid spec", async () => {

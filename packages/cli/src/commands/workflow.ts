@@ -321,6 +321,7 @@ line it prints, then rig workflow show WF01ABC to confirm the adoption.
     .command("instantiate <specPath>")
     .description("Create a workflow instance + entry-step qitem from a spec")
     .requiredOption("--root-objective <text>", "Root objective for the run")
+    .option("--title <text>", "Short display title for this run's ordinary queue packets")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
@@ -349,6 +350,7 @@ Examples:
 `)
     .action(async (specPath: string, opts: {
       rootObjective: string;
+      title?: string;
       createdBy: string;
       entryOwner?: string;
       rig?: string;
@@ -370,6 +372,7 @@ Examples:
         }>("/api/workflow/instantiate", {
           specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
+          runTitle: opts.title,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
@@ -840,6 +843,7 @@ Examples:
     .command("run <specPath>")
     .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed or aborted)")
     .requiredOption("--root-objective <text>", "Root objective for the run")
+    .option("--title <text>", "Short display title for this run's ordinary queue packets")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
@@ -863,6 +867,7 @@ Examples:
 `)
     .action(async (specPath: string, opts: {
       rootObjective: string;
+      title?: string;
       createdBy: string;
       entryOwner?: string;
       rig?: string;
@@ -883,6 +888,7 @@ Examples:
         }>("/api/workflow/instantiate", {
           specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
+          runTitle: opts.title,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,

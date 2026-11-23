@@ -167,6 +167,13 @@ quoted YAML form `"{pod}-builder@{rig}"`; the instance expands it from its
 stored bindings. Literal preferred targets and explicit owner overrides retain
 their existing precedence and may name other seats.
 
+Both commands also accept an optional `--title <text>` (one nonempty line,
+at most 120 characters). The instance retains it across restarts; ordinary
+entry and handoff packets receive a summary combining the title and step label
+(or step ID). Gate summaries keep their own behavior. A packet's summary can
+still be corrected with `rig queue update`; without a title the existing
+summary behavior is unchanged. The root objective remains the full instruction.
+
 A `preferred_targets` entry may end in `@{rig}`, for example `watcher@{rig}`.
 When the instance is bound to a rig (`--rig`, or the spec's `target.rig`
 default), the trailing `{rig}` becomes that rig, so one reusable spec addresses
