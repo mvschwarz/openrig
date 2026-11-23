@@ -56,6 +56,13 @@ harness grammar. Nonlocal host pins can validate as registered names but
 This is a workflow-step restriction, not a claim that all queue traffic is
 local-only.
 
+A step can carry an optional `label`, a short name a person sees in place of its
+`id`. It must be a non-empty string. It's display only: `id` stays the step's
+identity (and its display without a label), and `objective` stays its
+instruction; nothing routes or validates on it. A daemon from before this key
+refuses a labelled spec with `spec_unknown_key`, so author labelled specs only
+for versions that support them.
+
 A step whose `allowed_exits` can neither finish it nor route it on is refused as
 `step_cannot_finish` (`workflow-validator.ts:223-236`): its exits leave out `done`, none is
 mapped in `next_hop.on`, and it allows no `handoff` that routes on. In a dependency graph,
