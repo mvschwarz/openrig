@@ -1069,6 +1069,27 @@ describe("MCP Server", () => {
     expect(local.get("rig_whoami")?.annotations).toEqual({ readOnlyHint: true, title: "Show this connection" });
   });
 
+  it.each([
+    ["grant-service", "Show my network"],
+    ["file", "Show my team"],
+    ["local-authority", "Show my team"],
+  ] as const)("rig_team title follows the authenticated %s principal source", async (principalSource, title) => {
+    const server = createMcpServer(mockClient(), { seat: "participant@team", principalSource,
+      access: { principal: "opaque-principal", owner: false, rigs: ["team"], roots: [], workspace: false,
+        external: { objects: { team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "source-title-control", version: "1" });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const tool = (await client.listTools()).tools.find(tool => tool.name === "rig_team");
+      expect(tool?.title).toBe(title);
+      expect(tool?.annotations?.title).toBe(title);
+      expect(tool?.annotations?.readOnlyHint).toBe(true);
+      expect(tool?.description).toContain(principalSource === "grant-service" ? "on your network" : "on your team");
+    } finally { await client.close(); await server.close(); }
+  });
+
   it("rig_down calls POST /api/down with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
@@ -1676,6 +1697,48 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
+    it("rig_queue_list carries the daemon's page marker and applied limit into its result (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      // The result carries the limit the daemon says it applied, not the one asked for.
+      const page = (truncated: string) => new Headers({ "X-OpenRig-Limit": "7", "X-OpenRig-Truncated": truncated });
+      const getFn = vi.fn()
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("1") })
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("0") })
+        .mockResolvedValueOnce({ status: 200, data: [row] });
+      await setup({ get: getFn });
+      const texts = (result: Awaited<ReturnType<typeof mcpClient.callTool>>) => (result.content as Array<{ text: string }>).map((c) => c.text);
+
+      // A cut page: the items as before, the limit the daemon applied, truncated, and a line saying so.
+      const cut = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(cut.isError).toBeFalsy();
+      expect(cut.structuredContent).toEqual({ items: [row], limit: 7, truncated: true });
+      expect(texts(cut)).toEqual([JSON.stringify([row]), "This page stops at the limit of 7 and more items match; pass a larger limit to see the rest."]);
+
+      // Exactly the limit matched: a full page alone claims nothing more.
+      const exact = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(exact.structuredContent).toEqual({ items: [row], limit: 7, truncated: false });
+      expect(texts(exact)).toEqual([JSON.stringify([row])]);
+
+      // A daemon that doesn't send the marker leaves the result as it was.
+      const older = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(older.structuredContent).toEqual({ items: [row] });
+      expect(texts(older)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
+    it("rig_queue_list reads a limit header without a truncation header as unknown, not as a complete page (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      const getFn = vi.fn(async () => ({ status: 200, data: [row], headers: new Headers({ "X-OpenRig-Limit": "7" }) }));
+      await setup({ get: getFn });
+
+      // Only an explicit 0 or 1 says whether the page was cut; without one, the result carries no marker at all.
+      const result = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({ items: [row] });
+      expect((result.content as Array<{ text: string }>).map((c) => c.text)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
     it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
       const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
       await setup({ get: getFn });
@@ -1860,6 +1923,25 @@ describe("MCP host routing", () => {
     const create = box.calls.find((call) => call.path === "/api/queue/create");
     // The origin may qualify the seat; the agent it names is the caller's either way.
     expect(create?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("checks a landed same-id retry on the selected remote host before applying new-work backoff", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-123";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const box = recordingRemote();
+    const local = mockClient();
+    local.get = vi.fn(async () => ({ status: 404, data: {} }));
+    const result = await run(local, {
+      seat: "impl@team",
+      access: { principal: "local", owner: true, rigs: ["team"], roots: [], newWorkRetryAfterMs: 9000 },
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", qitemId: "qitem-already-remote", destination: "qa@team", body: "already landed" });
+    expect(result.isError).toBeFalsy();
+    expect(box.calls.find(call => call.path === "/api/queue/qitem-already-remote")?.headers.Authorization).toBe("Bearer tok-123");
+    expect(box.calls.some(call => call.path === "/api/queue/create")).toBe(true);
+    expect(local.get).not.toHaveBeenCalledWith("/api/queue/qitem-already-remote");
   });
 
   it("a remote send names the calling seat as the sender", async () => {

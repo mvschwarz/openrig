@@ -2,9 +2,13 @@
 // agents drain and which reserved adds are cancelled.
 //
 // A seat pool clones one model member into extra agents named `<member>-s<n>`. Each agent has a slot on record, in one
-// of four phases: `adding`, `live`, `draining` or `drained`. This file is pure: the same facts and clock always give the
-// same plan. It reads no database, starts, stops or moves nothing, and has no caller yet. The caller reads the facts
+// of four phases: `adding`, `live`, `draining` or `drained`. The planner is pure: the same facts and clock always give
+// the same plan. It reads no database, starts, stops or moves nothing, and has no caller yet. The caller reads the facts
 // (the slots, each agent's latest session, its open rows and held messages, the waiting rows) and applies the plan.
+//
+// The `seat-pool` watchdog policy, at the end of this file, is the job's side. For now it only reads the model node's
+// stored block and its slot rows, through the readers it is given, and reports them in the job's notes: it applies
+// nothing. The watchdog engine does not run it until the activation change arms the job.
 //
 // The rules are the agreed sizing for Piece 1:
 //   L (live)      agents in phase `live` whose session runs;
@@ -14,7 +18,8 @@
 //   R (unplaced)  movable rows that got no free agent in this plan.
 //
 //   desired = R + O
-//   target  = drain ? 0 : min(max, max(min, desired, O + S))
+//   wanted  = max(min, desired, O + S)             the demand before the clamp
+//   target  = drain ? 0 : min(max, wanted)
 //   current = L + S
 //   surplus = max(0, current − I − target)
 //   room    = max − (adding + live + draining slots on record)
@@ -22,6 +27,13 @@
 // Surplus first cancels `reserved` adds, newest first, then drains free agents idle past `idle_grace_s`, newest first.
 // An `issued` attempt is never cancelled or drained by sizing. A held message counts once, as occupancy: there is no
 // separate term for it and no "+1".
+//
+// A plan that would read `steady` while `wanted` is above `max` and movable rows are still unplaced reads
+// `max_reached` instead: the pool is full and work waits. Only the reason changes; the target and the intents stay.
+
+import type { SeatPoolSlot } from "../seat-pool-slots.js";
+import type { StoredSeatPool } from "../seat-pool-spec.js";
+import type { Policy, PolicyEvaluation, PolicyJob } from "./types.js";
 
 /** A slot's phase. Nothing is removed: a drained agent keeps its node, sessions and history. */
 export type SeatPoolPhase = "adding" | "live" | "draining" | "drained";
@@ -105,8 +117,8 @@ export interface SeatPoolPlan {
   current: number;
   surplus: number;
   room: number;
-  /** The terms the target came from, for the job's history. */
-  counts: { live: number; starting: number; issued: number; occupied: number; unplaced: number };
+  /** The terms the target came from, for the job's history. `wanted` is the demand before the clamp to `max`. */
+  counts: { live: number; starting: number; issued: number; occupied: number; unplaced: number; wanted: number };
 }
 
 /** Whether a slot takes room under `max`: every slot on record except a `drained` one. */
@@ -215,9 +227,8 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
   const unplaced = movable.length - receiving.size;
 
   const current = live.length + starting.length;
-  const target = spec.drain
-    ? 0
-    : Math.min(spec.max, Math.max(spec.min, unplaced + occupied.length, occupied.length + starting.length));
+  const wanted = Math.max(spec.min, unplaced + occupied.length, occupied.length + starting.length);
+  const target = spec.drain ? 0 : Math.min(spec.max, wanted);
   const surplus = Math.max(0, current - issued.length - target);
   const room = seatPoolRoom(spec, agents);
   // Inside the cooldown after the latest step. An unreadable time starts no cooldown.
@@ -251,6 +262,8 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
     else if (cooling) reason = "cooldown";
     else intents.push({ kind: "add", count });
   }
+  // Full at max with work still waiting: not steady. The dispatches above stay, and no add is made.
+  if (reason === "steady" && wanted > spec.max && unplaced > 0) reason = "max_reached";
   if (cooling && drainable.length > 0) reason = "cooldown";
 
   return {
@@ -260,6 +273,44 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
     current,
     surplus,
     room,
-    counts: { live: live.length, starting: starting.length, issued: issued.length, occupied: occupied.length, unplaced },
+    counts: {
+      live: live.length, starting: starting.length, issued: issued.length, occupied: occupied.length, unplaced, wanted,
+    },
+  };
+}
+
+/** The watchdog policy name of the seat pool job. */
+export const SEAT_POOL_POLICY_NAME = "seat-pool";
+
+/** What the seat pool policy reads, injected by whoever composes it. */
+export interface SeatPoolPolicyDeps {
+  /** The model node's stored `pool` block (the rig repository's `getNodePool`); undefined when none is stored. */
+  readBlock(modelNodeId: string): StoredSeatPool | undefined;
+  /** The model node's slot rows, lowest number first (the slot repository's `forModel`). */
+  readSlots(modelNodeId: string): readonly SeatPoolSlot[];
+}
+
+/**
+ * The `seat-pool` job's policy. The job finds its pool through the model node named in its spec (`model_node_id`),
+ * never through a list kept on the job, so a replacement job finds the same agents. For now it reads the stored block
+ * and the slot rows and reports them in the notes; it moves, adds, drains and stops nothing.
+ */
+export function makeSeatPoolPolicy(deps: SeatPoolPolicyDeps): Policy {
+  return {
+    name: SEAT_POOL_POLICY_NAME,
+    async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
+      const modelNodeId = job.context["model_node_id"];
+      if (typeof modelNodeId !== "string" || modelNodeId === "") {
+        return { action: "skip", reason: "seat_pool_model_unknown", notes: { modelNodeId: modelNodeId ?? null } };
+      }
+      const slots = deps.readSlots(modelNodeId).map((slot) => ({ slotNumber: slot.slotNumber, nodeId: slot.nodeId, phase: slot.phase }));
+      const stored = deps.readBlock(modelNodeId);
+      const block = stored === undefined
+        ? { block: "none" as const }
+        : "spec" in stored
+          ? { block: "stored" as const, spec: stored.spec }
+          : { block: "unusable" as const, error: stored.error };
+      return { action: "skip", reason: "seat_pool_report", notes: { modelNodeId, ...block, slots } };
+    },
   };
 }

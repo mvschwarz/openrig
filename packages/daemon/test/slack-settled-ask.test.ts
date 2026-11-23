@@ -131,6 +131,23 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(postCount).toBe(1);
   });
 
+  it("bounds settled context text after escaping a closure note", async () => {
+    const item = await postAsk();
+    const note = "🧪 " + "&&<".repeat(300);
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done",
+      closureReason: "no-follow-on", transitionNote: note });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const edited = updates[0]!;
+    const blocks = edited.blocks as Array<{ block_id?: string; type?: string; elements?: Array<{ text: string }> }>;
+    const status = blocks.find((block) => block.block_id === "or-settled")!.elements![0]!.text;
+    expect(status.length).toBeLessThanOrEqual(3000);
+    expect(status).toMatch(/^Done · .* · by author@rig · 🧪 /);
+    expect(status).toMatch(/(?:&amp;|&lt;)…$/);
+    expect(String(edited.text).split("\n")[0]).toBe(status);
+    expect(blocks.some((block) => block.type === "actions")).toBe(false);
+    expect(repo.listTransitions(item.qitemId).some((transition) => transition.transitionNote === note)).toBe(true);
+  });
+
   it("labels a done denial as Denied while retaining its stored closure reason", async () => {
     const item = await postAsk();
     repo.update({ qitemId: item.qitemId, actorSession: human, state: "done", closureReason: "denied" });

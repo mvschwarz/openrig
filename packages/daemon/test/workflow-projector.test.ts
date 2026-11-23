@@ -13,6 +13,9 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
+import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
+import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -789,5 +792,196 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
         .rejects.toMatchObject({ code: "packet_not_on_frontier" });
       expect(snapshot()[0]).toEqual(before[0]);
     });
+  });
+});
+
+// #3757: a handoff between two steps of the same role, closed by the session that owned the packet. Without
+// --next-owner the default stays preferred_targets[0] and project says so; next_owner: same_as_previous (step or spec)
+// keeps the next packet with the closing session.
+describe("WorkflowProjector — same-role handoff owner (#3757)", () => {
+  let db: Database.Database;
+  let runtime: WorkflowRuntime;
+  let queueRepo: QueueRepository;
+  let tmp: string;
+  let specCount = 0;
+
+  function sameRoleSpec(opts: { stepNextOwner?: string; specNextOwner?: string; deliverGate?: boolean; ownerTargets?: boolean;
+    deliverHarness?: string; routedFailed?: boolean } = {}): string {
+    const ownerRole = opts.ownerTargets === false ? "    owner: {}" : "    owner:\n      preferred_targets:\n        - triage@rig";
+    return `workflow:
+  id: same-role
+  version: 1
+  objective: same-role handoff owner resolution
+${opts.specNextOwner ? `  next_owner: ${opts.specNextOwner}\n` : ""}  entry:
+    role: owner
+  roles:
+${ownerRole}
+    checker:
+      preferred_targets:
+        - checker@rig
+  steps:
+    - id: execute
+      actor_role: owner
+${opts.routedFailed ? `      next_hop:\n        on:\n          failed: deliver\n` : ""}      allowed_exits:
+        - handoff
+${opts.routedFailed ? `        - failed\n` : ""}    - id: deliver
+      actor_role: owner
+${opts.stepNextOwner ? `      next_owner: ${opts.stepNextOwner}\n` : ""}${opts.deliverGate ? `      gate:\n        target: checker\n` : ""}${opts.deliverHarness ? `      harness: ${opts.deliverHarness}\n` : ""}      allowed_exits:
+        - handoff
+    - id: check
+      actor_role: checker
+      allowed_exits:
+        - done
+`;
+  }
+
+  async function start(spec: string) {
+    const path = join(tmp, `spec-${++specCount}.yaml`);
+    writeFileSync(path, spec);
+    return runtime.instantiate({ specPath: path, rootObjective: "x", createdBySession: "ops@rig", entryOwnerSession: "worker@rig" });
+  }
+
+  function ownerMode(instanceId: string, closedPacketId?: string): unknown {
+    const trail = runtime.trailLog.listForInstance(instanceId);
+    const row = closedPacketId ? trail.find((t) => t.priorQitemId === closedPacketId) : trail[0];
+    const evidence = row?.closureEvidence as Record<string, Record<string, unknown>> | null;
+    return evidence?.["owner_resolution"]?.["mode"];
+  }
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [outboxEntriesSchema, coreSchema, bindingsSessionsSchema, rigArchiveSchema, eventsSchema, queueItemsSchema,
+      queueTransitionsSchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, workflowSpecJsonSchema]);
+    const bus = new EventBus(db);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo.attachOutbox(new OutboxHandler(db));
+    tmp = mkdtempSync(join(tmpdir(), "wf-same-role-"));
+    runtime = new WorkflowRuntime({ exceptionDial: { hostDefault: () => null, humanFallbackSeat: "human@host" }, db, eventBus: bus, queueRepo });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("without --next-owner, the packet owner's same-role handoff goes to preferred_targets[0] and project advises --next-owner", async () => {
+    const inst = await start(sameRoleSpec());
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("triage@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("preferred_targets");
+    expect(projected.advisories).toEqual([
+      `next owner triage@rig for step "deliver" comes from preferred_targets of role "owner", not from worker@rig, which closed its own packet in the same role; pass --next-owner worker@rig to keep it, or set next_owner: same_as_previous in the spec`,
+    ]);
+  });
+
+  it("with --next-owner, the same-role handoff goes to the named seat without the advisory", async () => {
+    const inst = await start(sameRoleSpec());
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig", nextOwnerSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("worker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("explicit");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("a step's next_owner: same_as_previous keeps the next packet with the session that closed its own packet", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("worker@rig");
+    expect(queueRepo.getById(projected.nextQitemId!)?.destinationSession).toBe("worker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("continuation");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("a spec-level next_owner: same_as_previous applies to a step without its own", async () => {
+    const inst = await start(sameRoleSpec({ specNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("worker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("continuation");
+  });
+
+  it("same_as_previous does not apply when the closing session was not the packet's destination", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "other@rig" });
+    expect(projected.nextOwnerSession).toBe("triage@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("preferred_targets");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("--next-owner wins over same_as_previous", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig", nextOwnerSession: "other@rig" });
+    expect(projected.nextOwnerSession).toBe("other@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("explicit");
+  });
+
+  it("a gated next step compiles to its gate, not to same_as_previous", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous", deliverGate: true }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(projected.nextOwnerSession).toBe("checker@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("gate");
+  });
+
+  it("a handoff into a step of another role gives no advisory", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous" }));
+    const first = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    const second = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: first.nextQitemId!,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(second.nextOwnerSession).toBe("checker@rig");
+    expect(second.advisories).toBeUndefined();
+  });
+
+  it("a spec-level same_as_previous does not carry a handoff into another role", async () => {
+    const inst = await start(sameRoleSpec({ specNextOwner: "same_as_previous" }));
+    const first = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(first.nextOwnerSession).toBe("worker@rig");
+    const second = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: first.nextQitemId!,
+      exit: "handoff", actorSession: "worker@rig" });
+    expect(second.nextOwnerSession).toBe("checker@rig");
+    expect(ownerMode(inst.instance.instanceId, first.nextQitemId!)).toBe("preferred_targets");
+  });
+
+  it("same_as_previous applies to a handoff exit only, not to an exit routed by next_hop.on", async () => {
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous", routedFailed: true }));
+    const projected = await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "failed", actorSession: "worker@rig" });
+    expect(projected.nextStepId).toBe("deliver");
+    expect(projected.nextOwnerSession).toBe("triage@rig");
+    expect(ownerMode(inst.instance.instanceId)).toBe("preferred_targets");
+    expect(projected.advisories).toBeUndefined();
+  });
+
+  it("same_as_previous into a harness-pinned step the closing session doesn't run fails loud, naming the closing session", async () => {
+    // a managed node + session per seat, so the projector reads each runtime: the role's target runs the pinned harness
+    for (const [session, runtimeName] of [["triage@rig", "claude-code"], ["worker@rig", "codex"]]) {
+      db.prepare(`INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES (?, 'r-1', ?, ?)`).run(`n-${session}`, session.split("@")[0], runtimeName);
+      db.prepare(`INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, ?, ?, 'running')`).run(`s-${session}`, `n-${session}`, session);
+    }
+    const inst = await start(sameRoleSpec({ stepNextOwner: "same_as_previous", deliverHarness: "claude-code" }));
+    await expect(runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" }))
+      .rejects.toMatchObject({ code: "harness_pin_unsatisfied", message: expect.stringContaining("the closing session worker@rig (next_owner: same_as_previous) runs codex"),
+        details: expect.objectContaining({ continuation: true }) });
+  });
+
+  it("an unresolvable next owner names --next-owner beside nextOwnerSession", async () => {
+    const inst = await start(sameRoleSpec({ ownerTargets: false }));
+    await expect(runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId,
+      exit: "handoff", actorSession: "worker@rig" }))
+      .rejects.toMatchObject({ code: "next_owner_unresolved", message: expect.stringContaining("supply nextOwnerSession explicitly (rig workflow project --next-owner <session>)") });
+  });
+
+  it("a next_owner value outside the allowed set is refused at the spec", async () => {
+    await expect(start(sameRoleSpec({ stepNextOwner: "caller" }))).rejects.toMatchObject({ code: "spec_field_invalid" });
+    await expect(start(sameRoleSpec({ specNextOwner: "caller" }))).rejects.toMatchObject({ code: "spec_field_invalid" });
+    await expect(start(sameRoleSpec({ stepNextOwner: "true" }))).rejects.toMatchObject({ code: "spec_field_invalid" });
   });
 });
