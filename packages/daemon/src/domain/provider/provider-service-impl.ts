@@ -389,7 +389,12 @@ export class ProviderServiceImpl implements ProviderService {
         switchSeat: async (seat) => {
           const why = elsewhere(seat, true);
           if (why) return { outcome: "failed_safely", reasons: ["seat_name_shared"], message: why };
-          return this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat);
+          // The switch awaits its check and may wait for the shared home before it restarts the seat by name: the restart
+          // carries the node selected here, so it never acts on a seat the name reaches by then.
+          const nodeId = nodeOf.get(seat)!.nodeId;
+          const pinned: SeatRestart | undefined = tools.seatRestart
+            && { plan: (s) => tools.seatRestart!.plan(s, nodeId), run: (s, reason) => tools.seatRestart!.run(s, reason, nodeId) };
+          return this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, pinned, tools.claudeSeat);
         },
         restartPeer: async (seat, reason) => {
           if (!tools.seatRestart) return { ok: false, code: "restart_unavailable", message: "The seat's restart isn't available here." };
@@ -598,7 +603,7 @@ export class ProviderServiceImpl implements ProviderService {
       message: "Codex uses a saved API-key login in its existing home. Import/save that native login with rig auth, then select its name with --to-account; --api-key-file is for Claude." } };
     const plan = await seatRestart.plan(input.seat);
     if (!plan.ok) {
-      return { ok: false, verdict: { safe: false, reasons: [plan.code === "not_codex" ? "rebind_unsupported_for_runtime" : "seat_restart_refused"],
+      return { ok: false, verdict: { safe: false, reasons: [plan.code === "not_codex" ? "rebind_unsupported_for_runtime" : plan.code === "seat_name_shared" ? "seat_name_shared" : "seat_restart_refused"],
         message: `${plan.code}: ${plan.message}` } };
     }
     const seat = { home: plan.codexHome, activity: plan.activity.state, peers: plan.peers };
@@ -656,6 +661,12 @@ export class ProviderServiceImpl implements ProviderService {
     const key = resolvedHome(home);
     homeSwitches.set(key, { count: (homeSwitches.get(key)?.count ?? 0) + 1, seat: input.seat });
     const restart = await seatRestart.run(input.seat, `rig provider switch --to-account ${input.toAccount}`);
+    // The seat's name now reaches another seat (only a caller that selected it by node gets this): nothing was restarted,
+    // and a restart by that name would reach the other seat, so none is offered.
+    if (!restart.ok && restart.code === "seat_name_shared") {
+      return { outcome: "unknown", reasons: ["seat_name_shared"], seat: report,
+        message: `${home} now uses "${input.toAccount}", but ${restart.message} It and every other seat on this home keep their current login only until their next token refresh.${report.undo ? ` To switch the home back: ${report.undo}` : ""}` };
+    }
     if (!restart.ok) {
       return { outcome: "failed_safely", reasons: ["login_changed_seat_not_restarted"], seat: report,
         message: `${home} now uses "${input.toAccount}", but ${input.seat} wasn't restarted (${restart.code}: ${restart.message}). It and every other seat on this home keep their current login only until their next token refresh, when Codex stops them with "signed in to another account" until they're restarted: rig seat restart ${input.seat} --keep-conversation ${movedReason(input.toAccount)}.${report.undo ? ` To switch the home back: ${report.undo}` : ""}` };

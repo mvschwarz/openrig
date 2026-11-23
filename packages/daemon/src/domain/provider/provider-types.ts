@@ -180,6 +180,7 @@ export type PrecheckReason =
   | "signal_unknown_or_stale"
   | "rebind_unsupported_for_runtime"
   | "seat_restart_refused" // the seat's in-place restart plan refused, so nothing would change
+  | "seat_name_shared" // the seat's name now reaches another seat than the one an assignment selected
   | "target_not_in_seat_home" // no login by that name is saved in the Codex home the seat runs on
   | "token_file_required" // a Claude seat moves to a token file (--token-file), or back to its stored login (--stored-login)
   | "invalid_token_reference" // the label or the token file's path can't be a seat's reference

@@ -85,8 +85,9 @@ export type ProviderSwitchResult =
 /** The seat's in-place restart (`rig seat restart --keep-conversation`), lent by the route for one call. */
 export interface SeatRestart {
   /** Every gate, read-only: nothing is stopped. */
-  plan(seat: string): Promise<RestartInPlaceResult>;
-  run(seat: string, reason: string): Promise<RestartInPlaceResult>;
+  /** `nodeId`: the seat this was selected as; a name that resolves to another seat then restarts nothing. */
+  plan(seat: string, nodeId?: string): Promise<RestartInPlaceResult>;
+  run(seat: string, reason: string, nodeId?: string): Promise<RestartInPlaceResult>;
 }
 
 /** A Claude seat's relaunch on the same conversation, in its own pane, by restore's own resume path, lent by the route for

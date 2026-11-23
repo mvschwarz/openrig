@@ -2073,4 +2073,54 @@ describe("rig provider assign's plan over a Codex seat", () => {
     unchanged();
     expect(w.calls).toEqual([]);
   });
+
+  it("the switch's restart carries the seat it was selected as: a name another rig takes while the switch awaits its check restarts nothing", async () => {
+    const { w, home } = setup();
+    const rigs = new RigRepository(w.db);
+    const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
+    const svc = new ProviderServiceImpl({ db: w.db, listRigs: () => w.db.prepare("SELECT id FROM rigs").all() as Array<{ id: string }>,
+      env: { HOME: path.dirname(home), CODEX_HOME: home }, platform: "linux",
+      codexLogins: { list: () => ["team"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: [], notChecked: [] }) });
+    // While the switch awaits its own check, the rig is archived and another rig named r, with the same member, is the one
+    // the name resolves to.
+    let otherNode: string | null = null;
+    const takeName = () => {
+      rigs.archiveRig(rigId);
+      const other = rigs.createRig("r");
+      const node = rigs.addNode(other.id, "dev.codex", { runtime: "codex", cwd: "/work" });
+      const registry = new SessionRegistry(w.db);
+      registry.updateStatus(registry.registerSession(node.id, SEAT).id, "running");
+      otherNode = node.id;
+    };
+    let checks = 0;
+    // The route's in-place restart, passing the node it's given.
+    const seatRestart = {
+      plan: async (seat: string, nodeId?: string) => {
+        const r = await w.service.restartInPlace({ seatRef: seat, plan: true, ...(nodeId !== undefined ? { nodeId } : {}) });
+        // The plan's check, the apply's own plan, then the switch's check: the name moves on the last.
+        if (++checks === 3) takeName();
+        return r;
+      },
+      run: vi.fn((seat: string, reason: string, nodeId?: string) => w.service.restartInPlace({ seatRef: seat, reason, ...(nodeId !== undefined ? { nodeId } : {}) })),
+    };
+    const request = { rig: "r", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart);
+    if (!planned.ok) throw new Error(planned.message);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
+    if (!applied.ok) throw new Error(applied.message);
+    expect(otherNode).not.toBeNull();
+    expect(seatRestart.run).toHaveBeenCalledWith(SEAT, expect.any(String), w.node.id);
+    // Nothing was restarted, in either seat's pane, and the result is the selected seat's, with no command by its name.
+    expect(w.calls).toEqual([]);
+    expect(w.events().filter((e) => e.type !== "seat.restart_in_place.planned")).toEqual([]);
+    const [result] = applied.report.results;
+    expect(result).toMatchObject({ seat: SEAT, kind: "unknown" });
+    expect(result!.detail).toContain(`now names the seat in rig r (${(w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(otherNode) as { rig_id: string }).rig_id}), not the one this restart was for; nothing was restarted`);
+    expect(result!.recovery).toBeUndefined();
+    expect(result!.detail).not.toContain("rig seat restart");
+    expect(result!.detail).toContain("It has no restart command");
+    const saved = new ProviderAccountAssignmentsRepository(w.db).results(rigId, "codex");
+    expect(saved.map((r) => [r.nodeId, r.kind])).toEqual([[w.node.id, "unknown"]]);
+  });
 });

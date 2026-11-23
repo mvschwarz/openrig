@@ -64,8 +64,8 @@ function successorDryRun(c: Context): (seat: string, home: string) => Promise<Pl
 
 function seatRestartOf(c: Context): SeatRestart {
   return {
-    plan: (seat) => seatLifecycleService(c).restartInPlace({ seatRef: seat, plan: true }),
-    run: (seat, reason) => seatLifecycleService(c).restartInPlace({ seatRef: seat, reason }),
+    plan: (seat, nodeId) => seatLifecycleService(c).restartInPlace({ seatRef: seat, plan: true, ...(nodeId !== undefined ? { nodeId } : {}) }),
+    run: (seat, reason, nodeId) => seatLifecycleService(c).restartInPlace({ seatRef: seat, reason, ...(nodeId !== undefined ? { nodeId } : {}) }),
   };
 }
 

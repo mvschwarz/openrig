@@ -159,6 +159,7 @@ export interface SeatRefusal {
     | "seat_ref_required"
     | "seat_not_found"
     | "seat_ambiguous"
+    | "seat_name_shared"
     | "missing_model"
     | "missing_cwd"
     | "invalid_cwd"
@@ -2172,13 +2173,18 @@ export class SeatLifecycleService {
    * needs input) and child processes are reported for the operator to judge, not refused. Identity, typing
    * guard, adopted sessions, unreadable tmux and settings drift are named refusals before any signal.
    */
-  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null }): Promise<RestartInPlaceResult> {
+  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null; nodeId?: string }): Promise<RestartInPlaceResult> {
     if (!input.plan) {
       const required = this.requireReason(input.reason ?? "");
       if (required) return required;
     }
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    // #3625: a caller that selected the seat by its node (an assignment) passes it, so a name that now resolves to another
+    // seat (another rig took it meanwhile) restarts nothing rather than that seat.
+    if (input.nodeId !== undefined && resolved.nodeId !== input.nodeId) {
+      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names the seat in rig ${resolved.entry.rigName} (${resolved.entry.rigId}), not the one this restart was for; nothing was restarted.` };
+    }
     const prepared = this.inPlaceRestarter();
     if ("code" in prepared) return prepared;
     if (input.plan) {

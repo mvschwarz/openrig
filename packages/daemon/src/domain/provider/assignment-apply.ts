@@ -77,11 +77,11 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
   const unnamed = new Set([...plan.rows.filter((r) => r.precheck?.reasons.includes("seat_name_shared")).map((r) => r.seat),
     ...plan.codexHomes.flatMap((g) => g.seats.filter((s) => s.sharedName).map((s) => s.seat))]);
   const refusedByName = (row: PlanRow, r: ProviderSwitchResult | SuccessorResult) => {
-    if ("outcome" in r ? r.outcome === "failed_safely" && r.reasons.includes("seat_name_shared") : !r.ok && r.code === "seat_name_shared") unnamed.add(row.seat);
+    if ("outcome" in r ? (r.outcome === "failed_safely" || r.outcome === "unknown") && r.reasons.includes("seat_name_shared") : !r.ok && r.code === "seat_name_shared") unnamed.add(row.seat);
   };
   const recoveryOf = (seat: string) => (unnamed.has(seat) ? undefined : restartCommand(seat));
   const record = (row: PlanRow, kind: AssignmentResultKind, detail: string, recovery?: string, activity = row.activity as string) => {
-    if (kind === "unknown" && unnamed.has(row.seat)) detail = `${detail}. ${NO_NAME}.`;
+    if (kind === "unknown" && unnamed.has(row.seat)) detail = `${detail.replace(/\.$/, "")}. ${NO_NAME}.`;
     const result: ApplySeatResult = { seat: row.seat, kind, detail, ...(recovery ? { recovery } : {}), activity, at: deps.now() };
     // A seat whose own switch failed before effect is recorded again, as unknown, once another seat changes its home:
     // the later result, which names the earlier failure, replaces it in the report.
@@ -249,6 +249,8 @@ export function switchKind(seat: string, r: ProviderSwitchResult): [AssignmentRe
       }
       return ["failed_before_effect", `${r.reasons.join(", ")}${message ? `: ${message}` : ""}`, undefined];
     case "unknown":
+      // A seat its name no longer reaches gets no command by that name.
+      if (r.reasons.includes("seat_name_shared")) return ["unknown", `${r.reasons.join(", ")}: ${message}`, undefined];
       return ["unknown", `${r.reasons.join(", ")}: ${message}`,
         r.seat?.restart?.recoveryCommand ?? r.seat?.restart?.remainingStep ?? (r.seat?.home ? restartCommand(seat) : undefined)];
   }
