@@ -167,7 +167,7 @@ export class WorkflowInstanceStore {
     const specVal = this.hasSpecColumn ? ", ?, ?" : "";
     const objectiveCol = this.hasRootObjectiveColumn ? ", root_objective" : "";
     const objectiveVal = this.hasRootObjectiveColumn ? ", ?" : "";
-    if (input.runTitle && !this.hasRunTitleColumn) throw new WorkflowInstanceError("run_title_unavailable", "workflow run title requires migration 191");
+    if (input.runTitle && !this.hasRunTitleColumn) throw new WorkflowInstanceError("run_title_unavailable", "workflow run title requires migration 194");
     const titleCol = this.hasRunTitleColumn ? ", run_title" : "";
     const titleVal = this.hasRunTitleColumn ? ", ?" : "";
     const params: unknown[] = [

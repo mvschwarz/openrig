@@ -222,10 +222,14 @@ export function workflowRoutes(): Hono {
       .catch(() => ({} as never));
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
-    if (body.runTitle !== undefined && (typeof body.runTitle !== "string" || !body.runTitle.trim() || body.runTitle.length > 120 || /[\r\n\x00-\x1f\x7f]/.test(body.runTitle))) return c.json({ error: "runTitle must be a nonempty single-line string of at most 120 characters" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
     if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
+      const title = typeof body.runTitle === "string"
+        ? Array.from(body.runTitle.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()).slice(0, 120).join("") || undefined
+        : undefined;
+      const titleNote = body.runTitle !== undefined && body.runTitle !== title
+        ? `Workflow run title normalized to ${title === undefined ? "untitled" : JSON.stringify(title)}.` : null;
       // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
       // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
       // named is recorded, and the response advisories say plainly that it was not applied. A scope that can be
@@ -253,7 +257,7 @@ export function workflowRoutes(): Hono {
       const result = await getRuntime(c).instantiate({
         specPath: body.specPath,
         rootObjective: body.rootObjective,
-        runTitle: typeof body.runTitle === "string" ? body.runTitle.trim() : undefined,
+        runTitle: title,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
@@ -269,11 +273,11 @@ export function workflowRoutes(): Hono {
         notes.push(`Scope not applied (${scopeFailure}). Instance ${result.instance.instanceId} was created unscoped: its packets carry no project, mission, slice or tag scope. `
           + "Correct the scope and instantiate again for a scoped instance; that creates a second instance.");
       }
-      if (notes.length === 0) return c.json(result, 201);
+      if (notes.length === 0 && !titleNote) return c.json(result, 201);
       return c.json({
         ...result,
-        advisories: [...(result.advisories ?? []), ...notes],
-        scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") },
+        advisories: [...(result.advisories ?? []), ...notes, ...(titleNote ? [titleNote] : [])],
+        ...(notes.length ? { scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") } } : {}),
       }, 201);
     } catch (err) {
       return errorResponse(c, err);
