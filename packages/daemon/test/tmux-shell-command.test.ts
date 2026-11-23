@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shellQuote } from "../src/adapters/shell-quote.js";
-import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
+import { TmuxAdapter, defaultTmuxFileOps, type TmuxFileOps } from "../src/adapters/tmux.js";
 
 /** Capture staged scripts and tmux requests without writing into a live pane. */
 function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
@@ -207,6 +207,44 @@ describe("shell launch transport", () => {
       expect(existsSync(f.scriptPath)).toBe(false);
       expect(f.adapter.stagedLaunchUnread("pane")).toBe(false);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // #3843: the script's file name marks the launch's typed line in the pane, so a resume can tell its own "No conversation
+  // found" (below that line) from an earlier launch's (above it). It's kept after the shell reads the launch.
+  it("names the staged launch's script as its typed line shows it, after the shell reads it, until the next launch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "launch-name-"));
+    try {
+      const f = fixture(undefined, join(root, "launch 'quoted'.sh"));
+      expect(f.adapter.stagedLaunchFileName("pane")).toBeUndefined();
+      expect(await f.adapter.sendShellCommand("pane", "true", undefined, { sourceInPane: true })).toEqual({ ok: true });
+      const typed = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+      const name = f.adapter.stagedLaunchFileName("pane");
+      expect(name).toBe(`launch '"'"'quoted'"'"'.sh`);
+      expect(typed).toContain(`/${name}'`);
+      expect(f.adapter.stagedLaunchFileName("other")).toBeUndefined();
+      writeFileSync(f.scriptPath, f.files.get(f.scriptPath)!, { mode: 0o600 });
+      expect(f.adapter.stagedLaunchUnread("pane")).toBe(true);
+      execFileSync("/bin/sh", ["-c", typed]);
+      // Read: no longer unread, and still named.
+      expect(f.adapter.stagedLaunchUnread("pane")).toBe(false);
+      expect(f.adapter.stagedLaunchFileName("pane")).toBe(name);
+      // The next staged launch to the target replaces it; one sent inline leaves none.
+      expect(await f.adapter.sendShellCommand("pane", "true", undefined, { sourceInPane: true })).toEqual({ ok: true });
+      expect(f.adapter.stagedLaunchFileName("pane")).toBe("paste.txt");
+      expect(await f.adapter.sendShellCommand("pane", "true", undefined, { stageIfLong: true })).toEqual({ ok: true });
+      expect(f.adapter.stagedLaunchFileName("pane")).toBeUndefined();
+      expect(f.adapter.stagedLaunchUnread("pane")).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("names the script exactly as the default staging names it", async () => {
+    const files = new Map<string, string>();
+    const fileOps: TmuxFileOps = { ...defaultTmuxFileOps(), writeFile: vi.fn(async (path, text) => { files.set(path, text); }), unlink: vi.fn(async () => {}) };
+    const adapter = new TmuxAdapter(vi.fn(async (command: string) => command.includes("#{pane_current_command}") ? "zsh" : ""), fileOps);
+    expect(await adapter.sendShellCommand("pane", "true", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const [script] = [...files.keys()].filter(path => path.endsWith(".txt") && files.get(path)!.startsWith("/bin/rm"));
+    expect(adapter.stagedLaunchFileName("pane")).toBe(script!.split("/").pop());
+    expect(adapter.stagedLaunchFileName("pane")).toMatch(/^openrig-tmux-send-\d+-[0-9a-f-]{36}\.txt$/);
   });
 
   it("sources a long classic command in a pane-shell subshell using the same short-input bound", async () => {

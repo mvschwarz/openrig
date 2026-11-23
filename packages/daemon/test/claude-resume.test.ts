@@ -17,6 +17,10 @@ const CLAUDE_FLOOR_EFFECT = {
   claudeAutoMode: null,
 } as const;
 
+// A staged launch's script name, and the line the pane's shell shows once it reads the launch (after its prompt).
+const launchName = "openrig-tmux-send-4242-0f0e0d0c-1111-4222-8333-444455556666.txt";
+const typedLaunch = `( . '/tmp/${launchName}' )`;
+
 const DRAWN_CLAUDE = `Claude Code v2.1.310\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
 
 function mockTmux(overrides?: {
@@ -489,19 +493,108 @@ describe("ClaudeResumeAdapter", () => {
 
     // An earlier launch's "No conversation found" can still be on screen in a reused pane. While the staged launch is
     // unread Claude hasn't run, so that text can't be this launch's: the stored conversation isn't abandoned for it.
+    // Once the shell reads the launch, only a report below its typed line (naming the staged script) is this launch's.
     it.each([
       ["hasn't read the staged launch yet: an earlier launch's report keeps the launch", true, "attention_required"],
-      ["read the staged launch: the report is this launch's", false, "retry_fresh"],
+      ["read the staged launch: a report below its typed line is this launch's", false, "retry_fresh"],
     ] as const)("a pane already showing \"No conversation found\" whose shell %s", async (_label, unread, code) => {
-      const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => "No conversation found with session ID: old\n$ ",
-        getPanePid: async () => 4321 });
+      const tmux = mockTmux({ getPaneCommand: async () => "zsh", getPanePid: async () => 4321,
+        capturePaneContent: async () => `No conversation found with session ID: old\n$ ${unread ? "" : `${typedLaunch}\nNo conversation found with session ID: retained-history\n$ `}` });
       tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
       tmux.stagedLaunchUnread = vi.fn(() => unread);
+      tmux.stagedLaunchFileName = vi.fn(() => launchName);
       const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0,
         seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
       const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
       expect(result, JSON.stringify(result)).toMatchObject({ ok: false, code });
-      if (unread) expect((result as { message: string }).message).toContain("from an earlier launch");
+      if (unread) expect((result as { message: string }).message).toContain("may be from an earlier launch (the pane's shell hasn't read this launch yet)");
+    });
+
+    // #3843 r2: the report is placed by this launch's own typed line, not by how many reports are on screen.
+    describe("an earlier launch's \"No conversation found\" is told apart by the launch's typed line", () => {
+      // `frames(n)` is the nth capture; the shell has read the launch from capture `readAt` on.
+      const staged = (frames: (n: number) => string, opts: { readAt?: number; command?: string } = {}) => {
+        let read = 0;
+        let unread = (opts.readAt ?? 0) > 0;
+        const tmux = mockTmux({ getPaneCommand: async () => opts.command ?? "zsh", capturePaneContent: async () => {
+          const n = read++;
+          unread = n < (opts.readAt ?? 0);
+          return frames(n);
+        } });
+        tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+        tmux.stagedLaunchUnread = vi.fn(() => unread);
+        tmux.stagedLaunchFileName = vi.fn(() => launchName);
+        const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 1, maxWaitMs: 3, sleep: async () => {},
+          seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
+        return { adapter, reads: () => read };
+      };
+      const old = "No conversation found with session ID: old\n$ ";
+
+      // The reviewer's cells (review50-r2, reviewer-count-edges.patch), with the typed line the pane shows once the shell
+      // has read the launch.
+      it("an old report that scrolled out (or was replaced), then this launch's own report below its typed line: retried fresh", async () => {
+        const { adapter, reads } = staged(n => n === 0 ? old : n === 1 ? "starting..." : `$ ${typedLaunch}\nNo conversation found with session ID: retained-history`, { readAt: 1 });
+        const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+        expect(result, JSON.stringify({ result, read: reads() })).toMatchObject({ ok: false, code: "retry_fresh" });
+      });
+
+      it("two launches in one pane: each is judged by its own typed line", async () => {
+        let launch = 0;
+        const names = ["aaaaaaaa", "bbbbbbbb"].map(id => `openrig-tmux-send-4242-${id}-1111-4222-8333-444455556666.txt`);
+        const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => launch === 1
+          ? "No conversation found with session ID: old\nNo conversation found with session ID: older\n$ "
+          : `No conversation found with session ID: old\nNo conversation found with session ID: older\n$ ( . '/tmp/${names[1]}' )\nNo conversation found with session ID: second\n$ ` });
+        tmux.sendShellCommand = vi.fn(async () => { launch++; return { ok: true as const }; });
+        tmux.stagedLaunchUnread = vi.fn(() => launch === 1);
+        tmux.stagedLaunchFileName = vi.fn(() => names[launch - 1]);
+        const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 1, maxWaitMs: 3, sleep: async () => {},
+          seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
+        expect(await adapter.resume("worker", "claude_id", "first", "/repo")).toMatchObject({ code: "attention_required" });
+        expect(await adapter.resume("worker", "claude_id", "second", "/repo")).toMatchObject({ code: "retry_fresh" });
+        expect(launch).toBe(2);
+      });
+
+      it.each([
+        ["twice", `${old}${old}`],
+        ["once", old],
+      ])("a redraw that reprints the old report %s above the typed line doesn't hide the resumed screen below it", async (_label, reprint) => {
+        const { adapter } = staged(n => n === 0 ? old : `${reprint}${typedLaunch}\n${DRAWN_CLAUDE}`, { readAt: 1, command: "claude" });
+        expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo")).toMatchObject({ ok: true });
+      });
+
+      // A shell already at its prompt reads the launch before the first poll, so it's never seen unread.
+      it("a shell that read the launch before the first poll: an earlier report above its typed line isn't this launch's", async () => {
+        const { adapter } = staged(() => `${old}${typedLaunch}\n${DRAWN_CLAUDE}`, { command: "claude" });
+        expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo")).toMatchObject({ ok: true });
+      });
+
+      it("a shell that read the launch before the first poll: a report below its typed line is this launch's", async () => {
+        const { adapter } = staged(() => `${old}${typedLaunch}\nNo conversation found with session ID: retained-history\n$ `);
+        expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo")).toMatchObject({ ok: false, code: "retry_fresh" });
+      });
+
+      it("a report with the typed line out of view keeps polling, and ends saying whose it is can't be told", async () => {
+        const { adapter, reads } = staged(() => "No conversation found with session ID: retained-history\n$ ");
+        const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+        expect(result).toMatchObject({ ok: false, code: "attention_required",
+          message: "Claude resume could not be verified; launch retained: the \"No conversation found\" on screen may be from an earlier launch (this launch's typed line, which would tell, isn't in view), so Claude may still be starting." });
+        // The four polls the bound gives, then the final read: no budget past it.
+        expect(reads()).toBe(5);
+      });
+
+      it("an earlier report above the typed line, with nothing below yet, ends as the shell check says, not as a missing conversation", async () => {
+        const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => `${old}${typedLaunch}\n`, getPanePid: async () => 4321 });
+        tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+        tmux.stagedLaunchUnread = vi.fn(() => false);
+        tmux.stagedLaunchFileName = vi.fn(() => launchName);
+        const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0,
+          seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never,
+          listProcesses: async () => [
+            { pid: 4321, ppid: 1, pgid: 4321, tpgid: 4321, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          ] });
+        expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+          .toEqual({ ok: false, code: "retry_fresh", message: "Claude resume failed: pane returned to shell instead of entering Claude" });
+      });
     });
 
     it("waits for Claude to become the foreground command, and accepts a foreground Claude with nothing drawn only at its final read", async () => {

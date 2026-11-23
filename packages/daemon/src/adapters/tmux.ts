@@ -2385,19 +2385,31 @@ export class TmuxAdapter {
     return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
-  /** The script sendShellCommand last staged a launch in, per target, until its shell is seen to have read it. */
-  private readonly stagedLaunches = new Map<string, string>();
+  /** The script sendShellCommand last staged a launch in, per target, kept after its shell reads it until the next
+   *  launch sent to that target replaces it (or goes inline and removes it). */
+  private readonly stagedLaunches = new Map<string, { path: string; read: boolean }>();
 
   /** Whether the shell in `target` has yet to read the launch sendShellCommand last staged there. The script removes
    *  itself as its first step, so while it is still there the shell hasn't started the launch: a new pane's shell can
    *  still be running its startup files, and its pane reads as an idle shell meanwhile. False when nothing was staged
    *  for the target, or the script is gone or can't be read. */
   stagedLaunchUnread(target: string): boolean {
-    const path = this.stagedLaunches.get(target);
-    if (!path) return false;
-    try { if (statSync(path).isFile()) return true; } catch { /* gone (the shell read it), or unreadable: no evidence */ }
-    this.stagedLaunches.delete(target);
+    const staged = this.stagedLaunches.get(target);
+    if (!staged || staged.read) return false;
+    try { if (statSync(staged.path).isFile()) return true; } catch { /* gone (the shell read it), or unreadable: no evidence */ }
+    staged.read = true;
     return false;
+  }
+
+  /** The file name of the script sendShellCommand last staged a launch in for `target`, as the typed line shows it. It is
+   *  unique to that launch, so it marks the line the pane's shell read: output below the last line showing it came after
+   *  the launch. Undefined when the last launch sent there went inline (nothing staged), or none was sent. */
+  stagedLaunchFileName(target: string): string | undefined {
+    const staged = this.stagedLaunches.get(target);
+    if (!staged) return undefined;
+    // The typed line carries the path shell-quoted; the name is what follows its last "/", less the closing quote.
+    const typed = shellQuote(staged.path);
+    return typed.slice(typed.lastIndexOf("/") + 1, -1);
   }
 
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
@@ -2449,7 +2461,7 @@ export class TmuxAdapter {
       }
       // The receiver now owns removal. Unlinking here races shell startup.
       created = false;
-      if (path) this.stagedLaunches.set(target, path); else this.stagedLaunches.delete(target);
+      if (path) this.stagedLaunches.set(target, { path, read: false }); else this.stagedLaunches.delete(target);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

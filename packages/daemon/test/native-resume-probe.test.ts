@@ -6,6 +6,7 @@ import {
   buildCodexResumeCore,
   claudeTrustPromptFocus,
   isProbeShellReady,
+  noConversationFoundOwner,
 } from "../src/domain/native-resume-probe.js";
 
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
@@ -1910,5 +1911,63 @@ describe("claudeTrustPromptFocus (#2820 item 2)", () => {
   });
   it("is 'unknown' on any other option set", () => {
     expect(claudeTrustPromptFocus(plain.replace("  Yes, I trust this folder", "  Yes, I trust this folder\n  No, ask me later"))).toBe("unknown");
+  });
+});
+
+// #3843: a reused pane can still show an earlier launch's "No conversation found". The staged launch's script file name is
+// unique to the launch and shows in the line its shell read, so only a report below that line is this launch's.
+describe("whose \"No conversation found\" a resume's pane shows (noConversationFoundOwner)", () => {
+  const name = "openrig-tmux-send-12345-0f0e0d0c-1111-4222-8333-444455556666.txt";
+  const typed = `% ( . '/tmp/${name}' )`;
+  const earlier = "No conversation found with session ID: old-1";
+  const ours = "No conversation found with session ID: abc-123";
+  const read = { fileName: name, unread: false };
+
+  it("is this launch's only below the line showing the launch's file name", () => {
+    expect(noConversationFoundOwner(`${typed}\n${ours}\n% `, read)).toEqual({ owner: "this" });
+    expect(noConversationFoundOwner(`${earlier}\n${typed}\n${ours}\n% `, read)).toEqual({ owner: "this" });
+  });
+
+  it("is an earlier launch's above that line, with what this launch has drawn below it", () => {
+    expect(noConversationFoundOwner(`${earlier}\n${typed}\nClaude Code v2.1.310\n❯ `, read))
+      .toEqual({ owner: "earlier", since: "Claude Code v2.1.310\n❯ " });
+    // The same text redrawn above the line, once or twice, is still the earlier launch's.
+    expect(noConversationFoundOwner(`${earlier}\n${earlier}\n${earlier}\n${typed}\n`, read)).toEqual({ owner: "earlier", since: "" });
+  });
+
+  it("is never this launch's while its shell hasn't read the launch, even below the line's echo", () => {
+    expect(noConversationFoundOwner(`${typed}\n${ours}`, { fileName: name, unread: true })).toEqual({ owner: "earlier" });
+  });
+
+  it("can't be placed when the line isn't in view", () => {
+    expect(noConversationFoundOwner(`${ours}\n% `, read)).toEqual({ owner: "unknown" });
+    // Only the line's last row is left in the capture: its first rows scrolled out.
+    expect(noConversationFoundOwner(`0d0c-1111-4222-8333-444455556666.txt' )\n${ours}\n% `, read)).toEqual({ owner: "unknown" });
+  });
+
+  it("keeps any report as this launch's for a launch typed inline (nothing staged)", () => {
+    expect(noConversationFoundOwner(`${earlier}\n% `, { unread: false })).toEqual({ owner: "this" });
+  });
+
+  // Captured from real tmux 40 columns wide (a throwaway server): zsh still running its startup files when the launch was
+  // typed, so the terminal echoed it once, then zsh's line editor drew it again after its prompt. capture-pane -J rejoins
+  // only the first (the terminal wrapped it); zsh wraps its own line, so that one stays split, mid-name.
+  const narrow = [
+    "( . '/tmp/openrig-tmux-send-12345-0f0e0d",
+    "0c-1111-4222-8333-444455556666.txt' )",
+    "% ( . '/tmp/openrig-tmux-send-12345-0f0e",
+    "0d0c-1111-4222-8333-444455556666.txt' )",
+  ].join("\n");
+  it("finds the line when a narrow pane splits the file name across rows, and goes by the last line showing it", () => {
+    expect(noConversationFoundOwner(`${narrow}\nNo conversation found with session ID: a\nbc-123\n%`, read)).toEqual({ owner: "this" });
+    expect(noConversationFoundOwner(`${earlier}\n${narrow}\n%`, read)).toEqual({ owner: "earlier", since: "%" });
+    // Between the terminal's echo and the shell's own line is still above the line the shell read.
+    const [echo1, echo2, line1, line2] = narrow.split("\n");
+    expect(noConversationFoundOwner([echo1, echo2, earlier, line1, line2, "%"].join("\n"), read)).toEqual({ owner: "earlier", since: "%" });
+  });
+
+  it("finds a file name the typed line shows quoted", () => {
+    const quoted = `launch '"'"'quoted'"'"'.sh`;
+    expect(noConversationFoundOwner(`${earlier}\n$ /bin/sh '/tmp/${quoted}'\n${ours}`, { fileName: quoted, unread: false })).toEqual({ owner: "this" });
   });
 });

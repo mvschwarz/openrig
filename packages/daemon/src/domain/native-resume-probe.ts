@@ -364,10 +364,28 @@ export function buildCodexResumeCore(
   return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${tokenArg}${suffix}`;
 }
 
-/** How many times Claude's missing-conversation report shows in the pane text. A resume wait compares it with the count
- *  already on screen before its launch was read, so an earlier launch's report isn't taken for this one's. */
-export function noConversationFoundCount(paneContent: string): number {
-  return paneContent.split("No conversation found").length - 1;
+/** Whose "No conversation found" a resume's pane shows. A launch sent as a staged script (TmuxAdapter.sendShellCommand)
+ *  is typed as a line naming its script, and that file name is unique to the launch:
+ *  - while the pane's shell hasn't read the launch, Claude hasn't run, so no report is this launch's: "earlier";
+ *  - once it has, only a report below the last line showing the name is this launch's: "this". One above it is an
+ *    earlier launch's: "earlier", with `since`, the pane text below that line, which is what this launch has drawn;
+ *  - a name that doesn't show (scrolled out of the capture) can't place the report: "unknown".
+ *  A launch typed inline (no file name) keeps any report as this launch's. A long typed line wraps in a narrow pane and
+ *  the capture splits it into rows, which a joined capture (-J) doesn't rejoin when the shell's line editor did the
+ *  wrapping, so the name is matched with the row breaks ignored. */
+export function noConversationFoundOwner(paneContent: string, launch: { fileName?: string; unread: boolean }):
+  { owner: "this" } | { owner: "earlier"; since?: string } | { owner: "unknown" } {
+  if (launch.unread) return { owner: "earlier" };
+  if (!launch.fileName) return { owner: "this" };
+  const rows = paneContent.split("\n");
+  const rowEnds: number[] = [];
+  let joined = "";
+  for (const row of rows) rowEnds.push((joined += row).length);
+  const at = joined.lastIndexOf(launch.fileName);
+  if (at < 0) return { owner: "unknown" };
+  const nameEnd = at + launch.fileName.length;
+  const since = rows.slice(rowEnds.findIndex((end) => end >= nameEnd) + 1).join("\n");
+  return since.includes("No conversation found") ? { owner: "this" } : { owner: "earlier", since };
 }
 
 export function assessNativeResumeProbe(
@@ -385,7 +403,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for you to review its bypass-permissions warning and choose whether to accept. Startup context has not been sent.",
       };
     }
-    if (noConversationFoundCount(paneContent) > 0) {
+    if (paneContent.includes("No conversation found")) {
       return {
         status: "failed",
         code: "no_conversation_found",
