@@ -1401,6 +1401,34 @@ describe("Claude Code runtime adapter", () => {
           error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept" });
       });
 
+      // An earlier launch's "No conversation found" can still be on screen in a reused pane. While the staged launch is
+      // unread Claude hasn't run, so that text isn't this launch's: no fresh retry abandons the stored conversation.
+      const earlierNotFound = "No conversation found with session ID: old-1\nzsh$ ";
+      it("doesn't retry fresh on an earlier launch's \"No conversation found\" while the launch is unread: the launch is kept", async () => {
+        const { result } = await run({ launchScript: {}, paneCommand: "zsh", rows: shellOnly, screen: () => earlierNotFound });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: false, recovery: "attention_required",
+          error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept" });
+      });
+
+      it("resumes when the shell then reads the launch past an earlier launch's \"No conversation found\"", async () => {
+        const { result } = await run({ launchScript: { readAt: 24 }, command: (read) => (read < 24 ? "zsh" : "claude"),
+          rows: (read) => (read < 24 ? shellOnly() : occupied), screen: (read) => (read < 24 ? earlierNotFound : tui) });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: true, resumeToken: "abc-123" });
+      });
+
+      it("retries fresh on this launch's own \"No conversation found\", printed after an earlier launch's", async () => {
+        const { result } = await run({ launchScript: { readAt: 24 }, paneCommand: "zsh", rows: shellOnly,
+          screen: (read) => (read < 24 ? earlierNotFound : `${earlierNotFound}claude --resume abc-123\nNo conversation found with session ID: abc-123\nzsh$ `) });
+        expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+      });
+
+      it("still retries fresh on \"No conversation found\" once the shell has read the launch", async () => {
+        const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly, screen: () => earlierNotFound });
+        expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+      });
+
       // Controls: once the shell has read the launch, its verdicts are as before.
       it("a shell that read the launch and is back at its prompt still reports the return", async () => {
         const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly });

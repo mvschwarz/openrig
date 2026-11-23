@@ -14,7 +14,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
-import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, noConversationFoundCount } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -237,6 +237,16 @@ export class ClaudeResumeAdapter {
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
+    // While the staged launch is unread, Claude hasn't run, so any "No conversation found" on screen is an earlier launch's.
+    // Those reports stay earlier ones after the shell reads the launch, until Claude redraws the pane: only a report beyond
+    // them is this launch's.
+    let earlierNotFound = 0;
+    const isEarlierNotFound = (code: string | undefined, content: string): boolean => {
+      if (code !== "no_conversation_found") return false;
+      const shown = noConversationFoundCount(content);
+      if (this.tmux.stagedLaunchUnread?.(tmuxSessionName) === true) earlierNotFound = Math.max(earlierNotFound, shown);
+      return shown <= earlierNotFound;
+    };
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
@@ -247,7 +257,8 @@ export class ClaudeResumeAdapter {
         paneContent,
       });
 
-      if (probe.code === "no_conversation_found") {
+      // An earlier launch's report keeps polling.
+      if (probe.code === "no_conversation_found" && !isEarlierNotFound(probe.code, paneContent)) {
         return {
           ok: false,
           code: "retry_fresh",
@@ -290,6 +301,14 @@ export class ClaudeResumeAdapter {
     });
 
     if (finalProbe.code === "no_conversation_found") {
+      if (isEarlierNotFound(finalProbe.code, finalContent)) {
+        return {
+          ok: false,
+          code: "attention_required",
+          message: "Claude resume could not be verified; launch retained: the \"No conversation found\" on screen is from an earlier launch (it was there before the pane's shell read this launch), so Claude may still be starting.",
+          evidence: finalContent.split("\n").slice(-12).join("\n"),
+        };
+      }
       return { ok: false, code: "retry_fresh", message: "Claude resume failed: no conversation found for the requested session" };
     }
     if (finalProbe.status === "attention_required") {

@@ -18,7 +18,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput, noConversationFoundCount } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -814,13 +814,24 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // was confirmed (once: a frame drawn before Claude took the Enter still shows the prompt).
     let trustMoved = false;
     let trustEntered = false;
+    // While the staged launch is unread, Claude hasn't run, so any "No conversation found" on screen is an earlier launch's.
+    // Those reports stay earlier ones after the shell reads the launch, until Claude redraws the pane: only a report beyond
+    // them is this launch's. Meanwhile the wait goes on like a start in progress.
+    let earlierNotFound = 0;
+    const isEarlierNotFound = (probe: { code?: string }, content: string): boolean => {
+      if (probe.code !== "no_conversation_found") return false;
+      const shown = noConversationFoundCount(content);
+      if (this.tmux.stagedLaunchUnread?.(tmuxSession) === true) earlierNotFound = Math.max(earlierNotFound, shown);
+      return shown <= earlierNotFound;
+    };
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
       const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
+      const staleNotFound = isEarlierNotFound(probe, paneContent);
 
-      if (probe.code === "no_conversation_found") {
+      if (probe.code === "no_conversation_found" && !staleNotFound) {
         return {
           ok: false,
           probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession),
@@ -885,7 +896,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
       // Only a boot in progress (no verdict, no gate, a label that proves nothing) is worth waiting for; a real
       // gate (login, trust or MCP approval, auto-mode identity) won't clear itself.
-      const booting = probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
+      const booting = staleNotFound || probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
       // A foreground Claude alone keeps the longer wait going too, to its end, as in the quick window: a resume of a
       // missing conversation is one until it reports that and exits. It isn't a boot for the checks below, so its process
       // label never reads as a ready screen there.
@@ -955,8 +966,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    // The wait can end on the read that first shows Claude's missing-conversation report.
-    if (finalProbe.code === "no_conversation_found") {
+    // The wait can end on the read that first shows Claude's missing-conversation report, unless it's an earlier launch's.
+    const finalStale = isEarlierNotFound(finalProbe, finalContent);
+    if (finalProbe.code === "no_conversation_found" && !finalStale) {
       return {
         ok: false,
         probe: probeEvidence,
@@ -983,7 +995,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // The occupant can change after the last check in the loop, so the end of the wait looks once more, with the screen
     // judged as in the loop: a different occupant (or a ready-looking screen on a readable list) keeps main's result.
-    if (slowStart && (finalProbe.code === "awaiting_runtime" || finalProbe.code === "returned_to_shell")
+    if (slowStart && (finalStale || finalProbe.code === "awaiting_runtime" || finalProbe.code === "returned_to_shell")
       && await this.paneOccupant(binding, assessNativeResumeProbe({ runtime: "claude-code", paneCommand: finalCommand, paneContent: finalContent,
         claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true }).status === "resumed") !== "another") {
       // Claude, or the script about to start it, may still be coming up. Keep the launch and its resume token for

@@ -487,6 +487,23 @@ describe("ClaudeResumeAdapter", () => {
       if (unread) expect((result as { message: string }).message).toContain("hasn't read the launch yet");
     });
 
+    // An earlier launch's "No conversation found" can still be on screen in a reused pane. While the staged launch is
+    // unread Claude hasn't run, so that text can't be this launch's: the stored conversation isn't abandoned for it.
+    it.each([
+      ["hasn't read the staged launch yet: an earlier launch's report keeps the launch", true, "attention_required"],
+      ["read the staged launch: the report is this launch's", false, "retry_fresh"],
+    ] as const)("a pane already showing \"No conversation found\" whose shell %s", async (_label, unread, code) => {
+      const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => "No conversation found with session ID: old\n$ ",
+        getPanePid: async () => 4321 });
+      tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      tmux.stagedLaunchUnread = vi.fn(() => unread);
+      const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0,
+        seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
+      const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, code });
+      if (unread) expect((result as { message: string }).message).toContain("from an earlier launch");
+    });
+
     it("waits for Claude to become the foreground command, and accepts a foreground Claude with nothing drawn only at its final read", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()

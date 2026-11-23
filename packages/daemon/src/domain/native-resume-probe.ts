@@ -364,6 +364,12 @@ export function buildCodexResumeCore(
   return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${tokenArg}${suffix}`;
 }
 
+/** How many times Claude's missing-conversation report shows in the pane text. A resume wait compares it with the count
+ *  already on screen before its launch was read, so an earlier launch's report isn't taken for this one's. */
+export function noConversationFoundCount(paneContent: string): number {
+  return paneContent.split("No conversation found").length - 1;
+}
+
 export function assessNativeResumeProbe(
   input: NativeResumeProbeInput
 ): NativeResumeProbeResult {
@@ -379,7 +385,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for you to review its bypass-permissions warning and choose whether to accept. Startup context has not been sent.",
       };
     }
-    if (paneContent.includes("No conversation found")) {
+    if (noConversationFoundCount(paneContent) > 0) {
       return {
         status: "failed",
         code: "no_conversation_found",
