@@ -385,9 +385,12 @@ describe("the daemon's assignment plan", () => {
   // Found in review of #3679: a seat's result row references its node, so an apply whose seat was removed while it ran
   // threw on saving that row, after other seats had changed, and reported nothing.
   it.each([
-    ["seat", false],
-    ["seat's rig", true],
-  ] as const)("a %s removed while the apply runs is still reported, with no command; the apply finishes and saves what remains", async (_case, wholeRig) => {
+    ["seat", false, true],
+    ["seat's rig", true, true],
+    // Its restart fails for another reason before the removal lands: the switch's message names a restart command.
+    ["seat (its restart failing otherwise)", false, false],
+    ["seat's rig (its restart failing otherwise)", true, false],
+  ] as const)("a %s removed while the apply runs is still reported, with no command; the apply finishes and saves what remains", async (_case, wholeRig, pinned) => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
     seat("fleet", "k1", "codex", "a@fleet");
@@ -400,7 +403,8 @@ describe("the daemon's assignment plan", () => {
       if (s !== "a@fleet") return { ok: true, codexHome, outcome: "restarted_account_unverified", message: "restarted", activity: { state: "idle" }, peers: [] } as never;
       if (wholeRig) new RigRepository(db).deleteRig(rigId);
       else new RigRepository(db).deleteNode(removed);
-      return { ok: false, code: "seat_name_shared", message: '"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.' } as never;
+      return (pinned ? { ok: false, code: "seat_name_shared", message: '"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.' }
+        : { ok: false, code: "session_not_live", message: "The seat has no live session." }) as never;
     });
     const seatRestart = { plan: vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never), run };
     const svc = new ProviderServiceImpl({ db, listRigs: () => new RigRepository(db).listRigs(), env: { HOME: dir, CODEX_HOME: codexHome }, platform: "linux",
@@ -416,7 +420,8 @@ describe("the daemon's assignment plan", () => {
     const [a, b] = applied.report.results;
     expect(a).toMatchObject({ seat: "a@fleet", kind: "unknown" });
     expect(a!.recovery).toBeUndefined();
-    expect(a!.detail).toContain('"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.');
+    expect(a!.detail).toContain(pinned ? '"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.'
+      : "a@fleet wasn't restarted (session_not_live: The seat has no live session.)");
     const REMOVED = "It has no restart command: it was removed while this apply ran, and a restart by its session name could reach another seat later.";
     expect(a!.detail).toContain(REMOVED);
     expect(a!.detail).not.toContain("rig seat restart");
@@ -429,6 +434,30 @@ describe("the daemon's assignment plan", () => {
     // A removed rig saves no intent and no results (they'd go with it); otherwise only the removed seat's result is missing.
     const assignments = new ProviderAccountAssignmentsRepository(db);
     expect(assignments.results(rigId, "codex").map((r) => [r.seat, r.kind])).toEqual(wholeRig ? [] : [["b@fleet", b!.kind]]);
+  });
+
+  it.each([false, true])("another rig's peer on the switched home gets a restart command while it's live, and none once it's removed while the apply runs (removed: %s)", async (removedPeer) => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    seat("fleet", "k1", "codex", "a@fleet");
+    seat("other", "p1", "codex", "p@other");
+    const run = vi.fn<SeatRestart["run"]>(async () => {
+      if (removedPeer) new RigRepository(db).deleteNode("p1");
+      return { ok: true, codexHome, outcome: "restarted_account_unverified", message: "restarted", activity: { state: "idle" }, peers: [] } as never;
+    });
+    const seatRestart = { plan: vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never), run };
+    const svc = new ProviderServiceImpl({ db, listRigs: () => new RigRepository(db).listRigs(), env: { HOME: dir, CODEX_HOME: codexHome }, platform: "linux",
+      codexLogins: { list: () => ["team"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const request = { rig: "fleet", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart);
+    if (!planned.ok) throw new Error(planned.message);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
+    if (!applied.ok) throw new Error(applied.message);
+    expect(applied.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "switched"]]);
+    expect(applied.report.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: codexHome, ...(removedPeer
+      ? { why: "It has no restart command: it was removed while this apply ran, and a restart by its session name could reach another seat later" }
+      : { command: "rig seat restart p@other --keep-conversation" }) }]);
   });
 
   it("an outside peer whose session name a seat in a third rig has, on another home, gets no restart command", async () => {

@@ -234,7 +234,10 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
   results.forEach((r, i) => {
     if (!gone(r.seat, plan.rigId) || (!r.recovery && r.kind !== "unknown")) return;
     const { recovery: _dropped, ...rest } = r;
-    results[i] = { ...rest, detail: `${r.detail.replace(` ${NO_NAME}.`, "").replace(/\.$/, "")}. ${REMOVED}.` };
+    // A switch whose seat wasn't restarted writes the seat's restart command into its message: that goes too.
+    const names = [...new Set([r.seat, shellArg(r.seat)])].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    const inline = new RegExp(`: rig seat restart (?:${names}) --keep-conversation(?: --reason "[^"]*")?`, "g");
+    results[i] = { ...rest, detail: `${r.detail.replace(inline, "").replace(` ${NO_NAME}.`, "").replace(/\.$/, "")}. ${REMOVED}.` };
   });
   const otherRigPeers = plan.codexHomes.flatMap((group) => {
     const switched = results.some((r) => onHome.get(r.seat) === group.home && (r.kind === "switched" || r.kind === "unknown"));
