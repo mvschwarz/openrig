@@ -18,6 +18,7 @@ import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
+import { launchDirEnv } from "./seat-launch-environment.js";
 import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
@@ -259,6 +260,8 @@ export class NodeLauncher {
       // For a Codex seat it is also the selection signal its plugin hooks check, beside the interpreter they run with.
       [SEAT_PROJECT_DIR_ENV]: corePluginDir || codexCorePluginDir ? sessionCwd : undefined,
       [SEAT_NODE_ENV]: corePluginDir || codexCorePluginDir ? process.execPath : undefined,
+      // #3328: every seat, whatever its plugins: the folder this terminal starts in (the -c below).
+      ...launchDirEnv(sessionCwd),
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
     const openRigEnv = launchEnv(opts?.env);

@@ -2,6 +2,7 @@ import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
+import { launchDirEnv } from "./seat-launch-environment.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
@@ -235,6 +236,8 @@ export class SuccessorSessionLauncher {
       ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
       // Selected Claude and Codex plugin hooks use this interpreter, as at launch (node-launcher.ts).
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
+      // #3328: the folder the respawned pane starts in (its -c below), for every seat; it replaces the session's copy.
+      ...launchDirEnv(input.node.cwd),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration ?? undefined,
     });
     const cwd = input.node.cwd ?? undefined;
@@ -414,6 +417,7 @@ export class SuccessorSessionLauncher {
       ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
       ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
+      ...launchDirEnv(input.node.cwd),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration,
     });
     // #3253: the staging launch's own warning (a limit it went ahead without) reaches the switch's result, also when

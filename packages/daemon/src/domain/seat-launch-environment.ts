@@ -15,6 +15,17 @@ export const SEAT_PUBLIC_ENV_KEYS = [
   "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
 ] as const;
 
+/** The absolute working directory a seat's launch used (#3328): launch metadata for seat-scoped tools such as an MCP
+ *  server. Not a permission to write there, and not proof of the current directory (a child may have changed it). */
+export const SEAT_LAUNCH_DIR_ENV = "OPENRIG_SEAT_LAUNCH_DIR";
+
+/** The launch-dir variable for a launch that gives its terminal `cwd`. Set whenever that cwd is absolute, so every
+ *  respawn's own value replaces a copy an earlier launch left in the tmux session; without an absolute cwd tmux picks
+ *  the folder, which OpenRig doesn't know, so the variable is left out. */
+export function launchDirEnv(cwd: string | null | undefined): Record<string, string> {
+  return cwd && path.isAbsolute(cwd) ? { [SEAT_LAUNCH_DIR_ENV]: cwd } : {};
+}
+
 export function publicSeatEnvironment(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const result: Record<string, string> = {};
   for (const key of SEAT_PUBLIC_ENV_KEYS) if (env[key] !== undefined) result[key] = env[key]!;
