@@ -604,7 +604,7 @@ export class ProviderServiceImpl implements ProviderService {
     const plan = await seatRestart.plan(input.seat);
     if (!plan.ok) {
       return { ok: false, verdict: { safe: false, reasons: [plan.code === "not_codex" ? "rebind_unsupported_for_runtime" : plan.code === "seat_name_shared" ? "seat_name_shared" : "seat_restart_refused"],
-        message: `${plan.code}: ${plan.message}` } };
+        message: plan.code === "seat_name_shared" ? plan.message : `${plan.code}: ${plan.message}` } };
     }
     const seat = { home: plan.codexHome, activity: plan.activity.state, peers: plan.peers };
     if (!this.codexLogins().list(plan.codexHome).includes(input.toAccount)) {

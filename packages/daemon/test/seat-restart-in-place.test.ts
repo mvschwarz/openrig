@@ -2148,6 +2148,7 @@ describe("rig provider assign's plan over a Codex seat", () => {
       run: async () => { holding(); await held; return { ok: false, code: "seat_not_found", message: "held" } as never; } });
     await holds;
     const checkedAs: Array<string | undefined> = [];
+    let takenBy: string | null = null;
     const seatRestart = {
       plan: async (seat: string, nodeId?: string) => {
         checkedAs.push(nodeId);
@@ -2157,7 +2158,8 @@ describe("rig provider assign's plan over a Codex seat", () => {
         // then lets the home go.
         if (checkedAs.length === 3) {
           rigs.archiveRig(rigId);
-          const node = rigs.addNode(rigs.createRig("r").id, "dev.codex", { runtime: "codex", cwd: "/work" });
+          takenBy = rigs.createRig("r").id;
+          const node = rigs.addNode(takenBy, "dev.codex", { runtime: "codex", cwd: "/work" });
           const registry = new SessionRegistry(w.db);
           registry.updateStatus(registry.registerSession(node.id, SEAT).id, "running");
           setTimeout(release, 0);
@@ -2178,7 +2180,7 @@ describe("rig provider assign's plan over a Codex seat", () => {
     expect(w.calls).toEqual([]);
     const [result] = applied.report.results;
     expect(result).toMatchObject({ seat: SEAT, kind: "failed_before_effect" });
-    expect(result!.detail).toMatch(/^seat_name_shared: seat_name_shared: "dev-codex@r" now names the seat in rig r \(/);
+    expect(result!.detail).toBe(`seat_name_shared: "dev-codex@r" now names the seat in rig r (${takenBy}), not the one this restart was for; nothing was restarted.`);
     expect(result!.recovery).toBeUndefined();
   });
 });
