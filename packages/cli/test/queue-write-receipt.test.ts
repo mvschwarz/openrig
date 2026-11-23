@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
+import { DaemonConnectionError } from "../src/client.js";
 import { createProgram } from "../src/index.js";
 import { compactOutputEnabled } from "../src/queue-receipt.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -52,10 +53,12 @@ function row(over: Row = {}, waiting: Row = {}): Row {
 
 let requestPaths: string[] = [];
 
-function makeDeps(routes: Record<string, { status: number; data: unknown } | Array<{ status: number; data: unknown }>>): QueueDeps {
+type RouteEntry = { status: number; data: unknown } | Error;
+
+function makeDeps(routes: Record<string, RouteEntry | RouteEntry[]>): QueueDeps {
   const transitions: Array<{ transitionId: number; transitionNote: string | null; actorSession: string }> =
     [{ transitionId: 1, transitionNote: null, actorSession: "stub@rig" }];
-  const pick = (key: string, fallback: { status: number; data: unknown }) => {
+  const pick = (key: string, fallback: { status: number; data: unknown }): RouteEntry => {
     const r = routes[key];
     return (Array.isArray(r) ? r.shift() : r) ?? fallback;
   };
@@ -68,17 +71,23 @@ function makeDeps(routes: Record<string, { status: number; data: unknown } | Arr
       get: vi.fn(async (p: string) => {
         requestPaths.push(p);
         const explicit = routes[`GET ${p}`];
-        if (explicit) return Array.isArray(explicit) ? explicit.shift()! : explicit;
+        if (explicit) {
+          const entry = Array.isArray(explicit) ? explicit.shift() : explicit;
+          if (entry instanceof Error) throw entry;
+          if (entry) return entry;
+        }
         if (p.endsWith("/transitions")) return { status: 200, data: transitions };
         const update = routes[`POST ${p}/update`];
         if (update) {
           const response = Array.isArray(update) ? update[0] : update;
-          return { status: 200, data: response?.data ?? {} };
+          return { status: 200, data: response && !(response instanceof Error) ? response.data : {} };
         }
         return { status: 200, data: {} };
       }),
       post: vi.fn(async (p: string, body: unknown) => {
-        let response = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        const picked = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        if (picked instanceof Error) throw picked;
+        let response = picked;
         const requestedId = body && typeof body === "object" ? (body as { qitemId?: unknown }).qitemId : undefined;
         const responseRow = response.data && typeof response.data === "object" && !Array.isArray(response.data)
           ? response.data as Row : undefined;
@@ -379,6 +388,94 @@ describe("queue write receipt (output.compact)", () => {
         detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
       });
     });
+
+    it("explicit parkWarning: null on a direct blocked create confirms the park in compact output", async () => {
+      const id = "qitem-20261010180000-aaaa";
+      const data = row({
+        qitemId: id,
+        sourceSession: "stub@rig",
+        state: "blocked",
+        blockedOn: "external:release",
+        parkWarning: null,
+      });
+      const out = await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m"], data);
+      expect(out).toContain("  park: confirmed");
+      expect(out).not.toContain("park: not confirmed");
+      expect(out).toContain("wake: parked create: no immediate terminal wake was requested; the returned row confirms the blocked state");
+
+      logs = [];
+      const json = JSON.parse(await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m", "--json"], data)) as Row;
+      expect(json.wake).toEqual({
+        evidence: "suppressed",
+        detail: "parked create: no immediate terminal wake was requested; the returned row confirms the blocked state",
+      });
+    });
+
+    it.each(["blocked", "pending"] as const)(
+      "an older daemon create response without parkWarning (%s) never claims park confirmation in compact output",
+      async (state) => {
+        const id = "qitem-20261010180000-aaaa";
+        const data = row({
+          qitemId: id,
+          sourceSession: "stub@rig",
+          state,
+          ...(state === "blocked" ? { blockedOn: "external:release" } : {}),
+        });
+        const out = await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m"], data);
+        expect(out).toContain("  park: not confirmed");
+        expect(out).not.toContain("park: confirmed");
+        expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+
+        logs = [];
+        const json = JSON.parse(await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m", "--json"], data)) as Row;
+        expect(json.wake).toEqual({
+          evidence: "suppressed",
+          detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+        });
+      },
+    );
+
+    it.each<readonly [string, Row]>([
+      ["without parkWarning", {}],
+      ["even when GET payload carries parkWarning: null", { parkWarning: null }],
+    ])(
+      "a GET-recovered parked create (%s) never claims park confirmation in compact output",
+      async (_label, extraRowFields) => {
+        const id = "qitem-20261010180000-aaaa";
+        const recoveredRow = row({
+          qitemId: id,
+          sourceSession: "stub@rig",
+          state: "blocked",
+          blockedOn: "external:release",
+          ...extraRowFields,
+        });
+        const baseArgv = [
+          "create", "--destination", "worker@r", "--body", BODY, "--summary", "s",
+          "--id", id, "--blocked-on", "external:release", "--wake-after", "15m",
+        ];
+
+        const out = await run(baseArgv, {
+          "POST /api/queue/create": new DaemonConnectionError("connection dropped", "ECONNRESET"),
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        });
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(out).toContain("  park: not confirmed");
+        expect(out).not.toContain("park: confirmed");
+        expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+
+        logs = [];
+        requestPaths = [];
+        const json = JSON.parse(await run([...baseArgv, "--json"], {
+          "POST /api/queue/create": new DaemonConnectionError("connection dropped", "ECONNRESET"),
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        })) as Row;
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(json.wake).toEqual({
+          evidence: "suppressed",
+          detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+        });
+      },
+    );
 
     it("unknown create uses the typed indeterminate error and keeps the park warning", async () => {
       const id = "qitem-20261010180000-aaaa";

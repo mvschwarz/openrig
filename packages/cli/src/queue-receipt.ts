@@ -34,6 +34,8 @@ export interface ReceiptContext {
   nudgeSuppressed?: boolean;
   /** This create starts blocked and does not request an immediate terminal wake. */
   parked?: boolean;
+  /** The row came from read-back recovery (`GET /api/queue/:id`), not the create response itself. */
+  recovered?: boolean;
   /** The caller named the row id (`create --id`), so the daemon may have returned an existing row. */
   idGiven?: boolean;
   /** A `--host` write whose new row lives on another daemon. */
@@ -84,6 +86,18 @@ interface WakeEvidence {
   maybeEarlier?: true;
 }
 
+/** A parked create is confirmed only when the create response itself (not a
+ *  read-back GET or an older daemon that omits `parkWarning`) explicitly carries
+ *  `parkWarning: null` on a `blocked` row whose supplied body was saved. */
+function isParkConfirmed(row: Row, ctx: ReceiptContext): boolean {
+  const createWarning = isRow(row.createWarning) ? row.createWarning : null;
+  return Boolean(ctx.parked)
+    && !ctx.recovered
+    && row.state === "blocked"
+    && row.parkWarning === null
+    && createWarning?.code !== "qitem_body_not_saved";
+}
+
 /** Only what this response proves. "Scheduled" is never said: the response
  *  carries no flag showing a wake reached the outbox, and a null result is
  *  equally an outbox wake not yet delivered, a daemon with no transport, or an
@@ -93,7 +107,7 @@ function wakeEvidence(row: Row, ctx: ReceiptContext): WakeEvidence {
   const at = str(row.lastNudgeAttempt) ?? undefined;
   const warning = isRow(row.createWarning) ? row.createWarning : null;
   if (ctx.parked) {
-    const confirmedPark = row.state === "blocked" && !isRow(row.parkWarning);
+    const confirmedPark = isParkConfirmed(row, ctx);
     return { evidence: "suppressed", detail: confirmedPark
       ? "parked create: no immediate terminal wake was requested; the returned row confirms the blocked state"
       : "park request: no immediate terminal wake was requested; the returned row did not confirm the park" };
@@ -164,7 +178,7 @@ function backstopLine(b: unknown): string | null {
   return parts.join(" · ");
 }
 
-function rowLines(heading: string, r: Row, parked = false): string[] {
+function rowLines(heading: string, r: Row, parked = false, parkConfirmed = false): string[] {
   const lines = [`${heading} ${String(r.qitemId)} · ${String(r.state)} · owner ${String(r.destinationSession)}`];
   const facts = [`created ${String(r.tsCreated)}`, `updated ${String(r.tsUpdated)}`,
     typeof r.bodyBytes === "number" ? `body ${r.bodyBytes.toLocaleString("en-US")} bytes` : "body size not in the response",
@@ -193,7 +207,7 @@ function rowLines(heading: string, r: Row, parked = false): string[] {
   if (r.handedOffFrom) lines.push(`  handed off from ${String(r.handedOffFrom)}`);
   if (r.expiresAt) lines.push(`  expires ${String(r.expiresAt)}`);
   if (isRow(r.parkWarning)) lines.push("  park: not confirmed");
-  else if (parked && r.state === "blocked") lines.push("  park: confirmed");
+  else if (parked) lines.push(parkConfirmed ? "  park: confirmed" : "  park: not confirmed");
   if (isRow(r.wake)) {
     const w = r.wake;
     const literal = w.result ? `${String(w.result)}${w.at ? ` at ${String(w.at)}` : ""}` : "";
@@ -271,11 +285,12 @@ export function buildWriteReceipt(body: unknown, ctx: ReceiptContext): WriteRece
   }
   if (typeof body.qitemId !== "string") return null;
   const one = rowReceipt(body, ctx, wakes);
+  const parkConfirmed = isParkConfirmed(body, ctx);
   const read = fullRead(body.qitemId, ctx, true);
   const json: Row = { ...one.receipt, ...(ctx.remoteHost ? { host: ctx.remoteHost, ...(ctx.remoteHostUnconfirmed ? { hostUnconfirmed: true } : {}) } : {}),
     receipt: { omitted: one.omitted, fullCommand: read.command, ...(read.onHost ? { fullCommandOnHost: read.onHost } : {}) } };
   const text = [
-    ...rowLines(PAST[ctx.verb], one.receipt, ctx.parked),
+    ...rowLines(PAST[ctx.verb], one.receipt, ctx.parked, parkConfirmed),
     ...(ctx.remoteHost ? [`  host: ${hostNote(ctx, "the row")}`] : []),
     footer(one.omitted, [read.phrase], ctx.verb),
   ].join("\n");

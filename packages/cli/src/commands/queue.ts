@@ -1672,7 +1672,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         ) => {
           const resultReceipt = receipt && recovered !== undefined
             ? (() => {
-                const resolved = { ...receipt };
+                const resolved: ReceiptContext = { ...receipt, recovered: true };
                 delete resolved.remoteHostUnconfirmed;
                 if (recovered === "remote") {
                   const remote = remoteHostOf(hostResolved.hostId);
