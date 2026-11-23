@@ -69,7 +69,7 @@ try {
   `);
   run(process.execPath, [path.join(consumer, "import.mjs")]);
   fs.writeFileSync(path.join(consumer, "consumer.ts"), `
-    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution, type McpInstructionExtension } from "@openrig/cli/mcp.js";
+    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution, type McpInstructionExtension, type BindingLeaveRequest, type BindingLeaveResult } from "@openrig/cli/mcp.js";
     const options: McpHttpOptions = { daemonUrl: "http://127.0.0.1:1", host: "127.0.0.1", port: 0, tokenFile: "local.json" };
     // @ts-expect-error a typed endpoint port must not degrade to any through the package declarations
     const invalidPort: McpHttpOptions = { ...options, port: "not-a-port" };
@@ -89,7 +89,14 @@ try {
     ] };
     // @ts-expect-error resource text must stay typed through the public package
     const invalidInstructions: McpInstructionExtension = { resources: [{ uri: "team://reference/guide", name: "guide", mimeType: "text/plain", text: 3 }] };
-    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000, instructions });
+    const onBindingLeave = async (request: BindingLeaveRequest, signal: AbortSignal): Promise<BindingLeaveResult> => {
+      void request.token; void signal;
+      return { removalRevision: request.removalRevision, alreadyRemoved: true };
+    };
+    // @ts-expect-error the provider receipt must remain typed through packed declarations
+    const invalidLeave: BindingLeaveResult = { removalRevision: "r1", removedAt: 3 };
+    void invalidLeave;
+    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000, instructions, onBindingLeave });
     void invalidInstructions;
     void invalidResolver;
     const error: Error = new McpHttpConfigError("configuration");
