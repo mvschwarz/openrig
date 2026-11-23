@@ -1,3 +1,4 @@
+import { recordedQueueGraph } from "./queue-recorded-graph.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { randomUUID } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
@@ -126,49 +127,11 @@ export class CoreAppJob {
       links: { self: this.workLink(item.qitemId, requestId, actor), request: this.links(requestId, actor).self, result: this.links(requestId, actor).result } };
   }
   private graph(appId: string, requestId: string) {
-    const root = this.queue.getById(requestId);
-    const nodes = new Map<string, QueueItem>();
-    const edges: Array<{ from: string; to: string; relation: string; sourceQitemId: string; captured?: true }> = [];
-    let partial = false;
-    if (!root || root.contentErasedAt) return { nodes, edges, partial: true };
-    const pending: Array<{ id: string; hops: number }> = [{ id: requestId, hops: 0 }];
-    const addEdge = (from: string, to: string, relation: string, captured = false) => {
-      if (!edges.some(edge => edge.from === from && edge.to === to && edge.relation === relation)) {
-        edges.push({ from, to, relation, sourceQitemId: to, ...(captured ? { captured: true as const } : {}) });
-      }
-    };
-    for (const row of this.submissions(appId, requestId)) {
-      for (const id of parse<Checkpoint>(row.checkpoint_json)?.workIds ?? []) {
-        addEdge(requestId, id, "blocked-on", true); pending.push({ id, hops: 0 });
-      }
-    }
-    while (pending.length) {
-      const next = pending.shift()!;
-      if (nodes.has(next.id)) continue;
-      if (nodes.size >= 100 || next.hops > 20) { partial = true; continue; }
-      const item = this.queue.getById(next.id);
-      if (!item || item.contentErasedAt) { partial = true; continue; }
-      nodes.set(item.qitemId, item);
-      const related = this.queue.relatedTo(item.qitemId);
-      if (related.length >= 101) partial = true;
-      for (const edge of related.slice(0, 100)) {
-        addEdge(item.qitemId, edge.item.qitemId, edge.relation);
-        pending.push({ id: edge.item.qitemId, hops: next.hops + (edge.relation === "handed-off-from" ? 1 : 0) });
-      }
-      // A handed-to session address isn't an item ID. Only the actual successor's handedOffFrom is followable.
-      if (item.handedOffTo && !related.some(edge => edge.relation === "handed-off-from" && edge.item.destinationSession === item.handedOffTo)) partial = true;
-    }
-    // A directed cycle is real but can't establish a complete handoff/dependency outcome.
-    const active = new Set<string>(), visited = new Set<string>();
-    const cycle = (id: string): boolean => {
-      if (active.has(id)) return true;
-      if (visited.has(id)) return false;
-      visited.add(id); active.add(id);
-      const found = edges.some(edge => edge.from === id && cycle(edge.to)); active.delete(id); return found;
-    };
-    if (cycle(requestId)) partial = true;
-    return { nodes, edges, partial };
+    return recordedQueueGraph(this.queue, requestId, {
+      capturedWorkIds: this.submissions(appId, requestId).flatMap(row => parse<Checkpoint>(row.checkpoint_json)?.workIds ?? []),
+    });
   }
+
   private permission(item: QueueItem, nodes: Map<string, QueueItem>) {
     const origin = runnerPermissionOrigin(item);
     if (!origin) return { status: "not-applicable", nativeEffect: "unknown" };
