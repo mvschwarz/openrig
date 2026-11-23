@@ -1197,12 +1197,13 @@ look for that tag on the same daemon before deciding whether to retry.
 
 ```bash
 rig workflow list --name review-flow --tag request:review-20261123-01 --json
-rig queue list --all --all-rigs --tag instance:INSTANCE_ID --tag entry --json
+rig queue list --all --all-rigs --tag instance:INSTANCE_ID --json
 ```
 
-Use the `instanceId` from the matching run in the second command. The entry
-row's queue and pickup state tell you what happened after creation. A tag helps
-you find the request's effects. It can match multiple runs if reused, and an
+Use the `instanceId` from the matching run in the second command to list its
+queue packets. The first packet is tagged `entry`, or `gate` if the run starts
+with a gate. Its queue and pickup state tell you what happened after creation.
+A tag helps you find the request's effects. It can match multiple runs if reused, and an
 empty result can still mean a request is in flight, so recheck before retrying.
 
 For `rig workflow instantiate-lifecycle`, keep the original `--operation-key`.
