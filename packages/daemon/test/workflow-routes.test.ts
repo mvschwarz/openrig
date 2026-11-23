@@ -32,6 +32,7 @@ import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_j
 import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
 import { workflowInstanceScopeSchema } from "../src/db/migrations/110_workflow_instance_scope.js";
+import { workflowRunTitleSchema } from "../src/db/migrations/194_workflow_run_title.js";
 
 const SPEC = `workflow:
   id: routes-fixture
@@ -104,6 +105,29 @@ describe("workflow routes (PL-004 Phase D)", () => {
   afterEach(() => {
     db.close();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("normalizes titles without preventing starts and reports what was stored", async () => {
+    migrate(db, [queueItemSummarySchema, workflowRunTitleSchema]);
+    const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo.attachOutbox(new OutboxHandler(db));
+    runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
+    app = buildApp({ eventBus: bus, runtime });
+    const request = (runTitle: unknown) => app.request("/api/workflow/instantiate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, rootObjective: "full objective", createdBySession: "ops@rig", runTitle }),
+    });
+    for (const [input, expected] of [["", null], ["  ", null], ["two\nlines\u009fhere", "two lines here"], ["x".repeat(121), "x".repeat(120)], [123, null], ["  Release  ", "Release"]] as const) {
+      const response = await request(input);
+      expect(response.status).toBe(201);
+      const result = await response.json();
+      expect(result.instance.runTitle).toBe(expected);
+      expect(queueRepo.getById(result.entryQitemId)?.summary).toBe(expected ? `${expected} — produce` : null);
+      expect(result.advisories).toEqual(expect.arrayContaining([expect.stringContaining(expected ? JSON.stringify(expected) : "untitled")]));
+      expect(result.scopeIgnored).toBeUndefined();
+    }
+    const unchanged = await request("Release");
+    expect((await unchanged.json()).advisories ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("title normalized")]));
   });
 
   it("POST /validate returns ok=true for a valid spec", async () => {
