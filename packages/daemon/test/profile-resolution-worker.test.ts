@@ -12,7 +12,7 @@ import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "../src/domain/profile-resolution-worker.js";
 import { preflightValidatedSpec } from "../src/domain/rigspec-preflight.js";
 import { releaseScanCache } from "../src/domain/skill-discovery.js";
-import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter, mockNativeRuntime } from "./helpers/test-app.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -212,8 +212,8 @@ describe("profile resolution outside the daemon request thread", () => {
         return { ok: true };
       }),
     };
-    const tmux = mockTmuxAdapter();
-    const f = createTestApp(db, { tmux, adapters: { codex: adapter },
+    const { tmux, listProcesses } = mockNativeRuntime(session => session.startsWith("dev-later") ? "terminal" : "codex");
+    const f = createTestApp(db, { tmux, listProcesses, adapters: { codex: adapter },
       podInstantiatorFsOps: { exists: existsSync, readFile: path => readFileSync(path, "utf8") } });
     const server = createServer((_req, res) => res.end("healthy"));
     let gate: ReturnType<typeof startScanGate> | undefined;

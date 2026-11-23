@@ -62,10 +62,7 @@ export interface OutboundMessageOpts {
   extraBlocks?: unknown[];
   /** M1 A5b: outbound image attachments, rendered as Block Kit `image` blocks (the wired seam). */
   mediaRefs?: SlackMediaRef[];
-  /** #47 — an https evidenceRef that is NOT an image (GitLab issue link, PROOF.md URL, …),
-   *  rendered as a plain link in the message text + a context block. NEVER a Block Kit
-   *  `image` block: Slack rejects the ENTIRE message with `invalid_blocks` when an image
-   *  block's URL is not a real image, silently and permanently breaking delivery. */
+  /** An HTTPS evidence reference rendered as a link in the message text and context block. */
   evidenceLink?: string | null;
   /** S10 / A1.2 — the structured seat-attribution header (rig/host/seat/session), rendered as
    *  one sender context line in ONE honest bot identity. Authorship lives in OUR record;
@@ -436,19 +433,26 @@ function isSafeHttpsUrl(url: string): boolean {
   }
 }
 
-/** #47 — render a non-image https evidenceRef as a plain link instead of a Block Kit
- *  `image` block. The URL arrives pre-validated as `^https://\S+$` from the delivery
+/** Render an HTTPS evidence reference as a link. The URL arrives
+ *  pre-filtered as `^https://\S+$` from the delivery
  *  layer; item-7 hygiene still applies (a secret-bearing URL is refused, never
  *  forwarded), and a URL carrying mrkdwn-breaking `<`, `>`, `|` degrades to escaped
  *  plain text rather than a link. Returns null when there is nothing safe to render. */
-function buildEvidenceLink(url: string | null | undefined): { text: string; block: unknown } | null {
+function buildEvidenceLink(url: string | null | undefined): { text: string; compactText: string; block: unknown } | null {
   const ref = typeof url === "string" ? url.trim() : "";
   if (!ref || !isSafeHttpsUrl(ref)) return null;
   const escapedRef = inert(ref);
   const text = `Evidence: ${escapedRef}`;
-  const context = bounded(/[<>|]/.test(ref) ? text : `Evidence: <${escapedRef}|evidence>`, SLACK_SECTION_CAP, "evidence context");
+  const labels = /[<>|]/.test(ref) ? [text] : [
+    `Evidence: <${escapedRef}|evidence>`,
+    `<${escapedRef}|evidence>`,
+    `<${escapedRef}>`,
+  ];
+  // Slack auto-links bare URLs in mrkdwn. Keep the complete escaped URL even when its label can't fit.
+  const context = labels.find(label => label.length <= SLACK_SECTION_CAP)
+    ?? bounded(escapedRef, SLACK_SECTION_CAP, "evidence context");
   const block = { type: "context", elements: [{ type: "mrkdwn", text: context }] };
-  return { text, block };
+  return { text, compactText: escapedRef, block };
 }
 
 /** S10 fix-r3 (R2 exactly-once) — the STRUCTURAL reconciliation identity: a bounded,
@@ -621,7 +625,13 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     let machine = machineSeg(machineValue);
     if (sender.length + machine.length > 2000 && machine && opts.machineFallback) machine = machineSeg(opts.machineFallback);
     const attrFor = bounded(`${sender}${machine}`, 2000, "sender");
-    const fallback = (context: string | null, repeat: string | null = null) => [attrFor, headline, repeat, context, body, questionParts?.text, replyHint, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
+    const fallback = (context: string | null, repeat: string | null = null) => {
+      const render = (evidenceText?: string) =>
+        [attrFor, headline, repeat, context, body, questionParts?.text, replyHint, evidenceText, attachmentText, opts.reconcileMarker]
+          .filter(Boolean).join("\n");
+      const text = render(evidence?.text);
+      return evidence && text.length > SLACK_TEXT_CAP ? render(evidence.compactText) : text;
+    };
     // The gate context line is supplementary: when it alone would push the complete fallback over
     // budget, the instance part alone is tried, and the line is left out only when even that
     // doesn't fit, rather than refusing the gate.

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { CALLER_SHAPED, createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 import type { HostBindingsFile } from "../src/host-bindings.js";
@@ -32,6 +32,27 @@ const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until 
 const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
 const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.";
 const ASK_REMOVED_FACT = "If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered.";
+
+describe("caller address shape", () => {
+  it("keeps the caller shape with nonempty parts, including hyphens in either part", () => {
+    for (const address of [
+      "cus-a-caller@team", "cus-a-b-c@team", "cus---b@team", "cus-a--@team",
+      "cus-?-?-@team", "cus-名-接続@組", "cus-a\n-b@team", "cus-a-b@team\n",
+    ]) expect(CALLER_SHAPED.test(address), address).toBe(true);
+    for (const address of [
+      "lead@team", "Cus-a-b@team", "xcus-a-b@team", "cus-a@team", "cus--b@team",
+      "cus-a-@team", "cus-a-b@", "cus-a-b@team@other", "cus-a@b-c@team",
+    ]) expect(CALLER_SHAPED.test(address), address).toBe(false);
+  });
+
+  it("rejects a long repeated-hyphen input without retrying all possible splits", () => {
+    const address = `cus-${"?-".repeat(100_000)}@team@other`;
+    const start = performance.now();
+    expect(CALLER_SHAPED.test(address)).toBe(false);
+    // The linear scan takes milliseconds; allow a full second for a slow test host.
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
+});
 
 describe("MCP Server", () => {
   let mcpClient: Client;
@@ -1069,6 +1090,27 @@ describe("MCP Server", () => {
     expect(local.get("rig_whoami")?.annotations).toEqual({ readOnlyHint: true, title: "Show this connection" });
   });
 
+  it.each([
+    ["grant-service", "Show my network"],
+    ["file", "Show my team"],
+    ["local-authority", "Show my team"],
+  ] as const)("rig_team title follows the authenticated %s principal source", async (principalSource, title) => {
+    const server = createMcpServer(mockClient(), { seat: "participant@team", principalSource,
+      access: { principal: "opaque-principal", owner: false, rigs: ["team"], roots: [], workspace: false,
+        external: { objects: { team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "source-title-control", version: "1" });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const tool = (await client.listTools()).tools.find(tool => tool.name === "rig_team");
+      expect(tool?.title).toBe(title);
+      expect(tool?.annotations?.title).toBe(title);
+      expect(tool?.annotations?.readOnlyHint).toBe(true);
+      expect(tool?.description).toContain(principalSource === "grant-service" ? "on your network" : "on your team");
+    } finally { await client.close(); await server.close(); }
+  });
+
   it("rig_down calls POST /api/down with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
@@ -1676,6 +1718,48 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
+    it("rig_queue_list carries the daemon's page marker and applied limit into its result (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      // The result carries the limit the daemon says it applied, not the one asked for.
+      const page = (truncated: string) => new Headers({ "X-OpenRig-Limit": "7", "X-OpenRig-Truncated": truncated });
+      const getFn = vi.fn()
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("1") })
+        .mockResolvedValueOnce({ status: 200, data: [row], headers: page("0") })
+        .mockResolvedValueOnce({ status: 200, data: [row] });
+      await setup({ get: getFn });
+      const texts = (result: Awaited<ReturnType<typeof mcpClient.callTool>>) => (result.content as Array<{ text: string }>).map((c) => c.text);
+
+      // A cut page: the items as before, the limit the daemon applied, truncated, and a line saying so.
+      const cut = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(cut.isError).toBeFalsy();
+      expect(cut.structuredContent).toEqual({ items: [row], limit: 7, truncated: true });
+      expect(texts(cut)).toEqual([JSON.stringify([row]), "This page stops at the limit of 7 and more items match; pass a larger limit to see the rest."]);
+
+      // Exactly the limit matched: a full page alone claims nothing more.
+      const exact = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(exact.structuredContent).toEqual({ items: [row], limit: 7, truncated: false });
+      expect(texts(exact)).toEqual([JSON.stringify([row])]);
+
+      // A daemon that doesn't send the marker leaves the result as it was.
+      const older = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(older.structuredContent).toEqual({ items: [row] });
+      expect(texts(older)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
+    it("rig_queue_list reads a limit header without a truncation header as unknown, not as a complete page (#3572)", async () => {
+      const row = { qitemId: "qitem-newest", tags: [] };
+      const getFn = vi.fn(async () => ({ status: 200, data: [row], headers: new Headers({ "X-OpenRig-Limit": "7" }) }));
+      await setup({ get: getFn });
+
+      // Only an explicit 0 or 1 says whether the page was cut; without one, the result carries no marker at all.
+      const result = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({ items: [row] });
+      expect((result.content as Array<{ text: string }>).map((c) => c.text)).toEqual([JSON.stringify([row])]);
+      await cleanup();
+    });
+
     it("issue2728 rig_queue_list reports when an older daemon returns rows missing a requested tag", async () => {
       const getFn = vi.fn(async () => ({ status: 200, data: [{ qitemId: "qitem-unfiltered", tags: ["review"] }] }));
       await setup({ get: getFn });
@@ -1860,6 +1944,25 @@ describe("MCP host routing", () => {
     const create = box.calls.find((call) => call.path === "/api/queue/create");
     // The origin may qualify the seat; the agent it names is the caller's either way.
     expect(create?.headers["X-OpenRig-Session"]).toMatch(/^impl@team(@.+)?$/);
+  });
+
+  it("checks a landed same-id retry on the selected remote host before applying new-work backoff", async () => {
+    process.env.OPENRIG_TEST_HOST_TOKEN = "tok-123";
+    onTestFinished(() => { delete process.env.OPENRIG_TEST_HOST_TOKEN; });
+    const box = recordingRemote();
+    const local = mockClient();
+    local.get = vi.fn(async () => ({ status: 404, data: {} }));
+    const result = await run(local, {
+      seat: "impl@team",
+      access: { principal: "local", owner: true, rigs: ["team"], roots: [], newWorkRetryAfterMs: 9000 },
+      clientFactory: () => box.client,
+      hostRegistryLoader: () => registryOf({ id: "unipc", transport: "http", url: "http://127.0.0.1:17433", bearer_env: "OPENRIG_TEST_HOST_TOKEN" }),
+      hostBindingsLoader: () => noBindings,
+    }, "rig_queue_create", { host: "unipc", qitemId: "qitem-already-remote", destination: "qa@team", body: "already landed" });
+    expect(result.isError).toBeFalsy();
+    expect(box.calls.find(call => call.path === "/api/queue/qitem-already-remote")?.headers.Authorization).toBe("Bearer tok-123");
+    expect(box.calls.some(call => call.path === "/api/queue/create")).toBe(true);
+    expect(local.get).not.toHaveBeenCalledWith("/api/queue/qitem-already-remote");
   });
 
   it("a remote send names the calling seat as the sender", async () => {
@@ -2074,5 +2177,66 @@ describe("MCP host routing", () => {
     expect(result.isError).toBeFalsy();
     const unknownSender = (result.structuredContent as { unknownSender?: { followUp?: string } } | undefined)?.unknownSender;
     expect(unknownSender?.followUp).toContain("and host unipc");
+  });
+});
+
+
+describe("MCP instruction resources", () => {
+  const coreUri = "openrig://reference/coordination";
+  async function connectInstructions(options: Parameters<typeof createMcpServer>[1] = {}) {
+    const server = createMcpServer(mockClient(), options);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "instruction-consumer", version: "1.0.0" });
+    onTestFinished(async () => { await client.close(); await server.close(); });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  it("serves the generic coordination reference without an instruction extension", async () => {
+    const client = await connectInstructions();
+    expect((await client.listResources()).resources.map(resource => resource.uri)).toEqual([coreUri]);
+    expect(await client.readResource({ uri: coreUri })).toEqual({
+      contents: [{ uri: coreUri, mimeType: "text/plain", text: client.getInstructions() }],
+    });
+  });
+
+  it("canonicalizes configured resource URIs for SDK list-then-read", async () => {
+    const client = await connectInstructions({ instructions: { resources: [
+      { uri: "https://example.com", name: "site-guide", mimeType: "text/markdown", text: "# Site guide" },
+    ] } });
+    const listed = (await client.listResources()).resources.find(resource => resource.name === "site-guide");
+    expect(listed).toBeDefined();
+    const read = await client.readResource({ uri: listed!.uri });
+    expect(listed).toMatchObject({ uri: "https://example.com/", name: "site-guide", mimeType: "text/markdown" });
+    expect(read).toEqual({ contents: [{ uri: "https://example.com/", mimeType: "text/markdown", text: "# Site guide" }] });
+  });
+
+  it("composes endpoint introductions without broadening read-only guidance or sharing resources", async () => {
+    const access: McpAccess = {
+      principal: "reader", owner: false, rigs: ["team"], roots: [], readOnly: true,
+      external: { objects: { queue: ["show", "create"] } },
+    };
+    const aUri = "embedding://a/guide";
+    const bUri = "embedding://b/guide";
+    const a = await connectInstructions({ access, instructions: {
+      introduction: "Use A's guide.", resources: [{ uri: aUri, name: "a-guide", mimeType: "text/markdown", text: "# A guide" }],
+    } });
+    const b = await connectInstructions({ access, instructions: {
+      introduction: "Use B's guide.", resources: [{ uri: bUri, name: "b-guide", mimeType: "text/plain", text: "B guide" }],
+    } });
+    const core = await a.readResource({ uri: coreUri });
+    const generic = (core.contents[0] as { text: string }).text;
+    expect(generic).toContain("read operations only");
+    expect(generic).not.toContain("rig_queue_create");
+    expect(a.getInstructions()).toBe(`${generic}\n\nUse A's guide.`);
+    expect(b.getInstructions()).toBe(`${generic}\n\nUse B's guide.`);
+    expect((await a.listTools()).tools.map(tool => tool.name)).toEqual(["rig_queue_show"]);
+    expect((await a.listResources()).resources.map(resource => resource.uri).sort()).toEqual([coreUri, aUri].sort());
+    expect((await b.listResources()).resources.map(resource => resource.uri).sort()).toEqual([coreUri, bUri].sort());
+    expect(await a.readResource({ uri: aUri })).toEqual({ contents: [{ uri: aUri, mimeType: "text/markdown", text: "# A guide" }] });
+    expect(await b.readResource({ uri: bUri })).toEqual({ contents: [{ uri: bUri, mimeType: "text/plain", text: "B guide" }] });
+    await expect(a.readResource({ uri: bUri })).rejects.toThrow();
+    await expect(b.readResource({ uri: aUri })).rejects.toThrow();
   });
 });

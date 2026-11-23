@@ -378,6 +378,8 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
       tmux,
       fsOps: mockClaudeFs(),
       sessionIdFactory: () => "fresh-uuid-aaa",
+      // The resume of a blank pane under Claude's process runs the longer wait; this cell is about the paths, not timing.
+      sleep: async () => {},
     });
     const fresh = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig" });
     expect(fresh.ok).toBe(true);
@@ -704,7 +706,8 @@ function mockOrchTmux(): TmuxAdapter {
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
-    listPanes: vi.fn(async () => []),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 4242), getPaneCommand: vi.fn(async () => "claude"),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
   } as unknown as TmuxAdapter;
 }

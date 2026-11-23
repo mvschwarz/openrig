@@ -92,7 +92,7 @@ describe("GET /api/activity/parked reads the obligation face without the full li
     return {
       listOpenObligations: (destinationSession: string, limit: number) =>
         queue.list({ destinationSession, state: ["pending", "in-progress", "blocked"], limit })
-          .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null })),
+          .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated })),
       getParkWakeStatus: (qitemId: string) => queue.getParkWakeStatus(qitemId),
       parkWakeServedByOwnReminder: (qitemId: string) => queue.parkWakeServedByOwnReminder(qitemId),
     };
