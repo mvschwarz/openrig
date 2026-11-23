@@ -1984,19 +1984,18 @@ describe("rig queue CLI", () => {
     });
 
     it("does not call absent direct-response destination or body fields a contradiction", async () => {
-      const id = "qitem-partial-direct-and-readback";
-      const { deps } = makeDeps({ routes: {
-        "POST /api/queue/create": { status: 201, data: { qitemId: id } },
-        [`GET /api/queue/${id}`]: { status: 200, data: { qitemId: "another-id", state: "pending" } },
+      const id = "qitem-partial-direct-response";
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: { qitemId: id, state: "pending" } },
       } });
 
-      const rendered = await runQueueCreateWithRenderer(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
 
-      const output = JSON.parse(rendered.stdout[0]!) as { error: { fact: string; consequence: string } };
-      expect(rendered.exitCode).toBe(1);
-      expect(output.error.fact).toContain(id);
-      expect(output.error.consequence).toContain("UNKNOWN");
-      expect(rendered.stdout.join("\n")).not.toContain("queue_create_outcome_unknown");
+      expect(process.exitCode).toBeUndefined();
+      expect(JSON.parse(logs.at(-1)!)).toEqual({ qitemId: id, state: "pending" });
+      expect(errors.join("\n")).not.toContain("contradicts");
+      expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
     it("does not treat a matching watchdog backstop as this request's live one-shot timer after readback", async () => {
