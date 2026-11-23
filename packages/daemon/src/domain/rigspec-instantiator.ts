@@ -732,6 +732,8 @@ export class PodRigInstantiator {
         }
         // The rig's culture and startup layers, for seats added later (both rig-create sites; an expansion keeps them).
         if (!opts?.targetRigId) this.persistRigStartupLayers(materializedRigId, rigSpec, rigRoot);
+        // #80: the rig's seat grouping, read at each seat launch (both pod-aware rig-create sites; an expansion keeps it).
+        if (!opts?.targetRigId && rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(materializedRigId, rigSpec.seatSlice);
 
         // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
         // this is ONE of TWO rig-persist sites (materializeValidatedSpec + instantiate); missing
@@ -1586,6 +1588,8 @@ export class PodRigInstantiator {
           }
         }
         const rig = this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        // Grouping must persist with creation, so a missing migration leaves no partial rig.
+        if (rigSpec.seatSlice) this.deps.rigRepo.setRigSeatSlice(rig.id, rigSpec.seatSlice);
         opts?.recordCreated?.(rig.id);
         return rig;
       });
