@@ -23,21 +23,67 @@ describe("Rig lifecycle routes", () => {
 
   it.each(["nodes/infra.server", "pods/infra"])("%s removal ignores its roster notice but still protects ordinary work", async target => {
     migrate(db, ALL_MIGRATIONS);
+    const oldRig = setup.rigRepo.createRig("notice-removal");
+    const oldNode = setup.rigRepo.addNode(oldRig.id, "infra.server");
+    setup.sessionRegistry.registerSession(oldNode.id, "infra-server@notice-removal");
+    setup.rigRepo.archiveRig(oldRig.id);
     const rig = setup.rigRepo.createRig("notice-removal");
     const expanded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "infra", label: "infra",
       members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
     if (!expanded.ok) throw new Error(JSON.stringify(expanded));
     const session = expanded.nodes[0]!.sessionName;
+    expect(session).toBe("infra-server@notice-removal");
     const queue = new QueueRepository(db, setup.eventBus);
+    expect(await noticeRosterReady(queue, oldRig.id, [session])).toEqual([]);
     expect(await noticeRosterReady(queue, rig.id, [session])).toEqual([]);
     const work = await queue.create({ sourceSession: "other@notice-removal", destinationSession: session, body: "real work", nudge: false });
     const blocked = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
     expect(blocked.status).toBe(409);
     expect((await blocked.json()).activeQitemIds).toEqual([work.qitemId]);
+    expect(queue.getById(rosterReadyNoticeId(oldRig.id, session))?.state).toBe("pending");
     db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = ?").run(work.qitemId);
     const removed = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
     expect(removed.status).toBe(200);
-    expect(queue.getById(rosterReadyNoticeId(rig.id, session))?.state).toBe("pending");
+    expect(queue.getById(rosterReadyNoticeId(rig.id, session))?.state).toBe("canceled");
+    expect(queue.getById(rosterReadyNoticeId(oldRig.id, session))?.state).toBe("canceled");
+  });
+
+  it("rolls notice closure back if node removal fails", async () => {
+    migrate(db, ALL_MIGRATIONS);
+    const rig = setup.rigRepo.createRig("notice-rollback");
+    const expanded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "infra", label: "infra",
+      members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+    if (!expanded.ok) throw new Error(JSON.stringify(expanded));
+    const session = expanded.nodes[0]!.sessionName;
+    const queue = new QueueRepository(db, setup.eventBus);
+    await noticeRosterReady(queue, rig.id, [session]);
+    const notice = rosterReadyNoticeId(rig.id, session);
+    const updates: string[] = [];
+    setup.eventBus.subscribe(event => { if (event.type === "queue.updated") updates.push(event.qitemId); });
+    vi.spyOn(setup.rigRepo, "deleteNode").mockImplementationOnce(() => { throw new Error("fixture removal failure"); });
+    const response = await setup.app.request(`/api/rigs/${rig.id}/nodes/infra.server`, { method: "DELETE" });
+    expect(response.status).toBe(500);
+    expect(queue.getById(notice)?.state).toBe("pending");
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map(node => node.logicalId)).toContain("infra.server");
+    expect(updates).not.toContain(notice);
+  });
+
+  it("keeps notices for a live namesake when removing its archived predecessor", async () => {
+    migrate(db, ALL_MIGRATIONS);
+    const oldRig = setup.rigRepo.createRig("notice-owner");
+    const oldNode = setup.rigRepo.addNode(oldRig.id, "infra.server");
+    const session = "infra-server@notice-owner";
+    setup.sessionRegistry.registerSession(oldNode.id, session);
+    setup.rigRepo.archiveRig(oldRig.id);
+    const liveRig = setup.rigRepo.createRig("notice-owner");
+    const liveNode = setup.rigRepo.addNode(liveRig.id, "infra.server");
+    setup.sessionRegistry.registerSession(liveNode.id, session);
+    const queue = new QueueRepository(db, setup.eventBus);
+    await noticeRosterReady(queue, liveRig.id, [session]);
+    const response = await setup.app.request(`/api/rigs/${oldRig.id}/nodes/infra.server`, { method: "DELETE" });
+    expect(response.status).toBe(200);
+    expect(queue.getById(rosterReadyNoticeId(liveRig.id, session))?.state).toBe("pending");
+    expect(setup.rigRepo.getRig(liveRig.id)?.nodes.map(node => node.logicalId)).toContain("infra.server");
   });
 
   it.each([
