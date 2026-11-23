@@ -30,6 +30,14 @@ import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
+// `ps -o lstart` text (C locale, local time) for a Date, as the process census reports it.
+function lstart(d: Date): string {
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${days[d.getDay()]} ${months[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} ${d.getFullYear()}`;
+}
+
 function mockTmux(overrides?: Partial<{
   hasSession: (name: string) => Promise<boolean>;
   sendText: (target: string, text: string) => Promise<TmuxResult>;
@@ -385,19 +393,28 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
   let db: Database.Database;
   let registry: SessionRegistry;
   let livePanePid: number | null;
+  let paneReadHook: (() => void) | undefined;
   const threadId = "11111111-1111-4111-8111-111111111111";
+  // Census start times: before the verdict each seed writes, and after it (a replacement holding a verified PID).
+  const before = lstart(new Date(Date.now() - 60_000));
+  const later = () => lstart(new Date(Date.now() + 5_000));
+  const paneRows = (o: { root?: string; native?: string; nativePid?: number } = {}) => [
+    { pid: 10, ppid: 1, command: "zsh", startedAt: o.root ?? before },
+    { pid: o.nativePid ?? 20, ppid: 10, command: "codex", startedAt: o.native ?? before },
+  ];
 
   beforeEach(() => {
     stateDir = mkdtempSync(join(tmpdir(), "walk-genrec-"));
     db = createFullTestDb();
     registry = new SessionRegistry(db);
     livePanePid = 10;
+    paneReadHook = undefined;
     const store = new ContextUsageStore(db, { stateDir, codexHomeDir: stateDir });
     app = new Hono();
     app.use("*", async (c, next) => {
       c.set("contextUsageStore" as never, store as never);
       c.set("sessionRegistry" as never, registry as never);
-      c.set("tmuxAdapter" as never, { getPanePid: async () => livePanePid } as never);
+      c.set("tmuxAdapter" as never, { getPanePid: async () => { paneReadHook?.(); return livePanePid; } } as never);
       await next();
     });
     app.route("/api/sessions", sessionAdminRoutes);
@@ -415,9 +432,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     new SeatIdentityStore(db).upsert({ nodeId: node.id, verdict: "verified", evidenceSource: "env", reason: null,
       evidence: { registeredPane: "%42", observedPid, observedPanePid, observedCommand: "codex", matchedLayer: 1 },
       sessionName: seat, observedAt: new Date().toISOString() } as never);
-    vi.spyOn(ProcessCensus.prototype, "list").mockResolvedValue([
-      { pid: 10, ppid: 1, command: "zsh" }, { pid: 20, ppid: 10, command: "codex", startedAt: "start" },
-    ]);
+    vi.spyOn(ProcessCensus.prototype, "list").mockResolvedValue(paneRows());
     vi.spyOn(CodexThreadIdResolver.prototype, "resolveWithHome").mockResolvedValue({ thread: threadId, codexHome: join(stateDir, ".codex") });
     mkdirSync(join(stateDir, ".codex"));
     const nativeDb = new Database(join(stateDir, ".codex", "state_5.sqlite"));
@@ -439,16 +454,16 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
   it.each(["shell", "launcher"])("Codex %s wrapper serves the verified thread's metadata and suffix", async (launch) => {
     const { url, record } = seedCodex(threadId, 20, 10);
     vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
-      { pid: 10, ppid: 1, command: "zsh" },
-      ...(launch === "launcher" ? [{ pid: 15, ppid: 10, command: "node /opt/codex/bin/codex.js" }] : []),
-      { pid: 20, ppid: launch === "launcher" ? 15 : 10, command: "codex", startedAt: "start" },
+      { pid: 10, ppid: 1, command: "zsh", startedAt: before },
+      ...(launch === "launcher" ? [{ pid: 15, ppid: 10, command: "node /opt/codex/bin/codex.js", startedAt: before }] : []),
+      { pid: 20, ppid: launch === "launcher" ? 15 : 10, command: "codex", startedAt: before },
     ]);
     const response = await app.request(url);
     expect(response.status).toBe(200);
     const metadata = await response.json();
     expect(metadata).toMatchObject({ runtime: "codex", sessionId: threadId, totalBytes: Buffer.byteLength(readFileSync(record)) });
     expect(metadata.suffix).toBeUndefined();
-    expect(CodexThreadIdResolver.prototype.resolveWithHome).toHaveBeenCalledWith(20, "start", true);
+    expect(CodexThreadIdResolver.prototype.resolveWithHome).toHaveBeenCalledWith(20, before, true);
 
     const suffix = JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "fixture-turn" } }) + "\n";
     appendFileSync(record, suffix);
@@ -497,6 +512,59 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
       return { thread: threadId, codexHome: join(stateDir, ".codex") };
     });
     const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified", message: expect.stringContaining("changed while resolving") });
+  });
+
+  // The verdict records PIDs, not start times. Its observedAt is stamped around its process sample, so a process holding
+  // a verified PID that started in a later second is a replacement reusing it.
+  it.each<[string, [string?, number?, number?], { root?: string; native?: string }, string]>([
+    ["native Codex process", [threadId, 20, 10], { native: "later" }, "native Codex process"],
+    ["pane root", [threadId, 20, 10], { root: "later" }, "pane root"],
+    ["legacy verdict's pane root", [], { root: "later" }, "pane root"],
+  ])("Codex refuses a verified %s whose PID a later process holds", async (_case, seed, starts, label) => {
+    const { url } = seedCodex(...seed);
+    vi.mocked(ProcessCensus.prototype.list).mockResolvedValue(paneRows({
+      root: starts.root ? later() : undefined, native: starts.native ? later() : undefined }));
+    const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified",
+      message: `The bound pane for 'dev-codex@codex-rig' no longer matches its verified occupant: its ${label} did not start before it was verified.` });
+  });
+
+  // A replaced Codex process is caught by the lookup's own recheck; the pane root and the links above Codex are not.
+  it.each<[string, [string?, number?, number?], () => ReturnType<typeof paneRows>]>([
+    ["a later process reuses the pane root PID", [threadId, 20, 10], () => paneRows({ root: later() })],
+    ["a legacy verdict's pane root PID is reused", [], () => paneRows({ root: later() })],
+  ])("Codex refuses when %s while its thread resolves", async (_case, seed, next) => {
+    const { url } = seedCodex(...seed);
+    vi.mocked(CodexThreadIdResolver.prototype.resolveWithHome).mockImplementation(async () => {
+      vi.mocked(ProcessCensus.prototype.list).mockResolvedValue(next());
+      return { thread: threadId, codexHome: join(stateDir, ".codex") };
+    });
+    const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified", message: expect.stringContaining("changed while resolving") });
+  });
+
+  it.each<[string, (nodeId: string) => void]>([
+    ["the bound pane moves", nodeId => registry.updateBinding(nodeId, { tmuxPane: "%43" })],
+    ["a successor tenure starts", nodeId => registry.mintOccupantTenure(nodeId, "handover", "successor-native-id")],
+  ])("Codex refuses when %s during the closing pane read", async (_case, change) => {
+    const { url, node } = seedCodex(threadId, 20, 10);
+    let resolved = false;
+    vi.mocked(CodexThreadIdResolver.prototype.resolveWithHome).mockImplementation(async () => {
+      resolved = true;
+      return { thread: threadId, codexHome: join(stateDir, ".codex") };
+    });
+    // The first pane read after the thread lookup is the closing one; tenure and binding must be read after it.
+    paneReadHook = () => {
+      if (!resolved) return;
+      paneReadHook = undefined;
+      change(node.id);
+    };
+    const response = await app.request(url);
+    expect(paneReadHook).toBeUndefined();
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: "record_identity_unverified", message: expect.stringContaining("changed while resolving") });
   });

@@ -44,7 +44,7 @@ import type { PermissionDriftReader } from "../domain/permission-drift-observer.
 import { ProcessCensus } from "../domain/process-census.js";
 import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
 import { effectiveRuntimeHome } from "../domain/seat-runtime-home.js";
-import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
+import { codexPaneChain, resolveLiveCodexThreadId, startedBeforeVerdict } from "../domain/model-divergence/current-generation-record.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 import { runSyncSiteWhenSlow } from "../domain/sync-site-wrap.js";
@@ -846,6 +846,8 @@ const generationRecord = async (c: Context) => {
   let transcriptPath: string | null;
   let sessionId: string | null;
   let original: Awaited<ReturnType<typeof resolveExpectedConversation>> | undefined;
+  // Imported before the identity checks, so nothing is awaited between their last registry read and the record read.
+  const fs = await import("node:fs");
   if (expected) {
     try { original = await resolveExpectedConversation(expected, registry, tmuxAdapter, store);
       sessionId = original.identity.nativeId; transcriptPath = original.path;
@@ -872,9 +874,11 @@ const generationRecord = async (c: Context) => {
       const threads = codexHome ? new CodexThreadIdResolver({ codexHome }) : generationThreadIds;
       let verifiedNativeThreadId: string | undefined, verifiedHome: string | undefined;
       const homes = new Set<string>();
+      // One census snapshot serves the thread lookup and the process checks below.
+      const processes = await generationCensus.list();
       const live = await resolveLiveCodexThreadId(binding.tmuxPane, {
         getPanePid: async () => pid,
-        listProcesses: (opts) => generationCensus.list(opts),
+        listProcesses: async (opts) => opts?.fresh ? generationCensus.list(opts) : processes,
         readThreadIdByPid: async (nativePid, startedAt) => {
           if (!startedAt) return undefined;
           const read = await threads.resolveWithHome(nativePid, startedAt, nativePid === identity.evidence.observedPid);
@@ -890,14 +894,28 @@ const generationRecord = async (c: Context) => {
       if (identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId) {
         return c.json({ error: "record_identity_unverified", message: `The Codex conversation in the pane for '${sessionName}' isn't the one its verified process owned, so no generation record is served.` }, 409);
       }
+      // The verdict recorded PIDs: the processes now holding them must be the ones it saw (legacy verdicts name the root only).
+      const nativePid = identity.evidence.observedPanePid != null ? identity.evidence.observedPid ?? undefined : undefined;
+      for (const [label, verifiedPid] of [["pane root", pid], ...(nativePid === undefined ? [] : [["native Codex process", nativePid]])] as const) {
+        if (!startedBeforeVerdict(processes.find((row) => row.pid === verifiedPid), identity.observedAt)) {
+          return c.json({ error: "record_identity_unverified", message: `The bound pane for '${sessionName}' no longer matches its verified occupant: its ${label} did not start before it was verified.` }, 409);
+        }
+      }
+      const chain = codexPaneChain(processes, pid, nativePid);
       const recordHome = verifiedHome ?? (homes.size === 1 ? [...homes][0] : undefined);
       if (!recordHome) {
         return c.json({ error: "record_identity_unverified", message: `The current native process's record home for '${sessionName}' could not be established.` }, 409);
       }
       transcriptPath = store.readCodexTranscriptPath(sessionId, recordHome);
-      if (registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
-        || registry.getBindingForNode(context!.nodeId)?.tmuxPane !== binding.tmuxPane
-        || await tmuxAdapter.getPanePid?.(binding.tmuxPane) !== pid) {
+      // Every asynchronous observation comes first. After the lookup's awaits, the pane must still be held by the same
+      // process chain, read from a census of its own (never one already in flight or just cached). Tenure and binding are
+      // read last, with nothing awaited between them and the record read.
+      const closingPid = await tmuxAdapter.getPanePid?.(binding.tmuxPane);
+      const closingChain = codexPaneChain(await generationCensus.list({ fresh: true }), pid, nativePid);
+      const currentBinding = registry.getBindingForNode(context!.nodeId);
+      if (closingPid !== pid || closingChain !== chain
+        || registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
+        || currentBinding?.tmuxPane !== binding.tmuxPane || currentBinding.tmuxSession !== sessionName) {
         return c.json({ error: "record_identity_unverified", message: `The occupant binding changed while resolving '${sessionName}'.` }, 409);
       }
     } catch (err) {
@@ -911,7 +929,6 @@ const generationRecord = async (c: Context) => {
   if (!transcriptPath || !sessionId) {
     return c.json({ error: "unsupported_runtime", message: `No current-generation record resolves for '${sessionName}' (${runtime}) — consumption cannot be verified for this seat.` }, 409);
   }
-  const fs = await import("node:fs");
   const sinceRaw = c.req.query("sinceBytes");
   const since = sinceRaw === undefined ? 0 : Number(sinceRaw);
   if (!Number.isSafeInteger(since) || since < 0 || sinceRaw === "") {
