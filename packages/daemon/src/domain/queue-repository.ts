@@ -4667,6 +4667,18 @@ export class QueueRepository {
     return "park_timer_target_terminal";
   }
 
+  /** A usage-limit blocker's timer is a time event with no recipient: the blocker is addressed to `wake-ladder@<rig>`,
+   *  which no seat carries, so an input delivery can never succeed (#3704). When every row this job currently wakes is
+   *  such a blocker, its due fire is recorded here, before transport: the blocker resolves once and its dependents are
+   *  released. Returns the job's terminal reason, or null to keep the send path. */
+  fireUsageLimitTimerWithoutDelivery(jobId: string): string | null {
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
+    if (targets.length === 0
+      || !targets.every(({ qitemId }) => this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG))) return null;
+    this.recordWatchdogWakeAttempt(jobId, "no-recipient");
+    return "usage_limit_expiry_fired";
+  }
+
   /** OPR.0.7.0.12 — the current park's recorded continuation, bounded (see the transition log). */
   currentParkContinuation(qitemId: string): string | null {
     return this.transitionLog.currentParkContinuation(qitemId);
