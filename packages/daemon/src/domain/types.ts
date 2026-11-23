@@ -1561,9 +1561,14 @@ export interface WorkspaceSpec {
   knowledgeRoot?: string;
 }
 
+/** #80: how a rig groups its seats' systemd scopes. `rig`: beneath the rig's own slice under openrigseats.slice. */
+export type SeatSliceMode = "rig";
+
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
+  /** #80: spec `seat_slice`; absent keeps today's launch paths. */
+  seatSlice?: SeatSliceMode;
   version: string;
   name: string;
   summary?: string;
