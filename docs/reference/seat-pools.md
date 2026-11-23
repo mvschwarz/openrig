@@ -78,7 +78,9 @@ Under `drain: true`, nothing is moved.
     only while its latest session is still the one the evaluation read. Right before each of its effects, after its
     liveness probe, the stop runs the drain's recheck, which reads again the job, the rig and model holds, the pool
     block, and the agent's rows, held messages and activity; stopping again after an earlier attempt also needs the
-    pool to still have surplus. What keeps the agent stops nothing. Refused before the detach, a fresh drain whose
+    pool to still have surplus. An agent whose recorded status is not running keeps nothing only when it is
+    positively gone (its latest session exited, or confirmed stopped); an unknown or stale status keeps it, as do rows
+    and held messages. What keeps the agent stops nothing. Refused before the detach, a fresh drain whose
     agent got work or woke goes back to `live`, and any other refusal leaves the slot `draining` for that evaluation
     and gives it back to `live` in the next; a retry refused this way leaves the slot `draining` with the earlier
     attempt on record, and the stop is tried again later. Refused between the detach and the kill, the agent is left

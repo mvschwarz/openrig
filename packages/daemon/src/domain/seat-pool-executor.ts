@@ -605,9 +605,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           const now = readSeatPoolState(deps, model, deps.slots.forModel(modelNodeId));
           const agent = now.agents.find((a) => a.slotNumber === slotNumber);
           if (!agent || agent.phase !== "draining") return "slot_moved_on";
-          // An agent that no longer runs keeps nothing: the stop only confirms it is gone.
-          if (!agent.running) return null;
+          // Work first: `running` comes from the recorded status, so false does not prove the process is gone.
           if (agent.openRows > 0 || agent.heldCount > 0) return "work_arrived";
+          // An agent positively gone keeps nothing: the stop only confirms it. Gone is its latest session `exited`, or the
+          // node's executor confirmed stopped (session missing or pane exited); an unknown or stale status keeps it.
+          if (!agent.running) {
+            return agent.latestSessionStatus === "exited" || deps.confirmedStopped(nodeId) ? null : "not_confirmed_gone";
+          }
           if (!agent.idleAtPrompt || (idleSince !== null && woken(nodeId, idleSince))) return "woken";
           if (idleSince === null) {
             // A stop already attempted is finished only while the pool still has surplus, the draining agents counted as

@@ -352,6 +352,62 @@ describe("seat-pool drain: re-read under the lifecycle lease (#3395 Piece 1)", (
       w.db.close();
     }
   });
+
+  /** A retry whose recorded session status turns `to` while the retry's liveness probe is paused, with `work` or not. */
+  async function retryWithStatusDuringProbe(to: string, work: boolean) {
+    const w = drainWorld();
+    const m = w.model();
+    const s1 = w.agent(m, 1);
+    const job = w.jobFor(m);
+    w.stopResults.push({ ok: false, code: "stop_uncertain", message: "The kill was sent but the session could not be confirmed gone.", partialEffect: true });
+    await w.cycle(job.jobId);
+    expect(w.phases(m)).toEqual(["draining"]);
+    const stop = realCheckedStop(w, s1);
+    const run = w.cycle(job.jobId);
+    await stop.probed;
+    // after the retry's own read under the lease: the recorded status changes, and a row may arrive
+    w.sessions.updateStatus(w.latestOf(s1.nodeId)!.id, to);
+    const q = work ? await w.row(s1.session) : null;
+    stop.release();
+    const notes = await run;
+    return { w, m, s1, q, notes, ...stop };
+  }
+
+  it("A retry whose agent's recorded status went unknown, with work arrived, is kept at the stop's final step: a status that is not running does not prove the process is gone, so nothing more is detached or killed and the agent keeps the row.", async () => {
+    const { w, m, s1, q, notes, effectsSent } = await retryWithStatusDuringProbe("unknown", true);
+    try {
+      expect(effectsSent()).toEqual([]);
+      expect(w.queue.getById(q!)).toMatchObject({ state: "pending", destinationSession: s1.session });
+      expect(notes.drains).toEqual([{ slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "work_arrived" }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+      expect(w.slots.stopOutcome(w.slots.forModel(m.nodeId)[0]!.slotId)).toMatchObject({ result: "unconfirmed", partialEffect: true });
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A retry whose agent's recorded status went unknown, with no work, is kept too: the not-running shortcut is taken only for a session positively gone, so nothing more is detached or killed and the slot stays `draining` with the earlier attempt on record.", async () => {
+    const { w, m, s1, notes, effectsSent } = await retryWithStatusDuringProbe("unknown", false);
+    try {
+      expect(effectsSent()).toEqual([]);
+      expect(notes.drains).toEqual([{ slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "not_confirmed_gone" }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+      expect(w.slots.stopOutcome(w.slots.forModel(m.nodeId)[0]!.slotId)).toMatchObject({ result: "unconfirmed", partialEffect: true });
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A retry whose agent's latest session exited takes the shortcut, with no work: the stop goes on to confirm it gone and the slot is `drained`.", async () => {
+    const { w, m, s1, notes, effectsSent } = await retryWithStatusDuringProbe("exited", false);
+    try {
+      expect(effectsSent().length).toBeGreaterThan(0);
+      expect(notes.drains).toEqual([expect.objectContaining({ slotNumber: 1, session: s1.session, phase: "drained" })]);
+      expect(w.phases(m)).toEqual(["drained"]);
+    } finally {
+      w.db.close();
+    }
+  });
 });
 
 describe("seat-pool drain: the capture and the confirmed stop (#3395 Piece 1)", () => {
