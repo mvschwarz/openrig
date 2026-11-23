@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -44,7 +44,9 @@ type Seen = { launch: string; project: string; pwd: string; child: string };
 
 describe.skipIf(process.platform === "win32")("OPENRIG_SEAT_LAUNCH_DIR on real seats (private tmux server)", () => {
   const pexec = promisify(execFile);
-  const available = (() => { try { execFileSync("sh", ["-c", "command -v tmux"], { stdio: "ignore" }); return true; } catch { return false; } })();
+  // tmux as the caller's PATH finds it; its folder stays on the private server's PATH (e.g. /opt/homebrew/bin).
+  const tmuxBin = (() => { try { return execFileSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).trim() || null; } catch { return null; } })();
+  const available = tmuxBin !== null;
   // A path with a space in it, under a real (not symlinked) temp folder so `pwd` reads it back unchanged.
   const root = join(realpathSync(mkdtempSync(join(tmpdir(), "launch-dir-"))), "with space");
   const socket = join(root, "tmux.sock");
@@ -52,7 +54,7 @@ describe.skipIf(process.platform === "win32")("OPENRIG_SEAT_LAUNCH_DIR on real s
   const state = join(root, "state");
   const home = join(root, "home");
   // The tmux server under test must not inherit this run's own seat variables or a parent tmux.
-  const serverEnv: NodeJS.ProcessEnv = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: "/bin/sh", TERM: "xterm" };
+  const serverEnv: NodeJS.ProcessEnv = { PATH: [bin, ...(tmuxBin ? [dirname(tmuxBin)] : []), "/usr/bin", "/bin"].join(":"), HOME: home, SHELL: "/bin/sh", TERM: "xterm" };
   const tmux = async (args: string[]) => (await pexec("tmux", ["-S", socket, "-f", "/dev/null", ...args], { env: serverEnv })).stdout;
   const shellExec = async (cmd: string) => {
     if (!cmd.startsWith("tmux ")) throw new Error(`unexpected command ${cmd}`);

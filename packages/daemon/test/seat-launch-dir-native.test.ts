@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -22,6 +22,8 @@ import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
 // server records its environment, changes directory, records again and exits; Claude then reports it as failed to
 // connect, which doesn't matter here.
 const realClaude = process.env["OPENRIG_REAL_CLAUDE_BIN"];
+// tmux as the caller's PATH finds it; its folder stays on the private server's PATH (e.g. /opt/homebrew/bin).
+const tmuxBin = (() => { try { return execFileSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).trim() || null; } catch { return null; } })();
 
 const PROBE = `#!/bin/sh
 out="$1"
@@ -30,7 +32,7 @@ cd /
 printf '%s|%s|%s\\n' "$(pwd)" "\${OPENRIG_SEAT_LAUNCH_DIR-absent}" "\${OPENRIG_SEAT_PROJECT_DIR-absent}" >> "$out"
 `;
 
-describe.skipIf(!realClaude || process.platform === "win32")("OPENRIG_SEAT_LAUNCH_DIR reaches a real Claude Code's stdio MCP server", () => {
+describe.skipIf(!realClaude || !tmuxBin || process.platform === "win32")("OPENRIG_SEAT_LAUNCH_DIR reaches a real Claude Code's stdio MCP server", () => {
   const pexec = promisify(execFile);
   const root = join(realpathSync(mkdtempSync(join(tmpdir(), "launch-dir-native-"))), "with space");
   const socket = join(root, "tmux.sock");
@@ -38,7 +40,7 @@ describe.skipIf(!realClaude || process.platform === "win32")("OPENRIG_SEAT_LAUNC
   const state = join(root, "state");
   const home = join(root, "home");
   const probe = join(root, "probe.sh");
-  const serverEnv: NodeJS.ProcessEnv = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: "/bin/sh", TERM: "xterm" };
+  const serverEnv: NodeJS.ProcessEnv = { PATH: [bin, ...(tmuxBin ? [dirname(tmuxBin)] : []), "/usr/bin", "/bin"].join(":"), HOME: home, SHELL: "/bin/sh", TERM: "xterm" };
   const tmux = async (args: string[]) => (await pexec("tmux", ["-S", socket, "-f", "/dev/null", ...args], { env: serverEnv })).stdout;
   const shellExec = async (cmd: string) => {
     if (!cmd.startsWith("tmux ")) throw new Error(`unexpected command ${cmd}`);
