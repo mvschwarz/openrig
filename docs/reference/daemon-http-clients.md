@@ -51,26 +51,47 @@ in the case named:
 
 ## Bearer tokens
 
-The daemon reads two tokens from its environment at start:
+The daemon reads these two bearer-token settings from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
-  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`), and the `/api/rig-mode`
-  binding writes. `rig host pair` hands this token to the paired machine, so a daemon that will be paired with
-  needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
-- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport` and `/api/compaction` route, `POST
-  /api/terminal/follow` and `/viewer/ensure`, and every `GET /api/terminal/<name>` route, the terminal websocket
-  included. When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a
-  tailnet address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`) and `GET /api/hosts/pair/<pairId>`, the `/api/rig-mode`
+  binding writes, the `/api/network` writes (`POST /bindings`, `POST /installations` and `POST /bindings/<id>/disconnect`;
+  `GET /bindings` checks no token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
+  `POST /api/gateway/slack/forwarded`, a shared Slack app's relay. The other `/api/apps/v1` routes take a Core app
+  credential instead; see [Core app](core-app.md). `rig host pair` hands this token to the paired machine, so a daemon
+  that will be paired with needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
+- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport`, `/api/compaction` and `/api/startup` route, `POST
+  /api/terminal/follow`, `/viewer/ensure`, `/open-all` and `/close-all`, and every `GET /api/terminal/<name>` route, the terminal websocket
+  included. It also checks these seat routes:
+  - `GET /api/rigs/<rigId>/nodes/<logicalId>/preview` and `POST /api/rigs/<rigId>/nodes/<logicalId>/open-cmux`;
+  - under `/api/sessions/<session>`: `GET /preview`, `/generation-record` and `/generation-record-expected`, and `POST
+    /reconcile`, `/repair-missing-pane`, `/clear-attention`, `/resume-token` and `/unclaim`.
 
-A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
+  When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a tailnet
+  address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) do not check either
+of these bearer tokens. On the default binds (loopback, and the tailnet address when Tailscale is active),
+a client that can reach the daemon can read them. The [Browser access](browser-access.md) boundary still applies.
+
+Pairing-request routes `POST /api/hosts/pair-request`, `GET /api/hosts/pair-requests` and
+`GET /api/hosts/pair-request/<pairId>` do not check the operator bearer. They are open by design: a requester
+does not yet have the paired machine's token. They remain subject to their pairing workflow and the
+[Browser access](browser-access.md) boundary.
+
+When one of the two bearer checks has no configured token, that check passes the request through. Other
+route-specific requirements still apply. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
 or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
 approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
 `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
 refused for want of it, `rig host` and the TUI say what to set.
 
-A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
-and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
+A configured bearer check rejects a wrong or missing token with HTTP 401. The shared bearer middleware returns
+`{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`; the seat routes above
+use this shared body. The Core app API also has its own credential errors; see [Core app](core-app.md).
+`/api/startup` replaces an authentication failure with `{ "ok": false, "code": "terminal_auth_unavailable",
+"freshAllowed": false, "message" }`.
 The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
 for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
 [Browser access](browser-access.md).
@@ -112,6 +133,16 @@ All of them are server-sent events (`text/event-stream`):
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
 
+## Recorded lineage for a queue row
+
+`GET /api/queue/<qitemId>/lineage` uses the same read authority as the ordinary queue-row read. It needs no app request and makes no changes. It returns `rootId`, `nodes`, `edges`, `scope: "this-daemon"`, `status` (`available`, `partial` or `unknown`), `partial`, `partialReasons`, `unresolved`, and `limits`.
+
+Edges keep `reply-to`, `handed-off-from` and `blocked-on` distinct. Each edge runs from the referenced row to the row that records the relationship; `sourceQitemId` names that recording row. No relationship is inferred from a shared sender or a timestamp. The read follows recorded ancestors and descendants through the same graph traversal used by app request results, bounded to 100 nodes, 100 related edges per row and 20 handoff hops. Edges can name rows outside the returned node set when a limit or an unavailable row prevents traversal.
+
+A cycle, limit, missing or erased row, or a handed-to address without a recorded successor makes the result partial and names the reason. Unresolved references retain their recorded values; this route does not fetch another host. `available` means only that the bounded local traversal found no such gap, never that all hosts were searched. A missing or erased root returns 404 with `status: "unknown"` and no row content.
+
+A node's terminal state is `completion.status: "closed-as-recorded"`; other nodes say `open`. The graph's overall `completion.status` is always `unknown`: a closed record does not establish that the person's goal succeeded.
+
 ## People, asks and updates without Slack
 
 `GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
@@ -133,6 +164,19 @@ Open FYIs are ordered by priority, then newest first. `view=all` (also the defau
 `view=default` selects the effective default person, or all when no default is available. A named view that cannot
 resolve a person has `perspective.basis: "unknown"` and no items when a registry is available. With no registered
 people there is no perspective filter: inspect `perspective` rather than assuming the requested view was applied.
+
+For open FYIs on one selected machine, add `host=<registered-id>` to
+`GET /api/queue/open-human-updates`. The home daemon resolves that target before reading and forwards `view` and
+`limit` using the target's configured bearer, or no bearer for a tokenless entry. It does not forward the app's
+incoming credential. An unknown or unavailable target returns a structured read failure, never a complete empty
+list or an all-host fallback. The request and response body share the existing five-second read deadline.
+
+Keep the selected request host as the origin key alongside the returned envelope; do not infer it from a queue
+item id. Successful JSON is the origin's envelope verbatim and does not add a host stamp. The target resolves its
+own `view`: an unknown named person gives an unknown perspective and no items when people are registered, while
+an absent or unavailable people registry can return unfiltered items without `perspective`. Do not label that
+unfiltered result as a confirmed personal view. This read leaves action-required attention, delivered-update
+history and notification behavior unchanged.
 A person's view also includes instance or unassigned items when that person is the default. These are views on a
 trusted daemon, not per-person authentication or access control; existing daemon and browser access rules still apply.
 
