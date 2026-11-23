@@ -1,13 +1,7 @@
-import { createHash } from "node:crypto";
+import { QUEUE_STATES, type QueueState } from "./queue-repository.js";
 import { QUEUE_TRANSFER_COLUMNS } from "./queue-transfer-export.js";
-import { checkQueueTransferSize, canonicalQueueJson, QUEUE_TRANSFER_FORMAT, QUEUE_TRANSFER_MAX_BYTES,
+import { checkQueueTransferSize, queueTransferBodyDigest, QUEUE_TRANSFER_FORMAT, QUEUE_TRANSFER_MAX_BYTES,
   type QueueTransferJson, type QueueTransferObject } from "./queue-transfer-format.js";
-
-// Mirrors sealQueueTransfer's binding: sha256 over the canonical body without the digest field.
-const queueTransferDigest = (archive: QueueTransferObject): string => {
-  const { digest: _digest, ...body } = archive;
-  return createHash("sha256").update(canonicalQueueJson(body)).digest("hex");
-};
 
 type ParseCode = "format_unsupported" | "digest_mismatch" | "origin_identity_missing" | "selection_not_shown" | "archive_invalid";
 
@@ -21,9 +15,8 @@ const object = (value: unknown): value is Record<string, unknown> =>
 const name = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.trim() === value && !value.includes("\0");
 const names = (value: unknown): value is string[] => Array.isArray(value) && value.every(name);
-const state = (value: unknown): value is QueueState => value === "pending" || value === "in-progress" || value === "blocked" ||
-  value === "done" || value === "handed-off" || value === "canceled" || value === "denied" || value === "failed";
-type QueueState = "pending" | "in-progress" | "blocked" | "done" | "handed-off" | "canceled" | "denied" | "failed";
+const states: ReadonlySet<unknown> = new Set(QUEUE_STATES);
+const state = (value: unknown): value is QueueState => states.has(value);
 
 function json(value: unknown, depth = 0): value is QueueTransferJson {
   if (depth > 64) return false;
@@ -37,7 +30,7 @@ const requiredText = new Set(["qitem_id", "ts_created", "ts_updated", "priority"
   "ts", "state", "phase", "wake_kind", "action_id", "action_verb", "acted_at", "erased_at", "rig_id", "rig_name", "members_digest", "verified_at"]);
 function projection(value: unknown, fields: readonly string[]): value is QueueTransferObject {
   return object(value) && fields.every(field => {
-    const entry = value[wire(field)];
+    const entry = value[wire(field)] ?? null;
     if (field === "transition_id") return Number.isSafeInteger(entry);
     if (field === "notify_attempted") return entry === 0 || entry === 1;
     return typeof entry === "string" || (entry === null && !requiredText.has(field));
@@ -62,9 +55,9 @@ function parseRow(value: unknown) {
   if (transitionIds.size !== transitions.length || transitions.some(t => !Number.isSafeInteger(t.transitionId) || !state(t.state)) ||
       actions.some(a => !name(a.actionId))) throw invalid();
   const text = (entry: QueueTransferJson | undefined) => typeof entry === "string" ? entry : null;
-  const chain = value.chainOfRecord === null ? [] : parseJson(text(value.chainOfRecord) ?? "");
+  const chain = value.chainOfRecord == null ? [] : parseJson(text(value.chainOfRecord) ?? "");
   if (!names(chain)) throw invalid();
-  return { qitemId: value.qitemId, state: value.state, erased: value.contentErasedAt !== null,
+  return { qitemId: value.qitemId, state: value.state, erased: value.contentErasedAt != null,
     sourceSession: value.sourceSession, destinationSession: value.destinationSession, returnRoute: text(value.returnRoute),
     closureTarget: text(value.closureTarget), evidenceRef: text(value.evidenceRef), blockedOn: text(value.blockedOn),
     references: [text(value.replyTo), text(value.handedOffFrom), text(value.handedOffTo), ...chain],
@@ -94,7 +87,8 @@ export function parseQueueTransfer(text: string, maxBytes = QUEUE_TRANSFER_MAX_B
   }
   if (!json(archive) || !name(archive.transferId) || !name(archive.createdAt) || !Array.isArray(archive.rows) ||
       "authorization" in archive || "authorizationDigest" in archive || "destination" in archive) throw invalid();
-  if (queueTransferDigest(archive) !== digest.value) throw new QueueTransferParseError("digest_mismatch", "Archive content does not match its digest");
+  const { digest: _digest, ...body } = archive;
+  if (queueTransferBodyDigest(body) !== digest.value) throw new QueueTransferParseError("digest_mismatch", "Archive content does not match its digest");
   if (!object(scope) || !name(scope.selectionShownAt) || !names(scope.qitemIds) || !names(scope.rigs) || !names(scope.missions) ||
       !names(scope.slices) || typeof scope.includeClosed !== "boolean" ||
       !(scope.kind === "host" || scope.kind === "qitems" || (scope.kind === "rig" && scope.rigs.length) ||

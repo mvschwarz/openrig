@@ -35,7 +35,7 @@ type Report = {
 };
 
 export class QueueTransferStaging {
-  constructor(private readonly db: Database.Database, private readonly evidenceExists: (ref: string) => boolean = () => false) {}
+  constructor(private readonly db: Database.Database, private readonly evidenceExists: (ref: string) => boolean | undefined = () => undefined) {}
 
   list() {
     return this.db.prepare<[], StoredManifest>(`SELECT ${columns} FROM queue_transfer_staging ORDER BY staged_at, import_id`).all().map(manifest);
@@ -59,13 +59,13 @@ export class QueueTransferStaging {
         wouldBecomeRunnable: [], warnings: [], refusals: [{ code, message: error.message }] };
     }
     const { rows, erasedIds: _erasedIds, ...archive } = parsed;
-    const missing = new Set(rows.filter(row => row.evidenceRef && !this.evidenceExists(row.evidenceRef)).map(row => row.qitemId));
+    const evidence = new Map(rows.flatMap(row => row.evidenceRef ? [[row.qitemId, this.evidenceExists(row.evidenceRef)] as const] : []));
     const envelope = dryRun ? null : Buffer.from(text);
     const operation = this.db.transaction((): Report => {
       const content = { hostId: archive.origin.hostId, mintedAt: archive.origin.mintedAt, digest: archive.digest };
       const existing = this.db.prepare<[typeof content], StoredManifest>(`SELECT ${columns} FROM queue_transfer_staging
         WHERE origin_host_id = @hostId AND origin_minted_at = @mintedAt AND digest = @digest`).get(content);
-      const { counts, warnings, refusals, projectedRunnable } = reviewQueueTransfer(this.db, parsed, missing);
+      const { counts, warnings, refusals, projectedRunnable } = reviewQueueTransfer(this.db, parsed, evidence);
       if (existing?.status === "activated") refusals.push({ code: "already_activated" });
       const summary = { archive, dryRun, counts, warnings, refusals, wouldBecomeRunnable: refusals.length ? [] : projectedRunnable };
       if (refusals.length) return { ...summary, status: "rejected", replayed: !!existing, stage: existing ? manifest(existing) : null };

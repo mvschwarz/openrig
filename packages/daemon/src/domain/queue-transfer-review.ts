@@ -1,20 +1,19 @@
 import type Database from "better-sqlite3";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
+import { resolveCurrentSessionAddress } from "./session-registry.js";
 import type { ParsedQueueTransfer } from "./queue-transfer-parse.js";
 
 type Finding<Code extends string> = { readonly code: Code; readonly qitemId?: string; readonly reference?: string; readonly message?: string };
 export type TransferRefusal = Finding<"format_unsupported" | "digest_mismatch" | "origin_identity_missing" | "selection_not_shown" |
   "archive_invalid" | "archive_too_large" | "already_activated" | "qitem_id_collision" | "qitem_erased_at_destination" | "workspace_has_unrelated_conflict">;
-export type TransferWarning = Finding<"destination_unbound" | "unresolved_rig" | "unresolved_seat" | "missing_evidence" | "dangling_reference">;
+export type TransferWarning = Finding<"destination_unbound" | "unresolved_rig" | "unresolved_seat" | "missing_evidence" | "evidence_not_checked" | "dangling_reference">;
 
-export function reviewQueueTransfer(db: Database.Database, archive: ParsedQueueTransfer, missing: ReadonlySet<string>) {
+export function reviewQueueTransfer(db: Database.Database, archive: ParsedQueueTransfer, evidence: ReadonlyMap<string, boolean | undefined>) {
   const host = db.prepare<[], { hostId: string }>("SELECT host_id AS hostId FROM self_host_identity WHERE singleton = 1").get()?.hostId;
   const erased = db.prepare<[string]>("SELECT 1 FROM queue_erased_ids WHERE qitem_id = ?");
   const exists = db.prepare<[string]>("SELECT 1 FROM queue_items WHERE qitem_id = ?");
   const action = db.prepare<[string]>("SELECT 1 FROM mission_control_actions WHERE action_id = ?");
   const rig = db.prepare<[string]>("SELECT 1 FROM rigs WHERE name = ? AND archived_at IS NULL LIMIT 1");
-  const seat = db.prepare<[string, string]>(`SELECT 1 FROM sessions s JOIN nodes n ON s.node_id = n.id
-    JOIN rigs r ON n.rig_id = r.id WHERE r.archived_at IS NULL AND r.name = ? AND s.session_name = ? LIMIT 1`);
   const refusals: TransferRefusal[] = [];
   const warnings: TransferWarning[] = [{ code: "destination_unbound" }];
   const projectedRunnable: string[] = [];
@@ -29,14 +28,14 @@ export function reviewQueueTransfer(db: Database.Database, archive: ParsedQueueT
     if (parsed.kind !== "canonical" || isHumanSeatSessionRef(localAddress) ||
         (parts.length > 2 && localAddress === address)) return "unresolved_seat";
     if (!rig.get(parsed.rig)) return "unresolved_rig";
-    return seat.get(parsed.rig, localAddress) ? null : "unresolved_seat";
+    return resolveCurrentSessionAddress(db, localAddress)?.rigName === parsed.rig ? null : "unresolved_seat";
   };
   for (const reference of archive.selection.rigs) {
     if (!rig.get(reference)) warnings.push({ code: "unresolved_rig", reference });
   }
   for (const qitemId of archive.selection.qitemIds) {
     if (erased.get(qitemId)) refusals.push({ code: "qitem_erased_at_destination", qitemId });
-    else if (exists.get(qitemId)) refusals.push({ code: "qitem_id_collision", qitemId }, { code: "workspace_has_unrelated_conflict", qitemId });
+    else if (exists.get(qitemId)) refusals.push({ code: "qitem_id_collision", qitemId });
   }
   for (const row of archive.rows) {
     const { qitemId } = row;
@@ -45,7 +44,10 @@ export function reviewQueueTransfer(db: Database.Database, archive: ParsedQueueT
     else if (initiallyRunnable || row.state === "blocked") counts.open++;
     else counts.terminal++;
     if (!row.erased && initiallyRunnable && !checkSeat(row.destinationSession)) projectedRunnable.push(qitemId);
-    if (missing.has(qitemId) && row.evidenceRef) warnings.push({ code: "missing_evidence", qitemId, reference: row.evidenceRef });
+    const checked = evidence.get(qitemId);
+    if (row.evidenceRef && checked !== true) {
+      warnings.push({ code: checked === false ? "missing_evidence" : "evidence_not_checked", qitemId, reference: row.evidenceRef });
+    }
     const references = new Set([...row.references, row.blockedOn, row.closureTarget]);
     for (const reference of references) {
       if (!reference?.startsWith("qitem-")) continue;

@@ -53,6 +53,17 @@ it("keeps a staged envelope inactive after reopening the migrated database", () 
   noLiveWork();
 });
 
+it.each(["evidenceRef", "chainOfRecord", "contentErasedAt"])("stages an older v2 row without %s", field => {
+  const parsed: QueueTransferObject & { rows: Record<string, QueueTransferObject[string]>[] } = JSON.parse(archive);
+  for (const row of parsed.rows) delete row[field];
+  const older = sealQueueTransfer(parsed, QUEUE_TRANSFER_MAX_BYTES);
+
+  expect(new QueueTransferStaging(db).import(older)).toMatchObject({
+    status: "not_ready_for_activation", stage: { status: "staged" }, counts: { open: 1, erased: 0 },
+  });
+  expect(db.prepare("SELECT envelope FROM queue_transfer_staging").get()).toEqual({ envelope: Buffer.from(older) });
+});
+
 it("returns the same manifest without rewriting it on an equivalent re-import", () => {
   const store = new QueueTransferStaging(db);
   const first = store.import(archive);
@@ -78,10 +89,35 @@ it("reviews the unbound destination without staging or enabling anything", () =>
   expect(result).toMatchObject({ status: "not_ready_for_activation", stage: null,
     counts: { open: 1, terminal: 0, erased: 0 }, wouldBecomeRunnable: [] });
   expect(result.warnings.map(w => w.code)).toEqual(expect.arrayContaining([
-    "destination_unbound", "unresolved_rig", "unresolved_seat", "missing_evidence", "dangling_reference",
+    "destination_unbound", "unresolved_rig", "unresolved_seat", "evidence_not_checked", "dangling_reference",
   ]));
   expect(store.list()).toEqual([]);
   expect(db.prepare("SELECT total_changes() AS writes").get()).toEqual(before);
+  noLiveWork();
+});
+
+it.each([
+  ["alias", "b", "b@demo@here", ["qitem-a"]],
+  ["historical", "other", "b@demo@here", []],
+  ["foreign", "b", "b@demo@elsewhere", []],
+] as const)("reviews the %s seat address without rewriting the envelope", (scenario, logicalId, address, runnable) => {
+  db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-b','demo-id',?,'claude-code')").run(logicalId);
+  db.exec(`INSERT INTO self_host_identity VALUES (1, 'here', 'minted', 'reconciled');
+    INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('session-2','node-b','physical@demo','running','2');`);
+  db.exec("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('binding-b','node-b','physical@demo','%1')");
+  if (scenario === "historical") {
+    db.exec("INSERT INTO sessions (id,node_id,session_name,status,created_at) VALUES ('session-1','node-b','b@demo','superseded','1')");
+  }
+  const parsed: QueueTransferObject & { rows: QueueTransferObject[] } = JSON.parse(archive);
+  const qualified = sealQueueTransfer({ ...parsed, rows: parsed.rows.map(row => ({ ...row, destinationSession: address })) }, QUEUE_TRANSFER_MAX_BYTES);
+
+  const report = new QueueTransferStaging(db).import(qualified);
+
+  expect(report.wouldBecomeRunnable).toEqual(runnable);
+  expect(report.warnings.filter(w => w.reference === address)).toEqual(runnable.length ? [] : [
+    { code: "unresolved_seat", qitemId: "qitem-a", reference: address },
+  ]);
+  expect(db.prepare("SELECT envelope FROM queue_transfer_staging").get()).toEqual({ envelope: Buffer.from(qualified) });
   noLiveWork();
 });
 
@@ -112,6 +148,11 @@ it.each([
   ["format_unsupported", (file: string) => file.replace('"format":"openrig.queue-transfer/v2"', '"format":"openrig.queue-transfer/v3"')],
   ["digest_mismatch", (file: string) => file.replace("archive body", "changed body")],
   ["origin_identity_missing", (file: string) => file.replace('"hostId":"origin"', '"hostId":null')],
+  ["archive_invalid", (file: string) => {
+    const parsed: QueueTransferObject & { rows: Record<string, QueueTransferObject[string]>[] } = JSON.parse(file);
+    for (const row of parsed.rows) delete row.body;
+    return sealQueueTransfer(parsed, QUEUE_TRANSFER_MAX_BYTES);
+  }],
 ])("refuses %s before writing a stage", (code, alter) => {
   const store = new QueueTransferStaging(db);
   expect(store.import(alter(archive))).toMatchObject({ status: "rejected", refusals: [{ code }], stage: null });
@@ -135,7 +176,7 @@ it.each([
   db.exec(seed);
   const store = new QueueTransferStaging(db);
   for (const dryRun of [true, false]) {
-    expect(store.import(archive, { dryRun })).toMatchObject({ status: "rejected", refusals: expect.arrayContaining([{ code, qitemId: "qitem-a" }]) });
+    expect(store.import(archive, { dryRun })).toMatchObject({ status: "rejected", refusals: [{ code, qitemId: "qitem-a" }] });
   }
   expect(store.list()).toEqual([]);
 });

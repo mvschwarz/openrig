@@ -1,31 +1,36 @@
 import { constants as bufferConstants } from "node:buffer";
-import { constants, openSync, fstatSync, readSync, closeSync } from "node:fs";
+import { constants, openSync, fstatSync, readSync, closeSync, statSync } from "node:fs";
 import { isAbsolute, relative, sep } from "node:path";
 import Database from "better-sqlite3";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
-import { FilePathSafetyError, readAllowlistFromEnv, resolveAllowedFile } from "./domain/files/path-safety.js";
+import { decodeAllowlist, FilePathSafetyError, resolveAllowedPath } from "./domain/files/path-safety.js";
 import { QUEUE_TRANSFER_MAX_BYTES } from "./domain/queue-transfer-format.js";
 import { QueueTransferStaging } from "./domain/queue-transfer-staging.js";
 
-type Destination = { readonly home: string; readonly dbPath?: string };
+type Destination = { readonly home: string; readonly dbPath?: string; readonly allowlist?: string };
 
 function withStaging<T>(destination: Destination, readonly: boolean, run: (store: QueueTransferStaging) => T): T {
   const db = new Database(resolveDaemonDbPath(destination.dbPath, destination.home), { readonly, fileMustExist: true });
   try {
-    const roots = readAllowlistFromEnv();
+    const roots = decodeAllowlist(destination.allowlist ?? "");
     return run(new QueueTransferStaging(db, ref => {
-      if (!isAbsolute(ref) || ref.includes("\0")) return false;
+      if (!isAbsolute(ref) || ref.includes("\0")) return undefined;
       for (const root of roots) {
         const inside = relative(root.canonicalPath, ref);
         if (!inside || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) continue;
         try {
-          resolveAllowedFile(roots, root.name, inside);
-          return true;
+          const path = resolveAllowedPath(roots, root.name, inside);
+          return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
         } catch (error) {
-          if (!(error instanceof FilePathSafetyError)) throw error;
+          if (error instanceof FilePathSafetyError) continue;
+          if (error instanceof Error && "code" in error) {
+            if (error.code === "ENOTDIR") return false;
+            if (error.code === "EACCES" || error.code === "EPERM" || error.code === "ELOOP") continue;
+          }
+          throw error;
         }
       }
-      return false;
+      return undefined;
     }));
   } finally {
     db.close();
