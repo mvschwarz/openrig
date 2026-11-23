@@ -1906,7 +1906,7 @@ export function queueRoutes(): Hono {
       sourceSession: item.sourceSession, destinationSession: item.destinationSession,
       replyTo: item.replyTo ?? null, handedOffFrom: item.handedOffFrom, handedOffTo: item.handedOffTo,
       blockedOn: item.blockedOn, closureReason: item.closureReason, evidenceRef: item.evidenceRef,
-      completion: { status: isTerminalState(item.state) ? "closed-as-recorded" : "open" },
+      completion: { status: ["done", "canceled", "denied", "failed", "handed-off"].includes(item.state) ? "closed-as-recorded" : "open" },
     }));
     return c.json({ rootId, scope: "this-daemon", status: !rootAvailable ? "unknown" : graph.partial ? "partial" : "available",
       nodes, edges: graph.edges, partial: graph.partial, partialReasons: graph.partialReasons, unresolved: graph.unresolved,

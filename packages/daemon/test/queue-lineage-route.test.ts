@@ -55,6 +55,26 @@ describe("queue recorded lineage read", () => {
     expect(result.unresolved).toContainEqual({ reference: "next@rig@another-host", reason: "unresolved-successor" });
   });
 
+  it.each([
+    ["done", "closed-as-recorded"],
+    ["handed-off", "closed-as-recorded"],
+    ["canceled", "closed-as-recorded"],
+    ["denied", "closed-as-recorded"],
+    ["failed", "closed-as-recorded"],
+    ["pending", "open"],
+    ["in-progress", "open"],
+    ["blocked", "open"],
+  ])("classifies %s as %s without claiming aggregate completion", async (state, status) => {
+    const item = await create();
+    db.prepare("UPDATE queue_items SET state=? WHERE qitem_id=?").run(state, item.qitemId);
+    const response = await read(item.qitemId);
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.nodes).toHaveLength(1);
+    expect(result.nodes[0]).toMatchObject({ qitemId: item.qitemId, state, completion: { status } });
+    expect(result.completion).toEqual({ status: "unknown" });
+  });
+
   it("reports cycles, handoff depth and wide truncation without unbounded traversal", async () => {
     const cycle = await create(); db.prepare("UPDATE queue_items SET reply_to=? WHERE qitem_id=?").run(cycle.qitemId, cycle.qitemId);
     expect((await (await read(cycle.qitemId)).json()).partialReasons).toContain("cycle");
