@@ -60,8 +60,9 @@ interface DeliveryResultBase {
 /** The gateway (Slack connector) owns delivery; its ledger is the receipt. */
 export interface GatewayDeliveryResult extends DeliveryResultBase {
   receiptSource: "gateway";
-  /** not-alerted: an ask created without --alert to a person whose Slack subscription is urgent-only, so it's on Steering and the TUI and never sent to Slack. */
-  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted";
+  /** not-alerted: an ask created without --alert to a person whose Slack subscription is urgent-only, so it's on Steering and the TUI and never sent to Slack.
+   *  not-requested: a parked same-ID retry returned an existing row and started no new delivery. */
+  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted" | "not-requested";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
   /** #96: present for a --reply-to update once posted; false = it posted top-level instead. */
@@ -94,6 +95,8 @@ export interface DeliveryVerifyTarget {
   nudge?: boolean;
   /** A parked create suppresses the immediate terminal wake; its blocker or timer owns the next wake. */
   parked?: boolean;
+  /** True when a parked create returned an existing row (same-ID retry) and started no new delivery. */
+  existingRow?: boolean;
 }
 
 type QueueRow = Record<string, unknown>;
@@ -192,6 +195,15 @@ function isKnownUnconfirmed(wakeResult: string | null, outcome: TerminalDelivery
   return wakeResult.startsWith("indeterminate:") || wakeResult.startsWith("retained:") || wakeResult.startsWith("wake-accepted:");
 }
 
+function isAbsorbedParkedRetry(row: QueueRow): boolean {
+  const createWarning = isQueueRow(row.createWarning) ? row.createWarning : undefined;
+  if (createWarning?.code === "qitem_body_not_saved") return true;
+  const parkWarning = isQueueRow(row.parkWarning) ? row.parkWarning : undefined;
+  return parkWarning?.code === "qitem_park_not_confirmed"
+    && typeof parkWarning.message === "string"
+    && parkWarning.message.includes("already exists");
+}
+
 function terminalDeliveryResult(
   qitemId: string,
   destination: string | null,
@@ -199,6 +211,7 @@ function terminalDeliveryResult(
   outcome: TerminalDeliveryResult["outcome"],
   waitedMs: number | null,
   parked = false,
+  gatewayHistoryOnly = false,
 ): TerminalDeliveryResult {
   const wakeResult = stringField(row, "lastNudgeResult");
   const claimedAt = stringField(row, "claimedAt");
@@ -231,14 +244,20 @@ function terminalDeliveryResult(
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
   const gatewaySide = gatewayAlsoPosts(row);
   const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
+  const currentGateway = gatewayHistoryOnly ? null : gateway;
   const slackText = gateway === null ? ""
-    : gateway.outcome === "posted" ? " Slack receipt: posted."
-      : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
-        : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
-  const gatewayFailed = gateway !== null && gateway.connectorAccepted === false;
-  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
+    : gatewayHistoryOnly
+      ? gateway.outcome === "posted" ? " Row history: Slack receipt was posted."
+        : gateway.outcome === "still-pending" ? " Row history: no Slack receipt recorded."
+          : ` Row history: Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`
+      : gateway.outcome === "posted" ? " Slack receipt: posted."
+        : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
+          : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
+  const gatewayFailed = currentGateway !== null && currentGateway.connectorAccepted === false;
+  const gatewayHistoryFailed = gatewayHistoryOnly && gateway !== null && gateway.connectorAccepted === false;
+  const notFailed = !claim.observed && !gatewayFailed && !gatewayHistoryFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
   const destinationKind = terminalDestinationKind(destination, gatewaySide);
-  const settled = !parked && claim.observed && (gateway === null || gateway.outcome === "posted");
+  const settled = !parked && claim.observed && (currentGateway === null || currentGateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
@@ -246,7 +265,7 @@ function terminalDeliveryResult(
     outcome: currentOutcome,
     wakeResult,
     claim,
-    ...(gateway ? { gateway } : {}),
+    ...(currentGateway ? { gateway: currentGateway } : {}),
     detail: `The qitem is saved. ${receipt[currentOutcome]}${slackText} ${claimText}${notFailed}`,
     nextAction: settled ? null : currentOutcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
   };
@@ -306,6 +325,21 @@ export async function waitForDeliveryOutcome(
     if (receiptSourceOf(destination, row) === "gateway") {
       const outcome = row.deliveryOutcome;
       const gateway = { receiptSource: "gateway" as const, destinationKind: "human" as const, humanReadership: "unknown" as const };
+      if (target.parked && target.existingRow) {
+        const prior = gatewayReceiptOf(row);
+        const historyText = prior.outcome === "posted"
+          ? "Row history: Slack receipt was posted."
+          : prior.outcome === "still-pending"
+            ? "Row history: no Slack receipt recorded."
+            : `Row history: Slack delivery ${prior.outcome}${prior.detail ? `: ${prior.detail}` : ""}.`;
+        return {
+          ...gateway,
+          outcome: "not-requested",
+          connectorAccepted: null,
+          detail: `This parked retry returned the existing row and started no new delivery. ${historyText}`,
+          nextAction: `rig queue show ${qitemId} --json`,
+        };
+      }
       // An ask placed on Steering without an alert owes no post, so there's no receipt to wait for.
       if (outcome == null && stringField(row, "ownerNotificationLevel") === "RECORD") {
         return { ...gateway, outcome: "not-alerted", connectorAccepted: null,
@@ -346,12 +380,13 @@ export async function waitForDeliveryOutcome(
       // A parked create sent no immediate terminal wake. Any earlier wake or claim in this row is
       // history; the receipt reports only this request's wake. Nothing here re-sends anything.
       const gatewaySide = gatewayAlsoPosts(row);
+      const gatewayHistoryOnly = target.parked === true && target.existingRow === true;
       const terminalSettled = outcome === "not-requested" || wakeResult !== null || stringField(row, "claimedAt") !== null;
-      const gatewaySettled = !gatewaySide || stringField(row, "deliveryOutcome") !== null;
+      const gatewaySettled = !gatewaySide || gatewayHistoryOnly || stringField(row, "deliveryOutcome") !== null;
       if (terminalSettled && gatewaySettled) {
-        return terminalDeliveryResult(qitemId, destination, row, outcome, null, target.parked);
+        return terminalDeliveryResult(qitemId, destination, row, outcome, null, target.parked, gatewayHistoryOnly);
       }
-      if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs, target.parked);
+      if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs, target.parked, gatewayHistoryOnly);
     }
     await sleep(intervalMs);
   }
@@ -1703,7 +1738,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             }
             if (opts.verify) {
               const delivery = await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), qitemId, deps.deliveryVerify,
-                { destinationSession: hostResolved.destination, nudge: requestNudge, parked: true });
+                { destinationSession: hostResolved.destination, nudge: requestNudge, parked: true, existingRow: isAbsorbedParkedRetry(outputCreated) });
               await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt, recovered !== undefined);
               return;
             }

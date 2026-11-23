@@ -1631,23 +1631,19 @@ describe("rig queue CLI", () => {
       expect(result).not.toHaveProperty("parkWarning");
     });
 
-    it.each([
-      { label: "parked", parkArgs: ["--blocked-on", "external:condition"] },
-      { label: "unparked", parkArgs: [] },
-    ])("uses the shared verifier for an earlier gateway post on a $label same-ID retry", async ({ label, parkArgs }) => {
-      const id = `qitem-verify-existing-body-${label}`;
+    it("uses the shared verifier for an earlier gateway post on an unparked same-ID retry", async () => {
+      const id = "qitem-verify-existing-body-unparked";
       const savedBody = "the existing saved body";
       const row = validParkCreateResponse(id, {
         body: savedBody,
         deliveryOutcome: "posted",
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
-        ...(parkArgs.length > 0 ? { parkWarning: { code: "qitem_park_not_confirmed", message: "The requested park is not confirmed." } } : {}),
       });
       const { deps, calls } = makeDeps({ routes: {
         "POST /api/queue/create": { status: 201, data: row },
         [`GET /api/queue/${id}`]: { status: 200, data: row },
       } });
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", ...parkArgs, "--verify", "--json"]);
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({
         qitemId: id,
@@ -1661,11 +1657,143 @@ describe("rig queue CLI", () => {
         },
       });
       expect(result.delivery).not.toHaveProperty("gateway");
-      if (parkArgs.length > 0) expect(result.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
       expect(result.delivery.detail).toBeUndefined();
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
       expect(process.exitCode).toBeUndefined();
+    });
+
+    it.each([
+      {
+        label: "same-body retry",
+        rowOverrides: {
+          destinationClass: "gateway-routable",
+          deliveryOutcome: "posted",
+          replyTo: "qitem-parent",
+          parkWarning: {
+            code: "qitem_park_not_confirmed",
+            message: "qitem qitem-verify-parked-gateway-same-body already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.",
+          },
+        },
+      },
+      {
+        label: "different-body retry",
+        rowOverrides: {
+          body: "the existing saved body",
+          destinationClass: "gateway-routable",
+          deliveryOutcome: "posted",
+          createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
+          parkWarning: { code: "qitem_park_not_confirmed", message: "The requested park is not confirmed." },
+        },
+      },
+    ])("does not report an earlier gateway human-ask delivery as current on a parked --verify $label", async ({ label, rowOverrides }) => {
+      const id = `qitem-verify-parked-gateway-${label.replace(/\s+/g, "-")}`;
+      const row = validParkCreateResponse(id, rowOverrides);
+      for (const compact of [false, true]) {
+        logs = [];
+        vi.stubEnv("OPENRIG_OUTPUT_COMPACT", compact ? "1" : "0");
+        const { deps, calls } = makeDeps({ routes: {
+          "POST /api/queue/create": { status: 201, data: row },
+          [`GET /api/queue/${id}`]: { status: 200, data: row },
+        } });
+        const flags = compact
+          ? ["--id", id, "--destination", "human@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify"]
+          : ["--id", id, "--destination", "human@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify", "--json"];
+        await runQueueCreate(deps, flags);
+        const output = logs.at(-1)!;
+        if (compact) {
+          expect(output).toContain("\"outcome\":\"not-requested\"");
+          expect(output).toContain("\"connectorAccepted\":null");
+          expect(output).toContain("This parked retry returned the existing row and started no new delivery. Row history: Slack receipt was posted.");
+          expect(output).not.toContain("\"outcome\":\"posted\"");
+          expect(output).not.toContain("\"connectorAccepted\":true");
+        } else {
+          const result = JSON.parse(output) as Record<string, any>;
+          expect(result).toMatchObject({
+            qitemId: id,
+            persisted: true,
+            parkWarning: { code: "qitem_park_not_confirmed" },
+            delivery: {
+              receiptSource: "gateway",
+              destinationKind: "human",
+              humanReadership: "unknown",
+              outcome: "not-requested",
+              connectorAccepted: null,
+              nextAction: `rig queue show ${id} --json`,
+            },
+          });
+          expect(result.delivery).not.toHaveProperty("threaded");
+          expect(result.delivery.detail).toContain("This parked retry returned the existing row and started no new delivery.");
+          expect(result.delivery.detail).toContain("Row history: Slack receipt was posted.");
+        }
+        expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+        expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+        expect(process.exitCode).toBeUndefined();
+      }
+    });
+
+    it.each([
+      {
+        label: "earlier Slack post",
+        slackFields: { deliveryOutcome: "posted" },
+        expectedHistory: "Row history: Slack receipt was posted.",
+        forbiddenCurrent: ". Slack receipt: posted.",
+        expectNotFailed: true,
+      },
+      {
+        label: "earlier Slack transport failure",
+        slackFields: { deliveryOutcome: "transport-failed", deliveryFailureDetail: "old slack error" },
+        expectedHistory: "Row history: Slack delivery transport-failed: old slack error.",
+        forbiddenCurrent: ". Slack delivery transport-failed:",
+        expectNotFailed: false,
+      },
+    ])("marks an $label as row history on a hybrid terminal+Slack parked --verify same-ID retry", async ({
+      label, slackFields, expectedHistory, forbiddenCurrent, expectNotFailed,
+    }) => {
+      const id = `qitem-verify-parked-hybrid-${label.replace(/\s+/g, "-")}`;
+      const row = validParkCreateResponse(id, {
+        destinationClass: "pane-bound",
+        ownerNotificationLevel: "ALERT",
+        lastNudgeResult: "verified",
+        ...slackFields,
+        parkWarning: {
+          code: "qitem_park_not_confirmed",
+          message: `qitem ${id} already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.`,
+        },
+      });
+      for (const compact of [false, true]) {
+        logs = [];
+        vi.stubEnv("OPENRIG_OUTPUT_COMPACT", compact ? "1" : "0");
+        const { deps, calls } = makeDeps({ routes: {
+          "POST /api/queue/create": { status: 201, data: row },
+          [`GET /api/queue/${id}`]: { status: 200, data: row },
+        } });
+        const flags = compact
+          ? ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify"]
+          : ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify", "--json"];
+        await runQueueCreate(deps, flags);
+        const output = logs.at(-1)!;
+        if (compact) {
+          expect(output).toContain(expectedHistory);
+          expect(output).not.toContain(forbiddenCurrent);
+          expect(output).not.toContain("\"gateway\":");
+        } else {
+          const result = JSON.parse(output) as Record<string, any>;
+          expect(result.delivery).toMatchObject({
+            receiptSource: "terminal",
+            destinationKind: "human",
+            humanReadership: "unknown",
+            outcome: "not-requested",
+            wakeResult: "verified",
+          });
+          expect(result.delivery).not.toHaveProperty("gateway");
+          expect(result.delivery.detail).toContain(expectedHistory);
+          expect(result.delivery.detail).not.toContain(forbiddenCurrent);
+          if (expectNotFailed) expect(result.delivery.detail).toContain("This is not a failed handoff.");
+          else expect(result.delivery.detail).not.toContain("This is not a failed handoff.");
+        }
+        expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+      }
     });
 
     it("keeps an existing matching row from a same-ID retry but does not infer its earlier park", async () => {
