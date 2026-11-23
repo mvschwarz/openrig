@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
+import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import type BetterSqlite3 from "better-sqlite3";
 import { isStagedSendScriptPath, noticeLine, notAppliedNotice, type SeatProcessLimitsNotice, type TmuxAdapter } from "../adapters/tmux.js";
@@ -21,6 +23,9 @@ import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
 import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 import { CODEX_NON_LOGIN_SHELL_OVERRIDE } from "./native-resume-probe.js";
+import { readNativeProcessLaunch } from "./native-process-arguments.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -449,7 +454,7 @@ export class CodexInPlaceRestart {
     if (!runningArgv) return { ok: false, code: "settings_unverified", message: "The running Codex's exact arguments could not be read, so its launch settings are unverified. Nothing was stopped." };
     const startedAt = process.startedAt ?? null;
     const facts = await this.io.readProcess(process.pid);
-    if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read (this observer reads /proc on Linux). Nothing was stopped." };
+    if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read from the OS (Linux reads /proc; macOS reads the process's launch record and lsof; other platforms aren't supported). Nothing was stopped." };
     const codexHome = facts.env.CODEX_HOME ?? (facts.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
     if (!codexHome) return { ok: false, code: "settings_unverified", message: "The running Codex's home could not be determined (no CODEX_HOME or HOME). Nothing was stopped." };
 
@@ -1225,9 +1230,49 @@ export function procCmdlineArgv(raw: Buffer | string): string[] | null {
   return words.length > 0 ? words : null;
 }
 
+/** The OS reads behind macOS process facts; tests inject them. */
+export interface DarwinProcessReads {
+  /** The exact launch argv and environment from KERN_PROCARGS2 (readNativeProcessLaunch); null when unreadable. */
+  launch(pid: number): Promise<{ argv: string[]; env: Record<string, string> } | null>;
+  /** `lsof -a -p <pid> -d cwd,txt -Ffn` output. */
+  lsof(pid: number): Promise<string>;
+  isDirectory(path: string): boolean;
+}
+
+const darwinReads: DarwinProcessReads = {
+  launch: readNativeProcessLaunch,
+  async lsof(pid) {
+    return (await execFileAsync("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd,txt", "-Ffn"], { timeout: 2000, maxBuffer: 64 * 1024 })).stdout;
+  },
+  isDirectory(path) { try { return fs.statSync(path).isDirectory(); } catch { return false; } },
+};
+
+/** macOS has no /proc. The exact argv and environment are the process's own launch record (KERN_PROCARGS2, the same read
+ *  #2212's identity checks use), kept to CODEX_HOME and HOME; the cwd and the executable (the first txt file) come from
+ *  lsof. Null when the launch record can't be read; a cwd or executable lsof can't give is null. */
+export async function darwinProcessFacts(pid: number, reads: DarwinProcessReads = darwinReads): Promise<ProcessFacts | null> {
+  const launch = await reads.launch(pid);
+  if (!launch) return null;
+  const env: ProcessFacts["env"] = {};
+  for (const key of ["CODEX_HOME", "HOME"] as const) if (launch.env[key] !== undefined) env[key] = launch.env[key];
+  let cwd: string | null = null, exe: string | null = null;
+  try {
+    let fd = "";
+    for (const line of (await reads.lsof(pid)).split("\n")) {
+      if (line.startsWith("f")) fd = line.slice(1);
+      else if (line.startsWith("n") && fd === "cwd" && cwd === null) cwd = line.slice(1);
+      else if (line.startsWith("n") && fd === "txt" && exe === null) exe = line.slice(1);
+    }
+  } catch { /* unknown: the restart refuses where it needs the cwd */ }
+  // lsof escapes a name it can't print, so only a path that is that directory is the cwd.
+  if (cwd !== null && !reads.isDirectory(cwd)) cwd = null;
+  return { cwd, exe, env, argv: launch.argv };
+}
+
 export function defaultInPlaceRestartIo(): InPlaceRestartIo {
   return {
     async readProcess(pid) {
+      if (process.platform === "darwin") return darwinProcessFacts(pid);
       try {
         const environ = fs.readFileSync(`/proc/${pid}/environ`);
         const env: ProcessFacts["env"] = {};
