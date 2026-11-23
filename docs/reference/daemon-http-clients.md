@@ -112,6 +112,21 @@ All of them are server-sent events (`text/event-stream`):
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
 
+## Attention from one host
+
+`GET /api/queue/attention-aggregate` returns `{ items, hosts }` for local attention plus enabled Feed
+subscriptions. Add `?host=local` to read only local attention without a registry lookup, or
+`?host=<registered-id>` to read only that registered host, even when it is not a Feed subscription.
+Registry IDs resolve before declared `hostId` values. A remote target uses the existing HTTP transport
+and configured daemon bearer credentials (or the existing tokenless behavior).
+
+Target selection happens before remote reads. An unknown target returns no items and one `unreachable`
+host status with an explanatory error; it never falls back to the aggregate. Other outcomes remain
+`ok`, `auth-failed` and `unsupported-transport`. A remote HTTP read retains its 5,000 ms request-and-body
+deadline after credential resolution; selecting a silent host can still take that long. An `ok` status
+is not a completeness guarantee: remote list pagination metadata is not propagated, and a successful
+non-array response produces an empty list. No person or view filter is applied by this endpoint.
+
 ## People, asks and updates without Slack
 
 `GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
